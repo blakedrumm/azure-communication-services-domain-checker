@@ -242,10 +242,36 @@ The application will:
 - ✅ Show a confirmation prompt before reporting
 - ✅ Allow users to easily report domain configuration issues
 
-**Example:**
+### 📝 Using the GitHub Issue Template
+
+This repository includes a GitHub Issue Form template (`bug-report.yml`) designed for seamless integration with the web UI's "Report issue" button.
+
+**Template Filename:** `bug-report.yml`
+
+**Configure the Issue URL:**
 ```powershell
-$env:ACS_ISSUE_URL = "https://github.com/your-org/your-repo/issues/new"
+# Use the template parameter to direct users to the bug report form
+$env:ACS_ISSUE_URL = "https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml"
 ```
+
+**Example Issue URL:**
+```
+https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml&domain=example.com&source=acs-domain-checker
+```
+
+**How It Works:**
+1. 🖱️ User clicks "Report issue" button in the web UI
+2. 🌐 The app automatically appends the current domain and source parameters to the URL
+3. 📝 GitHub opens the issue form template
+4. ✍️ The domain information is available in the URL, making it easy for users to copy/paste into the domain field
+5. ✅ User fills out the remaining fields and submits the issue
+
+**Query Parameters:**
+- `template` - Specifies which issue template to use (e.g., `bug-report.yml`)
+- `domain` - Domain information from the web UI (included in URL for user reference)
+- `source` - Identifies the report source as `acs-domain-checker`
+
+**💡 Note:** GitHub Issue Forms don't auto-populate fields from URL parameters, but the domain information is preserved in the URL for easy reference when filling out the form.
 
 ## 📚 MSAL Browser Library Updates
 

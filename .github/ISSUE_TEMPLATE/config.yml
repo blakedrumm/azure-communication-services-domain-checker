@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 GitHub Discussions
+    url: https://github.com/blakedrumm/azure-communication-services-domain-checker/discussions
+    about: Ask questions, share ideas, and discuss with the community
+  - name: 📖 Documentation
+    url: https://github.com/blakedrumm/azure-communication-services-domain-checker#-table-of-contents
+    about: Read the full documentation and guides
