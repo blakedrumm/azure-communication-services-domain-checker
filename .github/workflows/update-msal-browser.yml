@@ -108,8 +108,8 @@ jobs:
           
           # Update package.json to use exact version
           if [ -f package.json ]; then
-            # Use jq to update the version, ensuring dependencies object exists
-            jq --arg version "$VERSION" '(.dependencies // {}) + {"@azure/msal-browser": ("^" + $version)} | {dependencies: .}' package.json > package.json.tmp
+            # Use jq to update the version, preserving all other fields
+            jq --arg version "$VERSION" '.dependencies["@azure/msal-browser"] = "^" + $version' package.json > package.json.tmp
             mv package.json.tmp package.json
             echo "Updated package.json to version ^$VERSION"
           fi
