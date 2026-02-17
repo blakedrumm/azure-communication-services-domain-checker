@@ -1,0 +1,17 @@
+# Escape=`
+ARG WINDOWS_BASE_TAG=nanoserver-ltsc2022
+FROM mcr.microsoft.com/powershell:${WINDOWS_BASE_TAG}
+
+WORKDIR /app
+
+COPY acs-domain-checker.ps1 /app/acs-domain-checker.ps1
+
+# Install Sysinternals whois.exe for WHOIS fallback inside the container.
+RUN pwsh.exe -Command "$ProgressPreference='SilentlyContinue'; $uri='https://download.sysinternals.com/files/WhoIs.zip'; $dest='C:\\tools'; New-Item -ItemType Directory -Path $dest -Force | Out-Null; Invoke-WebRequest -Uri $uri -OutFile "$dest\\WhoIs.zip"; Expand-Archive -Path "$dest\\WhoIs.zip" -DestinationPath $dest -Force; Remove-Item "$dest\\WhoIs.zip""
+
+ENV SYSINTERNALS_WHOIS_PATH="C:/tools/whois.exe"
+
+EXPOSE 8080
+
+# Bind to all interfaces so `-p 8080:8080` works in containers.
+ENTRYPOINT ["pwsh.exe", "-NoLogo", "-File", "C:/app/acs-domain-checker.ps1", "-Port", "8080", "-Bind", "Any"]

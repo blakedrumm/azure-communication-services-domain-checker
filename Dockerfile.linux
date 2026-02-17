@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04
+
+WORKDIR /app
+COPY acs-domain-checker.ps1 /app/acs-domain-checker.ps1
+
+# Install whois CLI for Linux WHOIS fallback + npm for optional MSAL auto-install
+RUN apt-get update \
+&& apt-get install -y --no-install-recommends whois \
+&& apt-get install -y --no-install-recommends nodejs npm \
+&& rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m appuser \
+&& chown -R appuser /app
+
+USER appuser
+
+EXPOSE 8080
+
+# Bind to all interfaces so `-p 8080:8080` works in containers
+ENTRYPOINT ["pwsh","-NoLogo","-File","/app/acs-domain-checker.ps1","-Port","8080","-Bind","Any"]
