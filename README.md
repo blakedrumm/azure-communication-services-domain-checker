@@ -124,11 +124,11 @@ If you need to prevent automatic updates and stay on a specific version:
 
 ### Fallback CDNs
 
-The UI also includes fallback CDN URLs in case the local file cannot be loaded:
+The UI (in `acs-domain-checker.ps1`) also includes fallback CDN URLs in case the local file cannot be loaded:
 - `https://alcdn.msauth.net/browser/{version}/js/msal-browser.min.js`
 - `https://cdn.jsdelivr.net/npm/@azure/msal-browser@{version}/dist/msal-browser.min.js`
 
-Note: The hardcoded CDN URLs in the PowerShell script will need manual updates if you want them to match the latest version.
+**Note:** The CDN URLs in `acs-domain-checker.ps1` (around line 3783-3784) have hardcoded versions and will need manual updates if you want them to match the latest version. The automated workflow only updates the checked-in `msal-browser.min.js` file.
 
 ## Security Notes
 - Content Security Policy (CSP) is enforced with nonces for inline scripts/styles.

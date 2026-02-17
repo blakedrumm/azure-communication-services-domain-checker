@@ -42,7 +42,8 @@ jobs:
           
           # Get current version from msal-browser.min.js file (first line comment)
           if [ -f msal-browser.min.js ]; then
-            CURRENT_VERSION=$(head -1 msal-browser.min.js | grep -oP '@azure/msal-browser v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+            # Match semantic versions including pre-release and build metadata
+            CURRENT_VERSION=$(head -1 msal-browser.min.js | grep -oP '@azure/msal-browser v\K[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?' || echo "unknown")
             echo "Current version: $CURRENT_VERSION"
           else
             CURRENT_VERSION="none"
@@ -107,8 +108,8 @@ jobs:
           
           # Update package.json to use exact version
           if [ -f package.json ]; then
-            # Use jq to update the version
-            jq --arg version "$VERSION" '.dependencies["@azure/msal-browser"] = "^" + $version' package.json > package.json.tmp
+            # Use jq to update the version, ensuring dependencies object exists
+            jq --arg version "$VERSION" '(.dependencies // {}) + {"@azure/msal-browser": ("^" + $version)} | {dependencies: .}' package.json > package.json.tmp
             mv package.json.tmp package.json
             echo "Updated package.json to version ^$VERSION"
           fi
