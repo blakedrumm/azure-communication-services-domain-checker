@@ -15,6 +15,7 @@
 - [Configuration (Environment Variables)](#-configuration-environment-variables)
 - [Issue Reporting](#-issue-reporting)
 - [MSAL Browser Library Updates](#-msal-browser-library-updates)
+- [Docker Hub Deployment](#-docker-hub-deployment)
 - [Security Notes](#-security-notes)
 - [Troubleshooting](#-troubleshooting)
 - [Contributing](#-contributing)
@@ -339,6 +340,94 @@ The UI (in `acs-domain-checker.ps1`) also includes fallback CDN URLs in case the
 - 🔗 `https://cdn.jsdelivr.net/npm/@azure/msal-browser@{version}/dist/msal-browser.min.js`
 
 ⚠️ **Note:** The CDN URLs in `acs-domain-checker.ps1` (in the `msalSources` array) have hardcoded versions and will need manual updates if you want them to match the latest version. The automated workflow only updates the checked-in `msal-browser.min.js` file.
+
+## 🐳 Docker Hub Deployment
+
+This repository includes automated workflows to build and publish Docker images to Docker Hub for both Linux and Windows containers.
+
+### 🤖 Automated Deployment
+
+A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
+
+**🚀 Deployment Triggers:**
+- ✅ Automatically when a version tag is pushed (e.g., `v1.2.13`)
+- ✅ Manually via GitHub Actions workflow dispatch
+
+**📦 What Gets Published:**
+- `linux-{version}` - Linux AMD64 image
+- `windows-{version}` - Windows AMD64 image (nanoserver-ltsc2022)
+- `{version}` - Multi-arch manifest (combines Linux + Windows)
+- `latest` - Multi-arch manifest pointing to the latest release
+
+### 🔧 Setup Instructions
+
+To enable automatic deployment to Docker Hub, configure the following secrets in your GitHub repository:
+
+1. 🔑 Navigate to **Settings** → **Secrets and variables** → **Actions**
+2. 📝 Add the following repository secrets:
+   - `DOCKERHUB_USERNAME` - Your Docker Hub username
+   - `DOCKERHUB_TOKEN` - Your Docker Hub access token ([Create one here](https://hub.docker.com/settings/security))
+
+### 🏷️ Publishing a New Release
+
+**Method 1: Git Tag (Recommended)**
+```bash
+# Tag the release
+git tag v1.2.13
+git push origin v1.2.13
+
+# The workflow will automatically:
+# 1. Build Linux image on Ubuntu
+# 2. Build Windows image on Windows Server 2022
+# 3. Create multi-arch manifests for version tag and 'latest'
+```
+
+**Method 2: Manual Workflow Dispatch**
+1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
+2. ▶️ Click **Run workflow**
+3. 📝 Enter the version (e.g., `1.2.13`) or leave empty to extract from `acs-domain-checker.ps1`
+4. 🚀 Click **Run workflow**
+
+### 🔍 Using Published Images
+
+Pull and run the latest version:
+```bash
+# Pull the latest multi-arch image (automatically selects platform)
+docker pull limitlessworlds/acs-domain-checker:latest
+
+# Run the container
+docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
+```
+
+Pull a specific version:
+```bash
+# Pull specific version
+docker pull limitlessworlds/acs-domain-checker:1.2.13
+
+# Pull platform-specific image
+docker pull limitlessworlds/acs-domain-checker:linux-1.2.13
+docker pull limitlessworlds/acs-domain-checker:windows-1.2.13
+```
+
+### 🛠️ Manual Build Script
+
+For local multi-platform builds and testing, use the included PowerShell script:
+
+```powershell
+# Build and publish (requires Docker Desktop with Windows containers support)
+./acs-domain-checker-dockerhub.ps1
+
+# Dry run (build only, no push)
+./acs-domain-checker-dockerhub.ps1 -DryRun
+
+# Specify custom version
+./acs-domain-checker-dockerhub.ps1 -Version 1.2.14
+```
+
+**📋 Requirements for manual script:**
+- Docker Desktop with Windows containers support
+- Authenticated to Docker Hub (`docker login`)
+- PowerShell 5.1 or later
 
 ## 🔒 Security Notes
 
