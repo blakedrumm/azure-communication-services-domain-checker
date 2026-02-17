@@ -242,10 +242,33 @@ The application will:
 - ✅ Show a confirmation prompt before reporting
 - ✅ Allow users to easily report domain configuration issues
 
-**Example:**
+### 📝 Using the GitHub Issue Template
+
+This repository includes a GitHub Issue Form template (`bug-report.yml`) designed for seamless integration with the web UI's "Report issue" button.
+
+**Template Filename:** `bug-report.yml`
+
+**Configure the Issue URL:**
 ```powershell
-$env:ACS_ISSUE_URL = "https://github.com/your-org/your-repo/issues/new"
+# Use the template parameter to direct users to the bug report form
+$env:ACS_ISSUE_URL = "https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml"
 ```
+
+**Example Issue URL (with domain pre-filled):**
+```
+https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml&domain=example.com&source=acs-domain-checker
+```
+
+**How It Works:**
+1. 🖱️ User clicks "Report issue" button in the web UI
+2. 🌐 The app automatically appends the current domain and source parameters
+3. 📝 GitHub opens the issue form with the domain field pre-populated
+4. ✅ User fills out the remaining fields and submits the issue
+
+**Available Query Parameters:**
+- `template` - Specifies which issue template to use (e.g., `bug-report.yml`)
+- `domain` - Pre-fills the affected domain field (automatically added by the app)
+- `source` - Identifies the report source as `acs-domain-checker` (automatically added)
 
 ## 📚 MSAL Browser Library Updates
 
