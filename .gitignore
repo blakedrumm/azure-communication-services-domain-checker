@@ -1,0 +1,19 @@
+# Node modules (msal-browser.min.js is checked in separately)
+node_modules/
+
+# Package lock files (package.json is minimal and checked in)
+package-lock.json
+
+# Build artifacts
+bin/
+obj/
+
+# IDE files
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS files
+.DS_Store
+Thumbs.db

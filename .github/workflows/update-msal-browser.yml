@@ -1,0 +1,164 @@
+name: Update MSAL Browser Library
+
+on:
+  schedule:
+    # Run weekly on Mondays at 9:00 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Target version (leave empty for latest)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-msal-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4.1.0
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get latest @azure/msal-browser version
+        id: get-version
+        run: |
+          if [ -n "${{ github.event.inputs.target_version }}" ]; then
+            TARGET_VERSION="${{ github.event.inputs.target_version }}"
+            echo "Using specified version: $TARGET_VERSION"
+          else
+            TARGET_VERSION=$(npm view @azure/msal-browser version)
+            echo "Latest version from npm: $TARGET_VERSION"
+          fi
+          echo "version=$TARGET_VERSION" >> $GITHUB_OUTPUT
+          
+          # Get current version from msal-browser.min.js file (first line comment)
+          if [ -f msal-browser.min.js ]; then
+            # Match semantic versions including pre-release and build metadata
+            CURRENT_VERSION=$(head -1 msal-browser.min.js | grep -oP '@azure/msal-browser v\K[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?' || echo "unknown")
+            echo "Current version: $CURRENT_VERSION"
+          else
+            CURRENT_VERSION="none"
+            echo "No existing msal-browser.min.js file found"
+          fi
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if update is needed
+        id: check-update
+        run: |
+          CURRENT="${{ steps.get-version.outputs.current_version }}"
+          TARGET="${{ steps.get-version.outputs.version }}"
+          
+          if [ "$CURRENT" = "$TARGET" ]; then
+            echo "No update needed. Current version ($CURRENT) matches target version ($TARGET)."
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+          else
+            echo "Update needed: $CURRENT -> $TARGET"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download and extract msal-browser.min.js
+        if: steps.check-update.outputs.needs_update == 'true'
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+          echo "Downloading @azure/msal-browser@$VERSION..."
+          
+          # Create temporary directory
+          TEMP_DIR=$(mktemp -d)
+          cd "$TEMP_DIR"
+          
+          # Download the package
+          npm pack @azure/msal-browser@$VERSION
+          
+          # Extract the tarball
+          tar -xzf azure-msal-browser-${VERSION}.tgz
+          
+          # Find the minified browser file (should be in package/lib/msal-browser.min.js)
+          if [ -f package/lib/msal-browser.min.js ]; then
+            MSAL_SOURCE="package/lib/msal-browser.min.js"
+          elif [ -f package/dist/msal-browser.min.js ]; then
+            MSAL_SOURCE="package/dist/msal-browser.min.js"
+          else
+            echo "Error: Could not find msal-browser.min.js in the package"
+            find package -name "*.min.js" -type f
+            exit 1
+          fi
+          
+          # Copy to repository root
+          cp "$MSAL_SOURCE" "$GITHUB_WORKSPACE/msal-browser.min.js"
+          
+          # Cleanup
+          cd "$GITHUB_WORKSPACE"
+          rm -rf "$TEMP_DIR"
+          
+          echo "Successfully updated msal-browser.min.js to version $VERSION"
+
+      - name: Update package.json version
+        if: steps.check-update.outputs.needs_update == 'true'
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+          
+          # Update package.json to use caret version range
+          # This allows npm install to get compatible updates if run manually
+          # The workflow downloads the exact version to msal-browser.min.js
+          if [ -f package.json ]; then
+            jq --arg version "$VERSION" '.dependencies["@azure/msal-browser"] = "^" + $version' package.json > package.json.tmp
+            mv package.json.tmp package.json
+            echo "Updated package.json to version ^$VERSION"
+          fi
+
+      - name: Create Pull Request
+        if: steps.check-update.outputs.needs_update == 'true'
+        uses: peter-evans/create-pull-request@v7.0.5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update msal-browser.min.js to v${{ steps.get-version.outputs.version }}'
+          branch: update-msal-browser-v${{ steps.get-version.outputs.version }}
+          delete-branch: true
+          title: 'chore: Update MSAL Browser Library to v${{ steps.get-version.outputs.version }}'
+          body: |
+            ## Automated Update: MSAL Browser Library
+            
+            This PR updates `msal-browser.min.js` from **v${{ steps.get-version.outputs.current_version }}** to **v${{ steps.get-version.outputs.version }}**.
+            
+            ### Changes
+            - ✅ Updated `msal-browser.min.js` to latest version from npm registry
+            - ✅ Updated `package.json` dependency reference
+            
+            ### Package Information
+            - **Package**: [@azure/msal-browser](https://www.npmjs.com/package/@azure/msal-browser)
+            - **Version**: ${{ steps.get-version.outputs.version }}
+            - **Registry**: npm (https://registry.npmjs.org)
+            
+            ### Release Notes
+            View the full changelog at: https://github.com/AzureAD/microsoft-authentication-library-for-js/releases/tag/@azure/msal-browser@${{ steps.get-version.outputs.version }}
+            
+            ### Verification Steps
+            Before merging, please verify:
+            1. The PowerShell script still serves the file correctly at `/assets/msal-browser.min.js`
+            2. Microsoft Entra ID authentication functionality works as expected
+            3. No console errors in the browser when loading the UI
+            
+            ---
+            
+            🤖 This PR was automatically created by the [Update MSAL Browser Library workflow](.github/workflows/update-msal-browser.yml).
+          labels: |
+            dependencies
+            automated
+          draft: false
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.check-update.outputs.needs_update }}" = "true" ]; then
+            echo "✅ Pull request created for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
+          else
+            echo "ℹ️ No update needed. Current version is already the latest."
+          fi
