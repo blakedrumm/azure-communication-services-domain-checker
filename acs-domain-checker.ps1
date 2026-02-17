@@ -487,7 +487,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.2.13'
+$script:AppVersion = '1.2.14'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -4527,7 +4527,7 @@ function buildIssueUrl(domain) {
     }
     url.searchParams.set('source', 'acs-domain-checker');
     if (appVersion && !appVersion.startsWith('__')) {
-      url.searchParams.set('version', appVersion);
+      url.searchParams.set('environment-version', appVersion);
     }
     return url.toString();
   } catch {
