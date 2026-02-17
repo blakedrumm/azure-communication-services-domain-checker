@@ -6410,25 +6410,56 @@ if ($metricsEnabled) {
     }
 
     # Validate JWT audience claim before forwarding the token anywhere.
-    # This ensures we only accept tokens intended for our application, preventing
-    # token relay attacks where a token for a different resource is used.
+    # NOTE: The UI acquires a Microsoft Graph access token (scope: User.Read) to validate the user via /me.
+    # That means the token audience (aud) is typically Microsoft Graph, not this SPA's client id.
+    # We allow:
+    # - Microsoft Graph (00000003-0000-0000-c000-000000000000)
+    # - this app's client id (ACS_ENTRA_CLIENT_ID)
     try {
       $expectedClientId = $env:ACS_ENTRA_CLIENT_ID
       if (-not [string]::IsNullOrWhiteSpace($expectedClientId)) {
         $jwtParts = $accessToken.Split('.')
         if ($jwtParts.Count -ge 2) {
           $payloadBase64 = $jwtParts[1]
-          # Fix Base64 padding
+          # Base64url decode (JWT uses '-' '_' and may omit padding)
+          $payloadBase64 = $payloadBase64.Replace('-', '+').Replace('_', '/')
           switch ($payloadBase64.Length % 4) {
+            0 { }
             2 { $payloadBase64 += '==' }
             3 { $payloadBase64 += '=' }
+            default { throw 'Malformed JWT payload (invalid base64 length).' }
           }
-          $payloadBase64 = $payloadBase64.Replace('-', '+').Replace('_', '/')
           $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payloadBase64))
           $payload = $payloadJson | ConvertFrom-Json -ErrorAction Stop
-          $tokenAud = [string]$payload.aud
-          if ([string]::IsNullOrWhiteSpace($tokenAud) -or $tokenAud -ne $expectedClientId) {
-            Write-Json -Context $ctx -Object @{ error = 'Token audience mismatch. This token was not issued for this application.'; authenticated = $false } -StatusCode 401
+          $graphAud = '00000003-0000-0000-c000-000000000000'
+
+          # JWT aud can be a string or an array
+          $audValues = @()
+          try {
+            if ($null -eq $payload.aud) {
+              $audValues = @()
+            }
+            elseif ($payload.aud -is [System.Array]) {
+              $audValues = @($payload.aud | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            }
+            else {
+              $audValues = @([string]$payload.aud)
+            }
+          } catch {
+            $audValues = @()
+          }
+
+          $audOk = $false
+          foreach ($a in $audValues) {
+            if ([string]::Equals($a, $expectedClientId, [System.StringComparison]::OrdinalIgnoreCase) -or
+                [string]::Equals($a, $graphAud, [System.StringComparison]::OrdinalIgnoreCase)) {
+              $audOk = $true
+              break
+            }
+          }
+
+          if (-not $audOk) {
+            Write-Json -Context $ctx -Object @{ error = 'Token audience mismatch. Expected token for Microsoft Graph or this application.'; authenticated = $false; tokenAudiences = $audValues } -StatusCode 401
             return
           }
         } else {
