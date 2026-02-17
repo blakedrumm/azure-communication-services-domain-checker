@@ -1,122 +1,298 @@
-# Azure Communication Services - Domain Checker Tool (***acs-domain-checker***)
+# 🌐 Azure Communication Services - Domain Checker Tool
 
-## Overview
-`acs-domain-checker` is a single-file PowerShell web UI + REST API to validate Azure Communication Services (ACS) email domain readiness. It checks DNS records (TXT/SPF, MX, DMARC, DKIM, CNAME), performs optional DNSBL reputation checks, and includes WHOIS/RDAP diagnostics.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://github.com/PowerShell/PowerShell)
+[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
 
-## Features
-- Single-file PowerShell HTTP server with an embedded SPA UI
-- DNS checks: root TXT/SPF, ACS TXT, MX with A/AAAA resolution, DMARC, DKIM selectors, CNAME
-- DNSBL reputation lookup with cached results
-- WHOIS/RDAP diagnostics with fallback providers
-- Optional API key auth and per-IP rate limiting
-- Optional anonymous metrics (HMAC-hashed domains only)
-- Optional Microsoft Entra ID sign-in for employee verification
-- Container-ready (Linux/Windows Dockerfiles)
+## 📖 Table of Contents
+- [Overview](#-overview)
+- [Features](#-features)
+- [Prerequisites](#-prerequisites)
+- [Quick Start (Local)](#-quick-start-local)
+- [Quick Start (Docker)](#-quick-start-docker)
+- [API Endpoints](#-api-endpoints)
+- [Authentication](#-authentication)
+- [Configuration (Environment Variables)](#-configuration-environment-variables)
+- [Issue Reporting](#-issue-reporting)
+- [MSAL Browser Library Updates](#-msal-browser-library-updates)
+- [Security Notes](#-security-notes)
+- [Troubleshooting](#-troubleshooting)
+- [Contributing](#-contributing)
+- [License](#-license)
 
-## Quick Start (Local)
-To run the application locally, execute the following command in PowerShell:
+## 📋 Overview
+`acs-domain-checker` is a powerful, single-file PowerShell web UI + REST API designed to validate Azure Communication Services (ACS) email domain readiness. It provides comprehensive DNS record verification including TXT/SPF, MX, DMARC, DKIM, and CNAME records, performs optional DNSBL reputation checks, and includes WHOIS/RDAP diagnostics for complete domain analysis.
 
+**Perfect for:**
+- 🏢 System administrators configuring ACS email domains
+- 🔧 DevOps engineers automating domain verification
+- 🧪 Developers testing email domain configurations
+- 📊 IT teams troubleshooting domain setup issues
 
-# Run the UI and API on the default port (8080)
+## ✨ Features
+- 🚀 **Single-file PowerShell HTTP server** with an embedded SPA UI - no complex setup required!
+- 🔍 **Comprehensive DNS checks:**
+  - Root TXT/SPF records validation
+  - ACS-specific TXT records
+  - MX records with A/AAAA resolution
+  - DMARC policy verification
+  - DKIM selector validation
+  - CNAME record checks
+- 🛡️ **DNSBL reputation lookup** with intelligent caching
+- 🌍 **WHOIS/RDAP diagnostics** with multiple fallback providers
+- 🔐 **Optional API key authentication** and per-IP rate limiting
+- 📊 **Anonymous metrics collection** (HMAC-hashed domains only, privacy-first)
+- 👤 **Microsoft Entra ID sign-in** support for employee verification
+- 🐳 **Container-ready** with Linux and Windows Dockerfiles
+- ⚡ **Fast and lightweight** - minimal resource footprint
+- 🎨 **Modern, responsive UI** - works on desktop and mobile devices
 
+## 📦 Prerequisites
+
+Before running the ACS Domain Checker, ensure you have:
+
+- **PowerShell 5.1+** (Windows) or **PowerShell Core 7+** (cross-platform)
+  - Windows: Pre-installed on Windows 10/11 and Windows Server 2016+
+  - macOS/Linux: [Install PowerShell Core](https://github.com/PowerShell/PowerShell#get-powershell)
+- **Docker** (optional, for containerized deployment)
+  - [Download Docker Desktop](https://www.docker.com/products/docker-desktop)
+- **Network access** to query DNS servers and WHOIS/RDAP services
+- **Port 8080** available (or specify a custom port)
+
+## 🚀 Quick Start (Local)
+
+Running the application locally is simple and quick:
+
+### Step 1: Clone the Repository
+```bash
+git clone https://github.com/blakedrumm/azure-communication-services-domain-checker.git
+cd azure-communication-services-domain-checker
+```
+
+### Step 2: Run the Application
 ```powershell
+# Run the UI and API on the default port (8080)
 ./acs-domain-checker.ps1
 ```
 
-Then, open your web browser and navigate to `http://localhost:8080`.
+### Step 3: Access the Web UI
+Open your web browser and navigate to:
+```
+http://localhost:8080
+```
 
-## Quick Start (Docker)
-To run the application using Docker, use the following commands:
+🎉 **That's it!** You can now start checking your domains.
 
+### 🔧 Advanced Options
+```powershell
+# Run on a custom port
+./acs-domain-checker.ps1 -Port 9000
 
-# Linux
+# Bind to all network interfaces (useful for remote access)
+./acs-domain-checker.ps1 -Bind Any
+
+# Run with API key authentication
+$env:ACS_API_KEY = "your-secret-key"
+./acs-domain-checker.ps1
+```
+
+## 🐳 Quick Start (Docker)
+
+Run the application in a Docker container for isolation and portability:
+
+### 🐧 Linux Container
 ```bash
+# Build the Docker image
 docker build -f Dockerfile.linux -t acs-domain-checker .
 
+# Run the container
 docker run --rm -p 8080:8080 \
-  -e ACS_API_KEY=your-key \
+  -e ACS_API_KEY=your-secret-key \
   acs-domain-checker
 ```
 
-## API Endpoints
-The following API endpoints are available:
+### 🪟 Windows Container
+```powershell
+# Build the Docker image
+docker build -f Dockerfile.windows -t acs-domain-checker:windows .
 
-- `/` : Web UI
-- `/dns` : Aggregated readiness JSON
-- `/api/base` : Root TXT/SPF/ACS TXT
-- `/api/mx` : MX + A/AAAA resolution
-- `/api/dmarc` : DMARC
-- `/api/dkim` : DKIM
-- `/api/cname` : CNAME
-- `/api/reputation` : DNSBL reputation
-- `/api/metrics` : Anonymous metrics snapshot
+# Run the container
+docker run --rm -p 8080:8080 `
+  -e ACS_API_KEY=your-secret-key `
+  acs-domain-checker:windows
+```
 
-## Authentication
-If `ACS_API_KEY` is set, API endpoints require an API key via header or query:
+### 🌐 Access the Application
+Once the container is running, open your browser to:
+```
+http://localhost:8080
+```
 
-- Header: `X-Api-Key: <key>`
-- Query (less secure): `?apiKey=<key>`
+## 🔌 API Endpoints
 
-## Configuration (Environment Variables)
-You can configure the application using the following environment variables:
+The application exposes the following RESTful API endpoints:
 
-- `PORT`: Port override for the web listener (default 8080)
-- `ACS_DNS_RESOLVER`: `Auto`, `System`, or `DoH`
-- `ACS_DNS_DOH_ENDPOINT`: DoH endpoint when resolver is DoH
-- `ACS_ENABLE_ANON_METRICS`: `1` to enable anonymous metrics
-- `ACS_ANON_METRICS_FILE`: Persist metrics to JSON
-- `ACS_METRICS_HASH_KEY`: Stable hash key for domain hashing
-- `ACS_API_KEY`: API key for `/api/*` and `/dns`
-- `ACS_RATE_LIMIT_PER_MIN`: Requests per minute per client IP
-- `ACS_ENTRA_CLIENT_ID`: Entra ID app registration client ID
-- `ACS_ENTRA_TENANT_ID`: Optional tenant ID/domain
-- `ACS_ISSUE_URL`: Issue tracker URL for the �Report issue� button
+| Endpoint | Description | 📝 Purpose |
+|----------|-------------|------------|
+| `/` | Web UI | Interactive single-page application for domain checking |
+| `/dns` | Aggregated readiness JSON | Complete DNS readiness report for a domain |
+| `/api/base` | Root TXT/SPF/ACS TXT | Validates SPF and ACS verification TXT records |
+| `/api/mx` | MX + A/AAAA resolution | Checks mail exchange records and IP resolution |
+| `/api/dmarc` | DMARC records | Validates DMARC email authentication policy |
+| `/api/dkim` | DKIM selectors | Checks DomainKeys Identified Mail signatures |
+| `/api/cname` | CNAME records | Validates canonical name records |
+| `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
+| `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
 
-## Issue Reporting
-To enable issue reporting, set `ACS_ISSUE_URL` to your issue tracker �new issue� URL. The application appends `domain` and `source` query parameters and shows a confirmation prompt when reporting an issue.
+### 📖 Example API Usage
+```bash
+# Check complete DNS readiness for a domain
+curl "http://localhost:8080/dns?domain=example.com"
 
-## MSAL Browser Library Updates
+# Check only MX records
+curl "http://localhost:8080/api/mx?domain=example.com"
 
-This repository uses the Microsoft Authentication Library (MSAL) for browser (`@azure/msal-browser`) to enable Microsoft Entra ID authentication. The library file `msal-browser.min.js` is checked into the repository root and served at `/assets/msal-browser.min.js`.
+# With API key authentication
+curl -H "X-Api-Key: your-secret-key" "http://localhost:8080/dns?domain=example.com"
+```
 
-### Automated Updates
+## 🔐 Authentication
+
+Protect your API endpoints with API key authentication:
+
+If `ACS_API_KEY` environment variable is set, API endpoints require authentication via:
+
+- **✅ Recommended - Header:** `X-Api-Key: <your-key>`
+- **⚠️ Less Secure - Query Parameter:** `?apiKey=<your-key>` (avoid in production)
+
+### 🔑 Setting Up Authentication
+```powershell
+# Set API key for the session
+$env:ACS_API_KEY = "your-secret-key-here"
+./acs-domain-checker.ps1
+```
+
+```bash
+# Linux/macOS
+export ACS_API_KEY="your-secret-key-here"
+./acs-domain-checker.ps1
+```
+
+⚠️ **Security Best Practice:** Always use header-based authentication in production environments to prevent API keys from appearing in logs.
+
+## ⚙️ Configuration (Environment Variables)
+Customize the application behavior using these environment variables:
+
+### 🌐 Network & Server
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8080` | Port for the web listener |
+| `ACS_API_KEY` | _(none)_ | API key for securing `/api/*` and `/dns` endpoints |
+| `ACS_RATE_LIMIT_PER_MIN` | _(none)_ | Maximum requests per minute per client IP |
+
+### 🔍 DNS Resolution
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_DNS_RESOLVER` | `Auto` | DNS resolver mode: `Auto`, `System`, or `DoH` |
+| `ACS_DNS_DOH_ENDPOINT` | _(auto)_ | Custom DNS-over-HTTPS endpoint URL |
+
+### 📊 Metrics & Analytics
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_ENABLE_ANON_METRICS` | `0` | Set to `1` to enable anonymous metrics collection |
+| `ACS_ANON_METRICS_FILE` | _(none)_ | File path to persist metrics data (JSON format) |
+| `ACS_METRICS_HASH_KEY` | _(generated)_ | Stable HMAC key for domain hashing |
+
+### 🔐 Authentication
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_ENTRA_CLIENT_ID` | _(none)_ | Microsoft Entra ID (Azure AD) app client ID |
+| `ACS_ENTRA_TENANT_ID` | _(none)_ | Entra ID tenant ID or domain (e.g., `contoso.onmicrosoft.com`) |
+
+### 🐛 Issue Reporting
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_ISSUE_URL` | _(none)_ | Issue tracker URL for the "Report issue" button |
+
+### 📝 Configuration Example
+```powershell
+# Windows PowerShell
+$env:PORT = "9000"
+$env:ACS_API_KEY = "my-secret-key"
+$env:ACS_ENABLE_ANON_METRICS = "1"
+$env:ACS_DNS_RESOLVER = "DoH"
+./acs-domain-checker.ps1
+```
+
+```bash
+# Linux/macOS
+export PORT=9000
+export ACS_API_KEY=my-secret-key
+export ACS_ENABLE_ANON_METRICS=1
+export ACS_DNS_RESOLVER=DoH
+./acs-domain-checker.ps1
+```
+
+## 🐛 Issue Reporting
+
+To enable issue reporting from the web UI, set `ACS_ISSUE_URL` to your issue tracker's "new issue" URL. 
+
+The application will:
+- ✅ Append `domain` and `source` query parameters automatically
+- ✅ Show a confirmation prompt before reporting
+- ✅ Allow users to easily report domain configuration issues
+
+**Example:**
+```powershell
+$env:ACS_ISSUE_URL = "https://github.com/your-org/your-repo/issues/new"
+```
+
+## 📚 MSAL Browser Library Updates
+
+This repository uses the **Microsoft Authentication Library (MSAL)** for browser (`@azure/msal-browser`) to enable Microsoft Entra ID authentication. The library file `msal-browser.min.js` is checked into the repository root and served at `/assets/msal-browser.min.js`.
+
+### 🤖 Automated Updates
 
 A GitHub Actions workflow (`.github/workflows/update-msal-browser.yml`) automatically checks for new releases of `@azure/msal-browser` and creates pull requests when updates are available.
 
-**Update Schedule:**
-- Runs automatically every Monday (GitHub Actions day 1 of week) at 9:00 AM UTC
-- Can be triggered manually via GitHub Actions workflow dispatch
+**⏰ Update Schedule:**
+- ✅ Runs automatically every Monday at 9:00 AM UTC
+- ✅ Can be triggered manually via GitHub Actions workflow dispatch
 
-**How It Works:**
-1. The workflow checks the latest version available on the npm registry
-2. Compares it with the current version in `msal-browser.min.js`
-3. If an update is available:
+**⚙️ How It Works:**
+1. 🔍 The workflow checks the latest version available on the npm registry
+2. 🔄 Compares it with the current version in `msal-browser.min.js`
+3. 📦 If an update is available:
    - Downloads the package from npm
    - Extracts `lib/msal-browser.min.js` from the package
    - Updates both `msal-browser.min.js` and `package.json`
    - Creates a pull request with the changes
-4. Review and merge the PR after testing
+4. ✅ Review and merge the PR after testing
 
-**Security Features:**
-- Pinned GitHub Actions versions for reproducibility
-- Downloads from official npm registry only
-- Version verification from package metadata
-- No arbitrary script execution
+**🔒 Security Features:**
+- 📌 Pinned GitHub Actions versions for reproducibility
+- 🌐 Downloads from official npm registry only
+- ✔️ Version verification from package metadata
+- 🚫 No arbitrary script execution
 
-### Manual Update
+### 🔧 Manual Update
+
+### 🔧 Manual Update
 
 To manually update to a specific version:
 
-1. Navigate to **Actions** → **Update MSAL Browser Library** in the GitHub repository
-2. Click **Run workflow**
-3. Enter the desired version (e.g., `5.3.0`) or leave empty for the latest
-4. Click **Run workflow**
+1. 🌐 Navigate to **Actions** → **Update MSAL Browser Library** in the GitHub repository
+2. ▶️ Click **Run workflow**
+3. 📝 Enter the desired version (e.g., `5.3.0`) or leave empty for the latest
+4. 🚀 Click **Run workflow**
 
-### Pinning a Specific Version
+### 📍 Pinning a Specific Version
+
+### 📍 Pinning a Specific Version
 
 If you need to prevent automatic updates and stay on a specific version:
 
-1. Disable the scheduled workflow run by editing `.github/workflows/update-msal-browser.yml`:
+1. 🛑 Disable the scheduled workflow run by editing `.github/workflows/update-msal-browser.yml`:
    ```yaml
    on:
      # schedule:  # Comment out the schedule trigger
@@ -124,22 +300,146 @@ If you need to prevent automatic updates and stay on a specific version:
      workflow_dispatch:  # Keep manual dispatch available
    ```
 
-2. Manually update to your desired version using the workflow dispatch method above
+2. 🔧 Manually update to your desired version using the workflow dispatch method above
 
-3. The application will continue to work with the checked-in version at that point
+3. ✅ The application will continue to work with the checked-in version at that point
 
-### Fallback CDNs
+### 🌐 Fallback CDNs
+
+### 🌐 Fallback CDNs
 
 The UI (in `acs-domain-checker.ps1`) also includes fallback CDN URLs in case the local file cannot be loaded:
-- `https://alcdn.msauth.net/browser/{version}/js/msal-browser.min.js`
-- `https://cdn.jsdelivr.net/npm/@azure/msal-browser@{version}/dist/msal-browser.min.js`
+- 🔗 `https://alcdn.msauth.net/browser/{version}/js/msal-browser.min.js`
+- 🔗 `https://cdn.jsdelivr.net/npm/@azure/msal-browser@{version}/dist/msal-browser.min.js`
 
-**Note:** The CDN URLs in `acs-domain-checker.ps1` (in the `msalSources` array) have hardcoded versions and will need manual updates if you want them to match the latest version. The automated workflow only updates the checked-in `msal-browser.min.js` file.
+⚠️ **Note:** The CDN URLs in `acs-domain-checker.ps1` (in the `msalSources` array) have hardcoded versions and will need manual updates if you want them to match the latest version. The automated workflow only updates the checked-in `msal-browser.min.js` file.
 
-## Security Notes
-- Content Security Policy (CSP) is enforced with nonces for inline scripts/styles.
-- Anonymous metrics do not store Personally Identifiable Information (PII) (domains are HMAC-hashed).
-- Avoid using API keys in URLs for production environments to enhance security.
+## 🔒 Security Notes
 
-## License
-MIT
+Security is a top priority for the ACS Domain Checker:
+
+- 🛡️ **Content Security Policy (CSP)** is enforced with nonces for inline scripts/styles
+- 🔐 **Anonymous metrics** do not store Personally Identifiable Information (PII) - domains are HMAC-hashed
+- ⚠️ **API key best practices:** Avoid using API keys in URLs for production environments to enhance security
+- 🔒 **HTTPS recommended:** Always use HTTPS in production deployments
+- 🚫 **No credential storage:** The application never stores credentials or sensitive data
+- ✅ **Input validation:** All user inputs are validated and sanitized
+
+### 🛡️ Security Recommendations
+
+For production deployments:
+1. ✅ Always enable `ACS_API_KEY` for authentication
+2. ✅ Configure `ACS_RATE_LIMIT_PER_MIN` to prevent abuse
+3. ✅ Use HTTPS with a valid SSL/TLS certificate
+4. ✅ Keep the MSAL library updated via automated updates
+5. ✅ Review logs regularly for suspicious activity
+6. ✅ Run in a containerized environment for isolation
+
+## 🔧 Troubleshooting
+
+### Common Issues and Solutions
+
+#### 🚫 Port Already in Use
+**Problem:** Error message "Port 8080 is already in use"
+**Solution:**
+```powershell
+# Use a different port
+./acs-domain-checker.ps1 -Port 9000
+```
+
+#### 🌐 DNS Resolution Failures
+**Problem:** DNS queries are failing or timing out
+**Solution:**
+```powershell
+# Try DNS-over-HTTPS for more reliable resolution
+$env:ACS_DNS_RESOLVER = "DoH"
+./acs-domain-checker.ps1
+```
+
+#### 🔐 Authentication Issues
+**Problem:** API key authentication not working
+**Solution:**
+- Ensure `ACS_API_KEY` is set correctly
+- Use header-based authentication: `X-Api-Key: your-key`
+- Verify the API key is not expired or contains special characters
+
+#### 🐳 Docker Container Issues
+**Problem:** Container fails to start or crashes
+**Solution:**
+```bash
+# Check container logs
+docker logs <container-id>
+
+# Ensure port is not in use
+docker ps | grep 8080
+
+# Run with interactive mode for debugging
+docker run -it --rm -p 8080:8080 acs-domain-checker
+```
+
+#### 📊 WHOIS/RDAP Failures
+**Problem:** WHOIS lookups are failing
+**Solution:**
+- Check network connectivity
+- Verify firewall allows outbound WHOIS queries
+- Consider configuring API keys for fallback providers
+
+### 💡 Getting Help
+
+If you encounter issues:
+1. 📖 Check the [documentation](#-table-of-contents)
+2. 🔍 Search existing [GitHub Issues](https://github.com/blakedrumm/azure-communication-services-domain-checker/issues)
+3. 🆕 [Open a new issue](https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new) with:
+   - Detailed description of the problem
+   - Steps to reproduce
+   - Environment information (OS, PowerShell version, etc.)
+   - Relevant error messages or logs
+
+## 🤝 Contributing
+
+We welcome contributions from the community! Here's how you can help:
+
+### 🎯 Ways to Contribute
+
+- 🐛 **Report bugs:** Open an issue with detailed reproduction steps
+- 💡 **Suggest features:** Share your ideas for improvements
+- 📝 **Improve documentation:** Fix typos, add examples, clarify instructions
+- 🔧 **Submit code:** Fix bugs, add features, improve performance
+- ⭐ **Star the repository:** Show your support!
+
+### 🚀 Getting Started
+
+1. 🍴 Fork the repository
+2. 🌿 Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. ✍️ Make your changes
+4. ✅ Test your changes thoroughly
+5. 📝 Commit your changes (`git commit -m 'Add amazing feature'`)
+6. 📤 Push to the branch (`git push origin feature/amazing-feature`)
+7. 🎉 Open a Pull Request
+
+### 📋 Contribution Guidelines
+
+- ✅ Follow PowerShell best practices
+- ✅ Maintain backward compatibility when possible
+- ✅ Add comments for complex logic
+- ✅ Update documentation for new features
+- ✅ Test your changes before submitting
+- ✅ Keep commits focused and atomic
+
+## 📄 License
+
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+
+### 🌟 If you find this project helpful, please consider giving it a star! 🌟
+
+**Made with ❤️ by [Blake Drumm](https://github.com/blakedrumm)**
+
+**Useful for Azure Communication Services domain validation**
+
+[Report Bug](https://github.com/blakedrumm/azure-communication-services-domain-checker/issues) · [Request Feature](https://github.com/blakedrumm/azure-communication-services-domain-checker/issues) · [Documentation](#-table-of-contents)
+
+</div>
