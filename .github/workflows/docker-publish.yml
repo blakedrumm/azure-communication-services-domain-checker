@@ -1,0 +1,195 @@
+name: Publish Docker Images to Docker Hub
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 1.2.13). Leave empty to extract from acs-domain-checker.ps1'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      linux-tag: ${{ steps.get-version.outputs.linux-tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get-version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            echo "Using manual version: $VERSION"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "Using version from tag: $VERSION"
+          else
+            # Extract version from PowerShell script
+            VERSION=$(grep -oP '\$script:AppVersion\s*=\s*["'"'"']\K\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?' acs-domain-checker.ps1 | head -1)
+            echo "Extracted version from script: $VERSION"
+          fi
+          
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not determine version"
+            exit 1
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "linux-tag=linux-$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Linux image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.linux
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/acs-domain-checker:${{ steps.get-version.outputs.linux-tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-windows:
+    runs-on: windows-2022
+    needs: build-linux
+    outputs:
+      windows-tag: ${{ steps.get-version.outputs.windows-tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get-version
+        shell: pwsh
+        run: |
+          $VERSION = "${{ needs.build-linux.outputs.version }}"
+          Write-Output "Using version: $VERSION"
+          Write-Output "version=$VERSION" >> $env:GITHUB_OUTPUT
+          Write-Output "windows-tag=windows-$VERSION" >> $env:GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Windows image
+        shell: pwsh
+        run: |
+          $VERSION = "${{ needs.build-linux.outputs.version }}"
+          $WINDOWS_TAG = "windows-$VERSION"
+          $REPO = "${{ secrets.DOCKERHUB_USERNAME }}/acs-domain-checker"
+          
+          Write-Output "Building Windows image: ${REPO}:${WINDOWS_TAG}"
+          
+          # Build Windows image
+          docker build `
+            -f Dockerfile.windows `
+            --build-arg WINDOWS_BASE_TAG=nanoserver-ltsc2022 `
+            -t "${REPO}:${WINDOWS_TAG}" `
+            .
+          
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker build failed with exit code $LASTEXITCODE"
+          }
+          
+          # Push Windows image
+          Write-Output "Pushing Windows image: ${REPO}:${WINDOWS_TAG}"
+          docker push "${REPO}:${WINDOWS_TAG}"
+          
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker push failed with exit code $LASTEXITCODE"
+          }
+
+  create-multiarch-tags:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows]
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create multi-arch version tag
+        run: |
+          VERSION="${{ needs.build-linux.outputs.version }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/acs-domain-checker"
+          LINUX_TAG="${{ needs.build-linux.outputs.linux-tag }}"
+          WINDOWS_TAG="${{ needs.build-windows.outputs.windows-tag }}"
+          
+          echo "Creating multi-arch tag: ${REPO}:${VERSION}"
+          docker buildx imagetools create \
+            -t "${REPO}:${VERSION}" \
+            "${REPO}:${LINUX_TAG}" \
+            "${REPO}:${WINDOWS_TAG}"
+
+      - name: Create/update latest tag
+        run: |
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/acs-domain-checker"
+          LINUX_TAG="${{ needs.build-linux.outputs.linux-tag }}"
+          WINDOWS_TAG="${{ needs.build-windows.outputs.windows-tag }}"
+          
+          echo "Creating/updating multi-arch tag: ${REPO}:latest"
+          docker buildx imagetools create \
+            -t "${REPO}:latest" \
+            "${REPO}:${LINUX_TAG}" \
+            "${REPO}:${WINDOWS_TAG}"
+
+      - name: Verify multi-arch tags
+        run: |
+          VERSION="${{ needs.build-linux.outputs.version }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/acs-domain-checker"
+          
+          echo "Verifying ${REPO}:${VERSION}"
+          docker buildx imagetools inspect "${REPO}:${VERSION}"
+          
+          echo "Verifying ${REPO}:latest"
+          docker buildx imagetools inspect "${REPO}:latest"
+
+      - name: Summary
+        run: |
+          VERSION="${{ needs.build-linux.outputs.version }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/acs-domain-checker"
+          
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## 🚀 Docker Images Published Successfully
+          
+          ### Version: \`$VERSION\`
+          
+          **Published Tags:**
+          - \`${REPO}:${{ needs.build-linux.outputs.linux-tag }}\` (linux/amd64)
+          - \`${REPO}:${{ needs.build-windows.outputs.windows-tag }}\` (windows/amd64)
+          - \`${REPO}:${VERSION}\` (multi-arch)
+          - \`${REPO}:latest\` (multi-arch)
+          
+          **Pull commands:**
+          \`\`\`bash
+          docker pull ${REPO}:${VERSION}
+          docker pull ${REPO}:latest
+          \`\`\`
+          
+          **View on Docker Hub:** https://hub.docker.com/r/${REPO}
+          EOF
