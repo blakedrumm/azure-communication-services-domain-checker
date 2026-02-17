@@ -78,7 +78,7 @@ This repository uses the Microsoft Authentication Library (MSAL) for browser (`@
 A GitHub Actions workflow (`.github/workflows/update-msal-browser.yml`) automatically checks for new releases of `@azure/msal-browser` and creates pull requests when updates are available.
 
 **Update Schedule:**
-- Runs automatically every Monday at 9:00 AM UTC
+- Runs automatically every Monday (GitHub Actions day 1 of week) at 9:00 AM UTC
 - Can be triggered manually via GitHub Actions workflow dispatch
 
 **How It Works:**

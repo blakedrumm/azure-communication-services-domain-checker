@@ -106,9 +106,10 @@ jobs:
         run: |
           VERSION="${{ steps.get-version.outputs.version }}"
           
-          # Update package.json to use exact version
+          # Update package.json to use caret version range
+          # This allows npm install to get compatible updates if run manually
+          # The workflow downloads the exact version to msal-browser.min.js
           if [ -f package.json ]; then
-            # Use jq to update the version, preserving all other fields
             jq --arg version "$VERSION" '.dependencies["@azure/msal-browser"] = "^" + $version' package.json > package.json.tmp
             mv package.json.tmp package.json
             echo "Updated package.json to version ^$VERSION"
