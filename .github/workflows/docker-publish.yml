@@ -17,6 +17,7 @@ permissions:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    environment: default
     outputs:
       version: ${{ steps.get-version.outputs.version }}
       linux-tag: ${{ steps.get-version.outputs.linux-tag }}
@@ -70,6 +71,7 @@ jobs:
 
   build-windows:
     runs-on: windows-2022
+    environment: default
     needs: build-linux
     outputs:
       windows-tag: ${{ steps.get-version.outputs.windows-tag }}
@@ -122,6 +124,7 @@ jobs:
 
   create-multiarch-tags:
     runs-on: ubuntu-latest
+    environment: default
     needs: [build-linux, build-windows]
     steps:
       - name: Log in to Docker Hub
