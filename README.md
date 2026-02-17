@@ -254,21 +254,24 @@ This repository includes a GitHub Issue Form template (`bug-report.yml`) designe
 $env:ACS_ISSUE_URL = "https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml"
 ```
 
-**Example Issue URL (with domain pre-filled):**
+**Example Issue URL:**
 ```
 https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml&domain=example.com&source=acs-domain-checker
 ```
 
 **How It Works:**
 1. 🖱️ User clicks "Report issue" button in the web UI
-2. 🌐 The app automatically appends the current domain and source parameters
-3. 📝 GitHub opens the issue form with the domain field pre-populated
-4. ✅ User fills out the remaining fields and submits the issue
+2. 🌐 The app automatically appends the current domain and source parameters to the URL
+3. 📝 GitHub opens the issue form template
+4. ✍️ The domain information is available in the URL, making it easy for users to copy/paste into the domain field
+5. ✅ User fills out the remaining fields and submits the issue
 
-**Available Query Parameters:**
+**Query Parameters:**
 - `template` - Specifies which issue template to use (e.g., `bug-report.yml`)
-- `domain` - Pre-fills the affected domain field (automatically added by the app)
-- `source` - Identifies the report source as `acs-domain-checker` (automatically added)
+- `domain` - Domain information from the web UI (included in URL for user reference)
+- `source` - Identifies the report source as `acs-domain-checker`
+
+**💡 Note:** GitHub Issue Forms don't auto-populate fields from URL parameters, but the domain information is preserved in the URL for easy reference when filling out the form.
 
 ## 📚 MSAL Browser Library Updates
 
