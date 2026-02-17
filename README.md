@@ -1,6 +1,4 @@
-Here's the improved `README.md` file, incorporating the new content while maintaining the existing structure and information:
-
-# acs-domain-checker
+# Azure Communication Services - Domain Checker Tool (***acs-domain-checker***)
 
 ## Overview
 `acs-domain-checker` is a single-file PowerShell web UI + REST API to validate Azure Communication Services (ACS) email domain readiness. It checks DNS records (TXT/SPF, MX, DMARC, DKIM, CNAME), performs optional DNSBL reputation checks, and includes WHOIS/RDAP diagnostics.
@@ -17,20 +15,28 @@ Here's the improved `README.md` file, incorporating the new content while mainta
 
 ## Quick Start (Local)
 To run the application locally, execute the following command in PowerShell:
-
+
+
 # Run the UI and API on the default port (8080)
-./acs-domain-checker.ps1
+
+```powershell
+./acs-domain-checker.ps1
+```
+
 Then, open your web browser and navigate to `http://localhost:8080`.
 
 ## Quick Start (Docker)
 To run the application using Docker, use the following commands:
-
+
+
 # Linux
+```bash
 docker build -f Dockerfile.linux -t acs-domain-checker .
 
 docker run --rm -p 8080:8080 \
   -e ACS_API_KEY=your-key \
-  acs-domain-checker
+  acs-domain-checker
+```
 
 ## API Endpoints
 The following API endpoints are available:
@@ -136,6 +142,4 @@ The UI (in `acs-domain-checker.ps1`) also includes fallback CDN URLs in case the
 - Avoid using API keys in URLs for production environments to enhance security.
 
 ## License
-Specify your license here.
-
-This revised README maintains the original structure while enhancing clarity and coherence. Each section is clearly defined, and the instructions are straightforward, making it easier for users to understand and utilize the `acs-domain-checker` project.
+MIT
