@@ -487,7 +487,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.2.12'
+$script:AppVersion = '1.2.13'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -3778,6 +3778,7 @@ ul.guidance li {
 const entraTenant = '__ENTRA_TENANT_ID__';
 const acsApiKey = '__ACS_API_KEY__';
 const acsIssueUrl = '__ACS_ISSUE_URL__';
+const appVersion = '__APP_VERSION__';
 const msalSources = [
   '/assets/msal-browser.min.js',
   'https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js',
@@ -4525,6 +4526,9 @@ function buildIssueUrl(domain) {
       url.searchParams.set('domain', domain);
     }
     url.searchParams.set('source', 'acs-domain-checker');
+    if (appVersion && !appVersion.startsWith('__')) {
+      url.searchParams.set('version', appVersion);
+    }
     return url.toString();
   } catch {
     return null;
