@@ -249,8 +249,6 @@ $env:ACS_ISSUE_URL = "https://github.com/your-org/your-repo/issues/new"
 
 ## 📚 MSAL Browser Library Updates
 
-## 📚 MSAL Browser Library Updates
-
 This repository uses the **Microsoft Authentication Library (MSAL)** for browser (`@azure/msal-browser`) to enable Microsoft Entra ID authentication. The library file `msal-browser.min.js` is checked into the repository root and served at `/assets/msal-browser.min.js`.
 
 ### 🤖 Automated Updates
