@@ -487,7 +487,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.2.12'
+$script:AppVersion = '1.2.13'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -6881,3 +6881,4 @@ finally {
   try { $pool.Close(); $pool.Dispose() } catch { $null = $_ }
   Write-Information -InformationAction Continue -MessageData "Server stopped."
 }
+
