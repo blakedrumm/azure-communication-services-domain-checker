@@ -45,7 +45,7 @@
   - DKIM selector validation (`selector1-azurecomm-prod-net`, `selector2-azurecomm-prod-net`)
   - CNAME record checks (root and `www` prefix)
 - 🛡️ **DNSBL reputation lookup** with parallel queries and intelligent caching
-- 🌍 **WHOIS/RDAP diagnostics** with multiple fallback providers (Sysinternals, Linux CLI, GoDaddy, WhoisXML, RDAP)
+- 🌍 **WHOIS/RDAP diagnostics** with multiple fallback providers (Sysinternals, Linux CLI, TCP whois, GoDaddy, WhoisXML, RDAP)
 - 🔐 **Optional API key authentication** and per-IP rate limiting
 - 📊 **Anonymous metrics collection** (HMAC-hashed domains only, privacy-first)
 - 👤 **Microsoft Entra ID sign-in** support for employee verification
@@ -235,9 +235,10 @@ The tool enriches results with domain registration metadata (creation date, expi
 |----------|----------|---------|
 | 1 | **Sysinternals whois.exe** | `SYSINTERNALS_WHOIS_PATH` (Windows) |
 | 2 | **Linux whois CLI** | `LINUX_WHOIS_PATH` (Linux/macOS) |
-| 3 | **GoDaddy API** | `GODADDY_API_KEY` + `GODADDY_API_SECRET` |
-| 4 | **WhoisXML API** | `ACS_WHOISXML_API_KEY` |
-| 5 | **RDAP** | None (uses IANA bootstrap + rdap.org fallback) |
+| 3 | **TCP whois** | None (pure PowerShell TCP client, port 43) |
+| 4 | **GoDaddy API** | `GODADDY_API_KEY` + `GODADDY_API_SECRET` |
+| 5 | **WhoisXML API** | `ACS_WHOISXML_API_KEY` |
+| 6 | **RDAP** | None (uses IANA bootstrap + rdap.org fallback) |
 
 WHOIS data is used to populate the **Email Quota** checklist and to surface warnings for expired or newly-registered domains.
 
@@ -623,7 +624,8 @@ docker run -it --rm -p 8080:8080 acs-domain-checker
 **Problem:** WHOIS lookups are failing
 **Solution:**
 - Check network connectivity
-- Verify firewall allows outbound WHOIS queries
+- Verify firewall allows outbound WHOIS queries (TCP port 43)
+- The tool includes a built-in TCP whois client that bypasses Linux CLI `getaddrinfo` issues in Docker containers
 - Consider configuring API keys for fallback providers
 
 ### 💡 Getting Help
