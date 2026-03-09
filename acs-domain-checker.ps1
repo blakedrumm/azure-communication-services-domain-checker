@@ -609,6 +609,184 @@ function Invoke-LinuxWhoisLookup {
     if ($ThrowOnError) { throw $msg } else { return $null }
   }
 }
+
+function Invoke-TcpWhoisLookup {
+  <#
+  .SYNOPSIS
+    Pure PowerShell TCP-based whois client that connects directly to port 43.
+    Bypasses the Linux whois CLI getaddrinfo() service-name resolution issue
+    ("Servname not supported for ai_socktype") that occurs in minimal Docker containers.
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Domain,
+
+    [int]$TimeoutSec = 15,
+
+    [switch]$ThrowOnError
+  )
+
+  $d = ([string]$Domain).Trim().TrimEnd('.')
+  if ([string]::IsNullOrWhiteSpace($d)) { return $null }
+
+  # Build server list based on TLD (same mapping as Invoke-LinuxWhoisLookup).
+  $servers = New-Object System.Collections.Generic.List[string]
+
+  switch -Regex ($d) {
+    '(?i)\.com$|\.net$'                                     { $servers.Add('whois.verisign-grs.com'); break }
+    '(?i)\.org$'                                            { $servers.Add('whois.pir.org'); break }
+    '(?i)\.info$'                                           { $servers.Add('whois.afilias.net'); break }
+    '(?i)\.biz$'                                            { $servers.Add('whois.biz'); break }
+    '(?i)\.io$'                                             { $servers.Add('whois.nic.io'); break }
+    '(?i)\.ai$'                                             { $servers.Add('whois.nic.ai'); break }
+    '(?i)\.app$|\.dev$'                                     { $servers.Add('whois.nic.google'); break }
+    '(?i)\.uk$|\.co\.uk$|\.org\.uk$|\.gov\.uk$|\.ac\.uk$'  { $servers.Add('whois.nic.uk'); break }
+    '(?i)\.de$'                                             { $servers.Add('whois.denic.de'); break }
+    '(?i)\.fr$'                                             { $servers.Add('whois.nic.fr'); break }
+    '(?i)\.au$|\.com\.au$|\.net\.au$|\.org\.au$'            { $servers.Add('whois.auda.org.au'); break }
+    '(?i)\.ca$'                                             { $servers.Add('whois.cira.ca'); break }
+    '(?i)\.jp$|\.co\.jp$|\.ne\.jp$|\.or\.jp$'               { $servers.Add('whois.jprs.jp'); break }
+    '(?i)\.us$'                                             { $servers.Add('whois.nic.us'); break }
+    '(?i)\.gov$'                                            { $servers.Add('whois.dotgov.gov'); break }
+    '(?i)\.edu$'                                            { $servers.Add('whois.educause.edu'); break }
+    '(?i)\.mil$'                                            { $servers.Add('whois.nic.mil'); break }
+  }
+
+  # For TLDs not in the mapping, try IANA referral to discover the authoritative server.
+  if ($servers.Count -eq 0) {
+    $servers.Add('whois.iana.org')
+  }
+
+  $canConvertDates = $true
+  if (-not (Get-Command -Name ConvertTo-NullableUtcIso8601 -ErrorAction SilentlyContinue)) {
+    $canConvertDates = $false
+  }
+
+  $lastError = $null
+
+  foreach ($server in $servers) {
+    $tcpClient = $null
+    try {
+      $tcpClient = [System.Net.Sockets.TcpClient]::new()
+      $connectTask = $tcpClient.ConnectAsync($server, 43)
+      if (-not $connectTask.Wait($TimeoutSec * 1000)) {
+        throw "TCP connection to ${server}:43 timed out after $TimeoutSec seconds."
+      }
+      if ($connectTask.IsFaulted) {
+        throw $connectTask.Exception.InnerException
+      }
+
+      $stream = $tcpClient.GetStream()
+      $stream.ReadTimeout  = $TimeoutSec * 1000
+      $stream.WriteTimeout = $TimeoutSec * 1000
+
+      $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::ASCII)
+      $writer.AutoFlush = $true
+      $writer.WriteLine($d)
+
+      $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+      $text   = $reader.ReadToEnd()
+
+      if ([string]::IsNullOrWhiteSpace($text)) { continue }
+
+      # If IANA returned a referral, follow it with a recursive call using the referred server.
+      if ($server -eq 'whois.iana.org' -and $text -match '(?im)^whois:\s*(.+)$') {
+        $referralServer = $Matches[1].Trim()
+        if (-not [string]::IsNullOrWhiteSpace($referralServer) -and $referralServer -ne 'whois.iana.org') {
+          try { $reader.Dispose() } catch { }
+          try { $writer.Dispose() } catch { }
+          try { $stream.Dispose() } catch { }
+          try { $tcpClient.Close() } catch { }
+          try { $tcpClient.Dispose() } catch { }
+          $tcpClient = $null
+
+          # Query the referral server directly.
+          $tcpClient = [System.Net.Sockets.TcpClient]::new()
+          $refTask = $tcpClient.ConnectAsync($referralServer, 43)
+          if (-not $refTask.Wait($TimeoutSec * 1000)) {
+            throw "TCP connection to ${referralServer}:43 timed out after $TimeoutSec seconds."
+          }
+          if ($refTask.IsFaulted) { throw $refTask.Exception.InnerException }
+
+          $stream = $tcpClient.GetStream()
+          $stream.ReadTimeout  = $TimeoutSec * 1000
+          $stream.WriteTimeout = $TimeoutSec * 1000
+          $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::ASCII)
+          $writer.AutoFlush = $true
+          $writer.WriteLine($d)
+          $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+          $text   = $reader.ReadToEnd()
+          $server = $referralServer
+
+          if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        }
+      }
+
+      # Skip responses that indicate no data or transport errors.
+      if ($text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b') { continue }
+
+      # Parse registration fields (same patterns as Invoke-LinuxWhoisLookup).
+      $creation   = $null
+      $expiry     = $null
+      $registrar  = $null
+      $registrant = $null
+
+      foreach ($line in ($text -split "`r?`n")) {
+        $l = $line.Trim()
+        if (-not $l) { continue }
+
+        if (-not $creation -and $l -match '(?i)^(Creation Date|Created On|Registered On|Domain Create Date|Creation date):\s*(.+)$') {
+          $val = $Matches[2].Trim()
+          if ($canConvertDates) {
+            try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
+          } else { $creation = $val }
+          continue
+        }
+
+        if (-not $expiry -and $l -match '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$') {
+          $val = $Matches[2].Trim()
+          if ($canConvertDates) {
+            try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
+          } else { $expiry = $val }
+          continue
+        }
+
+        if (-not $registrar -and $l -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
+          $registrar = $Matches[2].Trim()
+          continue
+        }
+
+        if (-not $registrant -and $l -match '(?i)^(Registrant Name|Registrant|Registrant Organisation|Registrant Organization):\s*(.+)$') {
+          $registrant = $Matches[2].Trim()
+          continue
+        }
+      }
+
+      return [pscustomobject]@{
+        creationDate = $creation
+        expiryDate   = $expiry
+        registrar    = $registrar
+        registrant   = $registrant
+        rawText      = $text
+        whoisServer  = $server
+      }
+    }
+    catch {
+      $lastError = $_.Exception.Message
+    }
+    finally {
+      if ($tcpClient) {
+        try { $tcpClient.Close() } catch { }
+        try { $tcpClient.Dispose() } catch { }
+      }
+    }
+  }
+
+  $msg = if ($lastError) { "TCP whois failed for '$d'. $lastError" } else { "TCP whois returned no usable data for '$d'." }
+  if ($ThrowOnError) { throw $msg } else { return $null }
+}
+
 if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
   $AnonymousMetricsFile = Join-Path -Path $PSScriptRoot -ChildPath 'acs-anon-metrics.json'
 }
@@ -651,7 +829,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.3.3'
+$script:AppVersion = '1.3.4'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1166,6 +1344,7 @@ function Get-DomainRegistrationStatus {
     $goDaddyError = $null
     $sysWhoisError = $null
     $linuxWhoisError = $null
+    $tcpWhoisError = $null
     $whoisXmlError = $null
 
     # Prefer GoDaddy fallback when API key/secret are available.
@@ -1305,6 +1484,46 @@ function Get-DomainRegistrationStatus {
       }
     }
 
+    # TCP whois fallback (pure PowerShell; bypasses CLI getaddrinfo service-name issues in Docker).
+    if (-not $usedFallback) {
+      try {
+        $raw = Invoke-TcpWhoisLookup -Domain $whoisDomain -ThrowOnError
+        if ($raw) {
+          $tcpCreation = ConvertTo-NullableUtcIso8601 $raw.creationDate
+          if (-not $tcpCreation -and -not [string]::IsNullOrWhiteSpace($raw.creationDate)) { $tcpCreation = $raw.creationDate }
+
+          $tcpExpiry = ConvertTo-NullableUtcIso8601 $raw.expiryDate
+          if (-not $tcpExpiry -and -not [string]::IsNullOrWhiteSpace($raw.expiryDate)) { $tcpExpiry = $raw.expiryDate }
+
+          if (-not $creation) { $creation = $tcpCreation }
+          if (-not $expiry)   { $expiry   = $tcpExpiry }
+          if (-not $registrar -and $raw.registrar) { $registrar = [string]$raw.registrar }
+          if (-not $registrant -and $raw.registrant) { $registrant = [string]$raw.registrant }
+          if (-not [string]::IsNullOrWhiteSpace($raw.rawText)) { $rawWhoisText = $raw.rawText }
+
+          $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
+          $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
+          $rawHasTransportError = $hasRawText -and ($raw.rawText -match '(?im)(getaddrinfo\(|Servname not supported for ai_socktype|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|socket error|connect\s+failed)')
+
+          if ($hasParsedFields) {
+            $source = 'TcpWhois'
+            $usedFallback = $true
+          }
+          elseif ($hasRawText -and -not $rawHasNoData -and -not $rawHasTransportError) {
+            $source = 'TcpWhois'
+            $usedFallback = $true
+          }
+          else {
+            $tcpWhoisError = if ($rawHasTransportError) { "TCP whois transport failed for '$whoisDomain'." } elseif ($rawHasNoData) { "TCP whois returned no registration data for '$whoisDomain'." } else { "TCP whois returned output but no registrant/registrar/dates could be parsed." }
+          }
+        }
+      }
+      catch {
+        $tcpWhoisError = $_.Exception.Message
+      }
+    }
+
     # Secondary fallback: WhoisXML if configured.
     if (-not $usedFallback) {
       $apiKey = $env:ACS_WHOISXML_API_KEY
@@ -1343,6 +1562,7 @@ function Get-DomainRegistrationStatus {
       elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += " GoDaddy not configured." }
       if ($sysWhoisError) { $err += " Sysinternals whois error: $sysWhoisError." }
       if ($linuxWhoisError) { $err += " Linux whois error: $linuxWhoisError." }
+      if ($tcpWhoisError) { $err += " TCP whois error: $tcpWhoisError." }
       if ($whoisXmlError) { $err += " WhoisXML error: $whoisXmlError." }
       elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += " WhoisXML not configured." }
 
@@ -1408,11 +1628,13 @@ function Get-DomainRegistrationStatus {
     $rdapError = $null
     $goDaddyError = $null
     $sysWhoisError = $null
+    $tcpWhoisError = $null
     $whoisXmlError = $null
   }
 
   if ($sysWhoisError -and -not $whoisError) { $whoisError = $sysWhoisError }
   if ($linuxWhoisError -and -not $whoisError) { $whoisError = $linuxWhoisError }
+  if ($tcpWhoisError -and -not $whoisError) { $whoisError = $tcpWhoisError }
   if ($goDaddyError -and -not $whoisError) { $whoisError = $goDaddyError }
   if ($whoisXmlError -and -not $whoisError) { $whoisError = $whoisXmlError }
   if ($rdapError -and -not $whoisError) { $whoisError = $rdapError }
