@@ -365,6 +365,10 @@ function Invoke-LinuxWhoisLookup {
       return $false
     }
 
+    if ($Text -match '(?im)\b(getaddrinfo\(|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|Servname not supported for ai_socktype|socket error|connect\s+failed)\b') {
+      return $false
+    }
+
     return $true
   }
 
@@ -393,8 +397,10 @@ function Invoke-LinuxWhoisLookup {
       } else {
         $psi.ArgumentList.Add('-h')
         $psi.ArgumentList.Add($Server)
-        $psi.ArgumentList.Add('-p')
-        $psi.ArgumentList.Add($ServerPort.ToString())
+        if ($ServerPort -ne 43) {
+          $psi.ArgumentList.Add('-p')
+          $psi.ArgumentList.Add($ServerPort.ToString())
+        }
         $psi.ArgumentList.Add('--')
         $psi.ArgumentList.Add($LookupDomain)
       }
@@ -402,7 +408,11 @@ function Invoke-LinuxWhoisLookup {
       if ([string]::IsNullOrWhiteSpace($Server)) {
         $psi.Arguments = "-- `"$LookupDomain`""
       } else {
-        $psi.Arguments = "-h `"$Server`" -p $ServerPort -- `"$LookupDomain`""
+        if ($ServerPort -ne 43) {
+          $psi.Arguments = "-h `"$Server`" -p $ServerPort -- `"$LookupDomain`""
+        } else {
+          $psi.Arguments = "-h `"$Server`" -- `"$LookupDomain`""
+        }
       }
     }
 
@@ -524,8 +534,7 @@ function Invoke-LinuxWhoisLookup {
         }
 
         if (-not [string]::IsNullOrWhiteSpace($queryResult.text)) {
-          $text = $queryResult.text
-          $usedServer = $queryResult.server
+          $lastQueryError = ($queryResult.text -split "`r?`n" | Select-Object -First 1)
         }
       }
       catch {
@@ -640,7 +649,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.3.1'
+$script:AppVersion = '1.3.2'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1222,17 +1231,18 @@ function Get-DomainRegistrationStatus {
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
+          $rawHasTransportError = $hasRawText -and ($raw.rawText -match '(?im)(getaddrinfo\(|Servname not supported for ai_socktype|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|socket error|connect\s+failed)')
 
           if ($hasParsedFields) {
             $source = 'LinuxWhois'
             $usedFallback = $true
           }
-          elseif ($hasRawText -and -not $rawHasNoData) {
+          elseif ($hasRawText -and -not $rawHasNoData -and -not $rawHasTransportError) {
             $source = 'LinuxWhois'
             $usedFallback = $true
           }
           else {
-            $linuxWhoisError = if ($rawHasNoData) { "Linux whois returned no registration data for '$whoisDomain'." } else { "Linux whois returned output but no registrant/registrar/dates could be parsed." }
+            $linuxWhoisError = if ($rawHasTransportError) { "Linux whois transport failed for '$whoisDomain'." } elseif ($rawHasNoData) { "Linux whois returned no registration data for '$whoisDomain'." } else { "Linux whois returned output but no registrant/registrar/dates could be parsed." }
           }
         }
       }
