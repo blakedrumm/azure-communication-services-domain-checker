@@ -10,6 +10,11 @@
 - [Prerequisites](#-prerequisites)
 - [Quick Start (Local)](#-quick-start-local)
 - [Quick Start (Docker)](#-quick-start-docker)
+- [Command-Line Test Mode](#-command-line-test-mode)
+- [Web UI Features](#-web-ui-features)
+- [DNS Checks & Guidance](#-dns-checks--guidance)
+- [DNSBL Reputation Checks](#-dnsbl-reputation-checks)
+- [WHOIS / RDAP Diagnostics](#-whois--rdap-diagnostics)
 - [API Endpoints](#-api-endpoints)
 - [Authentication](#-authentication)
 - [Configuration (Environment Variables)](#-configuration-environment-variables)
@@ -34,19 +39,20 @@
 - 🚀 **Single-file PowerShell HTTP server** with an embedded SPA UI - no complex setup required!
 - 🔍 **Comprehensive DNS checks:**
   - Root TXT/SPF records validation
-  - ACS-specific TXT records
-  - MX records with A/AAAA resolution
-  - DMARC policy verification
-  - DKIM selector validation
-  - CNAME record checks
-- 🛡️ **DNSBL reputation lookup** with intelligent caching
-- 🌍 **WHOIS/RDAP diagnostics** with multiple fallback providers
+  - ACS-specific verification TXT records (`ms-domain-verification`)
+  - MX records with A/AAAA resolution and mail provider detection
+  - DMARC policy verification (including inherited parent-domain DMARC)
+  - DKIM selector validation (`selector1-azurecomm-prod-net`, `selector2-azurecomm-prod-net`)
+  - CNAME record checks (root and `www` prefix)
+- 🛡️ **DNSBL reputation lookup** with parallel queries and intelligent caching
+- 🌍 **WHOIS/RDAP diagnostics** with multiple fallback providers (Sysinternals, Linux CLI, GoDaddy, WhoisXML, RDAP)
 - 🔐 **Optional API key authentication** and per-IP rate limiting
 - 📊 **Anonymous metrics collection** (HMAC-hashed domains only, privacy-first)
 - 👤 **Microsoft Entra ID sign-in** support for employee verification
 - 🐳 **Container-ready** with Linux and Windows Dockerfiles
 - ⚡ **Fast and lightweight** - minimal resource footprint
-- 🎨 **Modern, responsive UI** - works on desktop and mobile devices
+- 🎨 **Modern, responsive UI** - dark/light theme toggle, search history chips, shareable links, screenshot export, and JSON download
+- 💻 **Command-line test mode** (`-TestDomain`) for one-shot headless domain validation
 
 ## 📦 Prerequisites
 
@@ -129,6 +135,112 @@ Once the container is running, open your browser to:
 http://localhost:8080
 ```
 
+## 💻 Command-Line Test Mode
+
+The `-TestDomain` parameter runs a one-shot domain validation without starting the HTTP server. This is useful for scripting, CI pipelines, or quick headless checks:
+
+```powershell
+# Validate a domain and output the results as JSON to stdout
+./acs-domain-checker.ps1 -TestDomain example.com
+```
+
+**Example output:**
+```json
+{
+  "domain": "example.com",
+  "spfPresent": true,
+  "acsTextPresent": false,
+  "mxRecords": [...],
+  "dmarcPresent": true,
+  "dkim1": false,
+  "dkim2": false,
+  "reputation": { "riskLevel": 0, "rating": "Excellent" },
+  "guidance": ["ACS verification TXT record (ms-domain-verification) is missing."],
+  ...
+}
+```
+
+The process exits with code `0` on success (domain info returned) or `1` on error. This makes it straightforward to integrate with automation workflows.
+
+## 🎨 Web UI Features
+
+The embedded single-page application includes a rich set of interactive features:
+
+| Feature | Description |
+|---------|-------------|
+| 🌙 **Dark / Light theme** | Toggle between dark and light mode; preference is saved in `localStorage` |
+| 🕑 **Search history** | Recent domain lookups appear as dismissible chips below the search box |
+| 🔗 **Copy shareable link** | Copies a permalink to the current domain lookup so you can share it with teammates |
+| 📥 **Download JSON report** | Downloads the full aggregated DNS check result as a `.json` file |
+| 📸 **Copy page screenshot** | Captures the results page to the clipboard using `html2canvas` |
+| 🐛 **Report issue button** | Visible after a lookup; opens the configured issue tracker with domain pre-filled |
+| 📋 **Email Quota checklist** | Summary card showing MX, Reputation, Registration, and SPF pass/fail status |
+| ✅ **Domain Verification checklist** | Shows whether the ACS verification TXT record and ACS readiness criteria are met |
+| 🔑 **Microsoft sign-in** | Optional Entra ID sign-in for employee verification via MSAL |
+
+## 🔍 DNS Checks & Guidance
+
+The tool performs the following DNS checks and generates actionable guidance strings for any issues found:
+
+| Check | DNS Record(s) | ACS Requirement |
+|-------|--------------|-----------------|
+| **SPF** | Root `TXT` | Must include ACS SPF policy |
+| **ACS Verification TXT** | Root `TXT` | `ms-domain-verification=<value>` must be present |
+| **MX** | `MX` + `A`/`AAAA` | Valid MX records required; mail provider detected automatically |
+| **DMARC** | `_dmarc.<domain>` `TXT` | Recommended for deliverability; inherited from parent domain if absent |
+| **DKIM selector 1** | `selector1-azurecomm-prod-net._domainkey.<domain>` `TXT` | Required for ACS email signing |
+| **DKIM selector 2** | `selector2-azurecomm-prod-net._domainkey.<domain>` `TXT` | Required for ACS email signing |
+| **CNAME** | Root + `www` `CNAME` | Informational; conflicts may prevent domain use |
+
+Mail provider detection recognizes Microsoft 365, Google Workspace, Zoho, Proofpoint, Mimecast, and Cloudflare Email Routing out of the box.
+
+## 🛡️ DNSBL Reputation Checks
+
+The `/api/reputation` endpoint queries multiple DNS-based Block Lists (DNSBLs) to assess the sending reputation of IP addresses associated with a domain's MX records.
+
+### Default DNSBL Zones
+
+| Zone | Provider |
+|------|---------|
+| `bl.spamcop.net` | SpamCop |
+| `b.barracudacentral.org` | Barracuda Reputation Block List |
+| `psbl.surriel.com` | Passive Spam Block List (PSBL) |
+| `dnsbl.dronebl.org` | DroneBL |
+| `0spam.fusionzero.com` | 0spam |
+
+### Custom DNSBL Zones
+
+Override the defaults by setting `ACS_RBL_ZONES` to a comma-, semicolon-, or newline-delimited list of DNSBL zone names:
+
+```powershell
+$env:ACS_RBL_ZONES = "zen.spamhaus.org,bl.spamcop.net"
+./acs-domain-checker.ps1
+```
+
+### Reputation Ratings
+
+| Rating | Threshold | Risk Level |
+|--------|-----------|-----------|
+| 🟢 **Excellent** | ≥ 99 % clean | 0 |
+| 🟢 **Great** | ≥ 90 % clean | 0 |
+| 🟡 **Good** | ≥ 75 % clean | 1 (Warning) |
+| 🟠 **Fair** | ≥ 50 % clean | 2+ (Elevated Risk) |
+| 🔴 **Poor** | < 50 % clean | 2+ (Elevated Risk) |
+
+## 🌍 WHOIS / RDAP Diagnostics
+
+The tool enriches results with domain registration metadata (creation date, expiry, registrar, domain age) using a priority-ordered chain of fallback providers:
+
+| Priority | Provider | Requires |
+|----------|----------|---------|
+| 1 | **Sysinternals whois.exe** | `SYSINTERNALS_WHOIS_PATH` (Windows) |
+| 2 | **Linux whois CLI** | `LINUX_WHOIS_PATH` (Linux/macOS) |
+| 3 | **GoDaddy API** | `GODADDY_API_KEY` + `GODADDY_API_SECRET` |
+| 4 | **WhoisXML API** | `ACS_WHOISXML_API_KEY` |
+| 5 | **RDAP** | None (uses IANA bootstrap + rdap.org fallback) |
+
+WHOIS data is used to populate the **Email Quota** checklist and to surface warnings for expired or newly-registered domains.
+
 ## 🔌 API Endpoints
 
 The application exposes the following RESTful API endpoints:
@@ -189,7 +301,8 @@ Customize the application behavior using these environment variables:
 |----------|---------|-------------|
 | `PORT` | `8080` | Port for the web listener |
 | `ACS_API_KEY` | _(none)_ | API key for securing `/api/*` and `/dns` endpoints |
-| `ACS_RATE_LIMIT_PER_MIN` | _(none)_ | Maximum requests per minute per client IP |
+| `ACS_RATE_LIMIT_PER_MIN` | `60` | Maximum requests per minute per client IP (set to `0` to disable) |
+| `ACS_APP_VERSION` | _(from script)_ | Override the displayed application version string |
 
 ### 🔍 DNS Resolution
 | Variable | Default | Description |
@@ -210,6 +323,20 @@ Customize the application behavior using these environment variables:
 | `ACS_ENTRA_CLIENT_ID` | _(none)_ | Microsoft Entra ID (Azure AD) app client ID |
 | `ACS_ENTRA_TENANT_ID` | _(none)_ | Entra ID tenant ID or domain (e.g., `contoso.onmicrosoft.com`) |
 
+### 🌍 WHOIS / RDAP Providers
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SYSINTERNALS_WHOIS_PATH` | _(none)_ | Path to Sysinternals `whois.exe` (Windows WHOIS fallback) |
+| `LINUX_WHOIS_PATH` | _(none)_ | Path to the Linux `whois` binary (Linux/macOS WHOIS fallback) |
+| `GODADDY_API_KEY` | _(none)_ | GoDaddy API key for WHOIS fallback |
+| `GODADDY_API_SECRET` | _(none)_ | GoDaddy API secret for WHOIS fallback |
+| `ACS_WHOISXML_API_KEY` | _(none)_ | WhoisXML API key for WHOIS fallback |
+
+### 🛡️ DNSBL Reputation
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_RBL_ZONES` | _(built-in defaults)_ | Comma/semicolon/newline-delimited DNSBL zone names to query |
+
 ### 🐛 Issue Reporting
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -217,20 +344,26 @@ Customize the application behavior using these environment variables:
 
 ### 📝 Configuration Example
 ```powershell
-# Windows PowerShell
+# Windows PowerShell - comprehensive example
 $env:PORT = "9000"
 $env:ACS_API_KEY = "my-secret-key"
+$env:ACS_RATE_LIMIT_PER_MIN = "30"
 $env:ACS_ENABLE_ANON_METRICS = "1"
 $env:ACS_DNS_RESOLVER = "DoH"
+$env:ACS_WHOISXML_API_KEY = "your-whoisxml-key"
+$env:ACS_ISSUE_URL = "https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml"
 ./acs-domain-checker.ps1
 ```
 
 ```bash
-# Linux/macOS
+# Linux/macOS - comprehensive example
 export PORT=9000
 export ACS_API_KEY=my-secret-key
+export ACS_RATE_LIMIT_PER_MIN=30
 export ACS_ENABLE_ANON_METRICS=1
 export ACS_DNS_RESOLVER=DoH
+export ACS_WHOISXML_API_KEY=your-whoisxml-key
+export ACS_ISSUE_URL="https://github.com/blakedrumm/azure-communication-services-domain-checker/issues/new?template=bug-report.yml"
 ./acs-domain-checker.ps1
 ```
 
@@ -304,16 +437,12 @@ A GitHub Actions workflow (`.github/workflows/update-msal-browser.yml`) automati
 
 ### 🔧 Manual Update
 
-### 🔧 Manual Update
-
 To manually update to a specific version:
 
 1. 🌐 Navigate to **Actions** → **Update MSAL Browser Library** in the GitHub repository
 2. ▶️ Click **Run workflow**
 3. 📝 Enter the desired version (e.g., `5.3.0`) or leave empty for the latest
 4. 🚀 Click **Run workflow**
-
-### 📍 Pinning a Specific Version
 
 ### 📍 Pinning a Specific Version
 
@@ -333,8 +462,6 @@ If you need to prevent automatic updates and stay on a specific version:
 
 ### 🌐 Fallback CDNs
 
-### 🌐 Fallback CDNs
-
 The UI (in `acs-domain-checker.ps1`) also includes fallback CDN URLs in case the local file cannot be loaded:
 - 🔗 `https://alcdn.msauth.net/browser/{version}/js/msal-browser.min.js`
 - 🔗 `https://cdn.jsdelivr.net/npm/@azure/msal-browser@{version}/dist/msal-browser.min.js`
@@ -350,7 +477,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v1.2.13`)
+- ✅ Automatically when a version tag is pushed (e.g., `v1.3.0`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -373,8 +500,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v1.2.13
-git push origin v1.2.13
+git tag v1.3.0
+git push origin v1.3.0
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -385,7 +512,7 @@ git push origin v1.2.13
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `1.2.13`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `1.3.0`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -402,11 +529,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:1.2.13
+docker pull limitlessworlds/acs-domain-checker:1.3.0
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-1.2.13
-docker pull limitlessworlds/acs-domain-checker:windows-1.2.13
+docker pull limitlessworlds/acs-domain-checker:linux-1.3.0
+docker pull limitlessworlds/acs-domain-checker:windows-1.3.0
 ```
 
 ### 🛠️ Manual Build Script
@@ -421,7 +548,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 1.2.14
+./acs-domain-checker-dockerhub.ps1 -Version 1.3.0
 ```
 
 **📋 Requirements for manual script:**
