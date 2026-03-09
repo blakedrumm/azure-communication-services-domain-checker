@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Local web UI + REST API to inspect DNS records used for Azure Communication Services (ACS) domain verification.
 
@@ -22,6 +22,9 @@
 .PARAMETER Port
   TCP port to listen on. Default is 8080 (also respects PORT env var).
 
+.PARAMETER TestDomain
+  Runs a one-shot domain check, writes JSON to stdout, and exits without starting the web server.
+
 .EXAMPLE
   # Start on the default port
   .\acs-domain-checker.ps1
@@ -29,6 +32,10 @@
 .EXAMPLE
   # Start on a different port and bind to all interfaces (e.g., container)
   .\acs-domain-checker.ps1 -Port 8090 -Bind Any
+
+.EXAMPLE
+  # Run a one-shot validation and exit
+  .\acs-domain-checker.ps1 -TestDomain example.com
 
 .NOTES
   Author: Blake Drumm (blakedrumm@microsoft.com)
@@ -52,6 +59,8 @@
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
   - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 60; set to 0 to disable).
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
+  - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
+                                   Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
 
   Cross-platform / container notes:
   - Bind mode: Auto picks loopback on Windows; uses 0.0.0.0 in container scenarios. Override with -Bind Any/Localhost.
@@ -65,6 +74,7 @@ param(
   [ValidateSet('Auto','System','DoH')]
   [string]$DnsResolver = 'Auto',
   [string]$DohEndpoint,
+  [string]$TestDomain,
   # Listener binding mode:
   # - Auto      : preserve current behavior (Windows = all interfaces, non-Windows = localhost)
   # - Localhost : bind only to loopback (safest for local troubleshooting)
@@ -167,6 +177,28 @@ function Get-RegistrableDomain {
 
   # Default: use last two labels (e.g., example.com)
   return ($labels[($labels.Count - 2)..($labels.Count - 1)] -join '.').ToLowerInvariant()
+}
+
+function Get-ParentDomains {
+  param([string]$Domain)
+
+  if ([string]::IsNullOrWhiteSpace($Domain)) { return @() }
+
+  $d = ([string]$Domain).Trim().Trim('.').ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($d)) { return @() }
+
+  $labels = $d.Split('.')
+  if ($labels.Count -lt 3) { return @() }
+
+  $parents = New-Object System.Collections.Generic.List[string]
+  for ($i = 1; $i -lt ($labels.Count - 1); $i++) {
+    $candidate = ($labels[$i..($labels.Count - 1)] -join '.').ToLowerInvariant()
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+      $parents.Add($candidate)
+    }
+  }
+
+  return @($parents | Select-Object -Unique)
 }
 
 function Invoke-SysinternalsWhoisLookup {
@@ -487,7 +519,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.2.14'
+$script:AppVersion = '1.3.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -944,9 +976,8 @@ function Get-DomainRegistrationStatus {
     }
   }
 
-  # Use registrable domain for WHOIS/RDAP to avoid subdomain lookups failing (common in ACA scenarios)
-  $whoisDomain = Get-RegistrableDomain -Domain $d
-  if ([string]::IsNullOrWhiteSpace($whoisDomain)) { $whoisDomain = $d }
+  # Try the requested domain first, then fall back through parent domains if needed.
+  $whoisDomain = $d
 
   $creation = $null
   $expiry = $null
@@ -1069,17 +1100,18 @@ function Get-DomainRegistrationStatus {
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
 
           if ($hasParsedFields) {
             $source = 'LinuxWhois'
             $usedFallback = $true
           }
-          elseif ($hasRawText) {
+          elseif ($hasRawText -and -not $rawHasNoData) {
             $source = 'LinuxWhois'
             $usedFallback = $true
           }
           else {
-            $linuxWhoisError = "Linux whois returned output but no registrant/registrar/dates could be parsed."
+            $linuxWhoisError = if ($rawHasNoData) { "Linux whois returned no registration data for '$whoisDomain'." } else { "Linux whois returned output but no registrant/registrar/dates could be parsed." }
           }
         }
       }
@@ -1119,18 +1151,19 @@ function Get-DomainRegistrationStatus {
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
 
           if ($hasParsedFields) {
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
-          elseif ($hasRawText) {
-            # Treat raw output as success (no error) so the UI can show the text instead of an error-only state.
+          elseif ($hasRawText -and -not $rawHasNoData) {
+            # Treat raw output as success when it contains registration output even if not fully parsed.
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
           else {
-            $sysWhoisError = "Sysinternals whois returned output but no registrant/registrar/dates could be parsed."
+            $sysWhoisError = if ($rawHasNoData) { "Sysinternals whois returned no registration data for '$whoisDomain'." } else { "Sysinternals whois returned output but no registrant/registrar/dates could be parsed." }
           }
         }
       }
@@ -1179,8 +1212,25 @@ function Get-DomainRegistrationStatus {
       if ($whoisXmlError) { $err += " WhoisXML error: $whoisXmlError." }
       elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += " WhoisXML not configured." }
 
+      $parentDomains = @(Get-ParentDomains -Domain $d)
+      foreach ($parentDomain in $parentDomains) {
+        $parentStatus = Get-DomainRegistrationStatus -Domain $parentDomain -NewDomainWarnThresholdDays $NewDomainWarnThresholdDays -NewDomainErrorThresholdDays $NewDomainErrorThresholdDays
+        if ($parentStatus -and (
+            -not [string]::IsNullOrWhiteSpace([string]$parentStatus.source) -or
+            -not [string]::IsNullOrWhiteSpace([string]$parentStatus.creationDateUtc) -or
+            -not [string]::IsNullOrWhiteSpace([string]$parentStatus.expiryDateUtc) -or
+            -not [string]::IsNullOrWhiteSpace([string]$parentStatus.registrar) -or
+            -not [string]::IsNullOrWhiteSpace([string]$parentStatus.registrant) -or
+            -not [string]::IsNullOrWhiteSpace([string]$parentStatus.rawWhoisText)
+          )) {
+          try { $parentStatus.domain = $d } catch { }
+          return $parentStatus
+        }
+      }
+
       return [pscustomobject]@{
         domain = $d
+        lookupDomain = $whoisDomain
         source = $null
         creationDateUtc = $null
         expiryDateUtc = $null
@@ -1235,6 +1285,7 @@ function Get-DomainRegistrationStatus {
 
   [pscustomobject]@{
     domain = $d
+    lookupDomain = $whoisDomain
     source = $source
     creationDateUtc = $creation
     expiryDateUtc = $expiry
@@ -1266,89 +1317,91 @@ $serverStarted = $false
 
 $displayUrl = "http://localhost:$Port"
 
-try {
-  $listener = [System.Net.HttpListener]::new()
-
-  # Choose the listener prefix based on the requested binding mode.
-  # - On Windows, `+` is commonly used for "all interfaces".
-  # - Cross-platform, `*` is the most portable wildcard hostname in HttpListener prefixes.
-  # - `localhost` is loopback-only.
-  $prefix = switch ($Bind) {
-    'Localhost' { "http://localhost:$Port/" }
-    'Any'       { if ($IsWindows) { "http://+:$Port/" } else { "http://*:$Port/" } }
-    default     {
-      # Auto: prefer loopback on Windows to avoid URL ACL requirements unless explicitly bound to Any.
-      if ($IsWindows -and -not $script:IsContainer) { "http://localhost:$Port/" }
-      elseif ($IsWindows) { "http://+:$Port/" }
-      elseif ($script:IsContainer) { "http://*:$Port/" }
-      else { "http://localhost:$Port/" }
-    }
-  }
-  $listener.Prefixes.Add($prefix)
-  $listener.Start()
-  $serverStarted = $true
-}
-catch {
-  # HttpListener may be unavailable (Linux/macOS) or blocked by URL ACL permissions on Windows.
-  $listener = $null
-  $exc = $_.Exception
-  $deny = $false
-  if ($exc -is [System.UnauthorizedAccessException]) { $deny = $true }
-  elseif ($exc -is [System.Net.HttpListenerException] -and $exc.ErrorCode -eq 5) { $deny = $true }
-
-  if (-not $IsWindows -or $deny) {
-    $serverMode = 'TcpListener'
-  } else {
-    Write-Error -Message "HttpListener failed to start on $prefix : $($_.Exception.Message)" -ErrorAction Continue
-    throw
-  }
-}
-
-if ($serverMode -eq 'TcpListener') {
-  # TcpListener fallback should match the binding intent:
-  # - Localhost/Auto -> loopback only
-  # - Any            -> all interfaces (0.0.0.0)
-  $effectiveAny = ($Bind -eq 'Any') -or (($Bind -eq 'Auto') -and (-not $IsWindows) -and $script:IsContainer)
-  $bindAddress = if ($effectiveAny) { [System.Net.IPAddress]::Any } else { [System.Net.IPAddress]::Loopback }
-  $tcpListener = [System.Net.Sockets.TcpListener]::new($bindAddress, $Port)
+if ([string]::IsNullOrWhiteSpace($TestDomain)) {
   try {
-    $tcpListener.Start()
+    $listener = [System.Net.HttpListener]::new()
+
+    # Choose the listener prefix based on the requested binding mode.
+    # - On Windows, `+` is commonly used for "all interfaces".
+    # - Cross-platform, `*` is the most portable wildcard hostname in HttpListener prefixes.
+    # - `localhost` is loopback-only.
+    $prefix = switch ($Bind) {
+      'Localhost' { "http://localhost:$Port/" }
+      'Any'       { if ($IsWindows) { "http://+:$Port/" } else { "http://*:$Port/" } }
+      default     {
+        # Auto: prefer loopback on Windows to avoid URL ACL requirements unless explicitly bound to Any.
+        if ($IsWindows -and -not $script:IsContainer) { "http://localhost:$Port/" }
+        elseif ($IsWindows) { "http://+:$Port/" }
+        elseif ($script:IsContainer) { "http://*:$Port/" }
+        else { "http://localhost:$Port/" }
+      }
+    }
+    $listener.Prefixes.Add($prefix)
+    $listener.Start()
     $serverStarted = $true
   }
   catch {
-    # If the socket cannot be opened (e.g., ACL/port in use), fall back to stopped mode so the loop doesn't crash.
-    Write-Error -Message "TcpListener failed to start on $bindAddress`:$Port : $($_.Exception.Message)" -ErrorAction Continue
-    $tcpListener = $null
-    $serverMode = 'Stopped'
+    # HttpListener may be unavailable (Linux/macOS) or blocked by URL ACL permissions on Windows.
+    $listener = $null
+    $exc = $_.Exception
+    $deny = $false
+    if ($exc -is [System.UnauthorizedAccessException]) { $deny = $true }
+    elseif ($exc -is [System.Net.HttpListenerException] -and $exc.ErrorCode -eq 5) { $deny = $true }
+
+    if (-not $IsWindows -or $deny) {
+      $serverMode = 'TcpListener'
+    } else {
+      Write-Error -Message "HttpListener failed to start on $prefix : $($_.Exception.Message)" -ErrorAction Continue
+      throw
+    }
   }
-}
 
-if ($serverStarted) {
-  Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker running at $displayUrl"
+  if ($serverMode -eq 'TcpListener') {
+    # TcpListener fallback should match the binding intent:
+    # - Localhost/Auto -> loopback only
+    # - Any            -> all interfaces (0.0.0.0)
+    $effectiveAny = ($Bind -eq 'Any') -or (($Bind -eq 'Auto') -and (-not $IsWindows) -and $script:IsContainer)
+    $bindAddress = if ($effectiveAny) { [System.Net.IPAddress]::Any } else { [System.Net.IPAddress]::Loopback }
+    $tcpListener = [System.Net.Sockets.TcpListener]::new($bindAddress, $Port)
+    try {
+      $tcpListener.Start()
+      $serverStarted = $true
+    }
+    catch {
+      # If the socket cannot be opened (e.g., ACL/port in use), fall back to stopped mode so the loop doesn't crash.
+      Write-Error -Message "TcpListener failed to start on $bindAddress`:$Port : $($_.Exception.Message)" -ErrorAction Continue
+      $tcpListener = $null
+      $serverMode = 'Stopped'
+    }
+  }
 
-  # Also write version to the console for quick visibility during startup.
-  Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker version: $($script:AppVersion)"
+  if ($serverStarted) {
+    Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker running at $displayUrl"
 
-  if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
-    Write-Information -InformationAction Continue -MessageData "Anonymous metrics: ENABLED (no PII). Metrics file: $([System.IO.Path]::GetFullPath($env:ACS_ANON_METRICS_FILE))"
+    # Also write version to the console for quick visibility during startup.
+    Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker version: $($script:AppVersion)"
+
+    if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
+      Write-Information -InformationAction Continue -MessageData "Anonymous metrics: ENABLED (no PII). Metrics file: $([System.IO.Path]::GetFullPath($env:ACS_ANON_METRICS_FILE))"
+    } else {
+      Write-Information -InformationAction Continue -MessageData "Anonymous metrics: DISABLED. Start with -EnableAnonymousMetrics to enable /api/metrics counters."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ACS_API_KEY)) {
+      Write-Information -InformationAction Continue -MessageData 'API key authentication: ENABLED (send X-Api-Key to /api/* and /dns).'
+    } else {
+      Write-Information -InformationAction Continue -MessageData 'API key authentication: DISABLED.'
+    }
+
+    if ($rateLimitPerMinute -gt 0) {
+      Write-Information -InformationAction Continue -MessageData "Rate limiting: $rateLimitPerMinute requests/min per client IP."
+    } else {
+      Write-Information -InformationAction Continue -MessageData 'Rate limiting: DISABLED.'
+    }
   } else {
-    Write-Information -InformationAction Continue -MessageData "Anonymous metrics: DISABLED. Start with -EnableAnonymousMetrics to enable /api/metrics counters."
+    Write-Error -Message "Server did not start. The port may be in use or requires additional permissions. Try a different -Port or adjust -Bind (Auto/Localhost/Any)." -ErrorAction Continue
+    return
   }
-
-  if (-not [string]::IsNullOrWhiteSpace($env:ACS_API_KEY)) {
-    Write-Information -InformationAction Continue -MessageData 'API key authentication: ENABLED (send X-Api-Key to /api/* and /dns).'
-  } else {
-    Write-Information -InformationAction Continue -MessageData 'API key authentication: DISABLED.'
-  }
-
-  if ($rateLimitPerMinute -gt 0) {
-    Write-Information -InformationAction Continue -MessageData "Rate limiting: $rateLimitPerMinute requests/min per client IP."
-  } else {
-    Write-Information -InformationAction Continue -MessageData 'Rate limiting: DISABLED.'
-  }
-} else {
-  Write-Error -Message "Server did not start. The port may be in use or requires additional permissions. Try a different -Port or adjust -Bind (Auto/Localhost/Any)." -ErrorAction Continue
-  return
 }
 
 # ------------------- ANONYMOUS METRICS (IN-MEMORY) -------------------
@@ -2234,6 +2287,29 @@ function Get-DnsIpString {
   }
 }
 
+function Get-MxRecordObjects {
+  param([object[]]$Records)
+
+  $filtered = New-Object System.Collections.Generic.List[object]
+  foreach ($rec in @($Records)) {
+    if ($null -eq $rec) { continue }
+
+    $props = $rec.PSObject.Properties
+    if ($props.Match('NameExchange').Count -le 0 -or $props.Match('Preference').Count -le 0) { continue }
+
+    $typeValue = $null
+    if ($props.Match('Type').Count -gt 0) { $typeValue = [string]$rec.Type }
+    elseif ($props.Match('TypeName').Count -gt 0) { $typeValue = [string]$rec.TypeName }
+    elseif ($props.Match('QueryType').Count -gt 0) { $typeValue = [string]$rec.QueryType }
+
+    if (-not [string]::IsNullOrWhiteSpace($typeValue) -and $typeValue -ne 'MX') { continue }
+
+    $filtered.Add($rec)
+  }
+
+  return $filtered.ToArray()
+}
+
 function ConvertTo-NormalizedDomain {
   param([string]$Raw)
 
@@ -2463,6 +2539,11 @@ function Get-DnsBaseStatus {
   $ipv6Addrs  = @()
   $ipLookupDomain = $Domain
   $ipUsedParent = $false
+  $txtLookupDomain = $Domain
+  $txtUsedParent = $false
+  $parentTxtRecords = @()
+  $parentSpf = $null
+  $parentAcsTxt = $null
 
   try {
     $records = ResolveSafely $Domain "TXT" -ThrowOnError
@@ -2481,8 +2562,9 @@ function Get-DnsBaseStatus {
   }
 
   if (-not $dnsFailed -and $ipv4Addrs.Count -eq 0 -and $ipv6Addrs.Count -eq 0) {
-    $parent = Get-RegistrableDomain -Domain $Domain
-    if (-not [string]::IsNullOrWhiteSpace($parent) -and $parent -ne $Domain) {
+    foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
+      if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $Domain) { continue }
+
       try {
         $aRecsParent = ResolveSafely $parent "A"
         $aaaaRecsParent = ResolveSafely $parent "AAAA"
@@ -2493,6 +2575,7 @@ function Get-DnsBaseStatus {
           $ipv6Addrs = $v6p
           $ipLookupDomain = $parent
           $ipUsedParent = $true
+          break
         }
       } catch { }
     }
@@ -2502,6 +2585,33 @@ function Get-DnsBaseStatus {
     foreach ($t in $txtRecords) {
       if (-not $spf    -and $t -match '(?i)^v=spf1')                { $spf    = $t }
       if (-not $acsTxt -and $t -match '(?i)ms-domain-verification') { $acsTxt = $t }
+    }
+
+    if ($txtRecords.Count -eq 0) {
+      foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $Domain) { continue }
+
+        try {
+          $parentTxt = @()
+          $parentRecords = ResolveSafely $parent "TXT"
+          foreach ($pr in $parentRecords) {
+            $joinedParent = ($pr.Strings -join "").Trim()
+            if ($joinedParent) { $parentTxt += $joinedParent }
+          }
+
+          if ($parentTxt.Count -gt 0) {
+            $parentTxtRecords = $parentTxt
+            $txtLookupDomain = $parent
+            $txtUsedParent = $true
+
+            foreach ($t in $parentTxtRecords) {
+              if (-not $parentSpf -and $t -match '(?i)^v=spf1') { $parentSpf = $t }
+              if (-not $parentAcsTxt -and $t -match '(?i)ms-domain-verification') { $parentAcsTxt = $t }
+            }
+            break
+          }
+        } catch { }
+      }
     }
   }
 
@@ -2513,6 +2623,9 @@ function Get-DnsBaseStatus {
     dnsFailed  = $dnsFailed
     dnsError   = $dnsError
 
+    txtLookupDomain = $txtLookupDomain
+    txtUsedParent   = $txtUsedParent
+
     ipLookupDomain = $ipLookupDomain
     ipUsedParent   = $ipUsedParent
 
@@ -2523,6 +2636,12 @@ function Get-DnsBaseStatus {
     spfValue   = $spf
     acsPresent = $acsPresent
     acsValue   = $acsTxt
+
+    parentSpfPresent = (-not $dnsFailed) -and [bool]$parentSpf
+    parentSpfValue   = $parentSpf
+    parentAcsPresent = (-not $dnsFailed) -and [bool]$parentAcsTxt
+    parentAcsValue   = $parentAcsTxt
+    parentTxtRecords = $parentTxtRecords
 
     txtRecords = $txtRecords
   }
@@ -2551,7 +2670,12 @@ function Get-DnsMxStatus {
     }
 
     if ($mx = ResolveSafely $LookupDomain "MX") {
-      $mxSorted = $mx | Sort-Object Preference, NameExchange
+      $mxRecordsOnly = @(Get-MxRecordObjects -Records $mx)
+      if (-not $mxRecordsOnly -or $mxRecordsOnly.Count -eq 0) {
+        return $result
+      }
+
+      $mxSorted = $mxRecordsOnly | Sort-Object Preference, NameExchange
 
       $primaryMx = $null
       try { $primaryMx = ($mxSorted | Select-Object -First 1 -ExpandProperty NameExchange) } catch { $primaryMx = $null }
@@ -2649,16 +2773,23 @@ function Get-DnsMxStatus {
 
   # If none found, try the registrable (parent) domain as a fallback.
   if (($mxResult.mxRecords.Count -eq 0) -and ($mxResult.mxRecordsDetailed.Count -eq 0)) {
-    $parent = Get-RegistrableDomain -Domain $Domain
-    if ($parent -and $parent -ne $Domain) {
+    $parentsChecked = New-Object System.Collections.Generic.List[string]
+    foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
+      if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $Domain) { continue }
+
       $parent = $parent.Trim().TrimEnd('.')
-      $mxFallbackDomainChecked = $parent
+      $parentsChecked.Add($parent)
       $parentResult = Invoke-MxLookupCore -LookupDomain $parent
       if (($parentResult.mxRecords.Count -gt 0) -or ($parentResult.mxRecordsDetailed.Count -gt 0)) {
         $mxResult = $parentResult
         $mxLookupDomain = $parent
         $mxFallbackUsed = $true
+        break
       }
+    }
+
+    if ($parentsChecked.Count -gt 0) {
+      $mxFallbackDomainChecked = ($parentsChecked -join ', ')
     }
   }
 
@@ -2682,14 +2813,52 @@ function Get-DnsDmarcStatus {
   # DMARC is a TXT record at `_dmarc.<domain>`.
 
   $dmarc = $null
-  if ($dm = ResolveSafely "_dmarc.$Domain" "TXT") {
-    foreach ($r in $dm) {
-      $j = ($r.Strings -join "").Trim()
-      if ($j -match '(?i)^v=dmarc') { $dmarc = $j }
+  $dmarcLookupDomain = $Domain
+  $dmarcInherited = $false
+  $organizationalDomain = Get-RegistrableDomain -Domain $Domain
+
+  function Get-DmarcRecordValue {
+    param([string]$LookupDomain)
+
+    $recordValue = $null
+    if ($dm = ResolveSafely "_dmarc.$LookupDomain" "TXT") {
+      foreach ($r in $dm) {
+        $j = ($r.Strings -join "").Trim()
+        if ($j -match '(?i)^v=dmarc') {
+          $recordValue = $j
+          break
+        }
+      }
+    }
+    return $recordValue
+  }
+
+  $dmarc = Get-DmarcRecordValue -LookupDomain $Domain
+  if (-not $dmarc) {
+    $orgLabelCount = if ([string]::IsNullOrWhiteSpace($organizationalDomain)) { 0 } else { $organizationalDomain.Trim('.').Split('.').Count }
+    foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
+      if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $Domain) { continue }
+
+      $parentLabelCount = $parent.Trim('.').Split('.').Count
+      if ($orgLabelCount -gt 0 -and $parentLabelCount -lt $orgLabelCount) { continue }
+
+      $candidate = Get-DmarcRecordValue -LookupDomain $parent
+      if ($candidate) {
+        $dmarc = $candidate
+        $dmarcLookupDomain = $parent
+        $dmarcInherited = $true
+        break
+      }
     }
   }
 
-  [pscustomobject]@{ domain = $Domain; dmarc = $dmarc }
+  [pscustomobject]@{
+    domain = $Domain
+    dmarc = $dmarc
+    dmarcLookupDomain = $dmarcLookupDomain
+    dmarcInherited = $dmarcInherited
+    dmarcOrganizationalDomain = $organizationalDomain
+  }
 }
 
 function Get-DnsDkimStatus {
@@ -2754,17 +2923,29 @@ function Get-DnsCnameStatus {
   # Root CNAME check (not required for ACS verification; included as guidance).
 
   $cname = $null
+  $cnameLookupDomain = $Domain
+  $cnameUsedWwwFallback = $false
+  $normalizedDomain = ([string]$Domain).Trim().TrimEnd('.').ToLowerInvariant()
+  $labelCount = if ([string]::IsNullOrWhiteSpace($normalizedDomain)) { 0 } else { $normalizedDomain.Split('.').Count }
+  $checkWwwFallback = ($normalizedDomain -notmatch '^(?i)www\.') -and ($labelCount -le 3)
 
-  $lookupNames = if ($Domain -match '^(?i)www\.') { @($Domain) } else { @($Domain, "www.$Domain") }
+  $lookupNames = if ($normalizedDomain -match '^(?i)www\.') { @($normalizedDomain) } elseif ($checkWwwFallback) { @($normalizedDomain, "www.$normalizedDomain") } else { @($normalizedDomain) }
   foreach ($name in $lookupNames) {
     $target = Get-CnameTargetFromRecords (ResolveSafely $name 'CNAME')
     if (-not [string]::IsNullOrWhiteSpace($target)) {
       $cname = $target
+      $cnameLookupDomain = $name
+      $cnameUsedWwwFallback = ($name -ne $normalizedDomain)
       break
     }
   }
 
-  [pscustomobject]@{ domain = $Domain; cname = $cname }
+  [pscustomobject]@{
+    domain = $Domain
+    cname = $cname
+    cnameLookupDomain = $cnameLookupDomain
+    cnameUsedWwwFallback = $cnameUsedWwwFallback
+  }
 }
 
 function ConvertTo-ReversedIpv4 {
@@ -2861,8 +3042,9 @@ function Invoke-RblLookup {
     $ips = @($a | Get-DnsIpString)
     $listedAddr = if ($ips.Count -gt 0) { $ips[0] } else { $null }
 
-    # Spamhaus and some DNSBLs return policy-block addresses (e.g., 127.255.255.240-255) when queries are blocked
-    # via public resolvers or without auth. Treat those as errors, not listings.
+    # Some DNSBLs (including optional user-supplied zones) return policy-block addresses
+    # (e.g., 127.255.255.240-255) when queries are blocked via public resolvers or without auth.
+    # Treat those as errors, not listings.
     $isPolicyBlock = $false
     if (-not [string]::IsNullOrWhiteSpace($listedAddr)) {
       if ($listedAddr -match '^127\.255\.255\.(24[0-9]|25[0-5])$') {
@@ -2910,19 +3092,29 @@ function Get-DnsReputationStatus {
     [int]$MaxTargets = 5
   )
 
+  # Safer free/no-budget default DNSBL zones.
   $defaultZones = @(
-    # Common DNSBL zones used by similar tooling.
-    'zen.spamhaus.org',
     'bl.spamcop.net',
     'b.barracudacentral.org',
-    'dnsbl.sorbs.net',
     'psbl.surriel.com',
-    'rbl.efnetrbl.org',
-    'dnsbl.dronebl.org'
+    'dnsbl.dronebl.org',
+    'bl.0spam.org',
+    'rbl.0spam.org'
   )
 
-  $zones = if ($RblZones -and $RblZones.Count -gt 0) { @($RblZones) } else { $defaultZones }
-  $zones = @($zones | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().TrimEnd('.') } | Select-Object -Unique)
+  $envZones = @()
+  if ([string]::IsNullOrWhiteSpace(($RblZones -join ''))) {
+    $envZoneText = [string]$env:ACS_RBL_ZONES
+    if (-not [string]::IsNullOrWhiteSpace($envZoneText)) {
+      $envZones = @($envZoneText -split '[,;\r\n]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+  }
+
+  $zones = if ($RblZones -and $RblZones.Count -gt 0) { @($RblZones) } elseif ($envZones -and $envZones.Count -gt 0) { @($envZones) } else { $defaultZones }
+  $zones = @($zones | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().TrimEnd('.').ToLowerInvariant() } | Select-Object -Unique)
+  if (-not $zones -or $zones.Count -eq 0) {
+    $zones = @($defaultZones)
+  }
 
   $lookupDomain = $Domain
   $usedParent = $false
@@ -2958,7 +3150,7 @@ function Get-DnsReputationStatus {
   $ipSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
   # Prefer MX hosts, otherwise fall back to A on the root domain.
-  $mx = ResolveSafely $Domain 'MX'
+  $mx = @(Get-MxRecordObjects -Records (ResolveSafely $Domain 'MX'))
   $hosts = @()
   if ($mx) {
     $hosts = @($mx | Sort-Object Preference, NameExchange | Select-Object -First $MaxTargets -ExpandProperty NameExchange)
@@ -2981,12 +3173,13 @@ function Get-DnsReputationStatus {
   }
 
   if ($ipSet.Count -eq 0) {
-    $parentDomain = Get-RegistrableDomain -Domain $Domain
-    if ($parentDomain -and $parentDomain -ne $Domain) {
+    foreach ($parentDomain in @(Get-ParentDomains -Domain $Domain)) {
+      if ([string]::IsNullOrWhiteSpace($parentDomain) -or $parentDomain -eq $Domain) { continue }
+
       $lookupDomain = $parentDomain
       $usedParent = $true
       $parentHosts = @()
-      $parentMx = ResolveSafely $parentDomain 'MX'
+      $parentMx = @(Get-MxRecordObjects -Records (ResolveSafely $parentDomain 'MX'))
       if ($parentMx) {
         $parentHosts = @($parentMx | Sort-Object Preference, NameExchange | Select-Object -First $MaxTargets -ExpandProperty NameExchange)
       }
@@ -3002,6 +3195,8 @@ function Get-DnsReputationStatus {
           ipAddresses = $v4p
         }
       }
+
+      if ($ipSet.Count -gt 0) { break }
     }
   }
 
@@ -3055,6 +3250,7 @@ function Get-DnsReputationStatus {
   $errorCount = @($resultsArray | Where-Object { -not [string]::IsNullOrWhiteSpace($_.error) }).Count
   $totalCount = $resultsArray.Count
   $notListedCount = $totalCount - $listedCount - $errorCount
+  $riskSummary = if ($listedCount -ge 2) { 'ElevatedRisk' } elseif ($listedCount -eq 1) { 'Warning' } else { 'Clean' }
 
   [pscustomobject]@{
     domain = $Domain
@@ -3069,6 +3265,7 @@ function Get-DnsReputationStatus {
       listedCount = $listedCount
       notListedCount = $notListedCount
       errorCount = $errorCount
+      riskSummary = $riskSummary
     }
   }
 }
@@ -3096,8 +3293,20 @@ function Get-AcsDnsStatus {
     if ($base.dnsFailed) {
         $guidance.Add("DNS TXT lookup failed or timed out. Other DNS records may still resolve.")
     } else {
-      if (-not $base.spfPresent) { $guidance.Add("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent).") }
-      if (-not $base.acsPresent) { $guidance.Add("ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.") }
+      if (-not $base.spfPresent) {
+        if ($base.parentSpfPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
+          $guidance.Add("SPF is missing on $Domain. Parent domain $($base.txtLookupDomain) publishes SPF, but SPF does not automatically apply to the queried subdomain.")
+        } else {
+          $guidance.Add("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent).")
+        }
+      }
+      if (-not $base.acsPresent) {
+        if ($base.parentAcsPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
+          $guidance.Add("ACS ms-domain-verification TXT is missing on $Domain. Parent domain $($base.txtLookupDomain) has an ACS TXT record, but it does not verify the queried subdomain.")
+        } else {
+          $guidance.Add("ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.")
+        }
+      }
       if (-not $mx.mxRecords)    {
         if ($mx.mxFallbackDomainChecked -and $mx.mxFallbackUsed -and $mx.mxLookupDomain) {
           $guidance.Add("No MX records found on $Domain; using parent domain $($mx.mxLookupDomain) MX records as a fallback.")
@@ -3113,9 +3322,16 @@ function Get-AcsDnsStatus {
         $guidance.Add("No MX records found on $Domain; results shown are from parent domain $($mx.mxLookupDomain).")
       }
       if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
+      elseif ($dmarc.dmarcInherited -and $dmarc.dmarcLookupDomain -and $dmarc.dmarcLookupDomain -ne $Domain) { $guidance.Add("Effective DMARC policy is inherited from parent domain $($dmarc.dmarcLookupDomain).") }
       if (-not $dkim.dkim1)      { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
       if (-not $dkim.dkim2)      { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
-      if (-not $cname.cname)     { $guidance.Add("CNAME is not configured (root or www). Validate this is expected for your scenario.") }
+      if (-not $cname.cname)     {
+        if ($cname.cnameLookupDomain -and $cname.cnameLookupDomain -ne $Domain) {
+          $guidance.Add("CNAME is not configured on $Domain. Validate whether the queried host or its www alias should resolve for your scenario.")
+        } else {
+          $guidance.Add("CNAME is not configured. Validate this is expected for your scenario.")
+        }
+      }
 
       # Provider-aware hints
       if ($mx.mxProvider -and $mx.mxProvider -ne 'Unknown') {
@@ -3149,12 +3365,20 @@ function Get-AcsDnsStatus {
         dnsFailed  = $base.dnsFailed
         dnsError   = $base.dnsError
 
+        txtLookupDomain = $base.txtLookupDomain
+        txtUsedParent   = $base.txtUsedParent
+
         spfPresent = $base.spfPresent
         spfValue   = $base.spfValue
+        parentSpfPresent = $base.parentSpfPresent
+        parentSpfValue   = $base.parentSpfValue
         acsPresent = $base.acsPresent
         acsValue   = $base.acsValue
+        parentAcsPresent = $base.parentAcsPresent
+        parentAcsValue   = $base.parentAcsValue
 
         txtRecords = $base.txtRecords
+        parentTxtRecords = $base.parentTxtRecords
         acsReady   = $acsReady
 
         mxRecords         = $mx.mxRecords
@@ -3182,12 +3406,40 @@ function Get-AcsDnsStatus {
         whoisError         = $whois.error
 
         dmarc      = $dmarc.dmarc
+        dmarcLookupDomain = $dmarc.dmarcLookupDomain
+        dmarcInherited = $dmarc.dmarcInherited
         dkim1      = $dkim.dkim1
         dkim2      = $dkim.dkim2
         cname      = $cname.cname
+        cnameLookupDomain = $cname.cnameLookupDomain
+        cnameUsedWwwFallback = $cname.cnameUsedWwwFallback
 
         guidance   = $guidance
     }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($TestDomain)) {
+  $cliDomain = ConvertTo-NormalizedDomain -Raw $TestDomain
+  if ([string]::IsNullOrWhiteSpace($cliDomain) -or -not (Test-DomainName -Domain $cliDomain)) {
+    [pscustomobject]@{
+      mode = 'CliTest'
+      error = 'Invalid domain parameter.'
+      input = $TestDomain
+    } | ConvertTo-Json -Depth 8
+    return
+  }
+
+  $aggregate = Get-AcsDnsStatus -Domain $cliDomain
+  $reputation = Get-DnsReputationStatus -Domain $cliDomain
+
+  [pscustomobject]@{
+    mode = 'CliTest'
+    domain = $cliDomain
+    collectedAtUtc = ([DateTime]::UtcNow.ToString('o'))
+    aggregate = $aggregate
+    reputation = $reputation
+  } | ConvertTo-Json -Depth 8
+  return
 }
 
 # ------------------- HTML / UI -------------------
@@ -4239,19 +4491,19 @@ function buildTestSummaryHtml(r) {
 
   // SPF + ACS TXT + root TXT list depend on base
   if (!loaded.base && !errors.base) {
-    add("SPF (root TXT)", "pending");
+    add("SPF (queried domain TXT)", "pending");
     add("ACS TXT", "pending");
     add("TXT Records", "pending");
   } else if (errors.base) {
-    add("SPF (root TXT)", "error");
+    add("SPF (queried domain TXT)", "error");
     add("ACS TXT", "error");
     add("TXT Records", "error");
   } else if (r.dnsFailed) {
-    add("SPF (root TXT)", "unavailable", true);
+    add("SPF (queried domain TXT)", "unavailable", true);
     add("ACS TXT", "fail");
     add("TXT Records", "unavailable", true);
   } else {
-    add("SPF (root TXT)", r.spfPresent ? "pass" : "fail", true);
+    add("SPF (queried domain TXT)", r.spfPresent ? "pass" : "fail", true);
     add("ACS TXT", r.acsPresent ? "pass" : "fail");
     const hasTxt = Array.isArray(r.txtRecords) && r.txtRecords.length > 0;
     add("TXT Records", hasTxt ? "pass" : "fail", true);
@@ -4637,8 +4889,20 @@ function lookup() {
     }
 
     if (loaded.base) {
-      if (!r.spfPresent) guidance.push("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent). ");
-      if (!r.acsPresent) guidance.push("ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.");
+      if (!r.spfPresent) {
+        if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
+          guidance.push("SPF is missing on " + (r.domain || "") + ". Parent domain " + r.txtLookupDomain + " publishes SPF, but SPF does not automatically apply to the queried subdomain.");
+        } else {
+          guidance.push("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent). ");
+        }
+      }
+      if (!r.acsPresent) {
+        if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
+          guidance.push("ACS ms-domain-verification TXT is missing on " + (r.domain || "") + ". Parent domain " + r.txtLookupDomain + " has an ACS TXT record, but it does not verify the queried subdomain.");
+        } else {
+          guidance.push("ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.");
+        }
+      }
     }
 
     if (loaded.mx) {
@@ -4674,6 +4938,8 @@ function lookup() {
 
     if (loaded.dmarc && !r.dmarc) {
       guidance.push("DMARC is missing. Add a _dmarc." + (r.domain || "") + " TXT record to reduce spoofing risk.");
+    } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
+      guidance.push("Effective DMARC policy is inherited from parent domain " + r.dmarcLookupDomain + ".");
     }
 
     if (loaded.dkim) {
@@ -4682,7 +4948,7 @@ function lookup() {
     }
 
     if (loaded.cname && !r.cname) {
-      guidance.push("Root CNAME is not configured. Validate this is expected for your scenario.");
+      guidance.push("CNAME is not configured on the queried host. Validate this is expected for your scenario.");
     }
 
     if (loaded.base && loaded.mx && r.mxProvider === "Microsoft 365 / Exchange Online" && r.spfPresent && r.spfValue && !/spf\.protection\.outlook\.com/i.test(r.spfValue)) {
@@ -5057,7 +5323,7 @@ function render(r) {
   const multiRblHtml = `<a href="${multiRblLink}" target="_blank" rel="noopener" style="font-size:11px; color:#2f80ed; text-decoration:none;">(MultiRBL &#x2197;)</a>`;
 
   // 2) Reputation
-  const reputationInfo = "Reputation = percent of not-listed over successful DNSBL queries. Ratings: Excellent ≥99%, Great ≥90%, Good ≥75%, Fair ≥50%, Poor otherwise. Listed entries are shown when present; errors reduce confidence.";
+  const reputationInfo = "Default DNSBL checks use a safer free/no-budget set: Spamcop, Barracuda, PSBL, DroneBL, and 0spam. Optional user-supplied zones may also be queried. Reputation = percent of not-listed over successful DNSBL queries. Ratings: Excellent ≥99%, Great ≥90%, Good ≥75%, Fair ≥50%, Poor otherwise. Risk summary: 0 hits = Clean, 1 hit = Warning, 2+ hits = ElevatedRisk. Listed entries are shown when present; errors reduce confidence.";
   let repStateForCopy = '';
   if (!loaded.reputation && !errors.reputation) {
     repCopyDetail = 'Checking DNSBL reputation...';
@@ -5124,9 +5390,10 @@ function render(r) {
     const rating = percent === null ? 'unknown' : (percent >= 99 ? 'excellent' : percent >= 90 ? 'great' : percent >= 75 ? 'good' : percent >= 50 ? 'fair' : 'poor');
     const ratingLabel = rating.charAt(0).toUpperCase() + rating.slice(1);
     const state = listed > 0 ? 'warn' : (percent === null ? 'warn' : (percent >= 75 ? 'pass' : 'warn'));
+    const riskSummary = (summary.riskSummary || 'Clean');
     const baseDetail = percent === null
-      ? `Queries: ${total}, Not listed: ${notListed}`
-      : `Rating: ${ratingLabel} (${percent}%) | Listed: ${listed}, Not listed: ${notListed}`;
+      ? `Risk: ${riskSummary} | Queries: ${total}, Not listed: ${notListed}`
+      : `Risk: ${riskSummary} | Rating: ${ratingLabel} (${percent}%) | Listed: ${listed}, Not listed: ${notListed}`;
     const parentNote = repUsedParent ? `Used parent domain ${rep.lookupDomain} (no IP targets found for ${r.domain || ''}).` : '';
     const detail = parentNote ? `${baseDetail} | ${parentNote}` : baseDetail;
     repCopyDetail = detail;
@@ -5197,22 +5464,22 @@ function render(r) {
 
   // 4) SPF
   if (!loaded.base && !errors.base) {
-    quotaItems.push(quotaRow('SPF (root TXT)', 'pending', 'Waiting for TXT lookup...', null, 'spf'));
-    quotaLines.push('**SPF (root TXT):** PENDING - Waiting for TXT lookup...');
-    quotaLinesHtml.push('<strong>SPF (root TXT):</strong> PENDING - Waiting for TXT lookup...');
+    quotaItems.push(quotaRow('SPF (queried domain TXT)', 'pending', 'Waiting for TXT lookup...', null, 'spf'));
+    quotaLines.push('**SPF (queried domain TXT):** PENDING - Waiting for TXT lookup...');
+    quotaLinesHtml.push('<strong>SPF (queried domain TXT):</strong> PENDING - Waiting for TXT lookup...');
   } else if (errors.base) {
-    quotaItems.push(quotaRow('SPF (root TXT)', 'error', errors.base, null, 'spf'));
-    quotaLines.push(`**SPF (root TXT):** ERROR${errors.base ? ' - ' + errors.base : ''}`);
-    quotaLinesHtml.push(`<strong>SPF (root TXT):</strong> ERROR${errors.base ? ' - ' + escapeHtml(errors.base) : ''}`);
+    quotaItems.push(quotaRow('SPF (queried domain TXT)', 'error', errors.base, null, 'spf'));
+    quotaLines.push(`**SPF (queried domain TXT):** ERROR${errors.base ? ' - ' + errors.base : ''}`);
+    quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> ERROR${errors.base ? ' - ' + escapeHtml(errors.base) : ''}`);
   } else if (r.dnsFailed) {
-    quotaItems.push(quotaRow('SPF (root TXT)', 'warn', r.dnsError || 'TXT lookup failed.', null, 'spf'));
-    quotaLines.push(`**SPF (root TXT):** WARN${r.dnsError ? ' - ' + r.dnsError : ' - TXT lookup failed.'}`);
-    quotaLinesHtml.push(`<strong>SPF (root TXT):</strong> WARN${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - TXT lookup failed.'}`);
+    quotaItems.push(quotaRow('SPF (queried domain TXT)', 'warn', r.dnsError || 'TXT lookup failed.', null, 'spf'));
+    quotaLines.push(`**SPF (queried domain TXT):** WARN${r.dnsError ? ' - ' + r.dnsError : ' - TXT lookup failed.'}`);
+    quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> WARN${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - TXT lookup failed.'}`);
   } else {
-    quotaItems.push(quotaRow('SPF (root TXT)', r.spfPresent ? 'pass' : 'warn', r.spfPresent ? r.spfValue : 'No SPF record detected.', null, 'spf'));
+    quotaItems.push(quotaRow('SPF (queried domain TXT)', r.spfPresent ? 'pass' : 'warn', r.spfPresent ? r.spfValue : 'No SPF record detected.', null, 'spf'));
     const spfState = r.spfPresent ? 'PASS' : 'WARN';
-    quotaLines.push(`**SPF (root TXT):** ${spfState}${r.spfPresent ? ' - ' + r.spfValue : ' - No SPF record detected.'}`);
-    quotaLinesHtml.push(`<strong>SPF (root TXT):</strong> ${escapeHtml(spfState)}${r.spfPresent ? ' - ' + escapeHtml(r.spfValue) : ' - No SPF record detected.'}`);
+    quotaLines.push(`**SPF (queried domain TXT):** ${spfState}${r.spfPresent ? ' - ' + r.spfValue : ' - No SPF record detected.'}`);
+    quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> ${escapeHtml(spfState)}${r.spfPresent ? ' - ' + escapeHtml(r.spfValue) : ' - No SPF record detected.'}`);
   }
 
   // Domain age / expiry for copy block
@@ -5624,8 +5891,8 @@ function render(r) {
 
   // Match card order to the Check Summary.
   cards.push(card(
-    "SPF (root TXT)",
-    loaded.base ? r.spfValue : (baseError ? (errors.base || "Error") : "Loading..."),
+    "SPF (queried domain TXT)",
+    loaded.base ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} SPF (informational only):\n${r.parentSpfValue || ''}`) : null)) : (baseError ? (errors.base || "Error") : "Loading..."),
     basePending ? "LOADING" : (baseError ? "ERROR" : (r.spfPresent ? "PASS" : "OPTIONAL")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : (r.spfPresent ? "tag-pass" : "tag-info")),
     "spf"
@@ -5633,15 +5900,15 @@ function render(r) {
 
   cards.push(card(
     "ACS Domain Verification TXT",
-    loaded.base ? r.acsValue : (baseError ? (errors.base || "Error") : "Loading..."),
+    loaded.base ? (r.acsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} ACS TXT (informational only):\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || "Error") : "Loading..."),
     basePending ? "LOADING" : (baseError ? "ERROR" : (r.acsPresent ? "PASS" : "MISSING")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : (r.acsPresent ? "tag-pass" : "tag-fail")),
     "acsTxt"
   ));
 
   cards.push(card(
-    "TXT Records (root)",
-    loaded.base ? (r.txtRecords || []).join("\n") : (baseError ? (errors.base || "Error") : "Loading..."),
+    "TXT Records (queried domain)",
+    loaded.base ? (((r.txtRecords || []).join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No TXT records on ${r.domain}\n\nParent domain ${r.txtLookupDomain} TXT records (informational only):\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || "Error") : "Loading..."),
     basePending ? "LOADING" : (baseError ? "ERROR" : "INFO"),
     basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info"),
     "txtRecords",
@@ -5650,7 +5917,7 @@ function render(r) {
 
   cards.push(card(
     "DMARC",
-    loaded.dmarc ? r.dmarc : (errors.dmarc ? errors.dmarc : "Loading..."),
+    loaded.dmarc ? (r.dmarc ? (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain ? (`${r.dmarc}\n\nEffective policy inherited from parent domain ${r.dmarcLookupDomain}.`) : r.dmarc) : null) : (errors.dmarc ? errors.dmarc : "Loading..."),
     (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (r.dmarc ? "PASS" : "OPTIONAL")),
     (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info")),
     "dmarc"
@@ -5729,9 +5996,11 @@ function render(r) {
                `Total queries: ${total}\n` +
                `Errors: ${errorCount}`;
     if (percent !== null) {
+      body += `\nRisk: ${summary.riskSummary || 'Clean'}`;
       body += `\nReputation: ${rating} (${percent}%)`;
       body += `\nListed: ${listed}\nNot listed: ${notListed}`;
     } else {
+      body += `\nRisk: ${summary.riskSummary || 'Clean'}`;
       body += "\nReputation: Unknown (no successful queries)";
     }
     if (listedItems.length > 0) {
@@ -5752,7 +6021,7 @@ function render(r) {
 
   cards.push(card(
     "CNAME",
-    loaded.cname ? r.cname : (errors.cname ? errors.cname : "Loading..."),
+    loaded.cname ? (r.cname ? (r.cnameUsedWwwFallback && r.cnameLookupDomain && r.cnameLookupDomain !== r.domain ? (`${r.cname}\n\nResolved using ${r.cnameLookupDomain} for guidance.`) : r.cname) : null) : (errors.cname ? errors.cname : "Loading..."),
     (!loaded.cname && !errors.cname) ? "LOADING" : (errors.cname ? "ERROR" : (r.cname ? "PASS" : "FAIL")),
     (!loaded.cname && !errors.cname) ? "tag-info" : (errors.cname ? "tag-fail" : (r.cname ? "tag-pass" : "tag-fail")),
     "cname"
@@ -6195,8 +6464,8 @@ $functionNames = @(
   'Get-HashedDomain',
   'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
-  'Get-RegistrableDomain',
-  'Resolve-DohName','ResolveSafely','Get-DnsIpString','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
+  'Get-RegistrableDomain','Get-ParentDomains',
+  'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry',
