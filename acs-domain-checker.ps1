@@ -603,7 +603,9 @@ function Invoke-LinuxWhoisLookup {
     }
   }
   catch {
-    $msg = "whois failed: $($_.Exception.Message)"
+    $innerMsg = $_.Exception.Message
+    # Avoid double-wrapping errors that were explicitly thrown from the no-data path above
+    $msg = if ($innerMsg -match '^whois (failed for|returned no output for)\b') { $innerMsg } else { "whois failed: $innerMsg" }
     if ($ThrowOnError) { throw $msg } else { return $null }
   }
 }
@@ -1340,6 +1342,7 @@ function Get-DomainRegistrationStatus {
       if ($goDaddyError) { $err += " GoDaddy error: $goDaddyError." }
       elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += " GoDaddy not configured." }
       if ($sysWhoisError) { $err += " Sysinternals whois error: $sysWhoisError." }
+      if ($linuxWhoisError) { $err += " Linux whois error: $linuxWhoisError." }
       if ($whoisXmlError) { $err += " WhoisXML error: $whoisXmlError." }
       elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += " WhoisXML not configured." }
 
