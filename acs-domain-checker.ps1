@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Local web UI + REST API to inspect DNS records used for Azure Communication Services (ACS) domain verification.
 
@@ -51,6 +51,8 @@
   - ACS_METRICS_HASH_KEY         : Stable hash key for anonymous domain hashing (optional; generated if absent).
   - SYSINTERNALS_WHOIS_PATH      : Path to Sysinternals whois.exe (Windows WHOIS fallback).
   - LINUX_WHOIS_PATH             : Path to Linux whois binary (Linux WHOIS fallback).
+  - ACS_LINUX_WHOIS_SERVERS      : Optional comma/semicolon/newline-delimited Linux WHOIS fallback servers.
+                                   Example: `whois.nic.us;us.whois-servers.net`.
   - ACS_WHOISXML_API_KEY         : API key for WhoisXML fallback.
   - GODADDY_API_KEY / GODADDY_API_SECRET : Credentials for GoDaddy WHOIS fallback.
   - ACS_ENTRA_CLIENT_ID          : Azure AD (Entra ID) app registration client ID for Microsoft employee authentication.
@@ -354,6 +356,92 @@ function Invoke-LinuxWhoisLookup {
     [switch]$ThrowOnError
   )
 
+  function Test-LinuxWhoisHasUsableData {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+
+    if ($Text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b') {
+      return $false
+    }
+
+    return $true
+  }
+
+  function Invoke-LinuxWhoisQuery {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string]$Exe,
+
+      [Parameter(Mandatory = $true)]
+      [string]$LookupDomain,
+
+      [string]$Server,
+
+      [int]$ServerPort = 43,
+
+      [int]$QueryTimeoutSec = 25
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $Exe
+
+    try {
+      if ([string]::IsNullOrWhiteSpace($Server)) {
+        $psi.ArgumentList.Add('--')
+        $psi.ArgumentList.Add($LookupDomain)
+      } else {
+        $psi.ArgumentList.Add('-h')
+        $psi.ArgumentList.Add($Server)
+        $psi.ArgumentList.Add('-p')
+        $psi.ArgumentList.Add($ServerPort.ToString())
+        $psi.ArgumentList.Add('--')
+        $psi.ArgumentList.Add($LookupDomain)
+      }
+    } catch {
+      if ([string]::IsNullOrWhiteSpace($Server)) {
+        $psi.Arguments = "-- `"$LookupDomain`""
+      } else {
+        $psi.Arguments = "-h `"$Server`" -p $ServerPort -- `"$LookupDomain`""
+      }
+    }
+
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+
+    try {
+      $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+      $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
+    } catch { }
+
+    $p = [System.Diagnostics.Process]::Start($psi)
+    if (-not $p) {
+      throw 'Failed to start whois process.'
+    }
+
+    try {
+      $out = $p.StandardOutput.ReadToEnd()
+      $err = $p.StandardError.ReadToEnd()
+
+      if (-not $p.WaitForExit($QueryTimeoutSec * 1000)) {
+        try { $p.Kill($true) } catch { try { $p.Kill() } catch { } }
+        throw "whois timed out after $QueryTimeoutSec seconds for '$LookupDomain'."
+      }
+
+      return [pscustomobject]@{
+        text = (($out, $err) -join "`r`n").Trim()
+        exitCode = $p.ExitCode
+        server = $Server
+        port = $ServerPort
+      }
+    }
+    finally {
+      try { $p.Dispose() } catch { }
+    }
+  }
+
   $exe = $WhoisPath
   if ([string]::IsNullOrWhiteSpace($exe)) { $exe = $env:LINUX_WHOIS_PATH }
   if ([string]::IsNullOrWhiteSpace($exe)) { $exe = 'whois' }
@@ -368,6 +456,45 @@ function Invoke-LinuxWhoisLookup {
   $d = ([string]$Domain).Trim().TrimEnd('.')
   if ([string]::IsNullOrWhiteSpace($d)) { return $null }
 
+  $serverList = New-Object System.Collections.Generic.List[string]
+  $null = $serverList.Add($null)
+
+  $envServerText = [string]$env:ACS_LINUX_WHOIS_SERVERS
+  if (-not [string]::IsNullOrWhiteSpace($envServerText)) {
+    foreach ($serverCandidate in @($envServerText -split '[,;\r\n]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+      $normalizedServer = ([string]$serverCandidate).Trim()
+      if (-not [string]::IsNullOrWhiteSpace($normalizedServer) -and -not $serverList.Contains($normalizedServer)) {
+        $null = $serverList.Add($normalizedServer)
+      }
+    }
+  }
+
+  $defaultFallbackServers = @()
+  switch -Regex ($d) {
+    '(?i)\.com$|\.net$' { $defaultFallbackServers = @('whois.verisign-grs.com'); break }
+    '(?i)\.org$'         { $defaultFallbackServers = @('whois.pir.org'); break }
+    '(?i)\.info$'        { $defaultFallbackServers = @('whois.afilias.net'); break }
+    '(?i)\.biz$'         { $defaultFallbackServers = @('whois.biz'); break }
+    '(?i)\.io$'          { $defaultFallbackServers = @('whois.nic.io'); break }
+    '(?i)\.ai$'          { $defaultFallbackServers = @('whois.nic.ai'); break }
+    '(?i)\.app$|\.dev$' { $defaultFallbackServers = @('whois.nic.google'); break }
+    '(?i)\.uk$|\.co\.uk$|\.org\.uk$|\.gov\.uk$|\.ac\.uk$' { $defaultFallbackServers = @('whois.nic.uk'); break }
+    '(?i)\.de$'          { $defaultFallbackServers = @('whois.denic.de'); break }
+    '(?i)\.fr$'          { $defaultFallbackServers = @('whois.nic.fr'); break }
+    '(?i)\.au$|\.com\.au$|\.net\.au$|\.org\.au$' { $defaultFallbackServers = @('whois.auda.org.au'); break }
+    '(?i)\.ca$'          { $defaultFallbackServers = @('whois.cira.ca'); break }
+    '(?i)\.jp$|\.co\.jp$|\.ne\.jp$|\.or\.jp$' { $defaultFallbackServers = @('whois.jprs.jp'); break }
+    '(?i)\.us$'          { $defaultFallbackServers = @('whois.nic.us', 'us.whois-servers.net'); break }
+  }
+
+  foreach ($defaultServer in $defaultFallbackServers) {
+    if (-not [string]::IsNullOrWhiteSpace($defaultServer) -and -not $serverList.Contains($defaultServer)) {
+      if (-not $serverList.Contains($defaultServer)) {
+        $null = $serverList.Add($defaultServer)
+      }
+    }
+  }
+
   $explicitPathProvided = (-not [string]::IsNullOrWhiteSpace($WhoisPath)) -or (-not [string]::IsNullOrWhiteSpace($env:LINUX_WHOIS_PATH))
   if ($explicitPathProvided -and $exe -ne 'whois' -and -not (Test-Path -LiteralPath $exe)) {
     $msg = "Linux whois executable not found at: $exe"
@@ -380,45 +507,38 @@ function Invoke-LinuxWhoisLookup {
   }
 
   try {
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $exe
-    # Use ArgumentList (array form) to avoid shell injection via crafted domain names.
-    try {
-      $psi.ArgumentList.Add('--')
-      $psi.ArgumentList.Add($d)
-    } catch {
-      # Older .NET runtimes may not support ArgumentList; fall back to Arguments with validation.
-      # Domain is already validated by Test-DomainName (alphanumeric, dots, hyphens only).
-      $psi.Arguments = "-- `"$d`""
-    }
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError  = $true
-    $psi.UseShellExecute        = $false
-    $psi.CreateNoWindow         = $true
+    $text = $null
+    $exitCode = $null
+    $usedServer = $null
+    $lastQueryError = $null
 
-    try {
-      $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-      $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
-    } catch { }
+    foreach ($server in $serverList) {
+      try {
+        $queryResult = Invoke-LinuxWhoisQuery -Exe $exe -LookupDomain $d -Server $server -ServerPort 43 -QueryTimeoutSec $TimeoutSec
+        $exitCode = $queryResult.exitCode
 
-    $p = [System.Diagnostics.Process]::Start($psi)
-    if (-not $p) {
-      $msg = "Failed to start whois process."
-      if ($ThrowOnError) { throw $msg } else { return $null }
-    }
+        if (Test-LinuxWhoisHasUsableData -Text $queryResult.text) {
+          $text = $queryResult.text
+          $usedServer = $queryResult.server
+          break
+        }
 
-    $out = $p.StandardOutput.ReadToEnd()
-    $err = $p.StandardError.ReadToEnd()
-
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-      try { $p.Kill($true) } catch { try { $p.Kill() } catch { } }
-      $msg = "whois timed out after $TimeoutSec seconds for '$d'."
-      if ($ThrowOnError) { throw $msg } else { return $null }
+        if (-not [string]::IsNullOrWhiteSpace($queryResult.text)) {
+          $text = $queryResult.text
+          $usedServer = $queryResult.server
+        }
+      }
+      catch {
+        $lastQueryError = $_.Exception.Message
+      }
     }
 
-    $text = (($out, $err) -join "`r`n").Trim()
     if ([string]::IsNullOrWhiteSpace($text)) {
-      $msg = "whois returned no output for '$d'. ExitCode=$($p.ExitCode)."
+      $msg = if (-not [string]::IsNullOrWhiteSpace($lastQueryError)) {
+        "whois failed for '$d'. $lastQueryError"
+      } else {
+        "whois returned no output for '$d'." + $(if ($null -ne $exitCode) { " ExitCode=$exitCode." } else { '' })
+      }
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
 
@@ -468,8 +588,9 @@ function Invoke-LinuxWhoisLookup {
       registrar    = $registrar
       registrant   = $registrant
       rawText      = $text
-      exitCode     = $p.ExitCode
+      exitCode     = $exitCode
       whoisExe     = $exe
+      whoisServer  = $usedServer
     }
   }
   catch {
@@ -519,7 +640,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.3.0'
+$script:AppVersion = '1.3.1'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
