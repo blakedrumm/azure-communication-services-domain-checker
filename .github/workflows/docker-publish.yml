@@ -194,5 +194,5 @@ jobs:
           docker pull ${REPO}:latest
           \`\`\`
 
-          **View on Docker Hub:** https://hub.docker.com/r/${REPO}
+          **View on Docker Hub:** https://hub.docker.com/repository/docker/${REPO}/tags/${VERSION}
           EOF
