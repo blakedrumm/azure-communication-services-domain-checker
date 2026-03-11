@@ -1624,10 +1624,6 @@ function Get-DomainRegistrationStatus {
     }
   }
 
-  # Only surface raw whois text when no structured fields were parsed (prevents noise when data was already extracted).
-  $hasStructuredWhois = $creation -or $expiry -or $registrar -or $registrant
-  if ($hasStructuredWhois) { $rawWhoisText = $null }
-
   # If we obtained a source (success from any provider), suppress earlier fallback errors to avoid misleading UI.
   if ($source) {
     $rdapError = $null
@@ -6039,7 +6035,7 @@ function render(r) {
     if (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) {
       whoisLines.push("Days until expiry: " + String(r.whoisExpiryDays));
     }
-    if (r.whoisRawText) {
+    if (r.whoisRawText && !r.whoisCreationDateUtc && !r.whoisExpiryDateUtc && !r.whoisRegistrar && !r.whoisRegistrant) {
       const rawLabel = r.whoisSource || 'whois';
       whoisLines.push("Raw (" + rawLabel + "):\n" + r.whoisRawText);
     }
