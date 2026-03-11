@@ -4,8 +4,9 @@ WORKDIR /app
 COPY acs-domain-checker.ps1 /app/acs-domain-checker.ps1
 
 # Install whois CLI for Linux WHOIS fallback + npm for optional MSAL auto-install
+# netbase provides /etc/services which whois needs for getaddrinfo() service-name resolution
 RUN apt-get update \
-&& apt-get install -y --no-install-recommends whois \
+&& apt-get install -y --no-install-recommends whois netbase \
 && apt-get install -y --no-install-recommends nodejs npm \
 && rm -rf /var/lib/apt/lists/*
 
