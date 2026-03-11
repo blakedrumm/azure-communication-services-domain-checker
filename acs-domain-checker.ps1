@@ -1272,7 +1272,6 @@ function Get-DmarcSecurityGuidance {
     [bool]$Inherited = $false
   )
 
-  $dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records'
   $messages = New-Object System.Collections.Generic.List[string]
   if ([string]::IsNullOrWhiteSpace($DmarcRecord)) { return @() }
 
@@ -1311,34 +1310,34 @@ function Get-DmarcSecurityGuidance {
   $ruf = if ($tagMap.ContainsKey('ruf')) { ([string]$tagMap['ruf']).Trim() } else { $null }
 
   if ($policy -eq 'none') {
-    $messages.Add("DMARC for $targetDomain is monitor-only (`p=none`). For stronger protection against spoofing, move to enforcement with `p=quarantine` or `p=reject` after validating legitimate mail sources. For more information see: $dmarcHelpUrl")
+    $messages.Add("DMARC for $targetDomain is monitor-only (`p=none`). For stronger protection against spoofing, move to enforcement with `p=quarantine` or `p=reject` after validating legitimate mail sources.")
   }
   elseif ($policy -eq 'quarantine') {
-    $messages.Add("DMARC for $targetDomain is set to `p=quarantine`. For the strongest anti-spoofing posture, consider `p=reject` once you confirm valid mail is fully aligned. For more information see: $dmarcHelpUrl")
+    $messages.Add("DMARC for $targetDomain is set to `p=quarantine`. For the strongest anti-spoofing posture, consider `p=reject` once you confirm valid mail is fully aligned.")
   }
 
   if ($null -ne $pct -and $pct -lt 100) {
-    $messages.Add("DMARC enforcement for $targetDomain is only applied to $pct% of messages (`pct=$pct`). Use `pct=100` for full protection once rollout is validated. For more information see: $dmarcHelpUrl")
+    $messages.Add("DMARC enforcement for $targetDomain is only applied to $pct% of messages (`pct=$pct`). Use `pct=100` for full protection once rollout is validated.")
   }
 
   if ($adkim -eq 'r') {
-    $messages.Add("DKIM alignment for $targetDomain uses relaxed mode (`adkim=r`). Consider strict alignment (`adkim=s`) if your sending infrastructure supports it for tighter domain protection. For more information see: $dmarcHelpUrl")
+    $messages.Add("DKIM alignment for $targetDomain uses relaxed mode (`adkim=r`). Consider strict alignment (`adkim=s`) if your sending infrastructure supports it for tighter domain protection.")
   }
 
   if ($aspf -eq 'r') {
-    $messages.Add("SPF alignment for $targetDomain uses relaxed mode (`aspf=r`). Consider strict alignment (`aspf=s`) if your senders consistently use the exact domain. For more information see: $dmarcHelpUrl")
+    $messages.Add("SPF alignment for $targetDomain uses relaxed mode (`aspf=r`). Consider strict alignment (`aspf=s`) if your senders consistently use the exact domain.")
   }
 
   if (-not [string]::IsNullOrWhiteSpace($Domain) -and -not [string]::IsNullOrWhiteSpace($LookupDomain) -and $Inherited -and ($LookupDomain -ne $Domain) -and -not $tagMap.ContainsKey('sp')) {
-    $messages.Add("DMARC for subdomains of $LookupDomain does not define an explicit subdomain policy (`sp=`). If you send from subdomains like $Domain, consider adding `sp=quarantine` or `sp=reject` for clearer protection. For more information see: $dmarcHelpUrl")
+    $messages.Add("DMARC for subdomains of $LookupDomain does not define an explicit subdomain policy (`sp=`). If you send from subdomains like $Domain, consider adding `sp=quarantine` or `sp=reject` for clearer protection.")
   }
 
   if ([string]::IsNullOrWhiteSpace($rua)) {
-    $messages.Add("DMARC for $targetDomain does not publish aggregate reporting (`rua=`). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact. For more information see: $dmarcHelpUrl")
+    $messages.Add("DMARC for $targetDomain does not publish aggregate reporting (`rua=`). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact.")
   }
 
   if ([string]::IsNullOrWhiteSpace($ruf)) {
-    $messages.Add("DMARC for $targetDomain does not publish forensic reporting (`ruf=`). If your process allows it, forensic reports can provide additional failure detail for investigations. For more information see: $dmarcHelpUrl")
+    $messages.Add("DMARC for $targetDomain does not publish forensic reporting (`ruf=`). If your process allows it, forensic reports can provide additional failure detail for investigations.")
   }
 
   return @($messages)
@@ -2818,6 +2817,55 @@ function Get-SpfTokens {
   return @($text -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
+function Test-SpfMacroText {
+  param([string]$Text)
+
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+  return (([string]$Text) -match '%\{' -or ([string]$Text) -match '%%|%_|%-')
+}
+
+function Get-SpfDomainSpecTarget {
+  param(
+    [string]$Spec,
+    [string]$Domain
+  )
+
+  $fallbackDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { $null } else { ([string]$Domain).Trim().TrimEnd('.').ToLowerInvariant() }
+  if ([string]::IsNullOrWhiteSpace($Spec)) { return $fallbackDomain }
+
+  $candidate = ([string]$Spec).Trim()
+  if ([string]::IsNullOrWhiteSpace($candidate)) { return $fallbackDomain }
+
+  $slashIndex = $candidate.IndexOf('/')
+  if ($slashIndex -ge 0) {
+    $candidate = $candidate.Substring(0, $slashIndex)
+  }
+
+  $candidate = $candidate.Trim().TrimEnd('.')
+  if ([string]::IsNullOrWhiteSpace($candidate)) { return $fallbackDomain }
+
+  return $candidate.ToLowerInvariant()
+}
+
+function Get-SpfMechanismType {
+  param([string]$Token)
+
+  if ([string]::IsNullOrWhiteSpace($Token)) { return $null }
+
+  $normalized = ([string]$Token).Trim()
+  if ([string]::IsNullOrWhiteSpace($normalized)) { return $null }
+  $normalized = $normalized -replace '^[\+\-~\?]', ''
+
+  if ($normalized -match '^(?i)include:') { return 'include' }
+  if ($normalized -match '^(?i)redirect=') { return 'redirect' }
+  if ($normalized -match '^(?i)exists:') { return 'exists' }
+  if ($normalized -match '^(?i)a(?=$|:|/)') { return 'a' }
+  if ($normalized -match '^(?i)mx(?=$|:|/)') { return 'mx' }
+  if ($normalized -match '^(?i)ptr(?=$|:|/)') { return 'ptr' }
+
+  return $null
+}
+
 function Get-SpfNestedAnalysis {
   param(
     [string]$SpfRecord,
@@ -2833,37 +2881,34 @@ function Get-SpfNestedAnalysis {
   $tokens = @(Get-SpfTokens -SpfRecord $SpfRecord)
   if ($tokens.Count -eq 0) { return $null }
 
-  function Test-SpfLookupMechanism {
-    param([string]$Token)
-
-    if ([string]::IsNullOrWhiteSpace($Token)) { return $false }
-    $normalized = ([string]$Token).Trim()
-    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
-
-    $normalized = $normalized -replace '^[\+\-~\?]', ''
-    return ($normalized -match '^(?i)(include:|exists:|a(?=$|:|/)|mx(?=$|:|/)|ptr(?=$|:|/)|redirect=)')
-  }
-
   $includes = New-Object System.Collections.Generic.List[object]
   $redirect = $null
+  $existsTerms = New-Object System.Collections.Generic.List[object]
+  $aTerms = New-Object System.Collections.Generic.List[object]
+  $mxTerms = New-Object System.Collections.Generic.List[object]
+  $ptrTerms = New-Object System.Collections.Generic.List[object]
   $macros = New-Object System.Collections.Generic.List[string]
   $warnings = New-Object System.Collections.Generic.List[string]
+  $errors = New-Object System.Collections.Generic.List[string]
   $lookupTerms = 0
   $nestedLookupTerms = 0
+  $analysisScope = 'full-static'
 
   foreach ($token in $tokens) {
     $item = ([string]$token).Trim()
     if ([string]::IsNullOrWhiteSpace($item)) { continue }
 
-    if ($item -match '%\{' -or $item -match '%%|%_|%-') {
+    if (Test-SpfMacroText -Text $item) {
       if (-not $macros.Contains($item)) { $macros.Add($item) }
+      if ($analysisScope -ne 'message-context-required') { $analysisScope = 'partial-static' }
     }
 
-    if (Test-SpfLookupMechanism -Token $item) {
+    $mechanismType = Get-SpfMechanismType -Token $item
+    if ($mechanismType) {
       $lookupTerms++
     }
 
-    if ($item -match '^(?i)[+\-~?]?include:(.+)$') {
+    if ($mechanismType -eq 'include' -and $item -match '^(?i)[+\-~?]?include:(.+)$') {
       $target = ([string]$Matches[1]).Trim().TrimEnd('.')
       if ([string]::IsNullOrWhiteSpace($target)) { continue }
 
@@ -2877,6 +2922,10 @@ function Get-SpfNestedAnalysis {
       }
       elseif ($MaxDepth -le 0) {
         $includeError = "Maximum SPF include depth reached at $target."
+      }
+      elseif (Test-SpfMacroText -Text $target) {
+        $includeError = "Include target $target uses SPF macros and requires sender-specific context to expand."
+        if ($analysisScope -ne 'message-context-required') { $analysisScope = 'partial-static' }
       }
       else {
         $Visited[$visitedKey] = $true
@@ -2908,6 +2957,10 @@ function Get-SpfNestedAnalysis {
         }
       }
 
+      if (-not [string]::IsNullOrWhiteSpace($includeError) -and -not $errors.Contains($includeError)) {
+        $errors.Add($includeError)
+      }
+
       $includes.Add([pscustomobject]@{
         domain = $target
         record = $includeRecord
@@ -2917,7 +2970,7 @@ function Get-SpfNestedAnalysis {
       continue
     }
 
-    if ($item -match '^(?i)redirect=(.+)$') {
+    if ($mechanismType -eq 'redirect' -and $item -match '^(?i)redirect=(.+)$') {
       $target = ([string]$Matches[1]).Trim().TrimEnd('.')
       if ([string]::IsNullOrWhiteSpace($target)) { continue }
 
@@ -2931,6 +2984,10 @@ function Get-SpfNestedAnalysis {
       }
       elseif ($MaxDepth -le 0) {
         $redirectError = "Maximum SPF redirect depth reached at $target."
+      }
+      elseif (Test-SpfMacroText -Text $target) {
+        $redirectError = "Redirect target $target uses SPF macros and requires sender-specific context to expand."
+        if ($analysisScope -ne 'message-context-required') { $analysisScope = 'partial-static' }
       }
       else {
         $Visited[$visitedKey] = $true
@@ -2962,6 +3019,10 @@ function Get-SpfNestedAnalysis {
         }
       }
 
+      if (-not [string]::IsNullOrWhiteSpace($redirectError) -and -not $errors.Contains($redirectError)) {
+        $errors.Add($redirectError)
+      }
+
       $redirect = [pscustomobject]@{
         domain = $target
         record = $redirectRecord
@@ -2970,11 +3031,166 @@ function Get-SpfNestedAnalysis {
       }
       continue
     }
+
+    if ($mechanismType -eq 'exists' -and $item -match '^(?i)[+\-~?]?exists:(.+)$') {
+      $target = ([string]$Matches[1]).Trim().TrimEnd('.')
+      $existsError = $null
+      $resolved = @()
+      $analysisStatus = 'resolved'
+
+      if ([string]::IsNullOrWhiteSpace($target)) {
+        $analysisStatus = 'invalid'
+        $existsError = 'SPF exists mechanism target is empty.'
+      }
+      elseif (Test-SpfMacroText -Text $target) {
+        $analysisStatus = 'context-required'
+        $existsError = "Exists target $target uses SPF macros and requires sender-specific context to evaluate."
+        $analysisScope = 'message-context-required'
+      }
+      else {
+        try {
+          $resolved = @((ResolveSafely $target 'A' | Get-DnsIpString) + (ResolveSafely $target 'AAAA' | Get-DnsIpString) | Select-Object -Unique)
+        }
+        catch {
+          $analysisStatus = 'error'
+          $existsError = $_.Exception.Message
+        }
+      }
+
+      if (-not [string]::IsNullOrWhiteSpace($existsError) -and -not $errors.Contains($existsError)) {
+        $errors.Add($existsError)
+      }
+
+      $existsTerms.Add([pscustomobject]@{
+        target = $target
+        status = $analysisStatus
+        resolvedAddresses = @($resolved)
+        error = $existsError
+      })
+      continue
+    }
+
+    if ($mechanismType -eq 'a') {
+      $normalized = $item -replace '^[\+\-~\?]', ''
+      $spec = $normalized.Substring(1)
+      $target = Get-SpfDomainSpecTarget -Spec $spec -Domain $Domain
+      $aError = $null
+      $resolved = @()
+      $analysisStatus = 'resolved'
+
+      if ([string]::IsNullOrWhiteSpace($target)) {
+        $analysisStatus = 'invalid'
+        $aError = 'SPF a mechanism target is empty.'
+      }
+      elseif (Test-SpfMacroText -Text $target) {
+        $analysisStatus = 'context-required'
+        $aError = "A mechanism target $target uses SPF macros and requires sender-specific context to evaluate."
+        $analysisScope = 'message-context-required'
+      }
+      else {
+        try {
+          $resolved = @((ResolveSafely $target 'A' | Get-DnsIpString) + (ResolveSafely $target 'AAAA' | Get-DnsIpString) | Select-Object -Unique)
+        }
+        catch {
+          $analysisStatus = 'error'
+          $aError = $_.Exception.Message
+        }
+      }
+
+      if (-not [string]::IsNullOrWhiteSpace($aError) -and -not $errors.Contains($aError)) {
+        $errors.Add($aError)
+      }
+
+      $aTerms.Add([pscustomobject]@{
+        target = $target
+        status = $analysisStatus
+        resolvedAddresses = @($resolved)
+        error = $aError
+      })
+      continue
+    }
+
+    if ($mechanismType -eq 'mx') {
+      $normalized = $item -replace '^[\+\-~\?]', ''
+      $spec = $normalized.Substring(2)
+      $target = Get-SpfDomainSpecTarget -Spec $spec -Domain $Domain
+      $mxError = $null
+      $resolvedHosts = New-Object System.Collections.Generic.List[object]
+      $analysisStatus = 'resolved'
+
+      if ([string]::IsNullOrWhiteSpace($target)) {
+        $analysisStatus = 'invalid'
+        $mxError = 'SPF mx mechanism target is empty.'
+      }
+      elseif (Test-SpfMacroText -Text $target) {
+        $analysisStatus = 'context-required'
+        $mxError = "MX mechanism target $target uses SPF macros and requires sender-specific context to evaluate."
+        $analysisScope = 'message-context-required'
+      }
+      else {
+        try {
+          $mxRecords = @(Get-MxRecordObjects -Records (ResolveSafely $target 'MX'))
+          foreach ($mxRecord in $mxRecords) {
+            $mxHost = ([string]$mxRecord.NameExchange).Trim().TrimEnd('.')
+            if ([string]::IsNullOrWhiteSpace($mxHost)) { continue }
+            $hostAddresses = @((ResolveSafely $mxHost 'A' | Get-DnsIpString) + (ResolveSafely $mxHost 'AAAA' | Get-DnsIpString) | Select-Object -Unique)
+            $resolvedHosts.Add([pscustomobject]@{
+              hostname = $mxHost
+              preference = $mxRecord.Preference
+              addresses = @($hostAddresses)
+            })
+          }
+        }
+        catch {
+          $analysisStatus = 'error'
+          $mxError = $_.Exception.Message
+        }
+      }
+
+      if (-not [string]::IsNullOrWhiteSpace($mxError) -and -not $errors.Contains($mxError)) {
+        $errors.Add($mxError)
+      }
+
+      $mxTerms.Add([pscustomobject]@{
+        target = $target
+        status = $analysisStatus
+        resolvedHosts = @($resolvedHosts)
+        error = $mxError
+      })
+      continue
+    }
+
+    if ($mechanismType -eq 'ptr') {
+      $normalized = $item -replace '^[\+\-~\?]', ''
+      $spec = $normalized.Substring(3)
+      $target = Get-SpfDomainSpecTarget -Spec $spec -Domain $Domain
+      $ptrMessage = if ([string]::IsNullOrWhiteSpace($target)) {
+        'PTR mechanism present. Static analysis cannot validate PTR authorization safely and SPF PTR is discouraged.'
+      } elseif (Test-SpfMacroText -Text $target) {
+        $analysisScope = 'message-context-required'
+        "PTR mechanism target $target uses SPF macros and requires sender-specific context to evaluate."
+      } else {
+        "PTR mechanism target $target requires sender IP context and reverse DNS evaluation; only presence is reported."
+      }
+
+      if (-not $warnings.Contains($ptrMessage)) { $warnings.Add($ptrMessage) }
+      $ptrTerms.Add([pscustomobject]@{
+        target = $target
+        message = $ptrMessage
+      })
+      continue
+    }
   }
 
   $totalLookupTerms = $lookupTerms + $nestedLookupTerms
   if ($totalLookupTerms -gt 10) {
     $warnings.Add("SPF record for $Domain may exceed the 10-DNS-lookup guidance limit. Detected lookup-style terms across the expanded chain: $totalLookupTerms.")
+  }
+  if ($analysisScope -eq 'partial-static') {
+    $warnings.Add("SPF record for $Domain includes macro-based targets. This tool performs best-effort static analysis, but some nested paths require sender-specific context to expand fully.")
+  }
+  elseif ($analysisScope -eq 'message-context-required') {
+    $warnings.Add("SPF record for $Domain includes mechanisms that require sender-specific context (for example macros, exists, or ptr). Full SPF evaluation requires message inputs such as sender IP, HELO, and MAIL FROM.")
   }
 
   [pscustomobject]@{
@@ -2982,11 +3198,17 @@ function Get-SpfNestedAnalysis {
     record = $SpfRecord
     includes = @($includes)
     redirect = $redirect
+    existsTerms = @($existsTerms)
+    aTerms = @($aTerms)
+    mxTerms = @($mxTerms)
+    ptrTerms = @($ptrTerms)
     macros = @($macros | Select-Object -Unique)
     lookupTerms = $lookupTerms
     nestedLookupTerms = $nestedLookupTerms
     totalLookupTerms = $totalLookupTerms
+    analysisScope = $analysisScope
     warnings = @($warnings)
+    errors = @($errors | Select-Object -Unique)
   }
 }
 
@@ -3016,6 +3238,61 @@ function Format-SpfNestedAnalysisText {
   }
   foreach ($warning in @($Analysis.warnings)) {
     $lines.Add("${indent}Warning: $([string]$warning)")
+  }
+  foreach ($errorText in @($Analysis.errors)) {
+    $lines.Add("${indent}Note: $([string]$errorText)")
+  }
+
+  foreach ($existsTerm in @($Analysis.existsTerms)) {
+    $target = if (-not [string]::IsNullOrWhiteSpace([string]$existsTerm.target)) { [string]$existsTerm.target } else { '(empty)' }
+    $existsLine = "${indent}Exists: $target"
+    if ($existsTerm.status) { $existsLine += " [$([string]$existsTerm.status)]" }
+    if ($existsTerm.error) {
+      $existsLine += " (note: $([string]$existsTerm.error))"
+    }
+    elseif (@($existsTerm.resolvedAddresses).Count -gt 0) {
+      $existsLine += ": $((@($existsTerm.resolvedAddresses) -join ', '))"
+    }
+    $lines.Add($existsLine)
+  }
+
+  foreach ($aTerm in @($Analysis.aTerms)) {
+    $target = if (-not [string]::IsNullOrWhiteSpace([string]$aTerm.target)) { [string]$aTerm.target } else { '(empty)' }
+    $aLine = "${indent}A: $target"
+    if ($aTerm.status) { $aLine += " [$([string]$aTerm.status)]" }
+    if ($aTerm.error) {
+      $aLine += " (note: $([string]$aTerm.error))"
+    }
+    elseif (@($aTerm.resolvedAddresses).Count -gt 0) {
+      $aLine += ": $((@($aTerm.resolvedAddresses) -join ', '))"
+    }
+    $lines.Add($aLine)
+  }
+
+  foreach ($mxTerm in @($Analysis.mxTerms)) {
+    $target = if (-not [string]::IsNullOrWhiteSpace([string]$mxTerm.target)) { [string]$mxTerm.target } else { '(empty)' }
+    $mxLine = "${indent}MX: $target"
+    if ($mxTerm.status) { $mxLine += " [$([string]$mxTerm.status)]" }
+    if ($mxTerm.error) {
+      $mxLine += " (note: $([string]$mxTerm.error))"
+      $lines.Add($mxLine)
+      continue
+    }
+
+    $lines.Add($mxLine)
+    foreach ($host in @($mxTerm.resolvedHosts)) {
+      $hostLine = "${indent}  Host: $([string]$host.hostname)"
+      if ($null -ne $host.preference) { $hostLine += " (priority $([string]$host.preference))" }
+      if (@($host.addresses).Count -gt 0) {
+        $hostLine += ": $((@($host.addresses) -join ', '))"
+      }
+      $lines.Add($hostLine)
+    }
+  }
+
+  foreach ($ptrTerm in @($Analysis.ptrTerms)) {
+    $target = if (-not [string]::IsNullOrWhiteSpace([string]$ptrTerm.target)) { [string]$ptrTerm.target } else { '(queried domain)' }
+    $lines.Add("${indent}PTR: $target ($([string]$ptrTerm.message))")
   }
 
   foreach ($include in @($Analysis.includes)) {
@@ -3076,7 +3353,7 @@ function Get-SpfGuidance {
   }
 
   if ($recordText -match '%\{' -or $recordText -match '%%|%_|%-') {
-    $messages.Add("SPF for $targetDomain uses macros. Macro-based SPF can be provider-managed and dynamic, so review nested SPF expansion carefully when troubleshooting authorization.")
+    $messages.Add("SPF for $targetDomain uses macros. This tool performs best-effort static analysis, but macro-based SPF can require sender-specific context to evaluate fully.")
   }
 
   if ($SpfAnalysis) {
@@ -3085,6 +3362,15 @@ function Get-SpfGuidance {
     }
     if (@($SpfAnalysis.includes).Count -gt 0) {
       $messages.Add("SPF for $targetDomain includes nested sender policies. Review the expanded SPF chain in the SPF card to confirm all included services are expected.")
+    }
+    if (@($SpfAnalysis.existsTerms).Count -gt 0) {
+      $messages.Add("SPF for $targetDomain uses `exists:` mechanisms. These can be analyzed structurally, but full authorization depends on sender-specific evaluation context.")
+    }
+    if (@($SpfAnalysis.ptrTerms).Count -gt 0) {
+      $messages.Add("SPF for $targetDomain uses `ptr`, which is discouraged and cannot be fully evaluated by this static domain checker without sender context.")
+    }
+    if ($SpfAnalysis.analysisScope -eq 'message-context-required') {
+      $messages.Add("SPF for $targetDomain requires message context for full evaluation. Use a sender IP, HELO, and MAIL FROM if you need a true SPF pass/fail simulation.")
     }
     foreach ($warning in @($SpfAnalysis.warnings)) {
       if (-not [string]::IsNullOrWhiteSpace([string]$warning)) { $messages.Add([string]$warning) }
@@ -4028,6 +4314,7 @@ function Get-AcsDnsStatus {
   # ACS domain verification readiness is primarily based on the ms-domain-verification TXT record.
   # Other checks (SPF/MX/DMARC/DKIM/CNAME) are useful guidance but not required for ACS verification.
   $acsReady = (-not $base.dnsFailed) -and $base.acsPresent
+  $dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records'
 
     # Guidance
     $guidance = New-Object System.Collections.Generic.List[string]
@@ -4063,11 +4350,13 @@ function Get-AcsDnsStatus {
       elseif ($mx.mxFallbackUsed -and $mx.mxLookupDomain -and $mx.mxLookupDomain -ne $Domain) {
         $guidance.Add("No MX records found on $Domain; results shown are from parent domain $($mx.mxLookupDomain).")
       }
-      if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk. For more information see: https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records") }
+      if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
       elseif ($dmarc.dmarcInherited -and $dmarc.dmarcLookupDomain -and $dmarc.dmarcLookupDomain -ne $Domain) { $guidance.Add("Effective DMARC policy is inherited from parent domain $($dmarc.dmarcLookupDomain).") }
-      foreach ($dmarcMessage in @(Get-DmarcSecurityGuidance -DmarcRecord $dmarc.dmarc -Domain $Domain -LookupDomain $dmarc.dmarcLookupDomain -Inherited $dmarc.dmarcInherited)) {
+      $dmarcGuidance = @(Get-DmarcSecurityGuidance -DmarcRecord $dmarc.dmarc -Domain $Domain -LookupDomain $dmarc.dmarcLookupDomain -Inherited $dmarc.dmarcInherited)
+      foreach ($dmarcMessage in $dmarcGuidance) {
         if (-not [string]::IsNullOrWhiteSpace($dmarcMessage)) { $guidance.Add($dmarcMessage) }
       }
+      if ((-not $dmarc.dmarc) -or ($dmarcGuidance.Count -gt 0)) { $guidance.Add("For more information about DMARC TXT record syntax, see: $dmarcHelpUrl") }
       if (-not $dkim.dkim1)      { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
       if (-not $dkim.dkim2)      { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
       if (-not $cname.cname)     {
@@ -4544,6 +4833,12 @@ button.primary:disabled {
   border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.code-lite {
+  background: transparent;
+  color: var(--fg);
+  padding: 0;
 }
 
 .mx-table {
@@ -5196,7 +5491,6 @@ function formatLocalDateTime(isoString) {
 
 function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) {
   const guidance = [];
-  const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
   if (!dmarcRecord) return guidance;
 
   const tags = {};
@@ -5220,33 +5514,33 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   const ruf = (tags.ruf || '').trim();
 
   if (policy === 'none') {
-    guidance.push(`DMARC for ${targetDomain} is monitor-only (p=none). For stronger protection against spoofing, move to enforcement with p=quarantine or p=reject after validating legitimate mail sources. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`DMARC for ${targetDomain} is monitor-only (p=none). For stronger protection against spoofing, move to enforcement with p=quarantine or p=reject after validating legitimate mail sources.`);
   } else if (policy === 'quarantine') {
-    guidance.push(`DMARC for ${targetDomain} is set to p=quarantine. For the strongest anti-spoofing posture, consider p=reject once you confirm valid mail is fully aligned. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`DMARC for ${targetDomain} is set to p=quarantine. For the strongest anti-spoofing posture, consider p=reject once you confirm valid mail is fully aligned.`);
   }
 
   if (Number.isFinite(pct) && pct >= 0 && pct < 100) {
-    guidance.push(`DMARC enforcement for ${targetDomain} is only applied to ${pct}% of messages (pct=${pct}). Use pct=100 for full protection once rollout is validated. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`DMARC enforcement for ${targetDomain} is only applied to ${pct}% of messages (pct=${pct}). Use pct=100 for full protection once rollout is validated.`);
   }
 
   if (adkim === 'r') {
-    guidance.push(`DKIM alignment for ${targetDomain} uses relaxed mode (adkim=r). Consider strict alignment (adkim=s) if your sending infrastructure supports it for tighter domain protection. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`DKIM alignment for ${targetDomain} uses relaxed mode (adkim=r). Consider strict alignment (adkim=s) if your sending infrastructure supports it for tighter domain protection.`);
   }
 
   if (aspf === 'r') {
-    guidance.push(`SPF alignment for ${targetDomain} uses relaxed mode (aspf=r). Consider strict alignment (aspf=s) if your senders consistently use the exact domain. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`SPF alignment for ${targetDomain} uses relaxed mode (aspf=r). Consider strict alignment (aspf=s) if your senders consistently use the exact domain.`);
   }
 
   if (domain && lookupDomain && inherited === true && lookupDomain !== domain && !Object.prototype.hasOwnProperty.call(tags, 'sp')) {
-    guidance.push(`DMARC for subdomains of ${lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like ${domain}, consider adding sp=quarantine or sp=reject for clearer protection. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`DMARC for subdomains of ${lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like ${domain}, consider adding sp=quarantine or sp=reject for clearer protection.`);
   }
 
   if (!rua) {
-    guidance.push(`DMARC for ${targetDomain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`DMARC for ${targetDomain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact.`);
   }
 
   if (!ruf) {
-    guidance.push(`DMARC for ${targetDomain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations. For more information see: ${dmarcHelpUrl}`);
+    guidance.push(`DMARC for ${targetDomain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations.`);
   }
 
   return guidance;
@@ -5695,6 +5989,7 @@ function lookup() {
   function buildGuidance(r) {
     const guidance = [];
     const loaded = r._loaded || {};
+    const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
 
     if (loaded.base && r.dnsFailed) {
       guidance.push("DNS TXT lookup failed or timed out. Other DNS records may still resolve.");
@@ -5753,12 +6048,18 @@ function lookup() {
     }
 
     if (loaded.dmarc && !r.dmarc) {
-      guidance.push("DMARC is missing. Add a _dmarc." + (r.domain || "") + " TXT record to reduce spoofing risk. For more information see: https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records");
+      guidance.push("DMARC is missing. Add a _dmarc." + (r.domain || "") + " TXT record to reduce spoofing risk.");
     } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
       guidance.push("Effective DMARC policy is inherited from parent domain " + r.dmarcLookupDomain + ".");
     }
+    let dmarcActionable = false;
     if (loaded.dmarc && r.dmarc) {
-      guidance.push(...getDmarcSecurityGuidance(r.dmarc, r.domain, r.dmarcLookupDomain, r.dmarcInherited === true));
+      const dmarcSecurityGuidance = getDmarcSecurityGuidance(r.dmarc, r.domain, r.dmarcLookupDomain, r.dmarcInherited === true);
+      if (dmarcSecurityGuidance.length > 0) dmarcActionable = true;
+      guidance.push(...dmarcSecurityGuidance);
+    }
+    if ((loaded.dmarc && !r.dmarc) || dmarcActionable) {
+      guidance.push(`For more information about DMARC TXT record syntax, see: ${dmarcHelpUrl}`);
     }
 
     if (loaded.dkim) {
@@ -6536,11 +6837,11 @@ function render(r) {
     const domainClass = basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info");
 
     const ipNote = baseLoaded && ipUsedParent
-      ? `<div class="code" style="margin-top:6px;">Using IP addresses from parent domain ${escapeHtml(ipLookupDomain)} (no A/AAAA on ${escapeHtml(r.domain || '')}).</div>`
+      ? `<div class="code code-lite" style="margin-top:6px;">Using IP addresses from parent domain ${escapeHtml(ipLookupDomain)} (no A/AAAA on ${escapeHtml(r.domain || '')}).</div>`
       : '';
 
     const ipvTable = baseLoaded ? `
-      <div class="code" style="margin-top:6px; padding:0;">
+      <div class="code code-lite" style="margin-top:6px;">
         <table class="mx-table">
           <thead>
             <tr>
@@ -6564,7 +6865,7 @@ function render(r) {
           <strong>Domain</strong>
         </div>
         <div class="card-content">
-          <div id="field-domain" class="code">${escapeHtml(r.domain || 'No Records Available.')}</div>
+          <div id="field-domain" class="code code-lite">${escapeHtml(r.domain || 'No Records Available.')}</div>
           ${ipNote}${ipvTable}
         </div>
       </div>
@@ -6877,11 +7178,12 @@ function render(r) {
       </div>
       <div class="card-content">
         <ul class="guidance">
-          <li><a href="https://learn.microsoft.com/search/?terms=Azure%20Communication%20Services%20email%20domain%20verification" target="_blank" rel="noopener">ACS email domain verification</a></li>
-          <li><a href="https://learn.microsoft.com/search/?terms=SPF%20record" target="_blank" rel="noopener">SPF record basics</a></li>
-          <li><a href="https://learn.microsoft.com/search/?terms=DMARC%20record" target="_blank" rel="noopener">DMARC record basics</a></li>
-          <li><a href="https://learn.microsoft.com/search/?terms=DKIM%20record" target="_blank" rel="noopener">DKIM record basics</a></li>
-          <li><a href="https://learn.microsoft.com/search/?terms=MX%20record" target="_blank" rel="noopener">MX record basics</a></li>
+          <li><a href="https://learn.microsoft.com/azure/communication-services/quickstarts/email/add-custom-verified-domains" target="_blank" rel="noopener">ACS Email Domain Verification</a></li>
+          <li><a href="https://learn.microsoft.com/azure/communication-services/concepts/email/email-quota-increase" target="_blank" rel="noopener">ACS Email Quota Limit Increase</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure" target="_blank" rel="noopener">SPF Record Basics</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records" target="_blank" rel="noopener">DMARC Record Basics</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dkim-configure" target="_blank" rel="noopener">DKIM Record Basics</a></li>
+          <li><a href="https://learn.microsoft.com/microsoft-365/admin/setup/add-dns-records?view=o365-worldwide" target="_blank" rel="noopener">MX Record Basics</a></li>
         </ul>
       </div>
     </div>
