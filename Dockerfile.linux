@@ -5,8 +5,9 @@ COPY acs-domain-checker.ps1 /app/acs-domain-checker.ps1
 
 # Install whois CLI for Linux WHOIS fallback + npm for optional MSAL auto-install
 # netbase provides /etc/services which whois needs for getaddrinfo() service-name resolution
+# dnsutils provides dig/nslookup for reliable DNS resolution inside containers
 RUN apt-get update \
-&& apt-get install -y --no-install-recommends whois netbase \
+&& apt-get install -y --no-install-recommends whois netbase dnsutils \
 && apt-get install -y --no-install-recommends nodejs npm \
 && rm -rf /var/lib/apt/lists/*
 
