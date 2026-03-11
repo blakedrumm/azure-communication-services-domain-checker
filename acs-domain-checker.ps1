@@ -495,6 +495,10 @@ function Invoke-LinuxWhoisLookup {
     '(?i)\.ca$'          { $defaultFallbackServers = @('whois.cira.ca'); break }
     '(?i)\.jp$|\.co\.jp$|\.ne\.jp$|\.or\.jp$' { $defaultFallbackServers = @('whois.jprs.jp'); break }
     '(?i)\.us$'          { $defaultFallbackServers = @('whois.nic.us', 'us.whois-servers.net'); break }
+    '(?i)\.co$'          { $defaultFallbackServers = @('whois.registry.co'); break }
+    '(?i)\.gov$'         { $defaultFallbackServers = @('whois.dotgov.gov'); break }
+    '(?i)\.edu$'         { $defaultFallbackServers = @('whois.educause.edu'); break }
+    '(?i)\.mil$'         { $defaultFallbackServers = @('whois.nic.mil'); break }
   }
 
   foreach ($defaultServer in $defaultFallbackServers) {
@@ -648,6 +652,7 @@ function Invoke-TcpWhoisLookup {
     '(?i)\.ca$'                                             { $servers.Add('whois.cira.ca'); break }
     '(?i)\.jp$|\.co\.jp$|\.ne\.jp$|\.or\.jp$'               { $servers.Add('whois.jprs.jp'); break }
     '(?i)\.us$'                                             { $servers.Add('whois.nic.us'); break }
+    '(?i)\.co$'                                             { $servers.Add('whois.registry.co'); break }
     '(?i)\.gov$'                                            { $servers.Add('whois.dotgov.gov'); break }
     '(?i)\.edu$'                                            { $servers.Add('whois.educause.edu'); break }
     '(?i)\.mil$'                                            { $servers.Add('whois.nic.mil'); break }
@@ -829,7 +834,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.3.5'
+$script:AppVersion = '1.3.6'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1005,7 +1010,7 @@ function Invoke-RdapLookup {
     [Parameter(Mandatory = $true)]
     [string]$Domain,
 
-    [int]$TimeoutSec = 15,
+    [int]$TimeoutSec = 30,
 
     # If set, throw the final error instead of returning $null
     [switch]$ThrowOnError
@@ -7510,4 +7515,3 @@ finally {
   try { $pool.Close(); $pool.Dispose() } catch { $null = $_ }
   Write-Information -InformationAction Continue -MessageData "Server stopped."
 }
-
