@@ -1264,6 +1264,86 @@ function Format-ExpiryRemaining {
   return ($segments -join ', ')
 }
 
+function Get-DmarcSecurityGuidance {
+  param(
+    [string]$DmarcRecord,
+    [string]$Domain,
+    [string]$LookupDomain,
+    [bool]$Inherited = $false
+  )
+
+  $dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records'
+  $messages = New-Object System.Collections.Generic.List[string]
+  if ([string]::IsNullOrWhiteSpace($DmarcRecord)) { return @() }
+
+  $recordText = ([string]$DmarcRecord).Trim()
+  if ([string]::IsNullOrWhiteSpace($recordText)) { return @() }
+
+  $tagMap = @{}
+  foreach ($segment in ($recordText -split ';')) {
+    $part = ([string]$segment).Trim()
+    if ([string]::IsNullOrWhiteSpace($part)) { continue }
+    $kv = $part -split '=', 2
+    if ($kv.Count -ne 2) { continue }
+    $name = ([string]$kv[0]).Trim().ToLowerInvariant()
+    $value = ([string]$kv[1]).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($name)) {
+      $tagMap[$name] = $value
+    }
+  }
+
+  $targetDomain = if (-not [string]::IsNullOrWhiteSpace($Domain)) { $Domain } elseif (-not [string]::IsNullOrWhiteSpace($LookupDomain)) { $LookupDomain } else { 'the domain' }
+
+  $policy = $null
+  if ($tagMap.ContainsKey('p')) { $policy = ([string]$tagMap['p']).Trim().ToLowerInvariant() }
+  $subdomainPolicy = $null
+  if ($tagMap.ContainsKey('sp')) { $subdomainPolicy = ([string]$tagMap['sp']).Trim().ToLowerInvariant() }
+  $pct = $null
+  if ($tagMap.ContainsKey('pct')) {
+    $pctValue = 0
+    if ([int]::TryParse(([string]$tagMap['pct']).Trim(), [ref]$pctValue)) {
+      $pct = $pctValue
+    }
+  }
+  $adkim = if ($tagMap.ContainsKey('adkim')) { ([string]$tagMap['adkim']).Trim().ToLowerInvariant() } else { $null }
+  $aspf = if ($tagMap.ContainsKey('aspf')) { ([string]$tagMap['aspf']).Trim().ToLowerInvariant() } else { $null }
+  $rua = if ($tagMap.ContainsKey('rua')) { ([string]$tagMap['rua']).Trim() } else { $null }
+  $ruf = if ($tagMap.ContainsKey('ruf')) { ([string]$tagMap['ruf']).Trim() } else { $null }
+
+  if ($policy -eq 'none') {
+    $messages.Add("DMARC for $targetDomain is monitor-only (`p=none`). For stronger protection against spoofing, move to enforcement with `p=quarantine` or `p=reject` after validating legitimate mail sources. For more information see: $dmarcHelpUrl")
+  }
+  elseif ($policy -eq 'quarantine') {
+    $messages.Add("DMARC for $targetDomain is set to `p=quarantine`. For the strongest anti-spoofing posture, consider `p=reject` once you confirm valid mail is fully aligned. For more information see: $dmarcHelpUrl")
+  }
+
+  if ($null -ne $pct -and $pct -lt 100) {
+    $messages.Add("DMARC enforcement for $targetDomain is only applied to $pct% of messages (`pct=$pct`). Use `pct=100` for full protection once rollout is validated. For more information see: $dmarcHelpUrl")
+  }
+
+  if ($adkim -eq 'r') {
+    $messages.Add("DKIM alignment for $targetDomain uses relaxed mode (`adkim=r`). Consider strict alignment (`adkim=s`) if your sending infrastructure supports it for tighter domain protection. For more information see: $dmarcHelpUrl")
+  }
+
+  if ($aspf -eq 'r') {
+    $messages.Add("SPF alignment for $targetDomain uses relaxed mode (`aspf=r`). Consider strict alignment (`aspf=s`) if your senders consistently use the exact domain. For more information see: $dmarcHelpUrl")
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($Domain) -and -not [string]::IsNullOrWhiteSpace($LookupDomain) -and $Inherited -and ($LookupDomain -ne $Domain) -and -not $tagMap.ContainsKey('sp')) {
+    $messages.Add("DMARC for subdomains of $LookupDomain does not define an explicit subdomain policy (`sp=`). If you send from subdomains like $Domain, consider adding `sp=quarantine` or `sp=reject` for clearer protection. For more information see: $dmarcHelpUrl")
+  }
+
+  if ([string]::IsNullOrWhiteSpace($rua)) {
+    $messages.Add("DMARC for $targetDomain does not publish aggregate reporting (`rua=`). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact. For more information see: $dmarcHelpUrl")
+  }
+
+  if ([string]::IsNullOrWhiteSpace($ruf)) {
+    $messages.Add("DMARC for $targetDomain does not publish forensic reporting (`ruf=`). If your process allows it, forensic reports can provide additional failure detail for investigations. For more information see: $dmarcHelpUrl")
+  }
+
+  return @($messages)
+}
+
 function Get-DomainRegistrationStatus {
   param(
     [Parameter(Mandatory = $true)]
@@ -1469,18 +1549,19 @@ function Get-DomainRegistrationStatus {
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
+          $rawHasTransportError = $hasRawText -and ($raw.rawText -match '(?im)(No such host is known|The remote name could not be resolved|Unable to connect|Connection timed out|Connection refused|Network is unreachable|No route to host|socket error|connect\s+failed)')
 
           if ($hasParsedFields) {
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
-          elseif ($hasRawText -and -not $rawHasNoData) {
+          elseif ($hasRawText -and -not $rawHasNoData -and -not $rawHasTransportError) {
             # Treat raw output as success when it contains registration output even if not fully parsed.
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
           else {
-            $sysWhoisError = if ($rawHasNoData) { "Sysinternals whois returned no registration data for '$whoisDomain'." } else { "Sysinternals whois returned output but no registrant/registrar/dates could be parsed." }
+            $sysWhoisError = if ($rawHasTransportError) { "Sysinternals whois transport failed for '$whoisDomain'." } elseif ($rawHasNoData) { "Sysinternals whois returned no registration data for '$whoisDomain'." } else { "Sysinternals whois returned output but no registrant/registrar/dates could be parsed." }
           }
         }
       }
@@ -2726,6 +2807,293 @@ function Test-DomainName {
   return $true
 }
 
+function Get-SpfTokens {
+  param([string]$SpfRecord)
+
+  if ([string]::IsNullOrWhiteSpace($SpfRecord)) { return @() }
+
+  $text = ([string]$SpfRecord).Trim()
+  if ([string]::IsNullOrWhiteSpace($text)) { return @() }
+
+  return @($text -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Get-SpfNestedAnalysis {
+  param(
+    [string]$SpfRecord,
+    [string]$Domain,
+    [int]$MaxDepth = 8,
+    [hashtable]$Visited
+  )
+
+  if ([string]::IsNullOrWhiteSpace($SpfRecord)) { return $null }
+  if ($MaxDepth -lt 0) { $MaxDepth = 0 }
+  if ($null -eq $Visited) { $Visited = @{} }
+
+  $tokens = @(Get-SpfTokens -SpfRecord $SpfRecord)
+  if ($tokens.Count -eq 0) { return $null }
+
+  function Test-SpfLookupMechanism {
+    param([string]$Token)
+
+    if ([string]::IsNullOrWhiteSpace($Token)) { return $false }
+    $normalized = ([string]$Token).Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    $normalized = $normalized -replace '^[\+\-~\?]', ''
+    return ($normalized -match '^(?i)(include:|exists:|a(?=$|:|/)|mx(?=$|:|/)|ptr(?=$|:|/)|redirect=)')
+  }
+
+  $includes = New-Object System.Collections.Generic.List[object]
+  $redirect = $null
+  $macros = New-Object System.Collections.Generic.List[string]
+  $warnings = New-Object System.Collections.Generic.List[string]
+  $lookupTerms = 0
+  $nestedLookupTerms = 0
+
+  foreach ($token in $tokens) {
+    $item = ([string]$token).Trim()
+    if ([string]::IsNullOrWhiteSpace($item)) { continue }
+
+    if ($item -match '%\{' -or $item -match '%%|%_|%-') {
+      if (-not $macros.Contains($item)) { $macros.Add($item) }
+    }
+
+    if (Test-SpfLookupMechanism -Token $item) {
+      $lookupTerms++
+    }
+
+    if ($item -match '^(?i)[+\-~?]?include:(.+)$') {
+      $target = ([string]$Matches[1]).Trim().TrimEnd('.')
+      if ([string]::IsNullOrWhiteSpace($target)) { continue }
+
+      $includeRecord = $null
+      $includeError = $null
+      $includeResult = $null
+      $visitedKey = $target.ToLowerInvariant()
+
+      if ($Visited.ContainsKey($visitedKey)) {
+        $includeError = "Include loop detected for $target."
+      }
+      elseif ($MaxDepth -le 0) {
+        $includeError = "Maximum SPF include depth reached at $target."
+      }
+      else {
+        $Visited[$visitedKey] = $true
+        try {
+          $txtRecords = ResolveSafely $target 'TXT'
+          foreach ($txt in @($txtRecords)) {
+            $joined = ($txt.Strings -join '').Trim()
+            if ($joined -match '(?i)^v=spf1\b') {
+              $includeRecord = $joined
+              break
+            }
+          }
+
+          if ($includeRecord) {
+            $includeResult = Get-SpfNestedAnalysis -SpfRecord $includeRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
+            if ($includeResult -and $includeResult.totalLookupTerms -ne $null) {
+              $nestedLookupTerms += [int]$includeResult.totalLookupTerms
+            }
+          }
+          else {
+            $includeError = "No SPF TXT record found for include target $target."
+          }
+        }
+        catch {
+          $includeError = $_.Exception.Message
+        }
+        finally {
+          $Visited.Remove($visitedKey) | Out-Null
+        }
+      }
+
+      $includes.Add([pscustomobject]@{
+        domain = $target
+        record = $includeRecord
+        error = $includeError
+        analysis = $includeResult
+      })
+      continue
+    }
+
+    if ($item -match '^(?i)redirect=(.+)$') {
+      $target = ([string]$Matches[1]).Trim().TrimEnd('.')
+      if ([string]::IsNullOrWhiteSpace($target)) { continue }
+
+      $redirectRecord = $null
+      $redirectError = $null
+      $redirectAnalysis = $null
+      $visitedKey = $target.ToLowerInvariant()
+
+      if ($Visited.ContainsKey($visitedKey)) {
+        $redirectError = "Redirect loop detected for $target."
+      }
+      elseif ($MaxDepth -le 0) {
+        $redirectError = "Maximum SPF redirect depth reached at $target."
+      }
+      else {
+        $Visited[$visitedKey] = $true
+        try {
+          $txtRecords = ResolveSafely $target 'TXT'
+          foreach ($txt in @($txtRecords)) {
+            $joined = ($txt.Strings -join '').Trim()
+            if ($joined -match '(?i)^v=spf1\b') {
+              $redirectRecord = $joined
+              break
+            }
+          }
+
+          if ($redirectRecord) {
+            $redirectAnalysis = Get-SpfNestedAnalysis -SpfRecord $redirectRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
+            if ($redirectAnalysis -and $redirectAnalysis.totalLookupTerms -ne $null) {
+              $nestedLookupTerms += [int]$redirectAnalysis.totalLookupTerms
+            }
+          }
+          else {
+            $redirectError = "No SPF TXT record found for redirect target $target."
+          }
+        }
+        catch {
+          $redirectError = $_.Exception.Message
+        }
+        finally {
+          $Visited.Remove($visitedKey) | Out-Null
+        }
+      }
+
+      $redirect = [pscustomobject]@{
+        domain = $target
+        record = $redirectRecord
+        error = $redirectError
+        analysis = $redirectAnalysis
+      }
+      continue
+    }
+  }
+
+  $totalLookupTerms = $lookupTerms + $nestedLookupTerms
+  if ($totalLookupTerms -gt 10) {
+    $warnings.Add("SPF record for $Domain may exceed the 10-DNS-lookup guidance limit. Detected lookup-style terms across the expanded chain: $totalLookupTerms.")
+  }
+
+  [pscustomobject]@{
+    domain = $Domain
+    record = $SpfRecord
+    includes = @($includes)
+    redirect = $redirect
+    macros = @($macros | Select-Object -Unique)
+    lookupTerms = $lookupTerms
+    nestedLookupTerms = $nestedLookupTerms
+    totalLookupTerms = $totalLookupTerms
+    warnings = @($warnings)
+  }
+}
+
+function Format-SpfNestedAnalysisText {
+  param(
+    [object]$Analysis,
+    [int]$Depth = 0
+  )
+
+  if (-not $Analysis) { return @() }
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $indent = ('  ' * $Depth)
+  $domainLabel = if (-not [string]::IsNullOrWhiteSpace([string]$Analysis.domain)) { [string]$Analysis.domain } else { 'SPF' }
+  $lines.Add("${indent}Domain: $domainLabel")
+  if ($Analysis.record) {
+    $lines.Add("${indent}Record: $([string]$Analysis.record)")
+  }
+  if ($Analysis.lookupTerms -ne $null) {
+    $lines.Add("${indent}Lookup-style terms: $([string]$Analysis.lookupTerms)")
+  }
+  if ($Analysis.totalLookupTerms -ne $null -and [int]$Analysis.totalLookupTerms -ne [int]$Analysis.lookupTerms) {
+    $lines.Add("${indent}Expanded-chain lookup terms: $([string]$Analysis.totalLookupTerms)")
+  }
+  foreach ($macro in @($Analysis.macros)) {
+    $lines.Add("${indent}Macro term: $([string]$macro)")
+  }
+  foreach ($warning in @($Analysis.warnings)) {
+    $lines.Add("${indent}Warning: $([string]$warning)")
+  }
+
+  foreach ($include in @($Analysis.includes)) {
+    $includeDomain = [string]$include.domain
+    if ($include.error) {
+      $lines.Add("${indent}Include: $includeDomain (error: $([string]$include.error))")
+    }
+    else {
+      $lines.Add("${indent}Include: $includeDomain")
+      foreach ($childLine in @(Format-SpfNestedAnalysisText -Analysis $include.analysis -Depth ($Depth + 1))) {
+        $lines.Add($childLine)
+      }
+    }
+  }
+
+  if ($Analysis.redirect) {
+    $redirectDomain = [string]$Analysis.redirect.domain
+    if ($Analysis.redirect.error) {
+      $lines.Add("${indent}Redirect: $redirectDomain (error: $([string]$Analysis.redirect.error))")
+    }
+    else {
+      $lines.Add("${indent}Redirect: $redirectDomain")
+      foreach ($childLine in @(Format-SpfNestedAnalysisText -Analysis $Analysis.redirect.analysis -Depth ($Depth + 1))) {
+        $lines.Add($childLine)
+      }
+    }
+  }
+
+  return @($lines)
+}
+
+function Get-SpfGuidance {
+  param(
+    [string]$SpfRecord,
+    [string]$Domain,
+    [object]$SpfAnalysis
+  )
+
+  $messages = New-Object System.Collections.Generic.List[string]
+  if ([string]::IsNullOrWhiteSpace($SpfRecord)) { return @() }
+
+  $recordText = ([string]$SpfRecord).Trim()
+  if ([string]::IsNullOrWhiteSpace($recordText)) { return @() }
+
+  $targetDomain = if (-not [string]::IsNullOrWhiteSpace($Domain)) { $Domain } else { 'the domain' }
+
+  if ($recordText -match '(?i)\s\+all(\s|$)') {
+    $messages.Add("SPF for $targetDomain allows all senders (`+all`), which is insecure. Replace it with a restrictive qualifier such as `-all` or `~all` after validating legitimate senders.")
+  }
+  elseif ($recordText -match '(?i)\s\?all(\s|$)') {
+    $messages.Add("SPF for $targetDomain ends with `?all`, which is neutral and provides little protection. Consider `~all` during rollout or `-all` for strict enforcement.")
+  }
+  elseif ($recordText -match '(?i)\s~all(\s|$)') {
+    $messages.Add("SPF for $targetDomain ends with soft fail (`~all`). For a stricter anti-spoofing posture, consider `-all` once all valid senders are confirmed.")
+  }
+  elseif ($recordText -notmatch '(?i)\s[-~?+]all(\s|$)') {
+    $messages.Add("SPF for $targetDomain does not appear to end with an `all` mechanism. Add an explicit `~all` or `-all` so unauthorized senders are handled predictably.")
+  }
+
+  if ($recordText -match '%\{' -or $recordText -match '%%|%_|%-') {
+    $messages.Add("SPF for $targetDomain uses macros. Macro-based SPF can be provider-managed and dynamic, so review nested SPF expansion carefully when troubleshooting authorization.")
+  }
+
+  if ($SpfAnalysis) {
+    if ($SpfAnalysis.totalLookupTerms -gt 8) {
+      $messages.Add("SPF for $targetDomain uses many DNS-lookup-style terms ($($SpfAnalysis.totalLookupTerms) detected across the expanded chain). Complex nested SPF records can approach the SPF 10-lookup evaluation limit.")
+    }
+    if (@($SpfAnalysis.includes).Count -gt 0) {
+      $messages.Add("SPF for $targetDomain includes nested sender policies. Review the expanded SPF chain in the SPF card to confirm all included services are expected.")
+    }
+    foreach ($warning in @($SpfAnalysis.warnings)) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$warning)) { $messages.Add([string]$warning) }
+    }
+  }
+
+  return @($messages | Select-Object -Unique)
+}
+
 function Write-RequestLog {
   param(
     $Context,
@@ -2901,6 +3269,9 @@ function Get-DnsBaseStatus {
   $parentTxtRecords = @()
   $parentSpf = $null
   $parentAcsTxt = $null
+  $spfAnalysis = $null
+  $spfExpandedText = $null
+  $spfGuidance = @()
 
   try {
     $records = ResolveSafely $Domain "TXT" -ThrowOnError
@@ -2975,6 +3346,17 @@ function Get-DnsBaseStatus {
   $spfPresent = -not $dnsFailed -and [bool]$spf
   $acsPresent = -not $dnsFailed -and [bool]$acsTxt
 
+  if ($spfPresent -and -not [string]::IsNullOrWhiteSpace($spf)) {
+    try {
+      $spfAnalysis = Get-SpfNestedAnalysis -SpfRecord $spf -Domain $Domain
+      $spfExpandedLines = @(Format-SpfNestedAnalysisText -Analysis $spfAnalysis)
+      if ($spfExpandedLines.Count -gt 0) {
+        $spfExpandedText = ($spfExpandedLines -join "`n")
+      }
+      $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $spfAnalysis)
+    } catch { }
+  }
+
   [pscustomobject]@{
     domain     = $Domain
     dnsFailed  = $dnsFailed
@@ -2991,6 +3373,9 @@ function Get-DnsBaseStatus {
 
     spfPresent = $spfPresent
     spfValue   = $spf
+    spfAnalysis = $spfAnalysis
+    spfExpandedText = $spfExpandedText
+    spfGuidance = $spfGuidance
     acsPresent = $acsPresent
     acsValue   = $acsTxt
 
@@ -3678,8 +4063,11 @@ function Get-AcsDnsStatus {
       elseif ($mx.mxFallbackUsed -and $mx.mxLookupDomain -and $mx.mxLookupDomain -ne $Domain) {
         $guidance.Add("No MX records found on $Domain; results shown are from parent domain $($mx.mxLookupDomain).")
       }
-      if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
+      if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk. For more information see: https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records") }
       elseif ($dmarc.dmarcInherited -and $dmarc.dmarcLookupDomain -and $dmarc.dmarcLookupDomain -ne $Domain) { $guidance.Add("Effective DMARC policy is inherited from parent domain $($dmarc.dmarcLookupDomain).") }
+      foreach ($dmarcMessage in @(Get-DmarcSecurityGuidance -DmarcRecord $dmarc.dmarc -Domain $Domain -LookupDomain $dmarc.dmarcLookupDomain -Inherited $dmarc.dmarcInherited)) {
+        if (-not [string]::IsNullOrWhiteSpace($dmarcMessage)) { $guidance.Add($dmarcMessage) }
+      }
       if (-not $dkim.dkim1)      { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
       if (-not $dkim.dkim2)      { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
       if (-not $cname.cname)     {
@@ -3727,6 +4115,9 @@ function Get-AcsDnsStatus {
 
         spfPresent = $base.spfPresent
         spfValue   = $base.spfValue
+        spfAnalysis = $base.spfAnalysis
+        spfExpandedText = $base.spfExpandedText
+        spfGuidance = $base.spfGuidance
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
         acsPresent = $base.acsPresent
@@ -4739,6 +5130,13 @@ function escapeHtml(text) {
   });
 }
 
+function linkifyText(text) {
+  const escaped = escapeHtml(text);
+  return escaped.replace(/(https?:\/\/[^\s<]+)/gi, function(url) {
+    return `<a href="${url}" target="_blank" rel="noopener">${url}</a>`;
+  });
+}
+
 function formatLocalDateTime(isoString) {
   if (!isoString) return null;
   const d = new Date(isoString);
@@ -4794,6 +5192,64 @@ function formatLocalDateTime(isoString) {
   }
 
   return `${month} ${day}, ${year} at ${hour}:${minute} ${dayPeriod} ${tzAbbr ? `(${tzAbbr})` : ''}`.trim();
+}
+
+function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) {
+  const guidance = [];
+  const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
+  if (!dmarcRecord) return guidance;
+
+  const tags = {};
+  String(dmarcRecord).split(';').forEach(part => {
+    const text = String(part || '').trim();
+    if (!text) return;
+    const idx = text.indexOf('=');
+    if (idx < 1) return;
+    const name = text.slice(0, idx).trim().toLowerCase();
+    const value = text.slice(idx + 1).trim();
+    if (name) tags[name] = value;
+  });
+
+  const targetDomain = domain || lookupDomain || 'the domain';
+  const policy = (tags.p || '').trim().toLowerCase();
+  const subdomainPolicy = (tags.sp || '').trim().toLowerCase();
+  const pct = Number.parseInt((tags.pct || '').trim(), 10);
+  const adkim = (tags.adkim || '').trim().toLowerCase();
+  const aspf = (tags.aspf || '').trim().toLowerCase();
+  const rua = (tags.rua || '').trim();
+  const ruf = (tags.ruf || '').trim();
+
+  if (policy === 'none') {
+    guidance.push(`DMARC for ${targetDomain} is monitor-only (p=none). For stronger protection against spoofing, move to enforcement with p=quarantine or p=reject after validating legitimate mail sources. For more information see: ${dmarcHelpUrl}`);
+  } else if (policy === 'quarantine') {
+    guidance.push(`DMARC for ${targetDomain} is set to p=quarantine. For the strongest anti-spoofing posture, consider p=reject once you confirm valid mail is fully aligned. For more information see: ${dmarcHelpUrl}`);
+  }
+
+  if (Number.isFinite(pct) && pct >= 0 && pct < 100) {
+    guidance.push(`DMARC enforcement for ${targetDomain} is only applied to ${pct}% of messages (pct=${pct}). Use pct=100 for full protection once rollout is validated. For more information see: ${dmarcHelpUrl}`);
+  }
+
+  if (adkim === 'r') {
+    guidance.push(`DKIM alignment for ${targetDomain} uses relaxed mode (adkim=r). Consider strict alignment (adkim=s) if your sending infrastructure supports it for tighter domain protection. For more information see: ${dmarcHelpUrl}`);
+  }
+
+  if (aspf === 'r') {
+    guidance.push(`SPF alignment for ${targetDomain} uses relaxed mode (aspf=r). Consider strict alignment (aspf=s) if your senders consistently use the exact domain. For more information see: ${dmarcHelpUrl}`);
+  }
+
+  if (domain && lookupDomain && inherited === true && lookupDomain !== domain && !Object.prototype.hasOwnProperty.call(tags, 'sp')) {
+    guidance.push(`DMARC for subdomains of ${lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like ${domain}, consider adding sp=quarantine or sp=reject for clearer protection. For more information see: ${dmarcHelpUrl}`);
+  }
+
+  if (!rua) {
+    guidance.push(`DMARC for ${targetDomain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact. For more information see: ${dmarcHelpUrl}`);
+  }
+
+  if (!ruf) {
+    guidance.push(`DMARC for ${targetDomain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations. For more information see: ${dmarcHelpUrl}`);
+  }
+
+  return guidance;
 }
 
 function buildTestSummaryHtml(r) {
@@ -5253,6 +5709,9 @@ function lookup() {
           guidance.push("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent). ");
         }
       }
+      if (Array.isArray(r.spfGuidance) && r.spfGuidance.length > 0) {
+        guidance.push(...r.spfGuidance.filter(Boolean));
+      }
       if (!r.acsPresent) {
         if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
           guidance.push("ACS ms-domain-verification TXT is missing on " + (r.domain || "") + ". Parent domain " + r.txtLookupDomain + " has an ACS TXT record, but it does not verify the queried subdomain.");
@@ -5294,9 +5753,12 @@ function lookup() {
     }
 
     if (loaded.dmarc && !r.dmarc) {
-      guidance.push("DMARC is missing. Add a _dmarc." + (r.domain || "") + " TXT record to reduce spoofing risk.");
+      guidance.push("DMARC is missing. Add a _dmarc." + (r.domain || "") + " TXT record to reduce spoofing risk. For more information see: https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records");
     } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
       guidance.push("Effective DMARC policy is inherited from parent domain " + r.dmarcLookupDomain + ".");
+    }
+    if (loaded.dmarc && r.dmarc) {
+      guidance.push(...getDmarcSecurityGuidance(r.dmarc, r.domain, r.dmarcLookupDomain, r.dmarcInherited === true));
     }
 
     if (loaded.dkim) {
@@ -6247,9 +6709,15 @@ function render(r) {
   }
 
   // Match card order to the Check Summary.
+  const spfCardValue = loaded.base
+    ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} SPF (informational only):\n${r.parentSpfValue || ''}`) : null))
+    : (baseError ? (errors.base || "Error") : "Loading...");
+  const spfExpandedSection = loaded.base && r.spfExpandedText
+    ? `\n\n--- SPF Nested Analysis ---\n${r.spfExpandedText}`
+    : '';
   cards.push(card(
     "SPF (queried domain TXT)",
-    loaded.base ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} SPF (informational only):\n${r.parentSpfValue || ''}`) : null)) : (baseError ? (errors.base || "Error") : "Loading..."),
+    (spfCardValue || "No Records Available.") + spfExpandedSection,
     basePending ? "LOADING" : (baseError ? "ERROR" : (r.spfPresent ? "PASS" : "OPTIONAL")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : (r.spfPresent ? "tag-pass" : "tag-info")),
     "spf"
@@ -6384,7 +6852,7 @@ function render(r) {
     "cname"
   ));
 
-  const guidanceItems = (r.guidance || []).map(g => "<li>" + escapeHtml(g) + "</li>").join("");
+  const guidanceItems = (r.guidance || []).map(g => "<li>" + linkifyText(g) + "</li>").join("");
   cards.push(`
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
@@ -6823,10 +7291,12 @@ $functionNames = @(
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
   'Get-RegistrableDomain','Get-ParentDomains',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
+  'Get-SpfTokens','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry',
   'Get-RdapBootstrapData','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-DomainRegistrationStatus',
+  'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
   'Get-AcsDnsStatus'
 )
