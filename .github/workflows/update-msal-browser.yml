@@ -20,12 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4.1.0
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Get latest @azure/msal-browser version
@@ -78,8 +78,8 @@ jobs:
           # Download the package
           npm pack @azure/msal-browser@$VERSION
           
-          # Extract the tarball
-          tar -xzf azure-msal-browser-${VERSION}.tgz
+          # Extract the tarball (use glob to handle any naming quirks)
+          tar -xzf azure-msal-browser-*.tgz
           
           # Find the minified browser file (should be in package/lib/msal-browser.min.js)
           if [ -f package/lib/msal-browser.min.js ]; then
@@ -117,7 +117,7 @@ jobs:
 
       - name: Create Pull Request
         if: steps.check-update.outputs.needs_update == 'true'
-        uses: peter-evans/create-pull-request@v7.0.5
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: 'chore: update msal-browser.min.js to v${{ steps.get-version.outputs.version }}'
