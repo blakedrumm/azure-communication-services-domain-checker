@@ -203,6 +203,22 @@ function Get-ParentDomains {
   return @($parents | Select-Object -Unique)
 }
 
+function Test-WhoisRawTextHasUsableData {
+  param([string]$Text)
+
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+
+  if ($Text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE|Malformed request\.?|Invalid query|Invalid domain name|This query returned 0 objects)\b') {
+    return $false
+  }
+
+  if ($Text -match '(?im)\b(getaddrinfo\(|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|Servname not supported for ai_socktype|socket error|connect\s+failed|No such host is known|The remote name could not be resolved|Unable to connect)\b') {
+    return $false
+  }
+
+  return $true
+}
+
 function Invoke-SysinternalsWhoisLookup {
   [CmdletBinding()]
   param(
@@ -355,22 +371,6 @@ function Invoke-LinuxWhoisLookup {
 
     [switch]$ThrowOnError
   )
-
-  function Test-LinuxWhoisHasUsableData {
-    param([string]$Text)
-
-    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
-
-    if ($Text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b') {
-      return $false
-    }
-
-    if ($Text -match '(?im)\b(getaddrinfo\(|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|Servname not supported for ai_socktype|socket error|connect\s+failed)\b') {
-      return $false
-    }
-
-    return $true
-  }
 
   function Invoke-LinuxWhoisQuery {
     param(
@@ -531,7 +531,7 @@ function Invoke-LinuxWhoisLookup {
         $queryResult = Invoke-LinuxWhoisQuery -Exe $exe -LookupDomain $d -Server $server -ServerPort 43 -QueryTimeoutSec $TimeoutSec
         $exitCode = $queryResult.exitCode
 
-        if (Test-LinuxWhoisHasUsableData -Text $queryResult.text) {
+        if (Test-WhoisRawTextHasUsableData -Text $queryResult.text) {
           $text = $queryResult.text
           $usedServer = $queryResult.server
           break
@@ -728,8 +728,8 @@ function Invoke-TcpWhoisLookup {
         }
       }
 
-      # Skip responses that indicate no data or transport errors.
-      if ($text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b') { continue }
+      # Skip responses that indicate no data or invalid queries / malformed subdomain lookups.
+      if ($text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE|Malformed request\.?|Invalid query|Invalid domain name|This query returned 0 objects)\b') { continue }
 
       # Parse registration fields (same patterns as Invoke-LinuxWhoisLookup).
       $creation   = $null
@@ -834,7 +834,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.3.7'
+$script:AppVersion = '1.3.8'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1476,8 +1476,10 @@ function Get-DomainRegistrationStatus {
     }
   }
 
-  # Try the requested domain first, then fall back through parent domains if needed.
-  $whoisDomain = $d
+  # WHOIS/RDAP operates on the registrable domain, not arbitrary subdomains.
+  # Use the registrable domain first, then fall back through parent domains if needed.
+  $whoisDomain = Get-RegistrableDomain -Domain $d
+  if ([string]::IsNullOrWhiteSpace($whoisDomain)) { $whoisDomain = $d }
 
   $creation = $null
   $expiry = $null
@@ -1601,19 +1603,18 @@ function Get-DomainRegistrationStatus {
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
-          $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
-          $rawHasTransportError = $hasRawText -and ($raw.rawText -match '(?im)(getaddrinfo\(|Servname not supported for ai_socktype|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|socket error|connect\s+failed)')
+          $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
             $source = 'LinuxWhois'
             $usedFallback = $true
           }
-          elseif ($hasRawText -and -not $rawHasNoData -and -not $rawHasTransportError) {
+          elseif ($rawHasUsableData) {
             $source = 'LinuxWhois'
             $usedFallback = $true
           }
           else {
-            $linuxWhoisError = if ($rawHasTransportError) { "Linux whois transport failed for '$whoisDomain'." } elseif ($rawHasNoData) { "Linux whois returned no registration data for '$whoisDomain'." } else { "Linux whois returned output but no registrant/registrar/dates could be parsed." }
+            $linuxWhoisError = if ($hasRawText) { "Linux whois returned no usable registration data for '$whoisDomain'." } else { "Linux whois returned output but no registrant/registrar/dates could be parsed." }
           }
         }
       }
@@ -1653,20 +1654,19 @@ function Get-DomainRegistrationStatus {
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
-          $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
-          $rawHasTransportError = $hasRawText -and ($raw.rawText -match '(?im)(No such host is known|The remote name could not be resolved|Unable to connect|Connection timed out|Connection refused|Network is unreachable|No route to host|socket error|connect\s+failed)')
+          $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
-          elseif ($hasRawText -and -not $rawHasNoData -and -not $rawHasTransportError) {
+          elseif ($rawHasUsableData) {
             # Treat raw output as success when it contains registration output even if not fully parsed.
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
           else {
-            $sysWhoisError = if ($rawHasTransportError) { "Sysinternals whois transport failed for '$whoisDomain'." } elseif ($rawHasNoData) { "Sysinternals whois returned no registration data for '$whoisDomain'." } else { "Sysinternals whois returned output but no registrant/registrar/dates could be parsed." }
+            $sysWhoisError = if ($hasRawText) { "Sysinternals whois returned no usable registration data for '$whoisDomain'." } else { "Sysinternals whois returned output but no registrant/registrar/dates could be parsed." }
           }
         }
       }
@@ -1694,19 +1694,18 @@ function Get-DomainRegistrationStatus {
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
-          $rawHasNoData    = $hasRawText -and ($raw.rawText -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE)\b')
-          $rawHasTransportError = $hasRawText -and ($raw.rawText -match '(?im)(getaddrinfo\(|Servname not supported for ai_socktype|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|socket error|connect\s+failed)')
+          $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
             $source = 'TcpWhois'
             $usedFallback = $true
           }
-          elseif ($hasRawText -and -not $rawHasNoData -and -not $rawHasTransportError) {
+          elseif ($rawHasUsableData) {
             $source = 'TcpWhois'
             $usedFallback = $true
           }
           else {
-            $tcpWhoisError = if ($rawHasTransportError) { "TCP whois transport failed for '$whoisDomain'." } elseif ($rawHasNoData) { "TCP whois returned no registration data for '$whoisDomain'." } else { "TCP whois returned output but no registrant/registrar/dates could be parsed." }
+            $tcpWhoisError = if ($hasRawText) { "TCP whois returned no usable registration data for '$whoisDomain'." } else { "TCP whois returned output but no registrant/registrar/dates could be parsed." }
           }
         }
       }
@@ -4075,10 +4074,16 @@ function Get-DnsMxStatus {
 
       if ($primaryMx) {
         $mxHost = $primaryMx.ToString().Trim().TrimEnd('.').ToLowerInvariant()
-        switch -Regex ($mxHost) {
+switch -Regex ($mxHost) {
+          # --- Microsoft & Google ---
           'mail\.protection\.outlook\.com\.?$' {
             $result.mxProvider = 'Microsoft 365 / Exchange Online'
             $result.mxProviderHint = 'MX points to Exchange Online Protection (EOP).'
+            break
+          }
+          '(^|\.)protection\.outlook\.com\.?$' {
+            $result.mxProvider = 'Microsoft Defender for Office 365 / EOP'
+            $result.mxProviderHint = 'MX points to Microsoft filtering service.'
             break
           }
           'aspmx\.l\.google\.com\.?$|\.aspmx\.l\.google\.com\.?$|google\.com\.?$' {
@@ -4086,6 +4091,62 @@ function Get-DnsMxStatus {
             $result.mxProviderHint = 'MX points to Google mail exchangers.'
             break
           }
+
+          # --- Major Commercial Email (Yahoo, Apple, Zoho, etc.) ---
+          '(^|\.)yahoodns\.net\.?$|(^|\.)yahoodns\.com\.?$|(^|\.)bizmail\.yahoo\.com\.?$' {
+            $result.mxProvider = 'Yahoo Mail'
+            $result.mxProviderHint = 'MX points to Yahoo Mail.'
+            break
+          }
+          '(^|\.)mail\.icloud\.com\.?$' {
+            $result.mxProvider = 'Apple iCloud Mail'
+            $result.mxProviderHint = 'MX points to Apple iCloud Mail.'
+            break
+          }
+          'zoho\.com\.?$' {
+            $result.mxProvider = 'Zoho Mail'
+            $result.mxProviderHint = 'MX points to Zoho Mail.'
+            break
+          }
+          '(^|\.)messagingengine\.com\.?$' {
+            $result.mxProvider = 'Fastmail'
+            $result.mxProviderHint = 'MX points to Fastmail.'
+            break
+          }
+
+          # --- Privacy-Focused & Secure Webmail ---
+          '(^|\.)protonmail\.ch\.?$|(^|\.)protonmail\.net\.?$' {
+            $result.mxProvider = 'Proton Mail'
+            $result.mxProviderHint = 'MX points to Proton Mail.'
+            break
+          }
+          '(^|\.)tutanota\.de\.?$|(^|\.)tuta\.com\.?$' {
+            $result.mxProvider = 'Tuta (Tutanota)'
+            $result.mxProviderHint = 'MX points to Tuta secure email.'
+            break
+          }
+          '(^|\.)hushmail\.com\.?$' {
+            $result.mxProvider = 'Hushmail'
+            $result.mxProviderHint = 'MX points to Hushmail encrypted email.'
+            break
+          }
+          '(^|\.)runbox\.com\.?$' {
+            $result.mxProvider = 'Runbox'
+            $result.mxProviderHint = 'MX points to Runbox secure email.'
+            break
+          }
+          '(^|\.)mailfence\.com\.?$' {
+            $result.mxProvider = 'Mailfence'
+            $result.mxProviderHint = 'MX points to Mailfence secure email.'
+            break
+          }
+          '(^|\.)startmail\.com\.?$' {
+            $result.mxProvider = 'StartMail'
+            $result.mxProviderHint = 'MX points to StartMail private email.'
+            break
+          }
+
+          # --- Security, Cloud Filtering & Gateways ---
           '(^|\.)mx\.cloudflare\.net\.?$' {
             $result.mxProvider = 'Cloudflare Email Routing'
             $result.mxProviderHint = 'MX points to Cloudflare (mx.cloudflare.net).'
@@ -4096,16 +4157,319 @@ function Get-DnsMxStatus {
             $result.mxProviderHint = 'MX points to Proofpoint-hosted mail.'
             break
           }
+          '(^|\.)ppe-hosted\.com\.?$|(^|\.)pphostedmail\.com\.?$' {
+            $result.mxProvider = 'Proofpoint Essentials'
+            $result.mxProviderHint = 'MX points to Proofpoint Essentials.'
+            break
+          }
           'mimecast\.com\.?$' {
             $result.mxProvider = 'Mimecast'
             $result.mxProviderHint = 'MX points to Mimecast.'
             break
           }
-          'zoho\.com\.?$' {
-            $result.mxProvider = 'Zoho Mail'
-            $result.mxProviderHint = 'MX points to Zoho Mail.'
+          '(^|\.)iphmx\.com\.?$|(^|\.)esa\d*\..*\.iphmx\.com\.?$|(^|\.)ironport\.com\.?$' {
+            $result.mxProvider = 'Cisco Secure Email / IronPort'
+            $result.mxProviderHint = 'MX points to Cisco Secure Email (IronPort).'
             break
           }
+          '(^|\.)mailcontrol\.com\.?$' {
+            $result.mxProvider = 'Forcepoint / Websense Email Security'
+            $result.mxProviderHint = 'MX points to Forcepoint-hosted email security.'
+            break
+          }
+          '(^|\.)mailspamprotection\.com\.?$|(^|\.)spamh\.eu\.?$' {
+            $result.mxProvider = 'SpamHero'
+            $result.mxProviderHint = 'MX points to SpamHero email filtering.'
+            break
+          }
+          '(^|\.)trendmicro\.eu\.?$|(^|\.)trendmicro\.com\.?$|(^|\.)hes\.ms$|(^|\.)mxthunder\.net\.?$' {
+            $result.mxProvider = 'Trend Micro Hosted Email Security'
+            $result.mxProviderHint = 'MX points to Trend Micro hosted email security.'
+            break
+          }
+          '(^|\.)protection\.messagelabs\.com\.?$' {
+            $result.mxProvider = 'Broadcom / Symantec Email Security.cloud'
+            $result.mxProviderHint = 'MX points to Symantec Email Security.cloud.'
+            break
+          }
+          '(^|\.)messagelabs\.com\.?$' {
+            $result.mxProvider = 'Symantec MessageLabs'
+            $result.mxProviderHint = 'MX points to Symantec MessageLabs.'
+            break
+          }
+          '(^|\.)antispamcloud\.com\.?$' {
+            $result.mxProvider = 'SpamExperts / N-able Mail Assure'
+            $result.mxProviderHint = 'MX points to SpamExperts / Mail Assure filtering.'
+            break
+          }
+          '(^|\.)mailfiltering\.com\.?$|(^|\.)spamtitan\.com\.?$' {
+            $result.mxProvider = 'SpamTitan'
+            $result.mxProviderHint = 'MX points to SpamTitan filtering.'
+            break
+          }
+          '(^|\.)protection\.mailguard\.com\.au\.?$|(^|\.)mailguard\.com\.au\.?$' {
+            $result.mxProvider = 'MailGuard'
+            $result.mxProviderHint = 'MX points to MailGuard filtering.'
+            break
+          }
+          '(^|\.)sophos\.com\.?$|(^|\.)sophosxl\.net\.?$' {
+            $result.mxProvider = 'Sophos Email'
+            $result.mxProviderHint = 'MX points to Sophos Email security.'
+            break
+          }
+          '(^|\.)tessian\.com\.?$' {
+            $result.mxProvider = 'Tessian'
+            $result.mxProviderHint = 'MX points to Tessian email security.'
+            break
+          }
+          '(^|\.)barracudanetworks\.com\.?$' {
+            $result.mxProvider = 'Barracuda Networks'
+            $result.mxProviderHint = 'MX points to Barracuda Email Security Gateway.'
+            break
+          }
+          '(^|\.)appriver\.com\.?$' {
+            $result.mxProvider = 'AppRiver / Zix'
+            $result.mxProviderHint = 'MX points to AppRiver secure email.'
+            break
+          }
+          '(^|\.)hornetsecurity\.com\.?$' {
+            $result.mxProvider = 'Hornetsecurity'
+            $result.mxProviderHint = 'MX points to Hornetsecurity cloud filtering.'
+            break
+          }
+          '(^|\.)fortinet\.com\.?$' {
+            $result.mxProvider = 'Fortinet FortiMail'
+            $result.mxProviderHint = 'MX points to Fortinet email security.'
+            break
+          }
+          '(^|\.)trustifi\.com\.?$' {
+            $result.mxProvider = 'Trustifi'
+            $result.mxProviderHint = 'MX points to Trustifi email security.'
+            break
+          }
+          '(^|\.)halon\.io\.?$' {
+            $result.mxProvider = 'Halon'
+            $result.mxProviderHint = 'MX points to Halon MTA / Security.'
+            break
+          }
+          '(^|\.)fireeye\.com\.?$' {
+            $result.mxProvider = 'FireEye'
+            $result.mxProviderHint = 'MX points to FireEye Email Security.'
+            break
+          }
+
+          # --- Transactional, Delivery APIs & Marketing ---
+          '(^|\.)mailgun\.org\.?$' {
+            $result.mxProvider = 'Mailgun'
+            $result.mxProviderHint = 'MX points to Mailgun.'
+            break
+          }
+          '(^|\.)sendgrid\.net\.?$' {
+            $result.mxProvider = 'SendGrid'
+            $result.mxProviderHint = 'MX points to SendGrid.'
+            break
+          }
+          '(^|\.)amazonses\.com\.?$' {
+            $result.mxProvider = 'Amazon SES'
+            $result.mxProviderHint = 'MX points to Amazon SES.'
+            break
+          }
+          '(^|\.)inbound-smtp\.[a-z0-9-]+\.amazonaws\.com\.?$' {
+            $result.mxProvider = 'Amazon SES'
+            $result.mxProviderHint = 'MX points to Amazon SES inbound mail.'
+            break
+          }
+          '(^|\.)postmarkapp\.com\.?$' {
+            $result.mxProvider = 'Postmark'
+            $result.mxProviderHint = 'MX points to Postmark inbound processing.'
+            break
+          }
+          '(^|\.)sparkpostmail\.com\.?$' {
+            $result.mxProvider = 'SparkPost'
+            $result.mxProviderHint = 'MX points to SparkPost inbound.'
+            break
+          }
+          '(^|\.)hubspotemail\.net\.?$' {
+            $result.mxProvider = 'HubSpot'
+            $result.mxProviderHint = 'MX points to HubSpot inbound routing.'
+            break
+          }
+
+          # --- Web Hosting, Registrars & Hosted Email ---
+          '(^|\.)secureserver\.net\.?$|(^|\.)hosteurope\.de\.?$' {
+            $result.mxProvider = 'GoDaddy Email / Workspace Email'
+            $result.mxProviderHint = 'MX points to GoDaddy-hosted email.'
+            break
+          }
+          '(^|\.)mailstore1\.secureserver\.net\.?$|(^|\.)smtp\.secureserver\.net\.?$' {
+            $result.mxProvider = 'GoDaddy Email / Workspace Email'
+            $result.mxProviderHint = 'MX points to GoDaddy-hosted email.'
+            break
+          }
+          '(^|\.)emailsrvr\.com\.?$' {
+            $result.mxProvider = 'Rackspace Email'
+            $result.mxProviderHint = 'MX points to Rackspace Email.'
+            break
+          }
+          '(^|\.)mxroute\.com\.?$' {
+            $result.mxProvider = 'Mxroute'
+            $result.mxProviderHint = 'MX points to Mxroute.'
+            break
+          }
+          '(^|\.)mailhostbox\.com\.?$' {
+            $result.mxProvider = 'Titan Email'
+            $result.mxProviderHint = 'MX points to Titan Email.'
+            break
+          }
+          '(^|\.)titan\.email\.?$' {
+            $result.mxProvider = 'Titan Email'
+            $result.mxProviderHint = 'MX points to Titan Email.'
+            break
+          }
+          '(^|\.)prolocation\.(nl|net)\.?$' {
+            $result.mxProvider = 'Prolocation'
+            $result.mxProviderHint = 'MX points to Prolocation-hosted mail.'
+            break
+          }
+          '(^|\.)intermedia\.net\.?$' {
+            $result.mxProvider = 'Intermedia'
+            $result.mxProviderHint = 'MX points to Intermedia-hosted email.'
+            break
+          }
+          '(^|\.)hostedemail\.com\.?$' {
+            $result.mxProvider = 'Intermedia'
+            $result.mxProviderHint = 'MX points to Intermedia-hosted email.'
+            break
+          }
+          '(^|\.)ovh\.net\.?$|(^|\.)mail\.ovh\.net\.?$' {
+            $result.mxProvider = 'OVH Mail'
+            $result.mxProviderHint = 'MX points to OVH Mail.'
+            break
+          }
+          '(^|\.)ionos\.com\.?$|(^|\.)kundenserver\.de\.?$' {
+            $result.mxProvider = 'IONOS Mail'
+            $result.mxProviderHint = 'MX points to IONOS-hosted mail.'
+            break
+          }
+          '(^|\.)1and1\.(com|de)\.?$' {
+            $result.mxProvider = 'IONOS Mail'
+            $result.mxProviderHint = 'MX points to IONOS-hosted mail.'
+            break
+          }
+          '(^|\.)privateemail\.com\.?$' {
+            $result.mxProvider = 'Namecheap Private Email'
+            $result.mxProviderHint = 'MX points to Namecheap Private Email.'
+            break
+          }
+          '(^|\.)registrar-servers\.com\.?$' {
+            $result.mxProvider = 'Namecheap (Default)'
+            $result.mxProviderHint = 'MX points to Namecheap default mail routing.'
+            break
+          }
+          '(^|\.)hostinger\.com\.?$|(^|\.)tigomail\.net\.?$' {
+            $result.mxProvider = 'Hostinger Email'
+            $result.mxProviderHint = 'MX points to Hostinger-hosted email.'
+            break
+          }
+          '(^|\.)mxlogin\.com\.?$|(^|\.)myregistersite\.com\.?$' {
+            $result.mxProvider = 'Fasthosts / Newfold Email'
+            $result.mxProviderHint = 'MX points to Fasthosts / Newfold-hosted email.'
+            break
+          }
+          '(^|\.)websitewelcome\.com\.?$' {
+            $result.mxProvider = 'Newfold Digital (Bluehost/HostGator)'
+            $result.mxProviderHint = 'MX points to Newfold Digital shared hosting.'
+            break
+          }
+          '(^|\.)gandi\.net\.?$' {
+            $result.mxProvider = 'Gandi Mail'
+            $result.mxProviderHint = 'MX points to Gandi-hosted email.'
+            break
+          }
+          '(^|\.)dreamhost\.com\.?$' {
+            $result.mxProvider = 'DreamHost'
+            $result.mxProviderHint = 'MX points to DreamHost email.'
+            break
+          }
+          '(^|\.)siteground\.com\.?$|(^|\.)sgvps\.net\.?$' {
+            $result.mxProvider = 'SiteGround'
+            $result.mxProviderHint = 'MX points to SiteGround hosting.'
+            break
+          }
+          '(^|\.)a2hosting\.com\.?$' {
+            $result.mxProvider = 'A2 Hosting'
+            $result.mxProviderHint = 'MX points to A2 Hosting.'
+            break
+          }
+          '(^|\.)inmotionhosting\.com\.?$|(^|\.)servconfig\.com\.?$' {
+            $result.mxProvider = 'InMotion Hosting'
+            $result.mxProviderHint = 'MX points to InMotion Hosting.'
+            break
+          }
+          '(^|\.)liquidweb\.com\.?$' {
+            $result.mxProvider = 'Liquid Web'
+            $result.mxProviderHint = 'MX points to Liquid Web hosting.'
+            break
+          }
+          '(^|\.)squarespace\.com\.?$' {
+            $result.mxProvider = 'Squarespace'
+            $result.mxProviderHint = 'MX points to Squarespace default routing.'
+            break
+          }
+
+          # --- International & ISPs ---
+          '(^|\.)yandex\.(ru|net|com)\.?$' {
+            $result.mxProvider = 'Yandex Mail'
+            $result.mxProviderHint = 'MX points to Yandex Mail.'
+            break
+          }
+          '(^|\.)mail\.ru\.?$' {
+            $result.mxProvider = 'Mail.ru'
+            $result.mxProviderHint = 'MX points to Mail.ru.'
+            break
+          }
+          '(^|\.)comcast\.net\.?$' {
+            $result.mxProvider = 'Comcast'
+            $result.mxProviderHint = 'MX points to Comcast / Xfinity.'
+            break
+          }
+          '(^|\.)verizon\.net\.?$' {
+            $result.mxProvider = 'Verizon'
+            $result.mxProviderHint = 'MX points to Verizon.'
+            break
+          }
+          '(^|\.)att\.net\.?$|(^|\.)sbcglobal\.net\.?$' {
+            $result.mxProvider = 'AT&T'
+            $result.mxProviderHint = 'MX points to AT&T / Yahoo infrastructure.'
+            break
+          }
+          '(^|\.)charter\.net\.?$|(^|\.)spectrum\.com\.?$' {
+            $result.mxProvider = 'Spectrum / Charter'
+            $result.mxProviderHint = 'MX points to Spectrum.'
+            break
+          }
+          '(^|\.)btinternet\.com\.?$' {
+            $result.mxProvider = 'BT Group'
+            $result.mxProviderHint = 'MX points to BT Internet (UK).'
+            break
+          }
+          '(^|\.)virginmedia\.com\.?$' {
+            $result.mxProvider = 'Virgin Media'
+            $result.mxProviderHint = 'MX points to Virgin Media (UK).'
+            break
+          }
+          '(^|\.)optusnet\.com\.au\.?$' {
+            $result.mxProvider = 'Optus'
+            $result.mxProviderHint = 'MX points to Optus (Australia).'
+            break
+          }
+          '(^|\.)telstra\.com\.?$' {
+            $result.mxProvider = 'Telstra'
+            $result.mxProviderHint = 'MX points to Telstra (Australia).'
+            break
+          }
+
+          # --- Default Catch-All ---
           default {
             $result.mxProvider = 'Unknown'
             $result.mxProviderHint = 'Provider not recognized from MX hostname.'
@@ -4800,6 +5164,7 @@ function Get-AcsDnsStatus {
         mxFallbackUsed          = $mx.mxFallbackUsed
 
         whoisSource       = $whois.source
+        whoisLookupDomain = $whois.lookupDomain
         whoisCreationDateUtc = $whois.creationDateUtc
         whoisExpiryDateUtc   = $whois.expiryDateUtc
         whoisRegistrar     = $whois.registrar
@@ -4863,7 +5228,7 @@ $htmlPage = @'
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
@@ -4912,6 +5277,12 @@ $htmlPage = @'
   box-sizing: border-box;
 }
 
+html {
+  width: 100%;
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
   margin: 0;
@@ -4919,6 +5290,9 @@ body {
   background: var(--bg);
   color: var(--fg);
   transition: 0.25s background-color ease-in-out;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .search-box, .card, input, button, .code, .mx-table, .history-chip {
@@ -4929,6 +5303,7 @@ body {
   width: 100%;
   max-width: 1100px;
   margin: 0 auto;
+  min-width: 0;
 }
 
 h1 {
@@ -4943,6 +5318,7 @@ h1 {
   gap: 8px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+  width: 100%;
 }
 
 .top-bar button {
@@ -4957,6 +5333,7 @@ h1 {
 
 .language-dropdown {
   position: relative;
+  min-width: 0;
 }
 
 .language-trigger {
@@ -4971,6 +5348,7 @@ h1 {
   color: var(--button-fg-secondary);
   cursor: pointer;
   min-width: 150px;
+  max-width: 100%;
 }
 
 .language-trigger .caret {
@@ -5069,6 +5447,7 @@ html[dir="rtl"] .language-trigger {
   max-width: 760px;
   padding: 18px;
   margin: 0 auto 20px auto;
+  min-width: 0;
 }
 
 .search-box h1 {
@@ -5087,6 +5466,8 @@ html[dir="rtl"] .language-trigger {
 .input-row {
   display: flex;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
 }
 
 input[type=text] {
@@ -5099,6 +5480,7 @@ input[type=text] {
   font-size: 16px;
   background: var(--card-bg);
   color: var(--fg);
+  min-width: 0;
 }
 
 button.primary {
@@ -5315,6 +5697,32 @@ button.primary:disabled {
   padding: 0;
 }
 
+.kv-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  align-items: start;
+  font-size: 12px;
+}
+
+.kv-label {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.kv-value {
+  min-width: 0;
+}
+
+.kv-value em {
+  font-style: italic;
+}
+
+.kv-spacer {
+  grid-column: 1 / -1;
+  height: 8px;
+}
+
 .mx-table {
   width: 100%;
   border-collapse: collapse;
@@ -5412,6 +5820,8 @@ ul.guidance li {
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+  width: 100%;
+  min-width: 0;
 }
 
 .history-chip {
@@ -5472,14 +5882,21 @@ ul.guidance li {
 }
 
 @media (max-width: 640px) {
-  body { padding: 16px 12px; }
+  body {
+    padding: max(16px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  }
   .container { max-width: 100%; }
   .search-box { max-width: 100%; }
   .input-row { flex-direction: column; }
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
-  .mx-table { display: block; overflow-x: auto; white-space: nowrap; }
-  .top-bar button { width: 100%; height: 43px; }
+  .mx-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  .top-bar { align-items: stretch; }
+  .top-bar button, .language-dropdown, .language-trigger { width: 100%; height: 43px; }
+  .language-trigger { min-width: 0; }
+  .language-menu { width: 100%; min-width: 0; }
+  .kv-grid { grid-template-columns: 1fr; gap: 4px 0; }
+  .kv-label { white-space: normal; }
 }
 
 @media print {
@@ -5761,6 +6178,7 @@ const TRANSLATIONS = {
     yes: 'Yes',
     no: 'No',
     source: 'Source',
+    lookupDomainLabel: 'Lookup Domain',
     creationDate: 'Creation Date',
     registryExpiryDate: 'Registry Expiry Date',
     registrarLabel: 'Registrar',
@@ -5983,6 +6401,7 @@ const TRANSLATIONS = {
     yes: 'Sí',
     no: 'No',
     source: 'Origen',
+    lookupDomainLabel: 'Dominio consultado',
     creationDate: 'Fecha de creación',
     registryExpiryDate: 'Fecha de expiración del registro',
     registrarLabel: 'Registrador',
@@ -6544,6 +6963,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: 'TXT ms-domain-verification trouvé.',
     addAcsTxtFromPortal: 'Ajoutez le TXT ACS depuis le portail Azure.',
     source: 'Source',
+    lookupDomainLabel: 'Domaine interrogé',
     creationDate: 'Date de création',
     registryExpiryDate: 'Date d’expiration du registre',
     registrarLabel: 'Bureau d’enregistrement',
@@ -6604,6 +7024,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: 'ms-domain-verification-TXT gefunden.',
     addAcsTxtFromPortal: 'Fügen Sie das ACS-TXT aus dem Azure-Portal hinzu.',
     source: 'Quelle',
+    lookupDomainLabel: 'Abfragedomain',
     creationDate: 'Erstellungsdatum',
     registryExpiryDate: 'Ablaufdatum der Registrierung',
     registrarLabel: 'Registrar',
@@ -6664,6 +7085,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: 'TXT ms-domain-verification encontrado.',
     addAcsTxtFromPortal: 'Adicione o TXT do ACS no portal do Azure.',
     source: 'Fonte',
+    lookupDomainLabel: 'Domínio consultado',
     creationDate: 'Data de criação',
     registryExpiryDate: 'Data de expiração do registro',
     registrarLabel: 'Registrador',
@@ -6724,6 +7146,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: 'تم العثور على TXT الخاص بـ ms-domain-verification.',
     addAcsTxtFromPortal: 'أضف TXT الخاص بـ ACS من مدخل Azure.',
     source: 'المصدر',
+    lookupDomainLabel: 'النطاق المستعلم عنه',
     creationDate: 'تاريخ الإنشاء',
     registryExpiryDate: 'تاريخ انتهاء التسجيل',
     registrarLabel: 'المسجل',
@@ -6797,6 +7220,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: '已找到 ms-domain-verification TXT。',
     addAcsTxtFromPortal: '请从 Azure 门户添加 ACS TXT。',
     source: '来源',
+    lookupDomainLabel: '查询域',
     creationDate: '创建日期',
     registryExpiryDate: '注册到期日期',
     registrarLabel: '注册商',
@@ -6918,6 +7342,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: 'ms-domain-verification TXT मिला।',
     addAcsTxtFromPortal: 'Azure portal से ACS TXT जोड़ें।',
     source: 'स्रोत',
+    lookupDomainLabel: 'क्वेरी किया गया डोमेन',
     creationDate: 'निर्माण तिथि',
     registryExpiryDate: 'रजिस्ट्री समाप्ति तिथि',
     registrarLabel: 'रजिस्ट्रार',
@@ -7039,6 +7464,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: 'ms-domain-verification TXT が見つかりました。',
     addAcsTxtFromPortal: 'Azure portal から ACS TXT を追加してください。',
     source: 'ソース',
+    lookupDomainLabel: '照会ドメイン',
     creationDate: '作成日',
     registryExpiryDate: 'レジストリ有効期限',
     registrarLabel: 'レジストラ',
@@ -7165,6 +7591,7 @@ const TRANSLATION_EXTENSIONS = {
     msDomainVerificationFound: 'TXT ms-domain-verification найден.',
     addAcsTxtFromPortal: 'Добавьте ACS TXT из портала Azure.',
     source: 'Источник',
+    lookupDomainLabel: 'Запрошенный домен',
     creationDate: 'Дата создания',
     registryExpiryDate: 'Дата окончания регистрации',
     registrarLabel: 'Регистратор',
@@ -9766,6 +10193,7 @@ function lookup() {
       ensureResultObject();
       if (key === 'whois') {
         // Namespace WHOIS fields to avoid collisions with DNS fields.
+        lastResult.whoisLookupDomain = data.lookupDomain;
         lastResult.whoisSource = data.source;
         lastResult.whoisCreationDateUtc = data.creationDateUtc;
         lastResult.whoisExpiryDateUtc = data.expiryDateUtc;
@@ -10232,9 +10660,9 @@ function render(r) {
     quotaLines.push(`**SPF (queried domain TXT):** ERROR${errors.base ? ' - ' + errors.base : ''}`);
     quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> ERROR${errors.base ? ' - ' + escapeHtml(errors.base) : ''}`);
   } else if (r.dnsFailed) {
-    quotaItems.push(quotaRow(t('spfQueried'), 'warn', r.dnsError || t('txtLookupFailedOrTimedOut'), null, 'spf'));
-    quotaLines.push(`**${t('spfQueried')}:** WARN${r.dnsError ? ' - ' + r.dnsError : ' - ' + t('txtLookupFailedOrTimedOut')}`);
-    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> WARN${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
+    quotaItems.push(quotaRow(t('spfQueried'), 'fail', r.dnsError || t('txtLookupFailedOrTimedOut'), null, 'spf'));
+    quotaLines.push(`**${t('spfQueried')}:** FAIL${r.dnsError ? ' - ' + r.dnsError : ' - ' + t('txtLookupFailedOrTimedOut')}`);
+    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> FAIL${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
   } else {
     const spfPassesRequirement = !!(r.spfPresent && r.spfHasRequiredInclude === true);
     const spfDetail = r.spfPresent
@@ -10419,35 +10847,49 @@ function render(r) {
     const isExpired = r.whoisIsExpired === true;
     const isYoung = r.whoisIsYoungDomain === true;
     const isVeryYoung = r.whoisIsVeryYoungDomain === true;
-    const whoisLines = [];
-    if (r.whoisSource) whoisLines.push(t('source') + ": " + r.whoisSource);
-    if (r.whoisCreationDateUtc) whoisLines.push(t('creationDate') + ": " + r.whoisCreationDateUtc);
-    if (r.whoisExpiryDateUtc) whoisLines.push(t('registryExpiryDate') + ": " + r.whoisExpiryDateUtc);
-    if (r.whoisRegistrar) whoisLines.push(t('registrarLabel') + ": " + r.whoisRegistrar);
-    if (r.whoisRegistrant) whoisLines.push(t('registrantLabel') + ": " + r.whoisRegistrant);
+    const whoisRows = [];
+    const addWhoisRow = (label, value, options = {}) => {
+      if (value === null || value === undefined || value === '') return;
+      const valueHtml = options.italic
+        ? `<em>${escapeHtml(value)}</em>`
+        : escapeHtml(value);
+      whoisRows.push(`<div class="kv-label">${escapeHtml(label)}:</div><div class="kv-value">${valueHtml}</div>`);
+    };
+
+    addWhoisRow(t('lookupDomainLabel'), r.whoisLookupDomain);
+    if (r.whoisLookupDomain && r.whoisSource) {
+      whoisRows.push('<div class="kv-spacer"></div>');
+    }
+    addWhoisRow(t('source'), r.whoisSource, { italic: true });
+    addWhoisRow(t('creationDate'), r.whoisCreationDateUtc);
+    addWhoisRow(t('registryExpiryDate'), r.whoisExpiryDateUtc);
+    addWhoisRow(t('registrarLabel'), r.whoisRegistrar);
+    addWhoisRow(t('registrantLabel'), r.whoisRegistrant);
     if (r.whoisAgeHuman) {
-      whoisLines.push(t('domainAgeLabel') + ": " + localizeDurationText(r.whoisAgeHuman));
+      addWhoisRow(t('domainAgeLabel'), localizeDurationText(r.whoisAgeHuman));
     } else if (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) {
-      whoisLines.push(t('domainAgeLabel') + " (days): " + String(r.whoisAgeDays));
+      addWhoisRow(t('domainAgeLabel') + ' (days)', String(r.whoisAgeDays));
     }
     if (r.whoisExpiryHuman) {
-      whoisLines.push(t('domainExpiringIn') + ": " + (r.whoisIsExpired === true ? t('wordExpired') : localizeDurationText(r.whoisExpiryHuman)));
-    }
-    if (isExpired) {
-      whoisLines.push(t('statusLabel') + ": " + localizeWhoisStatus(t('expired')));
-    } else if (isVeryYoung) {
-      whoisLines.push(t('noteDomainLessThanDays', { days: String(r.whoisNewDomainErrorThresholdDays || 90) }));
-    } else if (isYoung) {
-      whoisLines.push(t('noteDomainLessThanDays', { days: String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180) }));
+      addWhoisRow(t('domainExpiringIn'), r.whoisIsExpired === true ? t('wordExpired') : localizeDurationText(r.whoisExpiryHuman));
     }
     if (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) {
-      whoisLines.push(t('daysUntilExpiry') + ": " + String(r.whoisExpiryDays));
+      addWhoisRow(t('daysUntilExpiry'), String(r.whoisExpiryDays));
     }
-    if (r.whoisRawText && !r.whoisCreationDateUtc && !r.whoisExpiryDateUtc && !r.whoisRegistrar && !r.whoisRegistrant) {
-      const rawLabel = r.whoisSource || t('rawWhoisLabel');
-      whoisLines.push(t('rawLabel') + " (" + rawLabel + "):\n" + r.whoisRawText);
+    if (isExpired) {
+      addWhoisRow(t('statusLabel'), localizeWhoisStatus(t('expired')));
+    } else if (isVeryYoung) {
+      addWhoisRow(t('statusLabel'), t('noteDomainLessThanDays', { days: String(r.whoisNewDomainErrorThresholdDays || 90) }));
+    } else if (isYoung) {
+      addWhoisRow(t('statusLabel'), t('noteDomainLessThanDays', { days: String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180) }));
     }
-    if (r.whoisError) whoisLines.push(t('error') + ": " + r.whoisError);
+
+    const rawWhoisHtml = (r.whoisRawText && !r.whoisCreationDateUtc && !r.whoisExpiryDateUtc && !r.whoisRegistrar && !r.whoisRegistrant)
+      ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('rawLabel'))} (${escapeHtml(r.whoisSource || t('rawWhoisLabel'))}):\n${escapeHtml(r.whoisRawText)}</div>`
+      : '';
+    const whoisErrorHtml = r.whoisError
+      ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('error'))}: ${escapeHtml(r.whoisError)}</div>`
+      : '';
 
     let whoisLabel = "INFO";
     let whoisTagClass = "tag-info";
@@ -10462,14 +10904,21 @@ function render(r) {
       whoisTagClass = "tag-warn";
     }
 
-    cards.push(card(
-      t('domainRegistration'),
-      whoisLines.join("\n") || t('noRegistrationInformation'),
-      whoisLabel,
-      whoisTagClass,
-      "whois",
-      true
-    ));
+    cards.push(`
+  <div class="card" id="card-whois">
+    <div class="card-header" onclick="toggleCard(this)">
+      <span class="chevron">&#x25BC;</span>
+      <span class="tag ${whoisTagClass}">${escapeHtml(translateBadge(whoisLabel))}</span>
+      <strong>${escapeHtml(t('domainRegistration'))}</strong>
+      <button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, 'whois')">${escapeHtml(t('copy'))}</button>
+    </div>
+    <div id="field-whois" class="card-content">
+      ${whoisRows.length > 0 ? `<div class="kv-grid">${whoisRows.join('')}</div>` : `<div class="code">${escapeHtml(t('noRegistrationInformation'))}</div>`}
+      ${rawWhoisHtml}
+      ${whoisErrorHtml}
+    </div>
+  </div>
+    `);
   }
 
   {
@@ -11249,7 +11698,7 @@ $functionNames = @(
   'Get-HashedDomain',
   'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
-  'Get-RegistrableDomain','Get-ParentDomains',
+  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
   'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
