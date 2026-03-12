@@ -2889,7 +2889,7 @@ function Test-SpfOutlookIncludeToken {
     }
   }
 
-  return ([string]$Text) -match '(?i)(^|\s)[+\-~\?]?include:spf\.protection\.outlook\.com(?=$|\s)'
+  return $false
 }
 
 function Find-SpfOutlookRequirementMatch {
@@ -4872,7 +4872,6 @@ html[dir="rtl"] .language-trigger {
   cursor: pointer;
   text-align: left;
   font-size: 12px;
-  transition: background-color 0.2s ease;
 }
 
 .language-option:hover,
