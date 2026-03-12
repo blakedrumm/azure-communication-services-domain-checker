@@ -4867,11 +4867,13 @@ html[dir="rtl"] .language-trigger {
   cursor: pointer;
   text-align: left;
   font-size: 12px;
+  transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
 }
 
 .language-option:hover,
 .language-option.active {
   background: var(--button-bg-secondary);
+  transform: translateY(-1px);
 }
 
 .language-flag {
@@ -7174,7 +7176,9 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: 'Parent domain {lookupDomain} TXT records (informational only):',
     listedOnZone: 'IP {ip} listed on {zone}{suffix}',
     spfOutlookRequirementPresent: 'Required Outlook SPF include detected for ACS.',
-    spfOutlookRequirementMissing: 'Required Outlook SPF include was not detected for ACS.'
+    spfOutlookRequirementMissing: 'Required Outlook SPF include was not detected for ACS.',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
   },
   es: {
     removeLabel: 'Quitar',
@@ -7203,7 +7207,9 @@ const UI_TRANSLATION_OVERRIDES = {
     providerHintUnknown: 'No se reconoció el proveedor a partir del nombre de host MX.',
     riskClean: 'Limpio',
     riskWarning: 'Aviso',
-    riskElevated: 'Riesgo elevado'
+    riskElevated: 'Riesgo elevado',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
   },
   fr: {
     removeLabel: 'Supprimer',
@@ -7214,7 +7220,9 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: 'Enregistrements TXT du domaine parent {lookupDomain} (informatif uniquement) :',
     listedOnZone: 'IP {ip} listée sur {zone}{suffix}',
     spfOutlookRequirementPresent: 'L’inclusion SPF Outlook requise pour ACS a été détectée.',
-    spfOutlookRequirementMissing: 'L’inclusion SPF Outlook requise pour ACS n’a pas été détectée.'
+    spfOutlookRequirementMissing: 'L’inclusion SPF Outlook requise pour ACS n’a pas été détectée.',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
   },
   de: {
     removeLabel: 'Entfernen',
@@ -7225,7 +7233,9 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: 'TXT-Einträge der übergeordneten Domain {lookupDomain} (nur informativ):',
     listedOnZone: 'IP {ip} ist auf {zone} gelistet{suffix}',
     spfOutlookRequirementPresent: 'Der für ACS erforderliche Outlook-SPF-Include wurde erkannt.',
-    spfOutlookRequirementMissing: 'Der für ACS erforderliche Outlook-SPF-Include wurde nicht erkannt.'
+    spfOutlookRequirementMissing: 'Der für ACS erforderliche Outlook-SPF-Include wurde nicht erkannt.',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
   },
   'pt-BR': {
     removeLabel: 'Remover',
@@ -7236,7 +7246,9 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: 'Registros TXT do domínio pai {lookupDomain} (somente informativo):',
     listedOnZone: 'IP {ip} listada em {zone}{suffix}',
     spfOutlookRequirementPresent: 'O include SPF do Outlook exigido para ACS foi detectado.',
-    spfOutlookRequirementMissing: 'O include SPF do Outlook exigido para ACS não foi detectado.'
+    spfOutlookRequirementMissing: 'O include SPF do Outlook exigido para ACS não foi detectado.',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
   },
   ar: {
     removeLabel: 'إزالة',
@@ -9002,7 +9014,7 @@ function render(r) {
   } else {
     const spfPassesRequirement = !!(r.spfPresent && r.spfHasRequiredInclude !== false);
     const spfDetail = r.spfPresent
-      ? ((r.spfRequiredIncludeError ? `${r.spfValue}\n\n${r.spfRequiredIncludeError}` : (r.spfRequiredIncludeDetail ? `${r.spfValue}\n\n${r.spfRequiredIncludeDetail}` : r.spfValue)))
+      ? ([r.spfValue, getLocalizedSpfRequirementSummary(r)].filter(Boolean).join("\n\n"))
       : t('noSpfRecordDetected');
     quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : 'fail', spfDetail, null, 'spf'));
     const spfState = spfPassesRequirement ? 'PASS' : 'FAIL';
@@ -9419,11 +9431,12 @@ function render(r) {
   }
 
   // Match card order to the Check Summary.
-  const spfCardValue = loaded.base
+  const spfCardBaseValue = loaded.base
     ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
-    : (baseError ? (errors.base || "Error") : "Loading...");
-  const spfExpandedSection = loaded.base && r.spfExpandedText
-    ? `\n\n--- ${t('spfRecordBasics')} ---\n${r.spfExpandedText}`
+    : (baseError ? (errors.base || t('error')) : t('loadingValue'));
+  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary(r)].filter(Boolean).join("\n\n");
+  const spfExpandedSection = currentLanguage === 'en' && loaded.base && r.spfExpandedText
+    ? `\n\n--- ${t('spfRecordBasics')} ---\n${stripSpfRequirementSection(r.spfExpandedText)}`
     : '';
   cards.push(card(
     t('spfQueried'),
@@ -9435,7 +9448,7 @@ function render(r) {
 
   cards.push(card(
     t('acsDomainVerificationTxt'),
-    loaded.base ? (r.acsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} ACS TXT (informational only):\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    loaded.base ? (r.acsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     basePending ? "LOADING" : (baseError ? "ERROR" : (r.acsPresent ? "PASS" : "MISSING")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : (r.acsPresent ? "tag-pass" : "tag-fail")),
     "acsTxt"
@@ -9443,7 +9456,7 @@ function render(r) {
 
   cards.push(card(
     t('txtRecordsQueried'),
-    loaded.base ? (((r.txtRecords || []).join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No TXT records on ${r.domain}\n\nParent domain ${r.txtLookupDomain} TXT records (informational only):\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    loaded.base ? (((r.txtRecords || []).join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noTxtRecordsOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainTxtRecordsInfo', { lookupDomain: r.txtLookupDomain })}\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     basePending ? "LOADING" : (baseError ? "ERROR" : "INFO"),
     basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info"),
     "txtRecords",
@@ -9460,7 +9473,7 @@ function render(r) {
 
   // include full selector host with domain in title
   cards.push(card(
-    `DKIM1 (selector1-azurecomm-prod-net._domainkey.${r.domain || ""})`,
+    `${t('dkim1Title')} (selector1-azurecomm-prod-net._domainkey.${r.domain || ""})`,
     loaded.dkim ? r.dkim1 : (errors.dkim ? errors.dkim : t('loadingValue')),
     (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim1 ? "PASS" : "OPTIONAL")),
     (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim1 ? "tag-pass" : "tag-info")),
@@ -9468,7 +9481,7 @@ function render(r) {
   ));
 
   cards.push(card(
-    `DKIM2 (selector2-azurecomm-prod-net._domainkey.${r.domain || ""})`,
+    `${t('dkim2Title')} (selector2-azurecomm-prod-net._domainkey.${r.domain || ""})`,
     loaded.dkim ? r.dkim2 : (errors.dkim ? errors.dkim : t('loadingValue')),
     (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim2 ? "PASS" : "OPTIONAL")),
     (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim2 ? "tag-pass" : "tag-info")),
@@ -9541,7 +9554,11 @@ function render(r) {
       body += `\n${t('reputationWord')}: ${t('noSuccessfulQueries')}`;
     }
     if (listedItems.length > 0) {
-      const lines = listedItems.map(x => `IP ${x.ip} listed on ${x.queriedZone}${x.listedAddress ? ` (${x.listedAddress})` : ''}`);
+      const lines = listedItems.map(x => t('listedOnZone', {
+        ip: x.ip,
+        zone: x.queriedZone,
+        suffix: x.listedAddress ? ` (${x.listedAddress})` : ''
+      }));
       body += `\n\n${t('listingsLabel')}:\n` + lines.join("\n");
     }
 
