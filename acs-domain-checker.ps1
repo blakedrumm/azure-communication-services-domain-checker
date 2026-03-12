@@ -2871,6 +2871,19 @@ function Test-SpfOutlookIncludeToken {
 
   if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
 
+  foreach ($token in @(Get-SpfTokens -SpfRecord $Text)) {
+    $normalized = ([string]$token).Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+
+    $normalized = $normalized -replace '^[\+\-~\?]', ''
+    if ($normalized -notmatch '^(?i)include:') { continue }
+
+    $target = Get-SpfDomainSpecTarget -Spec ($normalized -replace '^(?i)include:', '') -Domain $null
+    if ($target -eq 'spf.protection.outlook.com') {
+      return $true
+    }
+  }
+
   return ([string]$Text) -match '(?i)(^|\s)[+\-~\?]?include:spf\.protection\.outlook\.com(?=$|\s)'
 }
 
@@ -3094,6 +3107,9 @@ function Get-SpfNestedAnalysis {
           $txtRecords = ResolveSafely $target 'TXT'
           foreach ($txt in @($txtRecords)) {
             $joined = ($txt.Strings -join '').Trim()
+            if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
+              $joined = $joined.Substring(1, $joined.Length - 2)
+            }
             if ($joined -match '(?i)^v=spf1\b') {
               $includeRecord = $joined
               break
@@ -3156,6 +3172,9 @@ function Get-SpfNestedAnalysis {
           $txtRecords = ResolveSafely $target 'TXT'
           foreach ($txt in @($txtRecords)) {
             $joined = ($txt.Strings -join '').Trim()
+            if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
+              $joined = $joined.Substring(1, $joined.Length - 2)
+            }
             if ($joined -match '(?i)^v=spf1\b') {
               $redirectRecord = $joined
               break
@@ -3735,6 +3754,9 @@ function Get-DnsBaseStatus {
     $records = ResolveSafely $Domain "TXT" -ThrowOnError
     foreach ($r in $records) {
       $joined = ($r.Strings -join "").Trim()
+      if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
+        $joined = $joined.Substring(1, $joined.Length - 2)
+      }
       if ($joined) { $txtRecords += $joined }
     }
 
@@ -3782,6 +3804,9 @@ function Get-DnsBaseStatus {
           $parentRecords = ResolveSafely $parent "TXT"
           foreach ($pr in $parentRecords) {
             $joinedParent = ($pr.Strings -join "").Trim()
+            if ($joinedParent.StartsWith('"') -and $joinedParent.EndsWith('"') -and $joinedParent.Length -ge 2) {
+              $joinedParent = $joinedParent.Substring(1, $joinedParent.Length - 2)
+            }
             if ($joinedParent) { $parentTxt += $joinedParent }
           }
 
@@ -7139,6 +7164,159 @@ Object.keys(REMAINING_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, REMAINING_TRANSLATION_OVERRIDES[code]);
 });
 
+const UI_TRANSLATION_OVERRIDES = {
+  en: {
+    removeLabel: 'Remove',
+    reportIssueTitle: 'Report an issue (includes the domain name)',
+    noRecordOnDomain: 'No record on {domain}',
+    parentDomainAcsTxtInfo: 'Parent domain {lookupDomain} ACS TXT (informational only):',
+    noTxtRecordsOnDomain: 'No TXT records on {domain}',
+    parentDomainTxtRecordsInfo: 'Parent domain {lookupDomain} TXT records (informational only):',
+    listedOnZone: 'IP {ip} listed on {zone}{suffix}',
+    spfOutlookRequirementPresent: 'Required Outlook SPF include detected for ACS.',
+    spfOutlookRequirementMissing: 'Required Outlook SPF include was not detected for ACS.'
+  },
+  es: {
+    removeLabel: 'Quitar',
+    reportIssueTitle: 'Reportar un problema (incluye el nombre de dominio)',
+    noRecordOnDomain: 'No hay registro en {domain}',
+    parentDomainAcsTxtInfo: 'TXT ACS del dominio primario {lookupDomain} (solo informativo):',
+    noTxtRecordsOnDomain: 'No hay registros TXT en {domain}',
+    parentDomainTxtRecordsInfo: 'Registros TXT del dominio primario {lookupDomain} (solo informativo):',
+    listedOnZone: 'La IP {ip} figura en {zone}{suffix}',
+    spfOutlookRequirementPresent: 'Se detectó el include SPF de Outlook requerido para ACS.',
+    spfOutlookRequirementMissing: 'No se detectó el include SPF de Outlook requerido para ACS.',
+    unitYearOne: 'año',
+    unitYearMany: 'años',
+    unitMonthOne: 'mes',
+    unitMonthMany: 'meses',
+    unitDayOne: 'día',
+    unitDayMany: 'días',
+    wordExpired: 'Vencido',
+    mxPriorityLabel: 'Prioridad',
+    providerHintMicrosoft365: 'El MX apunta a Exchange Online Protection (EOP).',
+    providerHintGoogleWorkspace: 'El MX apunta a los servidores de correo de Google.',
+    providerHintCloudflare: 'El MX apunta a Cloudflare (mx.cloudflare.net).',
+    providerHintProofpoint: 'El MX apunta a correo alojado en Proofpoint.',
+    providerHintMimecast: 'El MX apunta a Mimecast.',
+    providerHintZoho: 'El MX apunta a Zoho Mail.',
+    providerHintUnknown: 'No se reconoció el proveedor a partir del nombre de host MX.',
+    riskClean: 'Limpio',
+    riskWarning: 'Aviso',
+    riskElevated: 'Riesgo elevado'
+  },
+  fr: {
+    removeLabel: 'Supprimer',
+    reportIssueTitle: 'Signaler un problème (inclut le nom de domaine)',
+    noRecordOnDomain: 'Aucun enregistrement sur {domain}',
+    parentDomainAcsTxtInfo: 'TXT ACS du domaine parent {lookupDomain} (informatif uniquement) :',
+    noTxtRecordsOnDomain: 'Aucun enregistrement TXT sur {domain}',
+    parentDomainTxtRecordsInfo: 'Enregistrements TXT du domaine parent {lookupDomain} (informatif uniquement) :',
+    listedOnZone: 'IP {ip} listée sur {zone}{suffix}',
+    spfOutlookRequirementPresent: 'L’inclusion SPF Outlook requise pour ACS a été détectée.',
+    spfOutlookRequirementMissing: 'L’inclusion SPF Outlook requise pour ACS n’a pas été détectée.'
+  },
+  de: {
+    removeLabel: 'Entfernen',
+    reportIssueTitle: 'Problem melden (einschließlich Domainname)',
+    noRecordOnDomain: 'Kein Eintrag auf {domain}',
+    parentDomainAcsTxtInfo: 'ACS-TXT der übergeordneten Domain {lookupDomain} (nur informativ):',
+    noTxtRecordsOnDomain: 'Keine TXT-Einträge auf {domain}',
+    parentDomainTxtRecordsInfo: 'TXT-Einträge der übergeordneten Domain {lookupDomain} (nur informativ):',
+    listedOnZone: 'IP {ip} ist auf {zone} gelistet{suffix}',
+    spfOutlookRequirementPresent: 'Der für ACS erforderliche Outlook-SPF-Include wurde erkannt.',
+    spfOutlookRequirementMissing: 'Der für ACS erforderliche Outlook-SPF-Include wurde nicht erkannt.'
+  },
+  'pt-BR': {
+    removeLabel: 'Remover',
+    reportIssueTitle: 'Relatar um problema (inclui o nome do domínio)',
+    noRecordOnDomain: 'Nenhum registro em {domain}',
+    parentDomainAcsTxtInfo: 'TXT ACS do domínio pai {lookupDomain} (somente informativo):',
+    noTxtRecordsOnDomain: 'Nenhum registro TXT em {domain}',
+    parentDomainTxtRecordsInfo: 'Registros TXT do domínio pai {lookupDomain} (somente informativo):',
+    listedOnZone: 'IP {ip} listada em {zone}{suffix}',
+    spfOutlookRequirementPresent: 'O include SPF do Outlook exigido para ACS foi detectado.',
+    spfOutlookRequirementMissing: 'O include SPF do Outlook exigido para ACS não foi detectado.'
+  },
+  ar: {
+    removeLabel: 'إزالة',
+    reportIssueTitle: 'الإبلاغ عن مشكلة (يتضمن اسم النطاق)',
+    noRecordOnDomain: 'لا يوجد سجل على {domain}',
+    parentDomainAcsTxtInfo: 'TXT الخاص بـ ACS من النطاق الأصل {lookupDomain} (للمعلومة فقط):',
+    noTxtRecordsOnDomain: 'لا توجد سجلات TXT على {domain}',
+    parentDomainTxtRecordsInfo: 'سجلات TXT من النطاق الأصل {lookupDomain} (للمعلومة فقط):',
+    listedOnZone: 'تم إدراج IP ‏{ip} في {zone}{suffix}',
+    spfOutlookRequirementPresent: 'تم اكتشاف تضمين Outlook SPF المطلوب لـ ACS.',
+    spfOutlookRequirementMissing: 'لم يتم اكتشاف تضمين Outlook SPF المطلوب لـ ACS.',
+    unitYearOne: 'سنة',
+    unitYearMany: 'سنوات',
+    unitMonthOne: 'شهر',
+    unitMonthMany: 'أشهر',
+    unitDayOne: 'يوم',
+    unitDayMany: 'أيام',
+    wordExpired: 'منتهي الصلاحية',
+    mxPriorityLabel: 'الأولوية',
+    providerHintMicrosoft365: 'يشير MX إلى Exchange Online Protection ‏(EOP).',
+    providerHintGoogleWorkspace: 'يشير MX إلى خوادم بريد Google.',
+    providerHintCloudflare: 'يشير MX إلى Cloudflare ‏(mx.cloudflare.net).',
+    providerHintProofpoint: 'يشير MX إلى بريد مستضاف لدى Proofpoint.',
+    providerHintMimecast: 'يشير MX إلى Mimecast.',
+    providerHintZoho: 'يشير MX إلى Zoho Mail.',
+    providerHintUnknown: 'تعذر التعرف على الموفر من اسم مضيف MX.',
+    riskClean: 'نظيف',
+    riskWarning: 'تحذير',
+    riskElevated: 'مخاطر مرتفعة'
+  },
+  'zh-CN': {
+    removeLabel: '移除',
+    reportIssueTitle: '报告问题（包含域名）',
+    noRecordOnDomain: '{domain} 上没有记录',
+    parentDomainAcsTxtInfo: '父域 {lookupDomain} 的 ACS TXT（仅供参考）：',
+    noTxtRecordsOnDomain: '{domain} 上没有 TXT 记录',
+    parentDomainTxtRecordsInfo: '父域 {lookupDomain} 的 TXT 记录（仅供参考）：',
+    listedOnZone: 'IP {ip} 已在 {zone} 中列出{suffix}',
+    spfOutlookRequirementPresent: '已检测到 ACS 所需的 Outlook SPF include。',
+    spfOutlookRequirementMissing: '未检测到 ACS 所需的 Outlook SPF include。'
+  },
+  'hi-IN': {
+    removeLabel: 'हटाएँ',
+    reportIssueTitle: 'समस्या रिपोर्ट करें (डोमेन नाम शामिल है)',
+    noRecordOnDomain: '{domain} पर कोई रिकॉर्ड नहीं है',
+    parentDomainAcsTxtInfo: 'मूल डोमेन {lookupDomain} का ACS TXT (केवल जानकारी के लिए):',
+    noTxtRecordsOnDomain: '{domain} पर कोई TXT रिकॉर्ड नहीं है',
+    parentDomainTxtRecordsInfo: 'मूल डोमेन {lookupDomain} के TXT रिकॉर्ड (केवल जानकारी के लिए):',
+    listedOnZone: 'IP {ip} {zone} पर सूचीबद्ध है{suffix}',
+    spfOutlookRequirementPresent: 'ACS के लिए आवश्यक Outlook SPF include मिल गया।',
+    spfOutlookRequirementMissing: 'ACS के लिए आवश्यक Outlook SPF include नहीं मिला।'
+  },
+  'ja-JP': {
+    removeLabel: '削除',
+    reportIssueTitle: '問題を報告（ドメイン名を含みます）',
+    noRecordOnDomain: '{domain} にレコードはありません',
+    parentDomainAcsTxtInfo: '親ドメイン {lookupDomain} の ACS TXT（参考情報のみ）:',
+    noTxtRecordsOnDomain: '{domain} に TXT レコードはありません',
+    parentDomainTxtRecordsInfo: '親ドメイン {lookupDomain} の TXT レコード（参考情報のみ）:',
+    listedOnZone: 'IP {ip} は {zone} に掲載されています{suffix}',
+    spfOutlookRequirementPresent: 'ACS に必要な Outlook SPF include が検出されました。',
+    spfOutlookRequirementMissing: 'ACS に必要な Outlook SPF include が検出されませんでした。'
+  },
+  'ru-RU': {
+    removeLabel: 'Удалить',
+    reportIssueTitle: 'Сообщить о проблеме (включая имя домена)',
+    noRecordOnDomain: 'На {domain} запись отсутствует',
+    parentDomainAcsTxtInfo: 'ACS TXT родительского домена {lookupDomain} (только для информации):',
+    noTxtRecordsOnDomain: 'На {domain} нет TXT-записей',
+    parentDomainTxtRecordsInfo: 'TXT-записи родительского домена {lookupDomain} (только для информации):',
+    listedOnZone: 'IP {ip} внесён в список {zone}{suffix}',
+    spfOutlookRequirementPresent: 'Обнаружен обязательный Outlook SPF include для ACS.',
+    spfOutlookRequirementMissing: 'Обязательный Outlook SPF include для ACS не обнаружен.'
+  }
+};
+
+Object.keys(UI_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, UI_TRANSLATION_OVERRIDES[code]);
+});
+
 const LANG_PARAM = 'lang';
 const LANGUAGE_OPTIONS = ['en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'];
 const RTL_LANGUAGES = new Set(['ar']);
@@ -7316,6 +7494,7 @@ function applyLanguageToStaticUi() {
 
   const reportBtn = document.getElementById('reportIssueBtn');
   if (reportBtn) reportBtn.innerHTML = t('reportIssue');
+  if (reportBtn) reportBtn.title = t('reportIssueTitle');
 
   const signInBtn = document.getElementById('msSignInBtn');
   if (signInBtn && signInBtn.style.display !== 'none') signInBtn.innerHTML = t('signInMicrosoft');
@@ -7338,7 +7517,10 @@ function applyLanguage(language, persist = true) {
   updateLanguageUrlParameter();
   applyLanguageToStaticUi();
   closeLanguageMenu();
-  if (lastResult) render(lastResult);
+  if (lastResult) {
+    recomputeDerived(lastResult);
+    render(lastResult);
+  }
 }
 
 function changeLanguage(language) {
@@ -7522,7 +7704,7 @@ function renderHistory(items) {
     const arg = JSON.stringify(text);
     return `<span class="history-chip" data-domain="${key}">
       <span class="history-item" onclick='runHistory(${arg})'>${safe}</span>
-      <button type="button" class="history-remove" title="Remove" aria-label="Remove" onclick='event.stopPropagation(); removeHistory(${arg})'>&#x2715;</button>
+      <button type="button" class="history-remove" title="${escapeHtml(t('removeLabel'))}" aria-label="${escapeHtml(t('removeLabel'))}" onclick='event.stopPropagation(); removeHistory(${arg})'>&#x2715;</button>
     </span>`;
   }).join(" ");
   container.innerHTML = escapeHtml(t('recent')) + ": " + chips;
@@ -7662,6 +7844,19 @@ function localizeRiskSummary(value) {
   if (normalized === 'warning') return t('riskWarning');
   if (normalized === 'elevatedrisk') return t('riskElevated');
   return value || t('unknown');
+}
+
+function getLocalizedSpfRequirementSummary(result) {
+  if (!result || !result.spfPresent) return null;
+  if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
+  if (result.spfHasRequiredInclude === true) return t('spfOutlookRequirementPresent');
+  return null;
+}
+
+function stripSpfRequirementSection(text) {
+  const source = String(text || '');
+  if (!source) return '';
+  return source.replace(/\r?\n\r?\nACS Outlook SPF requirement:\r?\n[\s\S]*$/i, '').trim();
 }
 
 function getLocalizedMxProviderHint(provider, fallbackHint) {
@@ -8208,11 +8403,8 @@ function lookup() {
           guidance.push(t('guidanceSpfMissing'));
         }
       }
-      if (r.spfPresent && r.spfHasRequiredInclude === false && r.spfRequiredIncludeError) {
-        guidance.push(r.spfRequiredIncludeError);
-      }
-      if (Array.isArray(r.spfGuidance) && r.spfGuidance.length > 0) {
-        guidance.push(...r.spfGuidance.filter(Boolean));
+      if (r.spfPresent && r.spfHasRequiredInclude === false) {
+        guidance.push(t('spfOutlookRequirementMissing'));
       }
       if (!r.acsPresent) {
         if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
