@@ -1184,6 +1184,112 @@ function Get-DomainAgeDays {
   return [int][Math]::Floor($age.TotalDays)
 }
 
+function Test-LocalHttpEndpoint {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Url,
+
+    [int]$TimeoutSec = 3
+  )
+
+  try {
+    $previousProgressPreference = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+      $resp = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+    }
+    finally {
+      $ProgressPreference = $previousProgressPreference
+    }
+    return [pscustomobject]@{
+      reachable = $true
+      statusCode = [int]$resp.StatusCode
+      statusDescription = [string]$resp.StatusDescription
+      content = [string]$resp.Content
+      error = $null
+    }
+  }
+  catch {
+    $webResp = $null
+    try { $webResp = $_.Exception.Response } catch { $webResp = $null }
+
+    if ($webResp) {
+      $statusCode = $null
+      $statusDescription = $null
+      $content = $null
+      try { $statusCode = [int]$webResp.StatusCode } catch { $statusCode = $null }
+      try { $statusDescription = [string]$webResp.StatusDescription } catch { $statusDescription = $null }
+      try {
+        $stream = $webResp.GetResponseStream()
+        if ($stream) {
+          $reader = [System.IO.StreamReader]::new($stream)
+          try { $content = $reader.ReadToEnd() } finally { try { $reader.Dispose() } catch { } }
+        }
+      } catch { $content = $null }
+
+      return [pscustomobject]@{
+        reachable = $true
+        statusCode = $statusCode
+        statusDescription = $statusDescription
+        content = $content
+        error = $null
+      }
+    }
+
+    return [pscustomobject]@{
+      reachable = $false
+      statusCode = $null
+      statusDescription = $null
+      content = $null
+      error = $_.Exception.Message
+    }
+  }
+}
+
+function Get-ListenerStartupErrorMessage {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$Port,
+
+    [string]$DisplayUrl,
+
+    [string]$BindMode,
+
+    [string]$AttemptedPrefix,
+
+    [string]$AttemptedAddress,
+
+    [string]$FailureMessage
+  )
+
+  $baseUrl = if ([string]::IsNullOrWhiteSpace($DisplayUrl)) { "http://localhost:$Port" } else { $DisplayUrl.TrimEnd('/') }
+  $probe = $null
+  try { $probe = Test-LocalHttpEndpoint -Url "$baseUrl/" -TimeoutSec 2 } catch { $probe = $null }
+
+  if ($probe -and $probe.reachable) {
+    $looksLikeChecker = $false
+    if (-not [string]::IsNullOrWhiteSpace([string]$probe.content)) {
+      if ($probe.content -match 'ACS Email Domain Checker|Azure Communication Services\s*-\s*Email Domain Checker') {
+        $looksLikeChecker = $true
+      }
+    }
+
+    if ($looksLikeChecker) {
+      return "An ACS Email Domain Checker instance appears to already be running on port $Port at $baseUrl/. Reuse that instance, stop the existing process, or start this script with a different -Port value."
+    }
+
+    $statusPart = if ($null -ne $probe.statusCode) { " HTTP $($probe.statusCode)" } else { '' }
+    return "Port $Port is already in use by another HTTP service at $baseUrl/.$statusPart Stop the process using that port or start this script with a different -Port value."
+  }
+
+  $attemptTarget = if (-not [string]::IsNullOrWhiteSpace($AttemptedPrefix)) { $AttemptedPrefix }
+    elseif (-not [string]::IsNullOrWhiteSpace($AttemptedAddress)) { "$AttemptedAddress`:$Port" }
+    else { "port $Port" }
+
+  $reason = if ([string]::IsNullOrWhiteSpace($FailureMessage)) { 'The listener could not be started.' } else { $FailureMessage.Trim() }
+  return "Could not start the local web server on $attemptTarget. $reason Try a different -Port or adjust -Bind ($BindMode)."
+}
+
 function Get-DomainAgeParts {
   param([string]$CreationDateUtc)
 
@@ -1751,6 +1857,7 @@ $serverMode = 'HttpListener'
 $listener = $null
 $tcpListener = $null
 $serverStarted = $false
+$startupErrorMessage = $null
 
 $displayUrl = "http://localhost:$Port"
 
@@ -1788,8 +1895,9 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
     if (-not $IsWindows -or $deny) {
       $serverMode = 'TcpListener'
     } else {
-      Write-Error -Message "HttpListener failed to start on $prefix : $($_.Exception.Message)" -ErrorAction Continue
-      throw
+      $startupErrorMessage = Get-ListenerStartupErrorMessage -Port $Port -DisplayUrl $displayUrl -BindMode $Bind -AttemptedPrefix $prefix -FailureMessage $_.Exception.Message
+      Write-Error -Message $startupErrorMessage -ErrorAction Continue
+      return
     }
   }
 
@@ -1805,8 +1913,8 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       $serverStarted = $true
     }
     catch {
-      # If the socket cannot be opened (e.g., ACL/port in use), fall back to stopped mode so the loop doesn't crash.
-      Write-Error -Message "TcpListener failed to start on $bindAddress`:$Port : $($_.Exception.Message)" -ErrorAction Continue
+      # If the socket cannot be opened (e.g., ACL/port in use), stop cleanly and surface a targeted message.
+      $startupErrorMessage = Get-ListenerStartupErrorMessage -Port $Port -DisplayUrl $displayUrl -BindMode $Bind -AttemptedAddress $bindAddress.ToString() -FailureMessage $_.Exception.Message
       $tcpListener = $null
       $serverMode = 'Stopped'
     }
@@ -1836,7 +1944,11 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       Write-Information -InformationAction Continue -MessageData 'Rate limiting: DISABLED.'
     }
   } else {
-    Write-Error -Message "Server did not start. The port may be in use or requires additional permissions. Try a different -Port or adjust -Bind (Auto/Localhost/Any)." -ErrorAction Continue
+    if (-not [string]::IsNullOrWhiteSpace($startupErrorMessage)) {
+      Write-Error -Message $startupErrorMessage -ErrorAction Continue
+    } else {
+      Write-Error -Message "Server did not start. The port may be in use or requires additional permissions. Try a different -Port or adjust -Bind (Auto/Localhost/Any)." -ErrorAction Continue
+    }
     return
   }
 }
@@ -2920,6 +3032,20 @@ function Find-SpfOutlookRequirementMatch {
       }
     }
 
+    if (([string]$include.domain) -match '(?i)(^|\.)spf\.protection\.outlook\.com$') {
+      return [pscustomobject]@{
+        matchType = 'nested-include'
+        value = $include.domain
+      }
+    }
+
+    if ($include.record -and ([string]$include.record) -match '(?i)\binclude:spf\.protection\.outlook\.com\b') {
+      return [pscustomobject]@{
+        matchType = 'nested-include'
+        value = 'include:spf.protection.outlook.com'
+      }
+    }
+
     $childMatch = Find-SpfOutlookRequirementMatch -Analysis $include.analysis
     if ($childMatch) { return $childMatch }
   }
@@ -2934,6 +3060,13 @@ function Find-SpfOutlookRequirementMatch {
     }
 
     if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.redirect.record)) {
+      return [pscustomobject]@{
+        matchType = 'redirect-include'
+        value = 'include:spf.protection.outlook.com'
+      }
+    }
+
+    if ($Analysis.redirect.record -and ([string]$Analysis.redirect.record) -match '(?i)\binclude:spf\.protection\.outlook\.com\b') {
       return [pscustomobject]@{
         matchType = 'redirect-include'
         value = 'include:spf.protection.outlook.com'
@@ -3010,22 +3143,31 @@ function Get-SpfOutlookRequirementStatus {
 
   $match = Find-SpfOutlookRequirementMatch -Analysis $SpfAnalysis
   if ($match) {
-    $detail = switch ($match.matchType) {
-      'nested-include'    { "Found include:spf.protection.outlook.com in the expanded SPF chain ($($match.value))." }
-      'redirect-include'  { 'Found include:spf.protection.outlook.com through an SPF redirect target.' }
-      'redirect-reference'{ "Detected a redirect path that references spf.protection.outlook.com ($($match.value))." }
-      'exists-reference'  { "Detected an exists/mechanism target that references spf.protection.outlook.com ($($match.value))." }
-      'a-reference'       { "Detected an A mechanism target that references spf.protection.outlook.com ($($match.value))." }
-      'mx-reference'      { "Detected an MX mechanism target that references spf.protection.outlook.com ($($match.value))." }
-      'macro-reference'   { "Detected a macro/reference that contains spf.protection.outlook.com ($($match.value))." }
-      default             { "Detected a reference to spf.protection.outlook.com ($($match.value))." }
-    }
-
-    return [pscustomobject]@{
-      isPresent = $true
-      matchType = $match.matchType
-      detail = $detail
-      error = $null
+    switch ($match.matchType) {
+      'nested-include' {
+        return [pscustomobject]@{
+          isPresent = $true
+          matchType = $match.matchType
+          detail = "Found include:spf.protection.outlook.com in the expanded SPF chain ($($match.value))."
+          error = $null
+        }
+      }
+      'redirect-include' {
+        return [pscustomobject]@{
+          isPresent = $true
+          matchType = $match.matchType
+          detail = 'Found include:spf.protection.outlook.com through an SPF redirect target.'
+          error = $null
+        }
+      }
+      default {
+        return [pscustomobject]@{
+          isPresent = $false
+          matchType = $match.matchType
+          detail = $null
+          error = "SPF for $targetDomain references spf.protection.outlook.com indirectly ($($match.value)), but the required include:spf.protection.outlook.com could not be confirmed in the expanded SPF chain."
+        }
+      }
     }
   }
 
@@ -3853,7 +3995,12 @@ function Get-DnsBaseStatus {
         $spfExpandedText = ($spfExpandedLines -join "`n")
       }
       $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $spfAnalysis -OutlookRequirementStatus $spfOutlookRequirement)
-    } catch { }
+    } catch {
+      try {
+        $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $null
+        $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $null -OutlookRequirementStatus $spfOutlookRequirement)
+      } catch { }
+    }
   }
 
   [pscustomobject]@{
@@ -4592,7 +4739,7 @@ function Get-AcsDnsStatus {
       if ($mx.mxProvider -and $mx.mxProvider -ne 'Unknown') {
         $guidance.Add("Detected MX provider: $($mx.mxProvider)")
       }
-      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $base.spfPresent -and ($base.spfValue -notmatch '(?i)spf\.protection\.outlook\.com')) {
+      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $base.spfPresent -and ($base.spfHasRequiredInclude -eq $false)) {
         $guidance.Add("Your MX indicates Microsoft 365, but SPF does not include spf.protection.outlook.com. Verify your SPF includes the correct provider include.")
       }
       if ($mx.mxProvider -eq 'Google Workspace / Gmail' -and $base.spfPresent -and ($base.spfValue -notmatch '(?i)_spf\.google\.com')) {
@@ -5705,7 +5852,20 @@ const TRANSLATIONS = {
     dmarcAspfRelaxed: 'SPF alignment for {domain} uses relaxed mode (aspf=r). Consider strict alignment (aspf=s) if your senders consistently use the exact domain.',
     dmarcMissingSp: 'DMARC for subdomains of {lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like {domain}, consider adding sp=quarantine or sp=reject for clearer protection.',
     dmarcMissingRua: 'DMARC for {domain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact.',
-    dmarcMissingRuf: 'DMARC for {domain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations.'
+    dmarcMissingRuf: 'DMARC for {domain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations.',
+    mxUsingParentNote: '(using MX from parent domain {lookupDomain})',
+    parentCheckedNoMx: 'Checked parent domain {parentDomain} (no MX).',
+    expiredOn: 'Expired on {date}',
+    registrationAppearsExpired: 'Domain registration appears expired.',
+    newDomainUnder90Days: 'New domain under 90 days old.',
+    newDomainUnder180Days: 'New domain under 180 days old.',
+    domainNameLabel: 'Domain Name',
+    domainStatusLabel: 'Domain Status',
+    mxRecordsLabel: 'MX Records',
+    spfStatusLabel: 'SPF Status',
+    dkim1StatusLabel: 'DKIM1 Status',
+    dkim2StatusLabel: 'DKIM2 Status',
+    dmarcStatusLabel: 'DMARC Status'
   },
   es: {
     languageName: 'Español',
@@ -6611,7 +6771,20 @@ const TRANSLATION_EXTENSIONS = {
     providerHintUnknown: 'تعذر التعرف على الموفر من اسم مضيف MX.',
     riskClean: 'نظيف',
     riskWarning: 'تحذير',
-    riskElevated: 'مخاطر مرتفعة'
+    riskElevated: 'مخاطر مرتفعة',
+    mxUsingParentNote: '(باستخدام MX من النطاق الأصل {lookupDomain})',
+    parentCheckedNoMx: 'تم التحقق من النطاق الأصل {parentDomain} (لا يوجد MX).',
+    expiredOn: 'منتهي في {date}',
+    registrationAppearsExpired: 'يبدو أن تسجيل النطاق قد انتهت صلاحيته.',
+    newDomainUnder90Days: 'نطاق جديد أقل من 90 يومًا.',
+    newDomainUnder180Days: 'نطاق جديد أقل من 180 يومًا.',
+    domainNameLabel: 'اسم النطاق',
+    domainStatusLabel: 'حالة النطاق',
+    mxRecordsLabel: 'سجلات MX',
+    spfStatusLabel: 'حالة SPF',
+    dkim1StatusLabel: 'حالة DKIM1',
+    dkim2StatusLabel: 'حالة DKIM2',
+    dmarcStatusLabel: 'حالة DMARC'
   },
   'zh-CN': {
     passing: '通过',
@@ -6943,6 +7116,11 @@ const TRANSLATION_EXTENSIONS = {
     signInMicrosoft: 'Войти через Microsoft 🔒',
     signOut: 'Выйти',
     recent: 'Недавние',
+    missing: 'ОТСУТСТВУЕТ',
+    pass: 'УСПЕХ',
+    fail: 'ОШИБКА',
+    warn: 'ПРЕДУПРЕЖДЕНИЕ',
+    newDomain: 'НОВЫЙ ДОМЕН',
     languageLabel: 'Язык',
     pageTitle: 'Azure Communication Services - Проверка почтового домена',
     footer: 'ACS Email Domain Checker v{version} • Автор: Blake Drumm • Сгенерировано PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Наверх</a>',
@@ -7048,21 +7226,6 @@ const TRANSLATION_EXTENSIONS = {
     dkim1StatusLabel: 'Статус DKIM1',
     dkim2StatusLabel: 'Статус DKIM2',
     dmarcStatusLabel: 'Статус DMARC'
-  },
-  ar: {
-    mxUsingParentNote: '(باستخدام MX من النطاق الأصل {lookupDomain})',
-    parentCheckedNoMx: 'تم التحقق من النطاق الأصل {parentDomain} (لا يوجد MX).',
-    expiredOn: 'منتهي في {date}',
-    registrationAppearsExpired: 'يبدو أن تسجيل النطاق قد انتهت صلاحيته.',
-    newDomainUnder90Days: 'نطاق جديد أقل من 90 يومًا.',
-    newDomainUnder180Days: 'نطاق جديد أقل من 180 يومًا.',
-    domainNameLabel: 'اسم النطاق',
-    domainStatusLabel: 'حالة النطاق',
-    mxRecordsLabel: 'سجلات MX',
-    spfStatusLabel: 'حالة SPF',
-    dkim1StatusLabel: 'حالة DKIM1',
-    dkim2StatusLabel: 'حالة DKIM2',
-    dmarcStatusLabel: 'حالة DMARC'
   }
 };
 
@@ -7343,6 +7506,1030 @@ Object.keys(UI_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, UI_TRANSLATION_OVERRIDES[code]);
 });
 
+const BADGE_TRANSLATION_OVERRIDES = {
+  es: {
+    checklist: 'LISTA',
+    verificationTag: 'VERIFICACIÓN',
+    docs: 'DOCS',
+    tools: 'HERRAMIENTAS',
+    readinessTips: 'CONSEJOS',
+    lookedUp: 'CONSULTADO',
+    loading: 'CARGANDO',
+    missing: 'FALTA',
+    optional: 'OPCIONAL',
+    info: 'INFO',
+    error: 'ERROR',
+    pass: 'OK',
+    fail: 'FALLO',
+    warn: 'AVISO',
+    pending: 'PENDIENTE',
+    dnsError: 'ERROR DNS',
+    newDomain: 'DOMINIO NUEVO',
+    expired: 'VENCIDO'
+  },
+  fr: {
+    checklist: 'CHECKLIST',
+    verificationTag: 'VÉRIFICATION',
+    docs: 'DOCS',
+    tools: 'OUTILS',
+    readinessTips: 'CONSEILS',
+    lookedUp: 'CONSULTÉ',
+    loading: 'CHARGEMENT',
+    missing: 'MANQUANT',
+    optional: 'OPTIONNEL',
+    info: 'INFO',
+    error: 'ERREUR',
+    pass: 'OK',
+    fail: 'ÉCHEC',
+    warn: 'AVERT.',
+    pending: 'EN ATTENTE',
+    dnsError: 'ERREUR DNS',
+    newDomain: 'NOUVEAU DOMAINE',
+    expired: 'EXPIRÉ'
+  },
+  de: {
+    checklist: 'CHECKLISTE',
+    verificationTag: 'VERIFIZIERUNG',
+    docs: 'DOKS',
+    tools: 'TOOLS',
+    readinessTips: 'TIPPS',
+    lookedUp: 'ABGEFRAGT',
+    loading: 'LADEN',
+    missing: 'FEHLT',
+    optional: 'OPTIONAL',
+    info: 'INFO',
+    error: 'FEHLER',
+    pass: 'OK',
+    fail: 'FEHLER',
+    warn: 'WARNUNG',
+    pending: 'AUSSTEHEND',
+    dnsError: 'DNS-FEHLER',
+    newDomain: 'NEUE DOMAIN',
+    expired: 'ABGELAUFEN'
+  },
+  'pt-BR': {
+    checklist: 'CHECKLIST',
+    verificationTag: 'VERIFICAÇÃO',
+    docs: 'DOCS',
+    tools: 'FERRAMENTAS',
+    readinessTips: 'DICAS',
+    lookedUp: 'CONSULTADO',
+    loading: 'CARREGANDO',
+    missing: 'AUSENTE',
+    optional: 'OPCIONAL',
+    info: 'INFO',
+    error: 'ERRO',
+    pass: 'OK',
+    fail: 'FALHA',
+    warn: 'AVISO',
+    pending: 'PENDENTE',
+    dnsError: 'ERRO DNS',
+    newDomain: 'DOMÍNIO NOVO',
+    expired: 'EXPIRADO'
+  },
+  ar: {
+    checklist: 'قائمة التحقق',
+    verificationTag: 'التحقق',
+    docs: 'المستندات',
+    tools: 'الأدوات',
+    readinessTips: 'نصائح الجاهزية',
+    lookedUp: 'تم الاستعلام',
+    loading: 'جارٍ التحميل',
+    missing: 'مفقود',
+    optional: 'اختياري',
+    info: 'معلومة',
+    error: 'خطأ',
+    pass: 'ناجح',
+    fail: 'فشل',
+    warn: 'تحذير',
+    pending: 'قيد الانتظار',
+    dnsError: 'خطأ DNS',
+    newDomain: 'نطاق جديد',
+    expired: 'منتهي الصلاحية'
+  },
+  'zh-CN': {
+    checklist: '检查清单',
+    verificationTag: '验证',
+    docs: '文档',
+    tools: '工具',
+    readinessTips: '就绪建议',
+    lookedUp: '已查询',
+    loading: '加载中',
+    missing: '缺失',
+    optional: '可选',
+    info: '信息',
+    error: '错误',
+    pass: '通过',
+    fail: '失败',
+    warn: '警告',
+    pending: '等待中',
+    dnsError: 'DNS 错误',
+    newDomain: '新域名',
+    expired: '已过期'
+  },
+  'hi-IN': {
+    checklist: 'चेकलिस्ट',
+    verificationTag: 'सत्यापन',
+    docs: 'दस्तावेज़',
+    tools: 'उपकरण',
+    readinessTips: 'तत्परता सुझाव',
+    lookedUp: 'जाँचा गया',
+    loading: 'लोड हो रहा है',
+    missing: 'अनुपस्थित',
+    optional: 'वैकल्पिक',
+    info: 'जानकारी',
+    error: 'त्रुटि',
+    pass: 'सफल',
+    fail: 'विफल',
+    warn: 'चेतावनी',
+    pending: 'लंबित',
+    dnsError: 'DNS त्रुटि',
+    newDomain: 'नया डोमेन',
+    expired: 'समाप्त'
+  },
+  'ja-JP': {
+    checklist: 'チェックリスト',
+    verificationTag: '検証',
+    docs: 'ドキュメント',
+    tools: 'ツール',
+    readinessTips: '準備のヒント',
+    lookedUp: '確認済み',
+    loading: '読み込み中',
+    missing: '不足',
+    optional: '任意',
+    info: '情報',
+    error: 'エラー',
+    pass: '成功',
+    fail: '失敗',
+    warn: '警告',
+    pending: '保留中',
+    dnsError: 'DNS エラー',
+    newDomain: '新しいドメイン',
+    expired: '期限切れ'
+  },
+  'ru-RU': {
+    checklist: 'КОНТРОЛЬНЫЙ СПИСОК',
+    verificationTag: 'ПРОВЕРКА',
+    docs: 'ДОКУМЕНТАЦИЯ',
+    tools: 'ИНСТРУМЕНТЫ',
+    readinessTips: 'СОВЕТЫ ПО ГОТОВНОСТИ',
+    lookedUp: 'ПРОВЕРЕНО',
+    loading: 'ЗАГРУЗКА',
+    missing: 'ОТСУТСТВУЕТ',
+    optional: 'НЕОБЯЗАТЕЛЬНО',
+    info: 'ИНФО',
+    error: 'ОШИБКА',
+    pass: 'УСПЕХ',
+    fail: 'ОШИБКА',
+    warn: 'ПРЕДУПРЕЖДЕНИЕ',
+    pending: 'ОЖИДАНИЕ',
+    dnsError: 'ОШИБКА DNS',
+    newDomain: 'НОВЫЙ ДОМЕН',
+    expired: 'ИСТЁК'
+  }
+};
+
+Object.keys(BADGE_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, BADGE_TRANSLATION_OVERRIDES[code]);
+});
+
+const RUNTIME_TRANSLATION_OVERRIDES = {
+  es: {
+    authInitFailed: 'No se pudo inicializar el inicio de sesión con Microsoft. Consulte la consola del navegador para más detalles.',
+    authInitFailedWithReason: 'No se pudo inicializar el inicio de sesión con Microsoft: {reason}',
+    authLibraryLoadFailed: 'No se pudo cargar la biblioteca de inicio de sesión de Microsoft. Verifique el acceso a la CDN de MSAL o proporcione un archivo local msal-browser.min.js.',
+    authMicrosoftLabel: 'Microsoft',
+    authSetClientIdAndRestart: 'El inicio de sesión con Microsoft no está configurado. Establezca la variable de entorno ACS_ENTRA_CLIENT_ID y reinicie.',
+    authSignInCancelled: 'Se canceló el inicio de sesión.',
+    authSignInFailed: 'Error al iniciar sesión: {reason}',
+    authSignInNotConfigured: 'El inicio de sesión con Microsoft no está configurado. Confirme que ACS_ENTRA_CLIENT_ID se haya insertado en la página y actualice.',
+    authSigningIn: 'Iniciando sesión...',
+    authUnknownError: 'Error desconocido',
+    copiedToClipboard: 'Copiado al portapapeles.',
+    copiedFieldToClipboard: 'Se copió {field} al portapapeles.',
+    failedCopyFieldToClipboard: 'No se pudo copiar {field} al portapapeles.',
+    failedCopyLink: 'No se pudo copiar el vínculo al portapapeles.',
+    failedCopyScreenshot: 'No se pudo copiar la captura al portapapeles.',
+    failedCopyToClipboard: 'No se pudo copiar al portapapeles.',
+    issueReportConfirm: 'Esto abrirá el sistema de seguimiento de problemas e incluirá {detail}. ¿Desea continuar?',
+    issueReportDetailDomain: 'el nombre de dominio "{domain}"',
+    issueReportDetailInput: 'el nombre de dominio del cuadro de entrada',
+    issueReportingNotConfigured: 'La notificación de problemas no está configurada.',
+    linkCopiedToClipboard: 'Vínculo copiado al portapapeles.',
+    nothingToCopyFor: 'No hay nada para copiar para {field}.',
+    screenshotCaptureFailed: 'No se pudo capturar la captura de pantalla.',
+    screenshotClipboardUnsupported: 'La compatibilidad para copiar capturas al portapapeles no está disponible en este navegador.',
+    screenshotContainerNotFound: 'No se encontró el contenedor para la captura.',
+    screenshotCopiedToClipboard: 'Captura de pantalla copiada al portapapeles.',
+    screenshotRenderFailed: 'Error al capturar la captura de pantalla.',
+    dkim1StatusLabel: 'Estado de DKIM1',
+    dkim2StatusLabel: 'Estado de DKIM2',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dmarcStatusLabel: 'Estado de DMARC',
+    domainNameLabel: 'Nombre de dominio',
+    domainStatusLabel: 'Estado del dominio',
+    expiredOn: 'Vencido el {date}',
+    mxRecordsLabel: 'Registros MX',
+    mxUsingParentNote: '(usando MX del dominio primario {lookupDomain})',
+    newDomainUnder180Days: 'Dominio nuevo de menos de 180 días.',
+    newDomainUnder90Days: 'Dominio nuevo de menos de 90 días.',
+    parentCheckedNoMx: 'Se comprobó el dominio primario {parentDomain} (sin MX).',
+    registrationAppearsExpired: 'El registro del dominio parece expirado.',
+    spfStatusLabel: 'Estado de SPF'
+  },
+  fr: {
+    acsReadyMessage: 'Ce domaine semble prêt pour la vérification de domaine Azure Communication Services.',
+    checkingDnsblReputation: 'Vérification de la réputation DNSBL...',
+    checkingMxRecords: 'Vérification des enregistrements MX...',
+    checkingValue: 'Vérification...',
+    checklist: 'CHECKLIST',
+    cname: 'CNAME',
+    dkim1StatusLabel: 'État DKIM1',
+    dkim2StatusLabel: 'État DKIM2',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: 'L’alignement DKIM pour {domain} utilise le mode relâché (adkim=r). Envisagez un alignement strict (adkim=s) si votre infrastructure d’envoi le permet pour une meilleure protection du domaine.',
+    dmarcAspfRelaxed: 'L’alignement SPF pour {domain} utilise le mode relâché (aspf=r). Envisagez un alignement strict (aspf=s) si vos expéditeurs utilisent systématiquement le domaine exact.',
+    dmarcMissingRua: 'DMARC pour {domain} ne publie pas de rapports agrégés (rua=). L’ajout d’une boîte aux lettres de rapport améliore la visibilité sur les tentatives d’usurpation et l’impact de l’application.',
+    dmarcMissingRuf: 'DMARC pour {domain} ne publie pas de rapports forensiques (ruf=). Si votre processus le permet, ces rapports peuvent fournir plus de détails pour les investigations.',
+    dmarcMissingSp: 'DMARC pour les sous-domaines de {lookupDomain} ne définit pas de politique explicite pour les sous-domaines (sp=). Si vous envoyez depuis des sous-domaines comme {domain}, envisagez d’ajouter sp=quarantine ou sp=reject pour une protection plus claire.',
+    dmarcMonitorOnly: 'DMARC pour {domain} est en mode surveillance uniquement (p=none). Pour une protection plus forte contre l’usurpation, passez à l’application avec p=quarantine ou p=reject après validation des sources légitimes.',
+    dmarcPct: 'L’application de DMARC pour {domain} ne s’applique qu’à {pct}% des messages (pct={pct}). Utilisez pct=100 pour une protection complète une fois le déploiement validé.',
+    dmarcQuarantine: 'DMARC pour {domain} est défini sur p=quarantine. Pour la meilleure protection contre l’usurpation, envisagez p=reject une fois que tout le courrier légitime est entièrement aligné.',
+    dmarcStatusLabel: 'État DMARC',
+    domainDossier: 'Dossier de domaine (CentralOps)',
+    domainNameLabel: 'Nom de domaine',
+    domainStatusLabel: 'Statut du domaine',
+    expiredOn: 'Expiré le {date}',
+    guidanceAcsMissing: 'Le TXT ACS ms-domain-verification est manquant. Ajoutez la valeur depuis le portail Azure.',
+    guidanceAcsMissingParent: 'Le TXT ACS ms-domain-verification est manquant sur {domain}. Le domaine parent {lookupDomain} possède un TXT ACS, mais il ne vérifie pas le sous-domaine interrogé.',
+    guidanceCnameMissing: 'Le CNAME n’est pas configuré sur l’hôte interrogé. Vérifiez que cela correspond bien à votre scénario.',
+    guidanceDkim1Missing: 'Le sélecteur DKIM1 (selector1-azurecomm-prod-net) est manquant.',
+    guidanceDkim2Missing: 'Le sélecteur DKIM2 (selector2-azurecomm-prod-net) est manquant.',
+    guidanceDmarcInherited: 'La politique DMARC effective est héritée du domaine parent {lookupDomain}.',
+    guidanceDmarcMissing: 'DMARC est manquant. Ajoutez un enregistrement TXT _dmarc.{domain} pour réduire le risque d’usurpation.',
+    guidanceDmarcMoreInfo: 'Pour plus d’informations sur la syntaxe de l’enregistrement TXT DMARC, consultez : {url}',
+    guidanceDnsTxtFailed: 'La recherche DNS TXT a échoué ou a expiré. Les autres enregistrements DNS peuvent encore répondre.',
+    guidanceDomainExpired: 'L’enregistrement du domaine semble expiré. Renouvelez le domaine avant de continuer.',
+    guidanceDomainVeryYoung: 'Le domaine a été enregistré très récemment (dans les {days} derniers jours). Cela est traité comme un signal d’erreur pour la vérification ; demandez au client d’attendre davantage.',
+    guidanceDomainYoung: 'Le domaine a été enregistré récemment (dans les {days} derniers jours). Demandez au client d’attendre davantage ; Microsoft utilise ce signal pour aider à empêcher les spammeurs de créer de nouvelles adresses web.',
+    guidanceMxGoogleSpf: 'Votre MX indique Google Workspace, mais SPF n’inclut pas _spf.google.com. Vérifiez que votre SPF inclut bien l’include correct du fournisseur.',
+    guidanceMxMicrosoftSpf: 'Votre MX indique Microsoft 365, mais SPF n’inclut pas spf.protection.outlook.com. Vérifiez que votre SPF inclut bien l’include correct du fournisseur.',
+    guidanceMxMissing: 'Aucun enregistrement MX détecté. Le flux de messagerie ne fonctionnera pas tant que les enregistrements MX ne seront pas configurés.',
+    guidanceMxMissingCheckedParent: 'Aucun enregistrement MX détecté pour {domain} ni pour son domaine parent {parentDomain}. Le flux de messagerie ne fonctionnera pas tant que les enregistrements MX ne seront pas configurés.',
+    guidanceMxMissingParentFallback: 'Aucun enregistrement MX trouvé sur {domain} ; utilisation des MX du domaine parent {lookupDomain} en secours.',
+    guidanceMxParentShown: 'Aucun enregistrement MX trouvé sur {domain} ; les résultats affichés proviennent du domaine parent {lookupDomain}.',
+    guidanceMxProviderDetected: 'Fournisseur MX détecté : {provider}',
+    guidanceMxZohoSpf: 'Votre MX indique Zoho, mais SPF n’inclut pas include:zoho.com. Vérifiez que votre SPF inclut bien l’include correct du fournisseur.',
+    guidanceSpfMissing: 'SPF est manquant. Ajoutez v=spf1 include:spf.protection.outlook.com -all (ou l’équivalent de votre fournisseur).',
+    guidanceSpfMissingParent: 'SPF est manquant sur {domain}. Le domaine parent {lookupDomain} publie SPF, mais SPF ne s’applique pas automatiquement au sous-domaine interrogé.',
+    listingsLabel: 'Inscriptions',
+    missingRequiredAcsTxt: 'Le TXT ACS requis est manquant.',
+    mxRecordsLabel: 'Enregistrements MX',
+    mxUsingParentNote: '(utilise le MX du domaine parent {lookupDomain})',
+    newDomainUnder180Days: 'Nouveau domaine de moins de 180 jours.',
+    newDomainUnder90Days: 'Nouveau domaine de moins de 90 jours.',
+    newDomainUnderDays: 'Nouveau domaine (moins de {days} jours){suffix}',
+    noMxRecordsDetected: 'Aucun enregistrement MX détecté.',
+    noSpfRecordDetected: 'Aucun enregistrement SPF détecté.',
+    noSuccessfulQueries: 'Inconnu (aucune requête réussie)',
+    notStarted: 'NON DÉMARRÉ',
+    notVerified: 'NON VÉRIFIÉ',
+    noteDomainLessThanDays: 'Le domaine a moins de {days} jours.',
+    pageTitle: 'Azure Communication Services - Vérificateur de domaine e-mail',
+    parentCheckedNoMx: 'Le domaine parent {parentDomain} a été vérifié (aucun MX).',
+    registrationAppearsExpired: 'L’enregistrement du domaine semble expiré.',
+    rawWhoisLabel: 'whois',
+    source: 'Source',
+    spfStatusLabel: 'État SPF',
+    statusLabel: 'Statut',
+    txtLookupFailedOrTimedOut: 'La recherche TXT a échoué ou a expiré.',
+    type: 'Type',
+    unableDetermineAcsTxtValue: 'Impossible de déterminer la valeur TXT ACS.',
+    unknown: 'INCONNU',
+    verified: 'VÉRIFIÉ',
+    waitingForBaseTxtLookup: 'En attente de la recherche TXT de base...',
+    waitingForTxtLookup: 'En attente de la recherche TXT...'
+  },
+  de: {
+    acsReadyMessage: 'Diese Domain scheint für die Domänenüberprüfung von Azure Communication Services bereit zu sein.',
+    checkingDnsblReputation: 'DNSBL-Reputation wird geprüft...',
+    checkingMxRecords: 'MX-Einträge werden geprüft...',
+    checkingValue: 'Wird geprüft...',
+    cname: 'CNAME',
+    dkim1StatusLabel: 'DKIM1-Status',
+    dkim2StatusLabel: 'DKIM2-Status',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: 'Die DKIM-Ausrichtung für {domain} verwendet den lockeren Modus (adkim=r). Erwägen Sie eine strikte Ausrichtung (adkim=s), wenn Ihre Sendeinfrastruktur dies zur besseren Domainabsicherung unterstützt.',
+    dmarcAspfRelaxed: 'Die SPF-Ausrichtung für {domain} verwendet den lockeren Modus (aspf=r). Erwägen Sie eine strikte Ausrichtung (aspf=s), wenn Ihre Absender konsequent die exakte Domain verwenden.',
+    dmarcMissingRua: 'DMARC für {domain} veröffentlicht keine aggregierten Berichte (rua=). Das Hinzufügen eines Berichtspostfachs verbessert die Sichtbarkeit von Spoofing-Versuchen und deren Auswirkungen.',
+    dmarcMissingRuf: 'DMARC für {domain} veröffentlicht keine forensischen Berichte (ruf=). Falls Ihr Prozess dies zulässt, können forensische Berichte zusätzliche Details für Untersuchungen liefern.',
+    dmarcMissingSp: 'DMARC für Subdomains von {lookupDomain} definiert keine explizite Subdomain-Richtlinie (sp=). Wenn Sie von Subdomains wie {domain} senden, sollten Sie sp=quarantine oder sp=reject für klareren Schutz hinzufügen.',
+    dmarcMonitorOnly: 'DMARC für {domain} ist nur auf Überwachung eingestellt (p=none). Für stärkeren Schutz vor Spoofing wechseln Sie nach der Validierung legitimer Quellen zu p=quarantine oder p=reject.',
+    dmarcPct: 'Die DMARC-Durchsetzung für {domain} gilt nur für {pct}% der Nachrichten (pct={pct}). Verwenden Sie pct=100 für vollständigen Schutz, sobald die Einführung validiert ist.',
+    dmarcQuarantine: 'DMARC für {domain} ist auf p=quarantine gesetzt. Für den stärksten Schutz vor Spoofing sollten Sie p=reject in Betracht ziehen, sobald legitime E-Mails vollständig ausgerichtet sind.',
+    dmarcStatusLabel: 'DMARC-Status',
+    domain: 'Domain',
+    domainDossier: 'Domain-Dossier (CentralOps)',
+    domainNameLabel: 'Domainname',
+    domainStatusLabel: 'Domainstatus',
+    expiredOn: 'Abgelaufen am {date}',
+    guidanceAcsMissing: 'ACS ms-domain-verification TXT fehlt. Fügen Sie den Wert aus dem Azure-Portal hinzu.',
+    guidanceAcsMissingParent: 'ACS ms-domain-verification TXT fehlt auf {domain}. Die übergeordnete Domain {lookupDomain} enthält zwar einen ACS-TXT-Eintrag, überprüft aber nicht die abgefragte Subdomain.',
+    guidanceCnameMissing: 'CNAME ist auf dem abgefragten Host nicht konfiguriert. Prüfen Sie, ob dies für Ihr Szenario erwartet wird.',
+    guidanceDkim1Missing: 'DKIM selector1 (selector1-azurecomm-prod-net) fehlt.',
+    guidanceDkim2Missing: 'DKIM selector2 (selector2-azurecomm-prod-net) fehlt.',
+    guidanceDmarcInherited: 'Die effektive DMARC-Richtlinie wird von der übergeordneten Domain {lookupDomain} geerbt.',
+    guidanceDmarcMissing: 'DMARC fehlt. Fügen Sie einen _dmarc.{domain}-TXT-Eintrag hinzu, um das Spoofing-Risiko zu verringern.',
+    guidanceDmarcMoreInfo: 'Weitere Informationen zur Syntax von DMARC-TXT-Einträgen finden Sie unter: {url}',
+    guidanceDnsTxtFailed: 'Die DNS-TXT-Abfrage ist fehlgeschlagen oder hat das Zeitlimit überschritten. Andere DNS-Einträge können dennoch aufgelöst werden.',
+    guidanceDomainExpired: 'Die Domainregistrierung scheint abgelaufen zu sein. Verlängern Sie die Domain, bevor Sie fortfahren.',
+    guidanceDomainVeryYoung: 'Die Domain wurde erst vor sehr kurzer Zeit registriert (innerhalb von {days} Tagen). Dies wird als Fehlersignal für die Überprüfung gewertet; bitten Sie den Kunden, noch etwas länger zu warten.',
+    guidanceDomainYoung: 'Die Domain wurde vor Kurzem registriert (innerhalb von {days} Tagen). Bitten Sie den Kunden, noch etwas länger zu warten; Microsoft nutzt dieses Signal, um Spammer am Einrichten neuer Webadressen zu hindern.',
+    guidanceMxGoogleSpf: 'Ihr MX weist auf Google Workspace hin, aber SPF enthält nicht _spf.google.com. Prüfen Sie, ob SPF den korrekten Provider-Include enthält.',
+    guidanceMxMicrosoftSpf: 'Ihr MX weist auf Microsoft 365 hin, aber SPF enthält nicht spf.protection.outlook.com. Prüfen Sie, ob SPF den korrekten Provider-Include enthält.',
+    guidanceMxMissing: 'Es wurden keine MX-Einträge erkannt. Der E-Mail-Fluss funktioniert erst, wenn MX-Einträge konfiguriert sind.',
+    guidanceMxMissingCheckedParent: 'Es wurden keine MX-Einträge für {domain} oder die übergeordnete Domain {parentDomain} erkannt. Der E-Mail-Fluss funktioniert erst, wenn MX-Einträge konfiguriert sind.',
+    guidanceMxMissingParentFallback: 'Keine MX-Einträge auf {domain} gefunden; MX-Einträge der übergeordneten Domain {lookupDomain} werden als Fallback verwendet.',
+    guidanceMxParentShown: 'Keine MX-Einträge auf {domain} gefunden; die angezeigten Ergebnisse stammen von der übergeordneten Domain {lookupDomain}.',
+    guidanceMxProviderDetected: 'Erkannter MX-Anbieter: {provider}',
+    guidanceMxZohoSpf: 'Ihr MX weist auf Zoho hin, aber SPF enthält nicht include:zoho.com. Prüfen Sie, ob SPF den korrekten Provider-Include enthält.',
+    guidanceSpfMissing: 'SPF fehlt. Fügen Sie v=spf1 include:spf.protection.outlook.com -all hinzu (oder das entsprechende Äquivalent Ihres Anbieters).',
+    guidanceSpfMissingParent: 'SPF fehlt auf {domain}. Die übergeordnete Domain {lookupDomain} veröffentlicht SPF, aber SPF gilt nicht automatisch für die abgefragte Subdomain.',
+    hostname: 'Hostname',
+    info: 'INFO',
+    ipv4: 'IPv4',
+    ipv6: 'IPv6',
+    listingsLabel: 'Listungen',
+    missingRequiredAcsTxt: 'Erforderlicher ACS-TXT-Eintrag fehlt.',
+    mxRecordsLabel: 'MX-Einträge',
+    mxUsingParentNote: '(MX der übergeordneten Domain {lookupDomain} wird verwendet)',
+    newDomainUnder180Days: 'Neue Domain, jünger als 180 Tage.',
+    newDomainUnder90Days: 'Neue Domain, jünger als 90 Tage.',
+    newDomainUnderDays: 'Neue Domain (unter {days} Tagen){suffix}',
+    noMxRecordsDetected: 'Keine MX-Einträge erkannt.',
+    noSpfRecordDetected: 'Kein SPF-Eintrag erkannt.',
+    noSuccessfulQueries: 'Unbekannt (keine erfolgreichen Abfragen)',
+    notStarted: 'NICHT GESTARTET',
+    notVerified: 'NICHT VERIFIZIERT',
+    noteDomainLessThanDays: 'Die Domain ist jünger als {days} Tage.',
+    pageTitle: 'Azure Communication Services - E-Mail-Domain-Prüfer',
+    parentCheckedNoMx: 'Übergeordnete Domain {parentDomain} wurde geprüft (kein MX).',
+    rawWhoisLabel: 'whois',
+    registrarLabel: 'Registrar',
+    registrationAppearsExpired: 'Die Domainregistrierung scheint abgelaufen zu sein.',
+    reputationDnsbl: 'Reputation (DNSBL)',
+    reputationWord: 'Reputation',
+    spfStatusLabel: 'SPF-Status',
+    status: 'Status',
+    statusLabel: 'Status',
+    tools: 'TOOLS',
+    txtLookupFailedOrTimedOut: 'TXT-Abfrage fehlgeschlagen oder Zeitüberschreitung.',
+    unableDetermineAcsTxtValue: 'ACS-TXT-Wert konnte nicht ermittelt werden.',
+    unknown: 'UNBEKANNT',
+    verified: 'VERIFIZIERT',
+    waitingForBaseTxtLookup: 'Warten auf Basis-TXT-Abfrage...',
+    waitingForTxtLookup: 'Warten auf TXT-Abfrage...'
+  },
+  'pt-BR': {
+    acsReadyMessage: 'Este domínio parece pronto para a verificação de domínio do Azure Communication Services.',
+    checkingDnsblReputation: 'Verificando a reputação DNSBL...',
+    checkingMxRecords: 'Verificando os registros MX...',
+    checkingValue: 'Verificando...',
+    checklist: 'CHECKLIST',
+    cname: 'CNAME',
+    dkim1StatusLabel: 'Status do DKIM1',
+    dkim2StatusLabel: 'Status do DKIM2',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: 'O alinhamento DKIM para {domain} usa modo relaxado (adkim=r). Considere alinhamento estrito (adkim=s) se a sua infraestrutura de envio permitir, para maior proteção do domínio.',
+    dmarcAspfRelaxed: 'O alinhamento SPF para {domain} usa modo relaxado (aspf=r). Considere alinhamento estrito (aspf=s) se os remetentes usarem consistentemente o domínio exato.',
+    dmarcMissingRua: 'O DMARC para {domain} não publica relatórios agregados (rua=). Adicionar uma caixa de correio de relatório melhora a visibilidade sobre tentativas de spoofing e o impacto da aplicação.',
+    dmarcMissingRuf: 'O DMARC para {domain} não publica relatórios forenses (ruf=). Se o seu processo permitir, esses relatórios podem fornecer mais detalhes para investigações.',
+    dmarcMissingSp: 'O DMARC para subdomínios de {lookupDomain} não define uma política explícita para subdomínios (sp=). Se você envia de subdomínios como {domain}, considere adicionar sp=quarantine ou sp=reject para uma proteção mais clara.',
+    dmarcMonitorOnly: 'O DMARC para {domain} está somente em monitoramento (p=none). Para uma proteção mais forte contra spoofing, avance para enforcement com p=quarantine ou p=reject após validar as fontes legítimas de e-mail.',
+    dmarcPct: 'A aplicação do DMARC para {domain} vale apenas para {pct}% das mensagens (pct={pct}). Use pct=100 para proteção total quando a implantação estiver validada.',
+    dmarcQuarantine: 'O DMARC para {domain} está definido como p=quarantine. Para a postura mais forte contra spoofing, considere p=reject quando confirmar que o e-mail legítimo está totalmente alinhado.',
+    dmarcStatusLabel: 'Status do DMARC',
+    docs: 'DOCS',
+    domainDossier: 'Dossiê do domínio (CentralOps)',
+    domainNameLabel: 'Nome do domínio',
+    domainStatusLabel: 'Status do domínio',
+    expiredOn: 'Expirado em {date}',
+    guidanceAcsMissing: 'O TXT ACS ms-domain-verification está ausente. Adicione o valor do portal do Azure.',
+    guidanceAcsMissingParent: 'O TXT ACS ms-domain-verification está ausente em {domain}. O domínio pai {lookupDomain} tem um TXT ACS, mas ele não verifica o subdomínio consultado.',
+    guidanceCnameMissing: 'O CNAME não está configurado no host consultado. Valide se isso é esperado para o seu cenário.',
+    guidanceDkim1Missing: 'O seletor DKIM1 (selector1-azurecomm-prod-net) está ausente.',
+    guidanceDkim2Missing: 'O seletor DKIM2 (selector2-azurecomm-prod-net) está ausente.',
+    guidanceDmarcInherited: 'A política DMARC efetiva é herdada do domínio pai {lookupDomain}.',
+    guidanceDmarcMissing: 'O DMARC está ausente. Adicione um registro TXT _dmarc.{domain} para reduzir o risco de falsificação.',
+    guidanceDmarcMoreInfo: 'Para mais informações sobre a sintaxe do registro TXT DMARC, consulte: {url}',
+    guidanceDnsTxtFailed: 'A consulta DNS TXT falhou ou excedeu o tempo limite. Outros registros DNS ainda podem resolver.',
+    guidanceDomainExpired: 'O registro do domínio parece expirado. Renove o domínio antes de continuar.',
+    guidanceDomainVeryYoung: 'O domínio foi registrado muito recentemente (dentro de {days} dias). Isso é tratado como um sinal de erro para verificação; peça ao cliente para aguardar mais tempo.',
+    guidanceDomainYoung: 'O domínio foi registrado recentemente (dentro de {days} dias). Peça ao cliente para aguardar mais tempo; a Microsoft usa esse sinal para ajudar a impedir que remetentes mal-intencionados configurem novos endereços da web.',
+    guidanceMxGoogleSpf: 'Seu MX indica Google Workspace, mas o SPF não inclui _spf.google.com. Verifique se o SPF inclui o include correto do provedor.',
+    guidanceMxMicrosoftSpf: 'Seu MX indica Microsoft 365, mas o SPF não inclui spf.protection.outlook.com. Verifique se o SPF inclui o include correto do provedor.',
+    guidanceMxMissing: 'Nenhum registro MX detectado. O fluxo de e-mail não funcionará até que os registros MX sejam configurados.',
+    guidanceMxMissingCheckedParent: 'Nenhum registro MX detectado para {domain} nem para o domínio pai {parentDomain}. O fluxo de e-mail não funcionará até que os registros MX sejam configurados.',
+    guidanceMxMissingParentFallback: 'Nenhum registro MX encontrado em {domain}; usando os registros MX do domínio pai {lookupDomain} como alternativa.',
+    guidanceMxParentShown: 'Nenhum registro MX encontrado em {domain}; os resultados exibidos são do domínio pai {lookupDomain}.',
+    guidanceMxProviderDetected: 'Provedor MX detectado: {provider}',
+    guidanceMxZohoSpf: 'Seu MX indica Zoho, mas o SPF não inclui include:zoho.com. Verifique se o SPF inclui o include correto do provedor.',
+    guidanceSpfMissing: 'O SPF está ausente. Adicione v=spf1 include:spf.protection.outlook.com -all (ou o equivalente do seu provedor).',
+    guidanceSpfMissingParent: 'O SPF está ausente em {domain}. O domínio pai {lookupDomain} publica SPF, mas o SPF não se aplica automaticamente ao subdomínio consultado.',
+    hostname: 'Hostname',
+    info: 'INFO',
+    ipv4: 'IPv4',
+    ipv6: 'IPv6',
+    listingsLabel: 'Listagens',
+    missingRequiredAcsTxt: 'O TXT ACS obrigatório está ausente.',
+    mxRecordsLabel: 'Registros MX',
+    mxUsingParentNote: '(usando MX do domínio pai {lookupDomain})',
+    newDomainUnder180Days: 'Domínio novo com menos de 180 dias.',
+    newDomainUnder90Days: 'Domínio novo com menos de 90 dias.',
+    newDomainUnderDays: 'Domínio novo (menos de {days} dias){suffix}',
+    noMxRecordsDetected: 'Nenhum registro MX detectado.',
+    noSpfRecordDetected: 'Nenhum registro SPF detectado.',
+    noSuccessfulQueries: 'Desconhecida (nenhuma consulta bem-sucedida)',
+    notStarted: 'NÃO INICIADO',
+    notVerified: 'NÃO VERIFICADO',
+    noteDomainLessThanDays: 'O domínio tem menos de {days} dias.',
+    pageTitle: 'Azure Communication Services - Verificador de domínio de e-mail',
+    parentCheckedNoMx: 'O domínio pai {parentDomain} foi verificado (sem MX).',
+    rawWhoisLabel: 'whois',
+    registrationAppearsExpired: 'O registro do domínio parece expirado.',
+    spfStatusLabel: 'Status do SPF',
+    status: 'Status',
+    statusLabel: 'Status',
+    txtLookupFailedOrTimedOut: 'A consulta TXT falhou ou excedeu o tempo limite.',
+    unableDetermineAcsTxtValue: 'Não foi possível determinar o valor do TXT ACS.',
+    unknown: 'DESCONHECIDO',
+    verified: 'VERIFICADO',
+    waitingForBaseTxtLookup: 'Aguardando a consulta TXT base...',
+    waitingForTxtLookup: 'Aguardando a consulta TXT...'
+  },
+  ar: {
+    acsEmailDomainVerification: 'التحقق من نطاق البريد الإلكتروني لـ ACS',
+    acsEmailQuotaLimitIncrease: 'زيادة حد حصة البريد الإلكتروني لـ ACS',
+    acsReadiness: 'جاهزية ACS',
+    acsTxtMsDomainVerification: 'TXT الخاص بـ ACS ‏(ms-domain-verification)',
+    addAcsTxtFromPortal: 'أضف TXT الخاص بـ ACS من مدخل Azure.',
+    additionalDetailsMinus: 'تفاصيل إضافية -',
+    additionalDetailsPlus: 'تفاصيل إضافية +',
+    addresses: 'العناوين',
+    ageLabel: 'العمر',
+    authMicrosoftLabel: 'Microsoft',
+    checkingDnsblReputation: 'جارٍ التحقق من سمعة DNSBL...',
+    checkingMxRecords: 'جارٍ التحقق من سجلات MX...',
+    checkingValue: 'جارٍ التحقق...',
+    checklist: 'قائمة التحقق',
+    clean: 'نظيف',
+    cname: 'CNAME',
+    copied: 'تم النسخ! ✔',
+    copy: 'نسخ',
+    copyEmailQuota: 'نسخ حصة البريد الإلكتروني',
+    creationDate: 'تاريخ الإنشاء',
+    daysUntilExpiry: 'عدد الأيام حتى الانتهاء',
+    detectedProvider: 'موفر تم اكتشافه',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dkimRecordBasics: 'أساسيات DKIM',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: 'يستخدم توافق DKIM لـ {domain} الوضع المرن (adkim=r). فكّر في التوافق الصارم (adkim=s) إذا كانت بنية الإرسال لديك تدعمه لحماية أكثر إحكامًا للنطاق.',
+    dmarcAspfRelaxed: 'يستخدم توافق SPF لـ {domain} الوضع المرن (aspf=r). فكّر في التوافق الصارم (aspf=s) إذا كان المرسلون لديك يستخدمون النطاق نفسه باستمرار.',
+    dmarcMissingRua: 'لا ينشر DMARC لـ {domain} تقارير مجمعة (rua=). تؤدي إضافة صندوق بريد للتقارير إلى تحسين الرؤية لمحاولات الانتحال وتأثيرات التطبيق.',
+    dmarcMissingRuf: 'لا ينشر DMARC لـ {domain} تقارير تحليلية/جنائية (ruf=). إذا كانت إجراءاتك تسمح بذلك، فقد توفر هذه التقارير تفاصيل إضافية للتحقيقات.',
+    dmarcMissingSp: 'لا يحدد DMARC للنطاقات الفرعية التابعة لـ {lookupDomain} سياسة صريحة للنطاقات الفرعية (sp=). إذا كنت ترسل من نطاقات فرعية مثل {domain}، ففكّر في إضافة sp=quarantine أو sp=reject لحماية أوضح.',
+    dmarcMonitorOnly: 'إن DMARC لـ {domain} في وضع المراقبة فقط (p=none). للحصول على حماية أقوى من الانتحال، انتقل إلى التطبيق باستخدام p=quarantine أو p=reject بعد التحقق من مصادر البريد الشرعية.',
+    dmarcPct: 'يتم تطبيق DMARC لـ {domain} على {pct}% فقط من الرسائل (pct={pct}). استخدم pct=100 للحصول على حماية كاملة بمجرد التحقق من النشر.',
+    dmarcQuarantine: 'تم تعيين DMARC لـ {domain} إلى p=quarantine. للحصول على أقوى حماية من الانتحال، فكّر في p=reject بعد التأكد من أن البريد الشرعي متوافق بالكامل.',
+    dmarcRecordBasics: 'أساسيات DMARC',
+    dnsTxtLookup: 'استعلام DNS TXT',
+    docs: 'المستندات',
+    domain: 'النطاق',
+    domainAgeLabel: 'عمر النطاق',
+    domainDossier: 'ملف النطاق (CentralOps)',
+    domainExpiringIn: 'ينتهي النطاق خلال',
+    effectivePolicyInherited: 'يتم توريث السياسة الفعالة من النطاق الأصل {lookupDomain}.',
+    error: 'خطأ',
+    errorsCount: 'الأخطاء',
+    excellent: 'ممتاز',
+    expired: 'منتهي الصلاحية',
+    expiresInLabel: 'ينتهي خلال',
+    failed: 'فشل',
+    fair: 'مقبول',
+    footer: 'ACS Email Domain Checker v{version} • من إعداد: Blake Drumm • تم إنشاؤه بواسطة PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">العودة إلى الأعلى</a>',
+    good: 'جيد',
+    great: 'رائع',
+    guidanceAcsMissing: 'TXT الخاص بـ ACS ms-domain-verification مفقود. أضف القيمة من مدخل Azure.',
+    guidanceAcsMissingParent: 'TXT الخاص بـ ACS ms-domain-verification مفقود على {domain}. يحتوي النطاق الأصل {lookupDomain} على سجل ACS TXT، لكنه لا يتحقق من النطاق الفرعي المستعلم عنه.',
+    guidanceCnameMissing: 'لم تتم تهيئة CNAME على المضيف المستعلم عنه. تحقّق مما إذا كان هذا متوقعًا لسيناريوك.',
+    guidanceDkim1Missing: 'محدد DKIM1 ‏(selector1-azurecomm-prod-net) مفقود.',
+    guidanceDkim2Missing: 'محدد DKIM2 ‏(selector2-azurecomm-prod-net) مفقود.',
+    guidanceDmarcInherited: 'يتم توريث سياسة DMARC الفعالة من النطاق الأصل {lookupDomain}.',
+    guidanceDmarcMissing: 'DMARC مفقود. أضف سجل TXT باسم _dmarc.{domain} لتقليل مخاطر الانتحال.',
+    guidanceDmarcMoreInfo: 'لمزيد من المعلومات حول بنية سجل DMARC TXT، راجع: {url}',
+    guidanceDnsTxtFailed: 'فشل استعلام DNS TXT أو انتهت مهلته. قد تظل سجلات DNS الأخرى قابلة للحل.',
+    guidanceMxGoogleSpf: 'يشير MX لديك إلى Google Workspace، لكن SPF لا يتضمن _spf.google.com. تحقّق من أن SPF يتضمن include الصحيح للموفر.',
+    guidanceMxMicrosoftSpf: 'يشير MX لديك إلى Microsoft 365، لكن SPF لا يتضمن spf.protection.outlook.com. تحقّق من أن SPF يتضمن include الصحيح للموفر.',
+    guidanceMxMissing: 'لم يتم اكتشاف سجلات MX. لن يعمل تدفق البريد حتى تتم تهيئة سجلات MX.',
+    guidanceMxMissingCheckedParent: 'لم يتم اكتشاف سجلات MX لـ {domain} أو النطاق الأصل {parentDomain}. لن يعمل تدفق البريد حتى تتم تهيئة سجلات MX.',
+    guidanceMxMissingParentFallback: 'لم يتم العثور على سجلات MX على {domain}؛ سيتم استخدام سجلات MX من النطاق الأصل {lookupDomain} كخيار احتياطي.',
+    guidanceMxParentShown: 'لم يتم العثور على سجلات MX على {domain}؛ النتائج المعروضة مأخوذة من النطاق الأصل {lookupDomain}.',
+    guidanceMxZohoSpf: 'يشير MX لديك إلى Zoho، لكن SPF لا يتضمن include:zoho.com. تحقّق من أن SPF يتضمن include الصحيح للموفر.',
+    guidanceSpfMissing: 'سجل SPF مفقود. أضف v=spf1 include:spf.protection.outlook.com -all (أو ما يعادله لدى موفر الخدمة).',
+    guidanceSpfMissingParent: 'سجل SPF مفقود على {domain}. ينشر النطاق الأصل {lookupDomain} سجل SPF، لكن SPF لا ينطبق تلقائيًا على النطاق الفرعي المستعلم عنه.',
+    hostname: 'اسم المضيف',
+    info: 'معلومة',
+    ipAddress: 'عنوان IP',
+    ipv4: 'IPv4',
+    ipv4Addresses: 'عناوين IPv4',
+    ipv6: 'IPv6',
+    ipv6Addresses: 'عناوين IPv6',
+    listed: 'مدرج',
+    listingsLabel: 'الإدراجات',
+    loadingValue: 'جارٍ التحميل...',
+    missingRequiredAcsTxt: 'TXT المطلوب الخاص بـ ACS مفقود.',
+    msDomainVerificationFound: 'تم العثور على TXT الخاص بـ ms-domain-verification.',
+    multiRblLookup: 'بحث DNSBL عبر MultiRBL',
+    mxRecordBasics: 'أساسيات MX',
+    newDomainUnderDays: 'نطاق جديد (أقل من {days} يومًا){suffix}',
+    no: 'لا',
+    noAdditionalGuidance: 'لا توجد إرشادات إضافية.',
+    noAdditionalMxDetails: 'لا توجد تفاصيل MX إضافية متوفرة.',
+    noIpAddressesFound: 'لم يتم العثور على عناوين IP',
+    noMxParentChecked: 'تم التحقق من النطاق الأصل {parentDomain} (لا يوجد MX).',
+    noMxParentShowing: 'لم يتم العثور على سجلات MX على {domain}؛ يتم عرض سجلات MX الخاصة بالنطاق الأصل {lookupDomain}.',
+    noMxRecordsDetected: 'لم يتم اكتشاف سجلات MX.',
+    noRecordsAvailable: 'لا توجد سجلات متوفرة.',
+    noRegistrationInformation: 'لا تتوفر معلومات تسجيل.',
+    noSpfRecordDetected: 'لم يتم اكتشاف سجل SPF.',
+    noSuccessfulQueries: 'غير معروف (لا توجد استعلامات ناجحة)',
+    none: 'لا يوجد',
+    notListed: 'غير مدرج',
+    notStarted: 'لم يبدأ',
+    notVerified: 'غير متحقق',
+    noteDomainLessThanDays: 'عمر النطاق أقل من {days} يومًا.',
+    passing: 'ناجح',
+    pending: 'قيد الانتظار',
+    poor: 'ضعيف',
+    priority: 'الأولوية',
+    rawLabel: 'خام',
+    rawWhoisLabel: 'whois',
+    readinessTips: 'نصائح الجاهزية',
+    registrantLabel: 'صاحب التسجيل',
+    registrarLabel: 'المسجل',
+    registrationDetailsUnavailable: 'تفاصيل التسجيل غير متوفرة.',
+    registryExpiryDate: 'تاريخ انتهاء التسجيل',
+    reputationDnsbl: 'السمعة (DNSBL)',
+    reputationWord: 'السمعة',
+    resolvedSuccessfully: 'تم الحل بنجاح.',
+    resolvedUsingGuidance: 'تم الحل باستخدام {lookupDomain} كمرجع.',
+    riskLabel: 'المخاطر',
+    source: 'المصدر',
+    spfRecordBasics: 'أساسيات SPF',
+    status: 'الحالة',
+    statusChecking: 'جارٍ التحقق من {domain} ⏳',
+    statusCollectedOn: 'تم الجمع في: {value}',
+    statusLabel: 'الحالة',
+    statusSomeChecksFailed: 'فشلت بعض عمليات التحقق ❌',
+    statusTxtFailed: 'فشل استعلام TXT ❌ — قد تظل سجلات DNS الأخرى قابلة للحل.',
+    tools: 'الأدوات',
+    totalQueries: 'إجمالي الاستعلامات',
+    txtLookupFailedOrTimedOut: 'فشل استعلام TXT أو انتهت مهلته.',
+    type: 'النوع',
+    unableDetermineAcsTxtValue: 'تعذر تحديد قيمة ACS TXT.',
+    unknown: 'غير معروف',
+    usingIpParent: 'جارٍ استخدام عناوين IP من النطاق الأصل {domain} (لا توجد سجلات A/AAAA على {queryDomain}).',
+    verificationTag: 'التحقق',
+    verified: 'تم التحقق',
+    view: 'عرض',
+    waitingForBaseTxtLookup: 'في انتظار استعلام TXT الأساسي...',
+    waitingForTxtLookup: 'في انتظار استعلام TXT...',
+    warningState: 'تحذير',
+    yes: 'نعم',
+    zonesQueried: 'المناطق التي تم الاستعلام عنها'
+  },
+  'zh-CN': {
+    acsEmailDomainVerification: 'ACS 电子邮件域验证',
+    acsEmailQuotaLimitIncrease: 'ACS 电子邮件配额限制提升',
+    additionalDetailsMinus: '更多详细信息 -',
+    additionalDetailsPlus: '更多详细信息 +',
+    addresses: '地址',
+    authMicrosoftLabel: 'Microsoft',
+    checkingDnsblReputation: '正在检查 DNSBL 信誉...',
+    checkingMxRecords: '正在检查 MX 记录...',
+    checkingValue: '检查中...',
+    checklist: '检查清单',
+    cname: 'CNAME',
+    copied: '已复制！✔',
+    copy: '复制',
+    copyEmailQuota: '复制电子邮件配额',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dkimRecordBasics: 'DKIM 基础知识',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: '{domain} 的 DKIM 对齐使用宽松模式 (adkim=r)。如果您的发送基础结构支持，为了更严格的域保护，可考虑使用严格对齐 (adkim=s)。',
+    dmarcAspfRelaxed: '{domain} 的 SPF 对齐使用宽松模式 (aspf=r)。如果您的发件方始终使用完全相同的域，可考虑使用严格对齐 (aspf=s)。',
+    dmarcMissingRua: '{domain} 的 DMARC 未发布聚合报告 (rua=)。添加报告邮箱有助于提高对伪造尝试和实施影响的可见性。',
+    dmarcMissingRuf: '{domain} 的 DMARC 未发布取证报告 (ruf=)。如果您的流程允许，这些报告可为调查提供额外的失败细节。',
+    dmarcMissingSp: '{lookupDomain} 的子域 DMARC 未定义显式子域策略 (sp=)。如果您从 {domain} 这样的子域发送邮件，请考虑添加 sp=quarantine 或 sp=reject 以获得更明确的保护。',
+    dmarcMonitorOnly: '{domain} 的 DMARC 仅处于监视模式 (p=none)。若要获得更强的反伪造保护，请在验证合法邮件源后迁移到 p=quarantine 或 p=reject。',
+    dmarcPct: '{domain} 的 DMARC 仅应用于 {pct}% 的邮件 (pct={pct})。在确认部署后，请使用 pct=100 以获得完整保护。',
+    dmarcQuarantine: '{domain} 的 DMARC 设置为 p=quarantine。若要获得最强的反伪造防护，在确认合法邮件已完全对齐后，可考虑使用 p=reject。',
+    dmarcRecordBasics: 'DMARC 基础知识',
+    docs: '文档',
+    domain: '域名',
+    domainDossier: '域名档案 (CentralOps)',
+    effectivePolicyInherited: '有效策略继承自父域 {lookupDomain}。',
+    error: '错误',
+    expired: '已过期',
+    footer: 'ACS Email Domain Checker v{version} • 作者：Blake Drumm • 由 PowerShell 生成 • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">返回顶部</a>',
+    guidanceAcsMissing: '缺少 ACS ms-domain-verification TXT。请从 Azure 门户添加该值。',
+    guidanceAcsMissingParent: '{domain} 上缺少 ACS ms-domain-verification TXT。父域 {lookupDomain} 具有 ACS TXT，但它不会验证所查询的子域。',
+    guidanceCnameMissing: '查询的主机上未配置 CNAME。请确认这是否符合您的场景预期。',
+    guidanceDkim1Missing: '缺少 DKIM selector1 (selector1-azurecomm-prod-net)。',
+    guidanceDkim2Missing: '缺少 DKIM selector2 (selector2-azurecomm-prod-net)。',
+    guidanceDmarcInherited: '有效 DMARC 策略继承自父域 {lookupDomain}。',
+    guidanceDmarcMissing: '缺少 DMARC。请添加 _dmarc.{domain} TXT 记录以降低伪造风险。',
+    guidanceDmarcMoreInfo: '有关 DMARC TXT 记录语法的详细信息，请参阅：{url}',
+    guidanceDnsTxtFailed: 'DNS TXT 查询失败或超时。其他 DNS 记录仍可能可以解析。',
+    guidanceMxGoogleSpf: '您的 MX 指向 Google Workspace，但 SPF 不包含 _spf.google.com。请验证 SPF 是否包含正确的提供商 include。',
+    guidanceMxMicrosoftSpf: '您的 MX 指向 Microsoft 365，但 SPF 不包含 spf.protection.outlook.com。请验证 SPF 是否包含正确的提供商 include。',
+    guidanceMxMissing: '未检测到 MX 记录。在配置 MX 记录之前，邮件流将无法正常工作。',
+    guidanceMxMissingCheckedParent: '未检测到 {domain} 或其父域 {parentDomain} 的 MX 记录。在配置 MX 记录之前，邮件流将无法正常工作。',
+    guidanceMxMissingParentFallback: '{domain} 上未找到 MX 记录；正在使用父域 {lookupDomain} 的 MX 记录作为回退。',
+    guidanceMxParentShown: '{domain} 上未找到 MX 记录；显示的结果来自父域 {lookupDomain}。',
+    guidanceMxZohoSpf: '您的 MX 指向 Zoho，但 SPF 不包含 include:zoho.com。请验证 SPF 是否包含正确的提供商 include。',
+    guidanceSpfMissing: '缺少 SPF。请添加 v=spf1 include:spf.protection.outlook.com -all（或您提供商的等效值）。',
+    guidanceSpfMissingParent: '{domain} 上缺少 SPF。父域 {lookupDomain} 发布了 SPF，但 SPF 不会自动应用到查询的子域。',
+    hostname: '主机名',
+    info: '信息',
+    ipAddress: 'IP 地址',
+    ipv4: 'IPv4',
+    ipv4Addresses: 'IPv4 地址',
+    ipv6: 'IPv6',
+    ipv6Addresses: 'IPv6 地址',
+    listingsLabel: '列入情况',
+    loadingValue: '加载中...',
+    missingRequiredAcsTxt: '缺少所需的 ACS TXT。',
+    multiRblLookup: 'MultiRBL DNSBL 查询',
+    mxRecordBasics: 'MX 基础知识',
+    newDomainUnderDays: '新域名（少于 {days} 天）{suffix}',
+    noAdditionalGuidance: '无其他指导。',
+    noAdditionalMxDetails: '没有其他 MX 详细信息。',
+    noIpAddressesFound: '未找到 IP 地址',
+    noMxParentChecked: '已检查父域 {parentDomain}（无 MX）。',
+    noMxParentShowing: '{domain} 上未找到 MX 记录；正在显示父域 {lookupDomain} 的 MX。',
+    noMxRecordsDetected: '未检测到 MX 记录。',
+    noRecordsAvailable: '没有可用记录。',
+    noSpfRecordDetected: '未检测到 SPF 记录。',
+    noSuccessfulQueries: '未知（无成功查询）',
+    notStarted: '未开始',
+    notVerified: '未验证',
+    noteDomainLessThanDays: '域名年龄少于 {days} 天。',
+    pending: '等待中',
+    rawWhoisLabel: 'whois',
+    readinessTips: '就绪建议',
+    reputationDnsbl: '信誉 (DNSBL)',
+    resolvedUsingGuidance: '使用 {lookupDomain} 进行参考解析。',
+    spfRecordBasics: 'SPF 基础知识',
+    status: '状态',
+    statusChecking: '正在检查 {domain} ⏳',
+    statusCollectedOn: '收集时间：{value}',
+    statusLabel: '状态',
+    statusSomeChecksFailed: '部分检查失败 ❌',
+    statusTxtFailed: 'TXT 查询失败 ❌ — 其他 DNS 记录仍可能可以解析。',
+    tools: '工具',
+    txtLookupFailedOrTimedOut: 'TXT 查询失败或超时。',
+    type: '类型',
+    unableDetermineAcsTxtValue: '无法确定 ACS TXT 值。',
+    unknown: '未知',
+    usingIpParent: '正在使用父域 {domain} 的 IP 地址（{queryDomain} 上没有 A/AAAA）。',
+    verificationTag: '验证',
+    verified: '已验证',
+    view: '查看',
+    waitingForBaseTxtLookup: '正在等待基础 TXT 查询...',
+    waitingForTxtLookup: '正在等待 TXT 查询...'
+  },
+  'hi-IN': {
+    acsEmailDomainVerification: 'ACS ईमेल डोमेन सत्यापन',
+    acsEmailQuotaLimitIncrease: 'ACS ईमेल कोटा सीमा वृद्धि',
+    acsTxtMsDomainVerification: 'ACS TXT (ms-domain-verification)',
+    additionalDetailsMinus: 'अतिरिक्त विवरण -',
+    additionalDetailsPlus: 'अतिरिक्त विवरण +',
+    addresses: 'पते',
+    authMicrosoftLabel: 'Microsoft',
+    checkingDnsblReputation: 'DNSBL प्रतिष्ठा जाँची जा रही है...',
+    checkingMxRecords: 'MX रिकॉर्ड जाँचे जा रहे हैं...',
+    checkingValue: 'जाँच हो रही है...',
+    checklist: 'चेकलिस्ट',
+    cname: 'CNAME',
+    copied: 'कॉपी हो गया! ✔',
+    copy: 'कॉपी करें',
+    copyEmailQuota: 'ईमेल कोटा कॉपी करें',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dkimRecordBasics: 'DKIM की मूल बातें',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: '{domain} के लिए DKIM संरेखण relaxed mode (adkim=r) का उपयोग करता है। यदि आपकी sending infrastructure समर्थन करती है, तो अधिक कड़े डोमेन सुरक्षा के लिए strict alignment (adkim=s) पर विचार करें।',
+    dmarcAspfRelaxed: '{domain} के लिए SPF संरेखण relaxed mode (aspf=r) का उपयोग करता है। यदि आपके प्रेषक लगातार सटीक डोमेन का उपयोग करते हैं, तो strict alignment (aspf=s) पर विचार करें।',
+    dmarcMissingRua: '{domain} के लिए DMARC aggregate reporting (rua=) प्रकाशित नहीं करता। एक reporting mailbox जोड़ने से spoofing प्रयासों और enforcement प्रभाव की दृश्यता बढ़ती है।',
+    dmarcMissingRuf: '{domain} के लिए DMARC forensic reporting (ruf=) प्रकाशित नहीं करता। यदि आपकी प्रक्रिया अनुमति देती है, तो forensic reports जांच के लिए अतिरिक्त विफलता विवरण दे सकती हैं।',
+    dmarcMissingSp: '{lookupDomain} के उपडोमेनों के लिए DMARC स्पष्ट subdomain policy (sp=) परिभाषित नहीं करता। यदि आप {domain} जैसे उपडोमेनों से भेजते हैं, तो अधिक स्पष्ट सुरक्षा के लिए sp=quarantine या sp=reject जोड़ने पर विचार करें।',
+    dmarcMonitorOnly: '{domain} के लिए DMARC monitor-only (p=none) है। spoofing के विरुद्ध अधिक मजबूत सुरक्षा के लिए, वैध मेल स्रोतों को सत्यापित करने के बाद p=quarantine या p=reject पर जाएँ।',
+    dmarcPct: '{domain} के लिए DMARC enforcement केवल {pct}% संदेशों पर लागू है (pct={pct})। rollout सत्यापित होने के बाद पूर्ण सुरक्षा के लिए pct=100 का उपयोग करें।',
+    dmarcQuarantine: '{domain} के लिए DMARC p=quarantine पर सेट है। spoofing के विरुद्ध सबसे मजबूत सुरक्षा के लिए, वैध मेल के पूरी तरह aligned होने की पुष्टि के बाद p=reject पर विचार करें।',
+    dmarcRecordBasics: 'DMARC की मूल बातें',
+    docs: 'दस्तावेज़',
+    domain: 'डोमेन',
+    domainDossier: 'डोमेन डॉसियर (CentralOps)',
+    effectivePolicyInherited: 'प्रभावी नीति मूल डोमेन {lookupDomain} से विरासत में मिली है।',
+    error: 'त्रुटि',
+    expired: 'समाप्त',
+    guidanceAcsMissing: 'ACS ms-domain-verification TXT अनुपस्थित है। Azure portal से मान जोड़ें।',
+    guidanceAcsMissingParent: '{domain} पर ACS ms-domain-verification TXT अनुपस्थित है। मूल डोमेन {lookupDomain} पर ACS TXT है, लेकिन यह क्वेरी किए गए उपडोमेन को सत्यापित नहीं करता।',
+    guidanceCnameMissing: 'क्वेरी किए गए होस्ट पर CNAME कॉन्फ़िगर नहीं है। सत्यापित करें कि यह आपके परिदृश्य के लिए अपेक्षित है।',
+    guidanceDkim1Missing: 'DKIM selector1 (selector1-azurecomm-prod-net) अनुपस्थित है।',
+    guidanceDkim2Missing: 'DKIM selector2 (selector2-azurecomm-prod-net) अनुपस्थित है।',
+    guidanceDmarcInherited: 'प्रभावी DMARC नीति मूल डोमेन {lookupDomain} से विरासत में मिली है।',
+    guidanceDmarcMissing: 'DMARC अनुपस्थित है। spoofing जोखिम कम करने के लिए _dmarc.{domain} TXT रिकॉर्ड जोड़ें।',
+    guidanceDmarcMoreInfo: 'DMARC TXT रिकॉर्ड सिंटैक्स के बारे में अधिक जानकारी के लिए देखें: {url}',
+    guidanceDnsTxtFailed: 'DNS TXT लुकअप विफल हुआ या समय समाप्त हो गया। अन्य DNS रिकॉर्ड अभी भी resolve हो सकते हैं।',
+    guidanceMxGoogleSpf: 'आपका MX Google Workspace दर्शाता है, लेकिन SPF में _spf.google.com शामिल नहीं है। सत्यापित करें कि SPF में सही provider include है।',
+    guidanceMxMicrosoftSpf: 'आपका MX Microsoft 365 दर्शाता है, लेकिन SPF में spf.protection.outlook.com शामिल नहीं है। सत्यापित करें कि SPF में सही provider include है।',
+    guidanceMxMissing: 'कोई MX रिकॉर्ड नहीं मिला। जब तक MX रिकॉर्ड कॉन्फ़िगर नहीं होते, मेल प्रवाह काम नहीं करेगा।',
+    guidanceMxMissingCheckedParent: '{domain} या उसके मूल डोमेन {parentDomain} के लिए कोई MX रिकॉर्ड नहीं मिला। जब तक MX रिकॉर्ड कॉन्फ़िगर नहीं होते, मेल प्रवाह काम नहीं करेगा।',
+    guidanceMxMissingParentFallback: '{domain} पर कोई MX रिकॉर्ड नहीं मिला; बैकअप के रूप में मूल डोमेन {lookupDomain} के MX रिकॉर्ड उपयोग किए जा रहे हैं।',
+    guidanceMxParentShown: '{domain} पर कोई MX रिकॉर्ड नहीं मिला; दिखाए गए परिणाम मूल डोमेन {lookupDomain} से हैं।',
+    guidanceMxZohoSpf: 'आपका MX Zoho दर्शाता है, लेकिन SPF में include:zoho.com शामिल नहीं है। सत्यापित करें कि SPF में सही provider include है।',
+    guidanceSpfMissing: 'SPF अनुपस्थित है। v=spf1 include:spf.protection.outlook.com -all जोड़ें (या अपने provider के समकक्ष)।',
+    guidanceSpfMissingParent: '{domain} पर SPF अनुपस्थित है। मूल डोमेन {lookupDomain} SPF प्रकाशित करता है, लेकिन SPF स्वचालित रूप से क्वेरी किए गए उपडोमेन पर लागू नहीं होता।',
+    hostname: 'होस्टनाम',
+    info: 'जानकारी',
+    ipAddress: 'IP पता',
+    ipv4: 'IPv4',
+    ipv4Addresses: 'IPv4 पते',
+    ipv6: 'IPv6',
+    ipv6Addresses: 'IPv6 पते',
+    listingsLabel: 'सूचियाँ',
+    loadingValue: 'लोड हो रहा है...',
+    missingRequiredAcsTxt: 'आवश्यक ACS TXT अनुपस्थित है।',
+    multiRblLookup: 'MultiRBL DNSBL लुकअप',
+    mxRecordBasics: 'MX की मूल बातें',
+    newDomainUnderDays: 'नया डोमेन ({days} दिनों से कम){suffix}',
+    noAdditionalGuidance: 'कोई अतिरिक्त मार्गदर्शन नहीं।',
+    noAdditionalMxDetails: 'कोई अतिरिक्त MX विवरण उपलब्ध नहीं है।',
+    noIpAddressesFound: 'कोई IP पता नहीं मिला',
+    noMxParentChecked: 'मूल डोमेन {parentDomain} जाँचा गया (कोई MX नहीं)।',
+    noMxParentShowing: '{domain} पर कोई MX रिकॉर्ड नहीं मिला; मूल डोमेन {lookupDomain} के MX दिखाए जा रहे हैं।',
+    noMxRecordsDetected: 'कोई MX रिकॉर्ड नहीं मिला।',
+    noRecordsAvailable: 'कोई रिकॉर्ड उपलब्ध नहीं।',
+    noSpfRecordDetected: 'कोई SPF रिकॉर्ड नहीं मिला।',
+    noSuccessfulQueries: 'अज्ञात (कोई सफल क्वेरी नहीं)',
+    notStarted: 'शुरू नहीं हुआ',
+    notVerified: 'सत्यापित नहीं',
+    noteDomainLessThanDays: 'डोमेन {days} दिनों से कम पुराना है।',
+    pending: 'लंबित',
+    rawWhoisLabel: 'whois',
+    readinessTips: 'तत्परता सुझाव',
+    reputationDnsbl: 'प्रतिष्ठा (DNSBL)',
+    resolvedUsingGuidance: '{lookupDomain} को मार्गदर्शन के लिए उपयोग करके resolve किया गया।',
+    spfRecordBasics: 'SPF की मूल बातें',
+    status: 'स्थिति',
+    statusChecking: '{domain} जाँचा जा रहा है ⏳',
+    statusCollectedOn: 'संग्रहित समय: {value}',
+    statusLabel: 'स्थिति',
+    statusSomeChecksFailed: 'कुछ जाँचें विफल हुईं ❌',
+    statusTxtFailed: 'TXT लुकअप विफल हुआ ❌ — अन्य DNS रिकॉर्ड अभी भी resolve हो सकते हैं।',
+    tools: 'उपकरण',
+    txtLookupFailedOrTimedOut: 'TXT लुकअप विफल हुआ या समय समाप्त हो गया।',
+    type: 'प्रकार',
+    unableDetermineAcsTxtValue: 'ACS TXT मान निर्धारित नहीं किया जा सका।',
+    unknown: 'अज्ञात',
+    usingIpParent: 'मूल डोमेन {domain} के IP पते उपयोग किए जा रहे हैं ({queryDomain} पर A/AAAA नहीं है)।',
+    verificationTag: 'सत्यापन',
+    verified: 'सत्यापित',
+    view: 'देखें',
+    waitingForBaseTxtLookup: 'मूल TXT लुकअप की प्रतीक्षा की जा रही है...',
+    waitingForTxtLookup: 'TXT लुकअप की प्रतीक्षा की जा रही है...'
+  },
+  'ja-JP': {
+    acsEmailDomainVerification: 'ACS メール ドメイン検証',
+    acsEmailQuotaLimitIncrease: 'ACS メール クォータ上限の引き上げ',
+    acsTxtMsDomainVerification: 'ACS TXT (ms-domain-verification)',
+    additionalDetailsMinus: '追加の詳細 -',
+    additionalDetailsPlus: '追加の詳細 +',
+    addresses: 'アドレス',
+    authMicrosoftLabel: 'Microsoft',
+    checkingDnsblReputation: 'DNSBL 評価を確認しています...',
+    checkingMxRecords: 'MX レコードを確認しています...',
+    checkingValue: '確認中...',
+    checklist: 'チェックリスト',
+    cname: 'CNAME',
+    copied: 'コピーしました！✔',
+    copy: 'コピー',
+    copyEmailQuota: 'メール クォータをコピー',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dkimRecordBasics: 'DKIM の基礎',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: '{domain} の DKIM アラインメントは緩和モード (adkim=r) を使用しています。送信インフラが対応している場合は、より厳密なドメイン保護のため strict alignment (adkim=s) を検討してください。',
+    dmarcAspfRelaxed: '{domain} の SPF アラインメントは緩和モード (aspf=r) を使用しています。送信元が常に正確なドメインを使用する場合は、strict alignment (aspf=s) を検討してください。',
+    dmarcMissingRua: '{domain} の DMARC は集計レポート (rua=) を公開していません。レポート用メールボックスを追加すると、なりすまし試行や適用状況の可視性が向上します。',
+    dmarcMissingRuf: '{domain} の DMARC はフォレンジック レポート (ruf=) を公開していません。プロセス上問題がなければ、調査のための追加の失敗詳細を得られる可能性があります。',
+    dmarcMissingSp: '{lookupDomain} のサブドメイン向け DMARC には明示的なサブドメイン ポリシー (sp=) が定義されていません。{domain} のようなサブドメインから送信する場合は、より明確な保護のために sp=quarantine または sp=reject の追加を検討してください。',
+    dmarcMonitorOnly: '{domain} の DMARC は監視専用 (p=none) です。なりすまし対策を強化するには、正当な送信元を確認した後で p=quarantine または p=reject へ移行してください。',
+    dmarcPct: '{domain} の DMARC 適用はメッセージの {pct}% のみに適用されています (pct={pct})。展開が確認できたら、完全保護のため pct=100 を使用してください。',
+    dmarcQuarantine: '{domain} の DMARC は p=quarantine に設定されています。最も強力ななりすまし対策のため、正当なメールが完全に整合していることを確認後に p=reject を検討してください。',
+    dmarcRecordBasics: 'DMARC の基礎',
+    docs: 'ドキュメント',
+    domain: 'ドメイン',
+    domainDossier: 'ドメイン ドシエ (CentralOps)',
+    effectivePolicyInherited: '有効なポリシーは親ドメイン {lookupDomain} から継承されています。',
+    error: 'エラー',
+    expired: '期限切れ',
+    guidanceAcsMissing: 'ACS ms-domain-verification TXT がありません。Azure portal から値を追加してください。',
+    guidanceAcsMissingParent: '{domain} に ACS ms-domain-verification TXT がありません。親ドメイン {lookupDomain} には ACS TXT がありますが、照会対象のサブドメインは検証しません。',
+    guidanceCnameMissing: '照会対象ホストで CNAME が構成されていません。これはシナリオ上想定どおりか確認してください。',
+    guidanceDkim1Missing: 'DKIM selector1 (selector1-azurecomm-prod-net) がありません。',
+    guidanceDkim2Missing: 'DKIM selector2 (selector2-azurecomm-prod-net) がありません。',
+    guidanceDmarcInherited: '有効な DMARC ポリシーは親ドメイン {lookupDomain} から継承されています。',
+    guidanceDmarcMissing: 'DMARC がありません。なりすましリスクを減らすために _dmarc.{domain} TXT レコードを追加してください。',
+    guidanceDmarcMoreInfo: 'DMARC TXT レコード構文の詳細については、次を参照してください: {url}',
+    guidanceDnsTxtFailed: 'DNS TXT 参照が失敗したか、タイムアウトしました。他の DNS レコードは解決できる場合があります。',
+    guidanceMxGoogleSpf: 'MX は Google Workspace を示していますが、SPF に _spf.google.com が含まれていません。SPF に正しい provider include が含まれていることを確認してください。',
+    guidanceMxMicrosoftSpf: 'MX は Microsoft 365 を示していますが、SPF に spf.protection.outlook.com が含まれていません。SPF に正しい provider include が含まれていることを確認してください。',
+    guidanceMxMissing: 'MX レコードが検出されませんでした。MX レコードを構成するまでメール フローは機能しません。',
+    guidanceMxMissingCheckedParent: '{domain} または親ドメイン {parentDomain} の MX レコードが検出されませんでした。MX レコードを構成するまでメール フローは機能しません。',
+    guidanceMxMissingParentFallback: '{domain} に MX レコードが見つからないため、親ドメイン {lookupDomain} の MX レコードをフォールバックとして使用しています。',
+    guidanceMxParentShown: '{domain} に MX レコードが見つからないため、表示中の結果は親ドメイン {lookupDomain} のものです。',
+    guidanceMxZohoSpf: 'MX は Zoho を示していますが、SPF に include:zoho.com が含まれていません。SPF に正しい provider include が含まれていることを確認してください。',
+    guidanceSpfMissing: 'SPF がありません。v=spf1 include:spf.protection.outlook.com -all (またはプロバイダー相当の値) を追加してください。',
+    guidanceSpfMissingParent: '{domain} に SPF がありません。親ドメイン {lookupDomain} は SPF を公開していますが、照会対象のサブドメインには自動適用されません。',
+    hostname: 'ホスト名',
+    info: '情報',
+    ipAddress: 'IP アドレス',
+    ipv4: 'IPv4',
+    ipv4Addresses: 'IPv4 アドレス',
+    ipv6: 'IPv6',
+    ipv6Addresses: 'IPv6 アドレス',
+    listingsLabel: '掲載',
+    loadingValue: '読み込み中...',
+    missingRequiredAcsTxt: '必要な ACS TXT がありません。',
+    multiRblLookup: 'MultiRBL DNSBL 参照',
+    mxRecordBasics: 'MX の基礎',
+    newDomainUnderDays: '新しいドメイン ({days} 日未満){suffix}',
+    noAdditionalGuidance: '追加のガイダンスはありません。',
+    noAdditionalMxDetails: '追加の MX 詳細はありません。',
+    noIpAddressesFound: 'IP アドレスが見つかりません',
+    noMxParentChecked: '親ドメイン {parentDomain} を確認しました (MX なし)。',
+    noMxParentShowing: '{domain} に MX レコードが見つからないため、親ドメイン {lookupDomain} の MX を表示しています。',
+    noMxRecordsDetected: 'MX レコードが検出されませんでした。',
+    noRecordsAvailable: '利用可能なレコードはありません。',
+    noSpfRecordDetected: 'SPF レコードが検出されませんでした。',
+    noSuccessfulQueries: '不明 (成功したクエリなし)',
+    notStarted: '未開始',
+    notVerified: '未検証',
+    noteDomainLessThanDays: 'ドメインは {days} 日未満です。',
+    pending: '保留中',
+    rawWhoisLabel: 'whois',
+    readinessTips: '準備のヒント',
+    reputationDnsbl: '評価 (DNSBL)',
+    resolvedUsingGuidance: 'ガイダンスのため {lookupDomain} を使用して解決しました。',
+    spfRecordBasics: 'SPF の基礎',
+    status: '状態',
+    statusChecking: '{domain} を確認しています ⏳',
+    statusCollectedOn: '収集日時: {value}',
+    statusLabel: '状態',
+    statusSomeChecksFailed: '一部の確認に失敗しました ❌',
+    statusTxtFailed: 'TXT 参照に失敗しました ❌ — 他の DNS レコードは引き続き解決できる場合があります。',
+    tools: 'ツール',
+    txtLookupFailedOrTimedOut: 'TXT 参照が失敗したか、タイムアウトしました。',
+    type: '種類',
+    unableDetermineAcsTxtValue: 'ACS TXT 値を判定できませんでした。',
+    unknown: '不明',
+    usingIpParent: '親ドメイン {domain} の IP アドレスを使用しています ({queryDomain} に A/AAAA がありません)。',
+    verificationTag: '検証',
+    verified: '検証済み',
+    view: '表示',
+    waitingForBaseTxtLookup: 'ベース TXT 参照を待機しています...',
+    waitingForTxtLookup: 'TXT 参照を待機しています...'
+  },
+  'ru-RU': {
+    acsEmailDomainVerification: 'Проверка почтового домена ACS',
+    acsEmailQuotaLimitIncrease: 'Увеличение лимита почтовой квоты ACS',
+    acsTxtMsDomainVerification: 'ACS TXT (ms-domain-verification)',
+    additionalDetailsMinus: 'Дополнительные сведения -',
+    additionalDetailsPlus: 'Дополнительные сведения +',
+    addresses: 'Адреса',
+    authMicrosoftLabel: 'Microsoft',
+    checkingDnsblReputation: 'Проверка репутации DNSBL...',
+    checkingMxRecords: 'Проверка MX-записей...',
+    checkingValue: 'Проверка...',
+    checklist: 'КОНТРОЛЬНЫЙ СПИСОК',
+    cname: 'CNAME',
+    copied: 'Скопировано! ✔',
+    copy: 'Копировать',
+    copyEmailQuota: 'Копировать квоту электронной почты',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2',
+    dkimRecordBasics: 'Основы DKIM',
+    dmarc: 'DMARC',
+    dmarcAdkimRelaxed: 'Выравнивание DKIM для {domain} использует расслабленный режим (adkim=r). Рассмотрите строгий режим (adkim=s), если ваша инфраструктура отправки это поддерживает, для более строгой защиты домена.',
+    dmarcAspfRelaxed: 'Выравнивание SPF для {domain} использует расслабленный режим (aspf=r). Рассмотрите строгий режим (aspf=s), если ваши отправители стабильно используют точный домен.',
+    dmarcMissingRua: 'DMARC для {domain} не публикует агрегированные отчёты (rua=). Добавление почтового ящика для отчётов повышает видимость попыток подделки и последствий применения политики.',
+    dmarcMissingRuf: 'DMARC для {domain} не публикует forensic-отчёты (ruf=). Если ваши процессы это допускают, такие отчёты могут дать дополнительные сведения для расследований.',
+    dmarcMissingSp: 'DMARC для поддоменов {lookupDomain} не определяет явную политику для поддоменов (sp=). Если вы отправляете почту с поддоменов, таких как {domain}, рассмотрите добавление sp=quarantine или sp=reject для более понятной защиты.',
+    dmarcMonitorOnly: 'DMARC для {domain} работает только в режиме мониторинга (p=none). Для более сильной защиты от подделки перейдите к применению политики с p=quarantine или p=reject после проверки легитимных источников почты.',
+    dmarcPct: 'Применение DMARC для {domain} распространяется только на {pct}% сообщений (pct={pct}). Используйте pct=100 для полной защиты после проверки внедрения.',
+    dmarcQuarantine: 'DMARC для {domain} установлен в p=quarantine. Для максимальной защиты от подделки рассмотрите p=reject после подтверждения полной выровненности легитимной почты.',
+    dmarcRecordBasics: 'Основы DMARC',
+    docs: 'ДОКУМЕНТАЦИЯ',
+    domain: 'Домен',
+    domainDossier: 'Досье домена (CentralOps)',
+    effectivePolicyInherited: 'Действующая политика унаследована от родительского домена {lookupDomain}.',
+    error: 'ОШИБКА',
+    expired: 'ИСТЁК',
+    guidanceAcsMissing: 'TXT ACS ms-domain-verification отсутствует. Добавьте значение из портала Azure.',
+    guidanceAcsMissingParent: 'TXT ACS ms-domain-verification отсутствует на {domain}. У родительского домена {lookupDomain} есть ACS TXT, но он не подтверждает запрошенный поддомен.',
+    guidanceCnameMissing: 'CNAME не настроен на запрошенном хосте. Проверьте, ожидается ли это в вашем сценарии.',
+    guidanceDkim1Missing: 'Отсутствует DKIM selector1 (selector1-azurecomm-prod-net).',
+    guidanceDkim2Missing: 'Отсутствует DKIM selector2 (selector2-azurecomm-prod-net).',
+    guidanceDmarcInherited: 'Эффективная политика DMARC унаследована от родительского домена {lookupDomain}.',
+    guidanceDmarcMissing: 'DMARC отсутствует. Добавьте TXT-запись _dmarc.{domain}, чтобы снизить риск подделки.',
+    guidanceDmarcMoreInfo: 'Дополнительные сведения о синтаксисе TXT-записи DMARC см. здесь: {url}',
+    guidanceDnsTxtFailed: 'Поиск DNS TXT завершился ошибкой или по тайм-ауту. Другие DNS-записи всё ещё могут разрешаться.',
+    guidanceMxGoogleSpf: 'Ваш MX указывает на Google Workspace, но SPF не содержит _spf.google.com. Убедитесь, что SPF включает правильный include провайдера.',
+    guidanceMxMicrosoftSpf: 'Ваш MX указывает на Microsoft 365, но SPF не содержит spf.protection.outlook.com. Убедитесь, что SPF включает правильный include провайдера.',
+    guidanceMxMissing: 'MX-записи не обнаружены. Почтовый поток не будет работать, пока MX-записи не будут настроены.',
+    guidanceMxMissingCheckedParent: 'MX-записи не обнаружены для {domain} или его родительского домена {parentDomain}. Почтовый поток не будет работать, пока MX-записи не будут настроены.',
+    guidanceMxMissingParentFallback: 'MX-записи не найдены на {domain}; используются MX-записи родительского домена {lookupDomain} как резервный вариант.',
+    guidanceMxParentShown: 'MX-записи не найдены на {domain}; показанные результаты взяты из родительского домена {lookupDomain}.',
+    guidanceMxZohoSpf: 'Ваш MX указывает на Zoho, но SPF не содержит include:zoho.com. Убедитесь, что SPF включает правильный include провайдера.',
+    guidanceSpfMissing: 'SPF отсутствует. Добавьте v=spf1 include:spf.protection.outlook.com -all (или эквивалент вашего провайдера).',
+    guidanceSpfMissingParent: 'SPF отсутствует на {domain}. Родительский домен {lookupDomain} публикует SPF, но SPF не применяется автоматически к запрошенному поддомену.',
+    hostname: 'Имя узла',
+    info: 'ИНФО',
+    ipAddress: 'IP-адрес',
+    ipv4: 'IPv4',
+    ipv4Addresses: 'IPv4-адреса',
+    ipv6: 'IPv6',
+    ipv6Addresses: 'IPv6-адреса',
+    listingsLabel: 'Списки',
+    loadingValue: 'Загрузка...',
+    missingRequiredAcsTxt: 'Отсутствует обязательный ACS TXT.',
+    multiRblLookup: 'Проверка DNSBL через MultiRBL',
+    mxRecordBasics: 'Основы MX',
+    newDomainUnderDays: 'Новый домен (меньше {days} дней){suffix}',
+    noAdditionalGuidance: 'Дополнительных рекомендаций нет.',
+    noAdditionalMxDetails: 'Дополнительные сведения о MX недоступны.',
+    noIpAddressesFound: 'IP-адреса не найдены',
+    noMxParentChecked: 'Проверен родительский домен {parentDomain} (MX не найден).',
+    noMxParentShowing: 'MX-записи не найдены на {domain}; отображаются MX родительского домена {lookupDomain}.',
+    noMxRecordsDetected: 'MX-записи не обнаружены.',
+    noRecordsAvailable: 'Нет доступных записей.',
+    noSpfRecordDetected: 'SPF-запись не обнаружена.',
+    noSuccessfulQueries: 'Неизвестно (нет успешных запросов)',
+    notStarted: 'НЕ НАЧАТО',
+    notVerified: 'НЕ ПРОВЕРЕНО',
+    noteDomainLessThanDays: 'Возраст домена меньше {days} дней.',
+    pending: 'ОЖИДАНИЕ',
+    rawWhoisLabel: 'whois',
+    readinessTips: 'СОВЕТЫ ПО ГОТОВНОСТИ',
+    reputationDnsbl: 'Репутация (DNSBL)',
+    resolvedUsingGuidance: 'Разрешено с использованием {lookupDomain} для справки.',
+    spfRecordBasics: 'Основы SPF',
+    status: 'Статус',
+    statusChecking: 'Проверка {domain} ⏳',
+    statusCollectedOn: 'Собрано: {value}',
+    statusLabel: 'Статус',
+    statusSomeChecksFailed: 'Некоторые проверки завершились ошибкой ❌',
+    statusTxtFailed: 'Поиск TXT завершился ошибкой ❌ — другие DNS-записи всё ещё могут разрешаться.',
+    tools: 'ИНСТРУМЕНТЫ',
+    txtLookupFailedOrTimedOut: 'Поиск TXT завершился ошибкой или по тайм-ауту.',
+    type: 'Тип',
+    unableDetermineAcsTxtValue: 'Не удалось определить значение ACS TXT.',
+    unknown: 'НЕИЗВЕСТНО',
+    usingIpParent: 'Используются IP-адреса родительского домена {domain} (на {queryDomain} нет A/AAAA).',
+    verificationTag: 'ПРОВЕРКА',
+    verified: 'ПРОВЕРЕНО',
+    view: 'Открыть',
+    waitingForBaseTxtLookup: 'Ожидание базового поиска TXT...',
+    waitingForTxtLookup: 'Ожидание поиска TXT...'
+  }
+};
+
+Object.keys(RUNTIME_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, RUNTIME_TRANSLATION_OVERRIDES[code]);
+});
+
 const LANG_PARAM = 'lang';
 const LANGUAGE_OPTIONS = ['en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'];
 const RTL_LANGUAGES = new Set(['ar']);
@@ -7362,6 +8549,8 @@ const LANGUAGE_FLAG_URLS = {
 let currentLanguage = 'en';
 
 let screenshotStatusToken = 0;
+let lookupInProgress = false;
+let lastAuthData = null;
 
 let activeLookup = { runId: 0, controllers: [] };
 
@@ -7502,7 +8691,11 @@ function applyLanguageToStaticUi() {
   if (input) input.placeholder = t('placeholderDomain');
 
   const lookupBtn = document.getElementById('lookupBtn');
-  if (lookupBtn && !lookupBtn.innerHTML.includes('spinner')) lookupBtn.innerHTML = t('lookup');
+  if (lookupBtn) {
+    lookupBtn.innerHTML = lookupInProgress
+      ? `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`
+      : t('lookup');
+  }
 
   const themeBtn = document.getElementById('themeToggleBtn');
   if (themeBtn) {
@@ -7533,6 +8726,10 @@ function applyLanguageToStaticUi() {
 
   populateLanguageSelect();
   loadHistory();
+
+  if (typeof updateAuthUI === 'function') {
+    updateAuthUI(lastAuthData);
+  }
 }
 
 function applyLanguage(language, persist = true) {
@@ -7874,6 +9071,13 @@ function localizeRiskSummary(value) {
   return value || t('unknown');
 }
 
+function localizeWhoisStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return '';
+  if (normalized === 'expired') return t('expired');
+  return status;
+}
+
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
   if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
@@ -7957,6 +9161,120 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   return guidance;
 }
 
+function buildGuidance(r) {
+  const guidance = [];
+  const loaded = r && r._loaded ? r._loaded : {};
+  const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
+
+  if (loaded.base && r.dnsFailed) {
+    guidance.push(t('guidanceDnsTxtFailed'));
+    return guidance;
+  }
+
+  if (loaded.base) {
+    if (!r.spfPresent) {
+      if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
+        guidance.push(t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
+      } else {
+        guidance.push(t('guidanceSpfMissing'));
+      }
+    }
+    if (r.spfPresent && r.spfHasRequiredInclude !== true) {
+      guidance.push(t('spfOutlookRequirementMissing'));
+    }
+    if (!r.acsPresent) {
+      if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
+        guidance.push(t('guidanceAcsMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
+      } else {
+        guidance.push(t('guidanceAcsMissing'));
+      }
+    }
+  }
+
+  if (loaded.mx) {
+    const mxList = r.mxRecords || [];
+    const hasMx = Array.isArray(mxList) && mxList.length > 0;
+    if (!hasMx) {
+      if (r.mxFallbackDomainChecked && r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
+        guidance.push(t('guidanceMxMissingParentFallback', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
+      } else if (r.mxFallbackDomainChecked && !r.mxFallbackUsed) {
+        guidance.push(t('guidanceMxMissingCheckedParent', { domain: r.domain || '', parentDomain: r.mxFallbackDomainChecked }));
+      } else {
+        guidance.push(t('guidanceMxMissing'));
+      }
+    } else if (r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
+      guidance.push(t('guidanceMxParentShown', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
+    }
+    if (r.mxProvider && r.mxProvider !== 'Unknown') {
+      guidance.push(t('guidanceMxProviderDetected', { provider: r.mxProvider }));
+    }
+  }
+
+  if (loaded.whois) {
+    if (r.whoisIsExpired === true) {
+      guidance.push(t('guidanceDomainExpired'));
+    } else if (r.whoisIsVeryYoungDomain === true) {
+      const d = r.whoisNewDomainErrorThresholdDays || 90;
+      guidance.push(t('guidanceDomainVeryYoung', { days: String(d) }));
+    } else if (r.whoisIsYoungDomain === true) {
+      const d = r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180;
+      guidance.push(t('guidanceDomainYoung', { days: String(d) }));
+    }
+  }
+
+  if (loaded.dmarc && !r.dmarc) {
+    guidance.push(t('guidanceDmarcMissing', { domain: r.domain || '' }));
+  } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
+    guidance.push(t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }));
+  }
+
+  let dmarcActionable = false;
+  if (loaded.dmarc && r.dmarc) {
+    const dmarcSecurityGuidance = getDmarcSecurityGuidance(r.dmarc, r.domain, r.dmarcLookupDomain, r.dmarcInherited === true);
+    if (dmarcSecurityGuidance.length > 0) dmarcActionable = true;
+    guidance.push(...dmarcSecurityGuidance);
+  }
+
+  if ((loaded.dmarc && !r.dmarc) || dmarcActionable) {
+    guidance.push(t('guidanceDmarcMoreInfo', { url: dmarcHelpUrl }));
+  }
+
+  if (loaded.dkim) {
+    if (!r.dkim1) guidance.push(t('guidanceDkim1Missing'));
+    if (!r.dkim2) guidance.push(t('guidanceDkim2Missing'));
+  }
+
+  if (loaded.cname && !r.cname) {
+    guidance.push(t('guidanceCnameMissing'));
+  }
+
+  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && r.spfPresent && r.spfHasRequiredInclude === false) {
+    guidance.push(t('guidanceMxMicrosoftSpf'));
+  }
+  if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && r.spfPresent && r.spfValue && !/_spf\.google\.com/i.test(r.spfValue)) {
+    guidance.push(t('guidanceMxGoogleSpf'));
+  }
+  if (loaded.base && loaded.mx && r.mxProvider === 'Zoho Mail' && r.spfPresent && r.spfValue && !/include:zoho\.com/i.test(r.spfValue)) {
+    guidance.push(t('guidanceMxZohoSpf'));
+  }
+
+  if (loaded.base && r.acsReady) {
+    guidance.push(t('acsReadyMessage'));
+  }
+
+  return guidance;
+}
+
+function recomputeDerived(r) {
+  const loaded = r && r._loaded ? r._loaded : {};
+  if (loaded.base) {
+    r.acsReady = (!r.dnsFailed) && !!r.acsPresent;
+  } else {
+    r.acsReady = false;
+  }
+  r.guidance = buildGuidance(r);
+}
+
 function buildTestSummaryHtml(r) {
   const loaded = (r && r._loaded) ? r._loaded : {};
   const errors = (r && r._errors) ? r._errors : {};
@@ -8021,7 +9339,7 @@ function buildTestSummaryHtml(r) {
     add("ACS TXT", "fail");
     add("TXT Records", "unavailable", true);
   } else {
-    add("SPF (queried domain TXT)", (r.spfPresent && r.spfHasRequiredInclude !== false) ? "pass" : "fail", true);
+    add("SPF (queried domain TXT)", (r.spfPresent && r.spfHasRequiredInclude === true) ? "pass" : "fail", true);
     add("ACS TXT", r.acsPresent ? "pass" : "fail");
     const hasTxt = Array.isArray(r.txtRecords) && r.txtRecords.length > 0;
     add("TXT Records", hasTxt ? "pass" : "fail", true);
@@ -8362,6 +9680,7 @@ function lookup() {
   document.getElementById("results").innerHTML = "";
   setStatus("");
   if (dlBtn) dlBtn.style.display = "none";
+  lookupInProgress = true;
 
   const url = new URL(window.location.href);
   url.searchParams.set("domain", domain);
@@ -8411,120 +9730,6 @@ function lookup() {
     if (!lastResult._errors) {
       lastResult._errors = {};
     }
-  }
-
-  function buildGuidance(r) {
-    const guidance = [];
-    const loaded = r._loaded || {};
-    const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
-
-    if (loaded.base && r.dnsFailed) {
-      guidance.push(t('guidanceDnsTxtFailed'));
-      return guidance;
-    }
-
-    if (loaded.base) {
-      if (!r.spfPresent) {
-        if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
-          guidance.push(t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
-        } else {
-          guidance.push(t('guidanceSpfMissing'));
-        }
-      }
-      if (r.spfPresent && r.spfHasRequiredInclude === false) {
-        guidance.push(t('spfOutlookRequirementMissing'));
-      }
-      if (!r.acsPresent) {
-        if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
-          guidance.push(t('guidanceAcsMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
-        } else {
-          guidance.push(t('guidanceAcsMissing'));
-        }
-      }
-    }
-
-    if (loaded.mx) {
-      const mxList = (r.mxRecords || []);
-      const hasMx = mxList && mxList.length > 0;
-      if (!hasMx) {
-        if (r.mxFallbackDomainChecked && r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-          guidance.push(t('guidanceMxMissingParentFallback', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
-        } else if (r.mxFallbackDomainChecked && !r.mxFallbackUsed) {
-          guidance.push(t('guidanceMxMissingCheckedParent', { domain: r.domain || '', parentDomain: r.mxFallbackDomainChecked }));
-        } else {
-          guidance.push(t('guidanceMxMissing'));
-        }
-      } else if (r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-        guidance.push(t('guidanceMxParentShown', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
-      }
-      if (r.mxProvider && r.mxProvider !== "Unknown") {
-        guidance.push(t('guidanceMxProviderDetected', { provider: r.mxProvider }));
-      }
-    }
-
-    if (loaded.whois) {
-      if (r.whoisIsExpired === true) {
-        guidance.push(t('guidanceDomainExpired'));
-      } else if (r.whoisIsVeryYoungDomain === true) {
-        const d = (r.whoisNewDomainErrorThresholdDays || 90);
-        guidance.push(t('guidanceDomainVeryYoung', { days: String(d) }));
-      } else if (r.whoisIsYoungDomain === true) {
-        const d = (r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180);
-        guidance.push(t('guidanceDomainYoung', { days: String(d) }));
-      }
-    }
-
-    if (loaded.dmarc && !r.dmarc) {
-      guidance.push(t('guidanceDmarcMissing', { domain: r.domain || '' }));
-    } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
-      guidance.push(t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }));
-    }
-    let dmarcActionable = false;
-    if (loaded.dmarc && r.dmarc) {
-      const dmarcSecurityGuidance = getDmarcSecurityGuidance(r.dmarc, r.domain, r.dmarcLookupDomain, r.dmarcInherited === true);
-      if (dmarcSecurityGuidance.length > 0) dmarcActionable = true;
-      guidance.push(...dmarcSecurityGuidance);
-    }
-    if ((loaded.dmarc && !r.dmarc) || dmarcActionable) {
-      guidance.push(t('guidanceDmarcMoreInfo', { url: dmarcHelpUrl }));
-    }
-
-    if (loaded.dkim) {
-      if (!r.dkim1) guidance.push(t('guidanceDkim1Missing'));
-      if (!r.dkim2) guidance.push(t('guidanceDkim2Missing'));
-    }
-
-    if (loaded.cname && !r.cname) {
-      guidance.push(t('guidanceCnameMissing'));
-    }
-
-    if (loaded.base && loaded.mx && r.mxProvider === "Microsoft 365 / Exchange Online" && r.spfPresent && r.spfHasRequiredInclude === false) {
-      guidance.push(t('guidanceMxMicrosoftSpf'));
-    }
-    if (loaded.base && loaded.mx && r.mxProvider === "Google Workspace / Gmail" && r.spfPresent && r.spfValue && !/_spf\.google\.com/i.test(r.spfValue)) {
-      guidance.push(t('guidanceMxGoogleSpf'));
-    }
-    if (loaded.base && loaded.mx && r.mxProvider === "Zoho Mail" && r.spfPresent && r.spfValue && !/include:zoho\.com/i.test(r.spfValue)) {
-      guidance.push(t('guidanceMxZohoSpf'));
-    }
-
-    if (loaded.base && r.acsReady) {
-      guidance.push(t('acsReadyMessage'));
-    }
-
-    return guidance;
-  }
-
-  function recomputeDerived(r) {
-    const loaded = r._loaded || {};
-    if (loaded.base) {
-      // ACS domain verification readiness is primarily based on the ms-domain-verification TXT record
-      // (SPF is best-practice guidance but not required for ACS verification).
-      r.acsReady = (!r.dnsFailed) && !!r.acsPresent;
-    } else {
-      r.acsReady = false;
-    }
-    r.guidance = buildGuidance(r);
   }
 
   ensureResultObject();
@@ -8616,6 +9821,7 @@ function lookup() {
     .catch(() => {})
     .finally(() => {
       if (runId !== activeLookup.runId) return;
+      lookupInProgress = false;
       btn.disabled = false;
       if (screenshotBtn) screenshotBtn.disabled = false;
       btn.innerHTML = t('lookup');
@@ -8768,7 +9974,7 @@ function render(r) {
     }
 
     // 4. SPF
-    if (!r.spfPresent || r.spfHasRequiredInclude === false) { quotaFail = true; }
+    if (!r.spfPresent || r.spfHasRequiredInclude !== true) { quotaFail = true; }
 
     let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     if (quotaFail) {
@@ -8818,13 +10024,15 @@ function render(r) {
   let mxCopyDetail = '';
   let repCopyDetail = '';
   let repStats = null;
+  const localizedWhoisAgeHuman = localizeDurationText(r.whoisAgeHuman);
+  const localizedWhoisExpiryHuman = r.whoisIsExpired === true ? t('wordExpired') : localizeDurationText(r.whoisExpiryHuman);
 
   const domainForCopy = r.domain || '';
-  quotaLines.push(`**Email Quota for:** ${domainForCopy}`.trim());
-  quotaLinesHtml.push(`<strong>Email Quota for:</strong> ${escapeHtml(domainForCopy)}`.trim());
-  quotaCopyPlainLines.push(`Domain Name: ${domainForCopy}`);
+  quotaLines.push(`**${t('emailQuota')} (${t('domainNameLabel')}):** ${domainForCopy}`.trim());
+  quotaLinesHtml.push(`<strong>${escapeHtml(t('emailQuota'))} (${escapeHtml(t('domainNameLabel'))}):</strong> ${escapeHtml(domainForCopy)}`.trim());
+  quotaCopyPlainLines.push(`${t('domainNameLabel')}: ${domainForCopy}`);
   quotaCopyPlainLines.push('----------------------------------');
-  quotaCopyHtmlLines.push(`<div><strong>Domain Name:</strong> ${escapeHtml(domainForCopy)}</div>`);
+  quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('domainNameLabel'))}:</strong> ${escapeHtml(domainForCopy)}</div>`);
   quotaCopyHtmlLines.push('<div>----------------------------------</div>');
 
 
@@ -8864,9 +10072,9 @@ function render(r) {
     mxStatusText = hasMx ? t('yes') : t('no');
   }
 
-  quotaCopyPlainLines.push(`MX Records:   ${mxStatusText || 'Unknown'}`);
+  quotaCopyPlainLines.push(`${t('mxRecordsLabel')}:   ${mxStatusText || t('unknown')}`);
   if (mxCopyDetail) { quotaCopyPlainLines.push(`  ${mxCopyDetail}`); }
-  quotaCopyHtmlLines.push(`<div><strong>MX Records:</strong> ${escapeHtml(mxStatusText || 'Unknown')}</div>` + (mxCopyDetail ? `<div style="margin-left:12px;">${escapeHtml(mxCopyDetail)}</div>` : ''));
+  quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('mxRecordsLabel'))}:</strong> ${escapeHtml(mxStatusText || t('unknown'))}</div>` + (mxCopyDetail ? `<div style="margin-left:12px;">${escapeHtml(mxCopyDetail)}</div>` : ''));
 
   const multiRblLink = `https://multirbl.valli.org/dnsbl-lookup/${encodeURIComponent(r.domain || "")}.html`;
   const multiRblHtml = `<a href="${multiRblLink}" target="_blank" rel="noopener" style="font-size:11px; color:#2f80ed; text-decoration:none;">(MultiRBL &#x2197;)</a>`;
@@ -8989,14 +10197,14 @@ function render(r) {
       quotaLines.push(`**Domain Registration:** ${regState}${expText ? ' - ' + expText : ''}`);
       quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${expText ? ' - ' + escapeHtml(expText) : ''}`);
     } else if (r.whoisIsVeryYoungDomain === true) {
-      const suffix = r.whoisAgeHuman ? ': ' + r.whoisAgeHuman : '';
+      const suffix = localizedWhoisAgeHuman ? ': ' + localizedWhoisAgeHuman : '';
       const text = t('newDomainUnderDays', { days: String(r.whoisNewDomainErrorThresholdDays || 90), suffix }).trim();
       quotaItems.push(quotaRow(t('domainRegistration'), 'fail', text || t('newDomainUnder90Days'), null, 'whois'));
       regState = 'FAIL';
       quotaLines.push(`**Domain Registration:** ${regState}${text ? ' - ' + text : ''}`);
       quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${text ? ' - ' + escapeHtml(text) : ''}`);
     } else if (r.whoisIsYoungDomain === true) {
-      const suffix = r.whoisAgeHuman ? ': ' + r.whoisAgeHuman : '';
+      const suffix = localizedWhoisAgeHuman ? ': ' + localizedWhoisAgeHuman : '';
       const text = t('newDomainUnderDays', { days: String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180), suffix }).trim();
       quotaItems.push(quotaRow(t('domainRegistration'), 'warn', text || t('newDomainUnder180Days'), null, 'whois'));
       regState = 'WARN';
@@ -9004,8 +10212,8 @@ function render(r) {
       quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${text ? ' - ' + escapeHtml(text) : ''}`);
     } else {
       const parts = [];
-      if (r.whoisAgeHuman) { parts.push(`${t('ageLabel')}: ${r.whoisAgeHuman}`); }
-      if (r.whoisExpiryHuman) { parts.push(`${t('expiresInLabel')}: ${r.whoisExpiryHuman}`); }
+      if (localizedWhoisAgeHuman) { parts.push(`${t('ageLabel')}: ${localizedWhoisAgeHuman}`); }
+      if (localizedWhoisExpiryHuman) { parts.push(`${t('expiresInLabel')}: ${localizedWhoisExpiryHuman}`); }
       const ageText = parts.join(' | ') || t('resolvedSuccessfully');
       quotaItems.push(quotaRow(t('domainRegistration'), 'pass', ageText, null, 'whois'));
       regState = 'PASS';
@@ -9028,7 +10236,7 @@ function render(r) {
     quotaLines.push(`**${t('spfQueried')}:** WARN${r.dnsError ? ' - ' + r.dnsError : ' - ' + t('txtLookupFailedOrTimedOut')}`);
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> WARN${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
   } else {
-    const spfPassesRequirement = !!(r.spfPresent && r.spfHasRequiredInclude !== false);
+    const spfPassesRequirement = !!(r.spfPresent && r.spfHasRequiredInclude === true);
     const spfDetail = r.spfPresent
       ? ([r.spfValue, getLocalizedSpfRequirementSummary(r)].filter(Boolean).join("\n\n"))
       : t('noSpfRecordDetected');
@@ -9039,8 +10247,8 @@ function render(r) {
   }
 
   // Domain age / expiry for copy block
-  const ageText = localizeDurationText(r.whoisAgeHuman) || t('unknown');
-  const expiryText = r.whoisIsExpired === true ? t('wordExpired') : (localizeDurationText(r.whoisExpiryHuman) || t('unknown'));
+  const ageText = localizedWhoisAgeHuman || t('unknown');
+  const expiryText = localizedWhoisExpiryHuman || t('unknown');
   quotaCopyPlainLines.push('');
   quotaCopyPlainLines.push(`${t('domainAgeLabel')}:  ${ageText}`);
   quotaCopyPlainLines.push(`${t('domainExpiringIn')}: ${expiryText}`);
@@ -9048,24 +10256,24 @@ function render(r) {
   quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('domainExpiringIn'))}:</strong> ${escapeHtml(expiryText)}</div>`);
 
   quotaCopyPlainLines.push('');
-  quotaCopyPlainLines.push(`Reputation (DNSBL) [MultiRBL: ${multiRblLink}] - ${repStateForCopy || 'UNKNOWN'}${repCopyDetail ? ' - ' + repCopyDetail : ''}`);
-  quotaCopyHtmlLines.push(`<div><strong>Reputation (DNSBL) - ${escapeHtml(repStateForCopy || 'UNKNOWN')}</strong>&nbsp;${multiRblHtml}${repCopyDetail ? ' - ' + escapeHtml(repCopyDetail) : ''}</div>`);
+  quotaCopyPlainLines.push(`${t('reputationDnsbl')} [MultiRBL: ${multiRblLink}] - ${repStateForCopy || t('unknown')}${repCopyDetail ? ' - ' + repCopyDetail : ''}`);
+  quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('reputationDnsbl'))} - ${escapeHtml(repStateForCopy || t('unknown'))}</strong>&nbsp;${multiRblHtml}${repCopyDetail ? ' - ' + escapeHtml(repCopyDetail) : ''}</div>`);
 
   if (repStats) {
     const repLines = [
-      `Zones queried: ${repStats.zones}`,
-      `Total queries: ${repStats.total}`,
-      `Errors: ${repStats.errors}`,
-      `Reputation: ${repStats.rating}${repStats.percent !== null ? ` (${repStats.percent}%)` : ''}`,
-      `Listed: ${repStats.listed}`,
-      `Not listed: ${repStats.notListed}`
+      `${t('zonesQueried')}: ${repStats.zones}`,
+      `${t('totalQueries')}: ${repStats.total}`,
+      `${t('errorsCount')}: ${repStats.errors}`,
+      `${t('reputationWord')}: ${repStats.rating}${repStats.percent !== null ? ` (${repStats.percent}%)` : ''}`,
+      `${t('listed')}: ${repStats.listed}`,
+      `${t('notListed')}: ${repStats.notListed}`
     ];
     quotaCopyPlainLines.push(...repLines);
     quotaCopyHtmlLines.push('<div>' + repLines.map(l => escapeHtml(l)).join('<br>') + '</div>');
   }
 
-  const repSummaryText = `${(repStateForCopy || 'UNKNOWN')}${repCopyDetail ? ' - ' + repCopyDetail : ''}` + (repStats
-    ? ` | Zones queried: ${repStats.zones} | Total queries: ${repStats.total} | Listed: ${repStats.listed} | Not listed: ${repStats.notListed}`
+  const repSummaryText = `${(repStateForCopy || t('unknown'))}${repCopyDetail ? ' - ' + repCopyDetail : ''}` + (repStats
+    ? ` | ${t('zonesQueried')}: ${repStats.zones} | ${t('totalQueries')}: ${repStats.total} | ${t('listed')}: ${repStats.listed} | ${t('notListed')}: ${repStats.notListed}`
     : '');
 
   const domainStatusText = (!loaded.base && !errors.base)
@@ -9110,7 +10318,7 @@ function render(r) {
   plainTable.push(`| ${t('dkim1StatusLabel')} | ${dkim1StatusText} |`);
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
-  plainTable.push(`| Reputation (DNSBL) | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
+  plainTable.push(`| ${t('reputationDnsbl')} | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
 
   const htmlTableRows = [];
   const addRow = (name, value) => { htmlTableRows.push(`<tr><th>${escapeHtml(name)}</th><td>${escapeHtml(value)}</td></tr>`); };
@@ -9124,7 +10332,7 @@ function render(r) {
   addRow(t('dkim2StatusLabel'), dkim2StatusText);
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
   // Manual push for Reputation to include parsed HTML link (multiRblHtml)
-  htmlTableRows.push(`<tr><th>Reputation (DNSBL)</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
+  htmlTableRows.push(`<tr><th>${escapeHtml(t('reputationDnsbl'))}</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
 
   const quotaCopyTextPlain = plainTable.join('\n');
   const quotaCopyTextHtml = `<table style="border-collapse:collapse;min-width:260px;">${htmlTableRows.map(r => r.replace('<th>', '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">').replace('<td>', '<td style="padding:4px 8px;border:1px solid #ddd;">')).join('')}</table>`;
@@ -9218,15 +10426,15 @@ function render(r) {
     if (r.whoisRegistrar) whoisLines.push(t('registrarLabel') + ": " + r.whoisRegistrar);
     if (r.whoisRegistrant) whoisLines.push(t('registrantLabel') + ": " + r.whoisRegistrant);
     if (r.whoisAgeHuman) {
-      whoisLines.push(t('domainAgeLabel') + ": " + r.whoisAgeHuman);
+      whoisLines.push(t('domainAgeLabel') + ": " + localizeDurationText(r.whoisAgeHuman));
     } else if (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) {
       whoisLines.push(t('domainAgeLabel') + " (days): " + String(r.whoisAgeDays));
     }
     if (r.whoisExpiryHuman) {
-      whoisLines.push(t('domainExpiringIn') + ": " + r.whoisExpiryHuman);
+      whoisLines.push(t('domainExpiringIn') + ": " + (r.whoisIsExpired === true ? t('wordExpired') : localizeDurationText(r.whoisExpiryHuman)));
     }
     if (isExpired) {
-      whoisLines.push(t('statusLabel') + ": " + t('expired'));
+      whoisLines.push(t('statusLabel') + ": " + localizeWhoisStatus(t('expired')));
     } else if (isVeryYoung) {
       whoisLines.push(t('noteDomainLessThanDays', { days: String(r.whoisNewDomainErrorThresholdDays || 90) }));
     } else if (isYoung) {
@@ -9459,8 +10667,8 @@ function render(r) {
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')) + spfExpandedSection,
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((r.spfPresent && r.spfHasRequiredInclude !== false) ? "PASS" : "FAIL")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((r.spfPresent && r.spfHasRequiredInclude !== false) ? "tag-pass" : "tag-fail")),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((r.spfPresent && r.spfHasRequiredInclude === true) ? "PASS" : "FAIL")),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((r.spfPresent && r.spfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
     "spf"
   ));
 
@@ -9885,6 +11093,7 @@ async function verifyMsAccount(accessToken) {
 }
 
 function updateAuthUI(authData) {
+  lastAuthData = authData || null;
   const signInBtn = document.getElementById('msSignInBtn');
   const signOutBtn = document.getElementById('msSignOutBtn');
   const statusEl = document.getElementById('msAuthStatus');
