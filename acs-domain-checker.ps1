@@ -2866,6 +2866,167 @@ function Get-SpfMechanismType {
   return $null
 }
 
+function Test-SpfOutlookIncludeToken {
+  param([string]$Text)
+
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+
+  return ([string]$Text) -match '(?i)(^|\s)[+\-~\?]?include:spf\.protection\.outlook\.com(?=$|\s)'
+}
+
+function Find-SpfOutlookRequirementMatch {
+  param([object]$Analysis)
+
+  if (-not $Analysis) { return $null }
+
+  if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.record)) {
+    return [pscustomobject]@{
+      matchType = 'direct-include'
+      value = 'include:spf.protection.outlook.com'
+    }
+  }
+
+  foreach ($include in @($Analysis.includes)) {
+    $includeDomain = ([string]$include.domain).Trim().TrimEnd('.').ToLowerInvariant()
+    if ($includeDomain -eq 'spf.protection.outlook.com') {
+      return [pscustomobject]@{
+        matchType = 'nested-include'
+        value = $include.domain
+      }
+    }
+
+    if (Test-SpfOutlookIncludeToken -Text ([string]$include.record)) {
+      return [pscustomobject]@{
+        matchType = 'nested-include'
+        value = 'include:spf.protection.outlook.com'
+      }
+    }
+
+    $childMatch = Find-SpfOutlookRequirementMatch -Analysis $include.analysis
+    if ($childMatch) { return $childMatch }
+  }
+
+  if ($Analysis.redirect) {
+    $redirectDomain = ([string]$Analysis.redirect.domain).Trim().TrimEnd('.').ToLowerInvariant()
+    if ($redirectDomain -eq 'spf.protection.outlook.com') {
+      return [pscustomobject]@{
+        matchType = 'redirect-reference'
+        value = $Analysis.redirect.domain
+      }
+    }
+
+    if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.redirect.record)) {
+      return [pscustomobject]@{
+        matchType = 'redirect-include'
+        value = 'include:spf.protection.outlook.com'
+      }
+    }
+
+    $redirectMatch = Find-SpfOutlookRequirementMatch -Analysis $Analysis.redirect.analysis
+    if ($redirectMatch) { return $redirectMatch }
+  }
+
+  foreach ($existsTerm in @($Analysis.existsTerms)) {
+    if (([string]$existsTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+      return [pscustomobject]@{
+        matchType = 'exists-reference'
+        value = $existsTerm.target
+      }
+    }
+  }
+
+  foreach ($aTerm in @($Analysis.aTerms)) {
+    if (([string]$aTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+      return [pscustomobject]@{
+        matchType = 'a-reference'
+        value = $aTerm.target
+      }
+    }
+  }
+
+  foreach ($mxTerm in @($Analysis.mxTerms)) {
+    if (([string]$mxTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+      return [pscustomobject]@{
+        matchType = 'mx-reference'
+        value = $mxTerm.target
+      }
+    }
+  }
+
+  foreach ($macro in @($Analysis.macros)) {
+    if (([string]$macro) -match '(?i)spf\.protection\.outlook\.com') {
+      return [pscustomobject]@{
+        matchType = 'macro-reference'
+        value = $macro
+      }
+    }
+  }
+
+  return $null
+}
+
+function Get-SpfOutlookRequirementStatus {
+  param(
+    [string]$Domain,
+    [string]$SpfRecord,
+    [object]$SpfAnalysis
+  )
+
+  if ([string]::IsNullOrWhiteSpace($SpfRecord)) {
+    return [pscustomobject]@{
+      isPresent = $false
+      matchType = 'missing-spf'
+      detail = 'No SPF record was found.'
+      error = 'SPF record is missing, so the required include:spf.protection.outlook.com could not be validated.'
+    }
+  }
+
+  if (Test-SpfOutlookIncludeToken -Text $SpfRecord) {
+    return [pscustomobject]@{
+      isPresent = $true
+      matchType = 'direct-include'
+      detail = 'Found direct include:spf.protection.outlook.com in the SPF record.'
+      error = $null
+    }
+  }
+
+  $match = Find-SpfOutlookRequirementMatch -Analysis $SpfAnalysis
+  if ($match) {
+    $detail = switch ($match.matchType) {
+      'nested-include'    { "Found include:spf.protection.outlook.com in the expanded SPF chain ($($match.value))." }
+      'redirect-include'  { 'Found include:spf.protection.outlook.com through an SPF redirect target.' }
+      'redirect-reference'{ "Detected a redirect path that references spf.protection.outlook.com ($($match.value))." }
+      'exists-reference'  { "Detected an exists/mechanism target that references spf.protection.outlook.com ($($match.value))." }
+      'a-reference'       { "Detected an A mechanism target that references spf.protection.outlook.com ($($match.value))." }
+      'mx-reference'      { "Detected an MX mechanism target that references spf.protection.outlook.com ($($match.value))." }
+      'macro-reference'   { "Detected a macro/reference that contains spf.protection.outlook.com ($($match.value))." }
+      default             { "Detected a reference to spf.protection.outlook.com ($($match.value))." }
+    }
+
+    return [pscustomobject]@{
+      isPresent = $true
+      matchType = $match.matchType
+      detail = $detail
+      error = $null
+    }
+  }
+
+  $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
+  $analysisScope = if ($SpfAnalysis -and $SpfAnalysis.analysisScope) { [string]$SpfAnalysis.analysisScope } else { 'full-static' }
+  $error = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
+    "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
+  } else {
+    "SPF for $targetDomain does not include include:spf.protection.outlook.com in the expanded SPF chain. This is required for ACS SPF validation."
+  }
+
+  return [pscustomobject]@{
+    isPresent = $false
+    matchType = 'not-found'
+    detail = 'Did not find include:spf.protection.outlook.com in the expanded SPF chain.'
+    error = $error
+  }
+}
+
 function Get-SpfNestedAnalysis {
   param(
     [string]$SpfRecord,
@@ -3328,7 +3489,8 @@ function Get-SpfGuidance {
   param(
     [string]$SpfRecord,
     [string]$Domain,
-    [object]$SpfAnalysis
+    [object]$SpfAnalysis,
+    [object]$OutlookRequirementStatus
   )
 
   $messages = New-Object System.Collections.Generic.List[string]
@@ -3374,6 +3536,15 @@ function Get-SpfGuidance {
     }
     foreach ($warning in @($SpfAnalysis.warnings)) {
       if (-not [string]::IsNullOrWhiteSpace([string]$warning)) { $messages.Add([string]$warning) }
+    }
+  }
+
+  if ($OutlookRequirementStatus) {
+    if ($OutlookRequirementStatus.isPresent -eq $true -and -not [string]::IsNullOrWhiteSpace([string]$OutlookRequirementStatus.detail)) {
+      $messages.Add([string]$OutlookRequirementStatus.detail)
+    }
+    elseif ($OutlookRequirementStatus.isPresent -ne $true -and -not [string]::IsNullOrWhiteSpace([string]$OutlookRequirementStatus.error)) {
+      $messages.Add([string]$OutlookRequirementStatus.error)
     }
   }
 
@@ -3558,6 +3729,7 @@ function Get-DnsBaseStatus {
   $spfAnalysis = $null
   $spfExpandedText = $null
   $spfGuidance = @()
+  $spfOutlookRequirement = $null
 
   try {
     $records = ResolveSafely $Domain "TXT" -ThrowOnError
@@ -3635,11 +3807,22 @@ function Get-DnsBaseStatus {
   if ($spfPresent -and -not [string]::IsNullOrWhiteSpace($spf)) {
     try {
       $spfAnalysis = Get-SpfNestedAnalysis -SpfRecord $spf -Domain $Domain
+      $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $spfAnalysis
       $spfExpandedLines = @(Format-SpfNestedAnalysisText -Analysis $spfAnalysis)
+      if ($spfOutlookRequirement -and -not [string]::IsNullOrWhiteSpace([string]$spfOutlookRequirement.detail)) {
+        $spfExpandedLines += ''
+        $spfExpandedLines += 'ACS Outlook SPF requirement:'
+        $spfExpandedLines += [string]$spfOutlookRequirement.detail
+      }
+      elseif ($spfOutlookRequirement -and -not [string]::IsNullOrWhiteSpace([string]$spfOutlookRequirement.error)) {
+        $spfExpandedLines += ''
+        $spfExpandedLines += 'ACS Outlook SPF requirement:'
+        $spfExpandedLines += [string]$spfOutlookRequirement.error
+      }
       if ($spfExpandedLines.Count -gt 0) {
         $spfExpandedText = ($spfExpandedLines -join "`n")
       }
-      $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $spfAnalysis)
+      $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $spfAnalysis -OutlookRequirementStatus $spfOutlookRequirement)
     } catch { }
   }
 
@@ -3662,6 +3845,11 @@ function Get-DnsBaseStatus {
     spfAnalysis = $spfAnalysis
     spfExpandedText = $spfExpandedText
     spfGuidance = $spfGuidance
+    spfHasRequiredInclude = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.isPresent } else { $null })
+    spfRequiredInclude = 'spf.protection.outlook.com'
+    spfRequiredIncludeMatchType = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.matchType } else { $null })
+    spfRequiredIncludeDetail = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.detail } else { $null })
+    spfRequiredIncludeError = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.error } else { $null })
     acsPresent = $acsPresent
     acsValue   = $acsTxt
 
@@ -4329,6 +4517,9 @@ function Get-AcsDnsStatus {
           $guidance.Add("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent).")
         }
       }
+      foreach ($spfMessage in @($base.spfGuidance)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$spfMessage)) { $guidance.Add([string]$spfMessage) }
+      }
       if (-not $base.acsPresent) {
         if ($base.parentAcsPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("ACS ms-domain-verification TXT is missing on $Domain. Parent domain $($base.txtLookupDomain) has an ACS TXT record, but it does not verify the queried subdomain.")
@@ -4407,6 +4598,11 @@ function Get-AcsDnsStatus {
         spfAnalysis = $base.spfAnalysis
         spfExpandedText = $base.spfExpandedText
         spfGuidance = $base.spfGuidance
+        spfHasRequiredInclude = $base.spfHasRequiredInclude
+        spfRequiredInclude = $base.spfRequiredInclude
+        spfRequiredIncludeMatchType = $base.spfRequiredIncludeMatchType
+        spfRequiredIncludeDetail = $base.spfRequiredIncludeDetail
+        spfRequiredIncludeError = $base.spfRequiredIncludeError
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
         acsPresent = $base.acsPresent
@@ -7602,7 +7798,7 @@ function buildTestSummaryHtml(r) {
     add("ACS TXT", "fail");
     add("TXT Records", "unavailable", true);
   } else {
-    add("SPF (queried domain TXT)", r.spfPresent ? "pass" : "fail", true);
+    add("SPF (queried domain TXT)", (r.spfPresent && r.spfHasRequiredInclude !== false) ? "pass" : "fail", true);
     add("ACS TXT", r.acsPresent ? "pass" : "fail");
     const hasTxt = Array.isArray(r.txtRecords) && r.txtRecords.length > 0;
     add("TXT Records", hasTxt ? "pass" : "fail", true);
@@ -8012,6 +8208,9 @@ function lookup() {
           guidance.push(t('guidanceSpfMissing'));
         }
       }
+      if (r.spfPresent && r.spfHasRequiredInclude === false && r.spfRequiredIncludeError) {
+        guidance.push(r.spfRequiredIncludeError);
+      }
       if (Array.isArray(r.spfGuidance) && r.spfGuidance.length > 0) {
         guidance.push(...r.spfGuidance.filter(Boolean));
       }
@@ -8079,7 +8278,7 @@ function lookup() {
       guidance.push(t('guidanceCnameMissing'));
     }
 
-    if (loaded.base && loaded.mx && r.mxProvider === "Microsoft 365 / Exchange Online" && r.spfPresent && r.spfValue && !/spf\.protection\.outlook\.com/i.test(r.spfValue)) {
+    if (loaded.base && loaded.mx && r.mxProvider === "Microsoft 365 / Exchange Online" && r.spfPresent && r.spfHasRequiredInclude === false) {
       guidance.push(t('guidanceMxMicrosoftSpf'));
     }
     if (loaded.base && loaded.mx && r.mxProvider === "Google Workspace / Gmail" && r.spfPresent && r.spfValue && !/_spf\.google\.com/i.test(r.spfValue)) {
@@ -8349,7 +8548,7 @@ function render(r) {
     }
 
     // 4. SPF
-    if (!r.spfPresent) { quotaWarn = true; }
+    if (!r.spfPresent || r.spfHasRequiredInclude === false) { quotaFail = true; }
 
     let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     if (quotaFail) {
@@ -8609,10 +8808,14 @@ function render(r) {
     quotaLines.push(`**${t('spfQueried')}:** WARN${r.dnsError ? ' - ' + r.dnsError : ' - ' + t('txtLookupFailedOrTimedOut')}`);
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> WARN${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
   } else {
-    quotaItems.push(quotaRow(t('spfQueried'), r.spfPresent ? 'pass' : 'warn', r.spfPresent ? r.spfValue : t('noSpfRecordDetected'), null, 'spf'));
-    const spfState = r.spfPresent ? 'PASS' : 'WARN';
-    quotaLines.push(`**${t('spfQueried')}:** ${spfState}${r.spfPresent ? ' - ' + r.spfValue : ' - ' + t('noSpfRecordDetected')}`);
-    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfState)}${r.spfPresent ? ' - ' + escapeHtml(r.spfValue) : ' - ' + escapeHtml(t('noSpfRecordDetected'))}`);
+    const spfPassesRequirement = !!(r.spfPresent && r.spfHasRequiredInclude !== false);
+    const spfDetail = r.spfPresent
+      ? ((r.spfRequiredIncludeError ? `${r.spfValue}\n\n${r.spfRequiredIncludeError}` : (r.spfRequiredIncludeDetail ? `${r.spfValue}\n\n${r.spfRequiredIncludeDetail}` : r.spfValue)))
+      : t('noSpfRecordDetected');
+    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : 'fail', spfDetail, null, 'spf'));
+    const spfState = spfPassesRequirement ? 'PASS' : 'FAIL';
+    quotaLines.push(`**${t('spfQueried')}:** ${spfState}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
+    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfState)}${spfDetail ? ' - ' + escapeHtml(spfDetail).replace(/\r?\n/g, '<br>') : ''}`);
   }
 
   // Domain age / expiry for copy block
@@ -8655,7 +8858,7 @@ function render(r) {
     ? t('pending')
     : (errors.base
       ? t('error')
-      : (r.spfPresent ? t('verified') : t('notStarted')));
+      : ((r.spfPresent && r.spfHasRequiredInclude !== false) ? t('verified') : t('notStarted')));
 
   const dkim1StatusText = (!loaded.dkim && !errors.dkim)
     ? t('pending')
@@ -9033,8 +9236,8 @@ function render(r) {
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')) + spfExpandedSection,
-    basePending ? "LOADING" : (baseError ? "ERROR" : (r.spfPresent ? "PASS" : "OPTIONAL")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : (r.spfPresent ? "tag-pass" : "tag-info")),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((r.spfPresent && r.spfHasRequiredInclude !== false) ? "PASS" : "FAIL")),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((r.spfPresent && r.spfHasRequiredInclude !== false) ? "tag-pass" : "tag-fail")),
     "spf"
   ));
 
@@ -9612,7 +9815,7 @@ $functionNames = @(
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
   'Get-RegistrableDomain','Get-ParentDomains',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
-  'Get-SpfTokens','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
+  'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry',
