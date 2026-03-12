@@ -2878,7 +2878,12 @@ function Test-SpfOutlookIncludeToken {
     $normalized = $normalized -replace '^[\+\-~\?]', ''
     if ($normalized -notmatch '^(?i)include:') { continue }
 
-    $target = Get-SpfDomainSpecTarget -Spec ($normalized -replace '^(?i)include:', '') -Domain $null
+    $target = ($normalized -replace '^(?i)include:', '')
+    $slashIndex = $target.IndexOf('/')
+    if ($slashIndex -ge 0) {
+      $target = $target.Substring(0, $slashIndex)
+    }
+    $target = $target.Trim().TrimEnd('.').ToLowerInvariant()
     if ($target -eq 'spf.protection.outlook.com') {
       return $true
     }
@@ -4867,13 +4872,23 @@ html[dir="rtl"] .language-trigger {
   cursor: pointer;
   text-align: left;
   font-size: 12px;
-  transition: background-color 0.2s ease, transform 0.2s ease;
+  transition: background-color 0.2s ease;
 }
 
 .language-option:hover,
 .language-option.active {
   background: var(--button-bg-secondary);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .language-option {
+    transition: background-color 0.2s ease, transform 0.2s ease;
+  }
+
+  .language-option:hover,
+  .language-option.active {
   transform: translateY(-1px);
+  }
 }
 
 .language-flag {
@@ -9437,8 +9452,8 @@ function render(r) {
     ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary(r)].filter(Boolean).join("\n\n");
-  // The expanded SPF analysis is server-generated in English, so only render it for English until
-  // the server payload carries localized analysis text.
+  // The expanded SPF analysis is server-generated in English, and it is only meaningful once the
+  // base TXT payload has loaded, so only render it for English after the base check completes.
   const spfExpandedSection = currentLanguage === 'en' && loaded.base && r.spfExpandedText
     ? `\n\n--- ${t('spfRecordBasics')} ---\n${stripSpfRequirementSection(r.spfExpandedText)}`
     : '';
