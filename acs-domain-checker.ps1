@@ -4867,7 +4867,7 @@ html[dir="rtl"] .language-trigger {
   cursor: pointer;
   text-align: left;
   font-size: 12px;
-  transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+  transition: background-color 0.2s ease, transform 0.2s ease;
 }
 
 .language-option:hover,
@@ -7530,6 +7530,7 @@ function applyLanguage(language, persist = true) {
   applyLanguageToStaticUi();
   closeLanguageMenu();
   if (lastResult) {
+    // Rebuild derived, language-sensitive strings before rendering cached results again.
     recomputeDerived(lastResult);
     render(lastResult);
   }
@@ -7714,9 +7715,10 @@ function renderHistory(items) {
     const safe = escapeHtml(text);
     const key = escapeHtml(text.toLowerCase());
     const arg = JSON.stringify(text);
+    const removeLabel = escapeHtml(t('removeLabel'));
     return `<span class="history-chip" data-domain="${key}">
       <span class="history-item" onclick='runHistory(${arg})'>${safe}</span>
-      <button type="button" class="history-remove" title="${escapeHtml(t('removeLabel'))}" aria-label="${escapeHtml(t('removeLabel'))}" onclick='event.stopPropagation(); removeHistory(${arg})'>&#x2715;</button>
+      <button type="button" class="history-remove" title="${removeLabel}" aria-label="${removeLabel}" onclick='event.stopPropagation(); removeHistory(${arg})'>&#x2715;</button>
     </span>`;
   }).join(" ");
   container.innerHTML = escapeHtml(t('recent')) + ": " + chips;
@@ -9435,6 +9437,8 @@ function render(r) {
     ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary(r)].filter(Boolean).join("\n\n");
+  // The expanded SPF analysis is server-generated in English, so only render it for English until
+  // the server payload carries localized analysis text.
   const spfExpandedSection = currentLanguage === 'en' && loaded.base && r.spfExpandedText
     ? `\n\n--- ${t('spfRecordBasics')} ---\n${stripSpfRequirementSection(r.spfExpandedText)}`
     : '';
