@@ -2449,7 +2449,7 @@ function Set-SecurityHeaders {
       $styleSrcParts = @("'self'", $nonceToken) | Where-Object { $_ }
       $scriptSrc = 'script-src ' + ($scriptSrcParts -join ' ')
       $styleSrc = 'style-src ' + ($styleSrcParts -join ' ')
-      $Context.Response.Headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com; frame-ancestors 'none'"
+      $Context.Response.Headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com; frame-ancestors 'none'"
     }
   } catch { }
 }
@@ -4582,6 +4582,96 @@ h1 {
   cursor: pointer;
 }
 
+.language-dropdown {
+  position: relative;
+}
+
+.language-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--button-border-secondary);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  cursor: pointer;
+  min-width: 150px;
+}
+
+.language-trigger .caret {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.language-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.18);
+  z-index: 50;
+  display: none;
+}
+
+.language-menu.open {
+  display: block;
+}
+
+html[dir="rtl"] .language-menu {
+  left: auto;
+  right: 0;
+}
+
+html[dir="rtl"] .language-option,
+html[dir="rtl"] .language-trigger {
+  text-align: right;
+}
+
+.language-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+}
+
+.language-option:hover,
+.language-option.active {
+  background: var(--button-bg-secondary);
+}
+
+.language-flag {
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 50%;
+  border: 1px solid #eee;
+  flex: 0 0 auto;
+}
+
+.top-bar select {
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--button-border-secondary);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  cursor: pointer;
+}
+
 .top-bar button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -5130,6 +5220,10 @@ async function ensureMsalLoaded() {
 <div class="container">
 
 <div class="top-bar">
+  <div id="languageDropdown" class="language-dropdown hide-on-screenshot">
+    <button id="languageSelectBtn" type="button" class="language-trigger" onclick="toggleLanguageMenu()" aria-haspopup="listbox" aria-expanded="false"></button>
+    <div id="languageSelectMenu" class="language-menu" role="listbox"></div>
+  </div>
   <button id="themeToggleBtn" type="button" class="hide-on-screenshot" onclick="toggleTheme()">Dark mode &#x1F319;</button>
   <button id="copyLinkBtn" type="button" class="hide-on-screenshot" onclick="copyShareLink()">Copy link &#x1F517;</button>
   <button id="screenshotBtn" type="button" class="hide-on-screenshot" onclick="screenshotPage()">Copy page screenshot &#x1F4F8;</button>
@@ -5142,7 +5236,7 @@ async function ensureMsalLoaded() {
 
 <div class="search-box">
   <img src="data:image/png;base64,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" alt="ACS Logo" style="height: 64px; display: block; margin: 0 auto 12px auto;">
-  <h1>Azure Communication Services<br/>Email Domain Checker</h1>
+  <h1 id="appHeading">Azure Communication Services<br/>Email Domain Checker</h1>
   <div class="input-row">
     <div class="input-wrapper">
       <input id="domainInput" type="text" placeholder="example.com" oninput="toggleClearBtn()" />
@@ -5155,7 +5249,7 @@ async function ensureMsalLoaded() {
 <div id="status"></div>
 <div id="results" class="cards"></div>
 
-<div class="footer">
+<div class="footer" id="footerText">
   ACS Email Domain Checker v__APP_VERSION__ &bull; Written by: Blake Drumm &bull; Generated by PowerShell &bull; <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Back to Top</a>
 </div>
 
@@ -5164,10 +5258,1896 @@ async function ensureMsalLoaded() {
 <script nonce="__CSP_NONCE__">
 let lastResult = null;
 const HISTORY_KEY = "acsDomainHistory";
+const LANG_KEY = "acsLanguage";
+
+const TRANSLATIONS = {
+  en: {
+    languageName: 'English',
+    appHeading: 'Azure Communication Services<br/>Email Domain Checker',
+    placeholderDomain: 'example.com',
+    lookup: 'Lookup',
+    checkingShort: 'Checking',
+    themeDark: 'Dark mode 🌙',
+    themeLight: 'Light mode ☀️',
+    copyLink: 'Copy link 🔗',
+    copyScreenshot: 'Copy page screenshot 📸',
+    downloadJson: 'Download JSON 📥',
+    reportIssue: 'Report issue 🐛',
+    signInMicrosoft: 'Sign in with Microsoft 🔒',
+    signOut: 'Sign out',
+    recent: 'Recent',
+    footer: 'ACS Email Domain Checker v{version} • Written by: Blake Drumm • Generated by PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Back to Top</a>',
+    statusChecking: 'Checking {domain} ⏳',
+    statusSomeChecksFailed: 'Some checks failed ❌',
+    statusTxtFailed: 'TXT lookup failed ❌ — other DNS records may still resolve.',
+    statusCollectedOn: 'Collected on: {value}',
+    emailQuota: 'Email Quota',
+    domainVerification: 'Domain Verification',
+    domainRegistration: 'Domain Registration (WHOIS/RDAP)',
+    domain: 'Domain',
+    mxRecords: 'MX Records',
+    spfQueried: 'SPF (queried domain TXT)',
+    acsDomainVerificationTxt: 'ACS Domain Verification TXT',
+    txtRecordsQueried: 'TXT Records (queried domain)',
+    dmarc: 'DMARC',
+    reputationDnsbl: 'Reputation (DNSBL)',
+    cname: 'CNAME',
+    guidance: 'Guidance 💡',
+    helpfulLinks: 'Helpful Links',
+    externalTools: 'External Tools',
+    checklist: 'CHECKLIST',
+    verificationTag: 'VERIFICATION',
+    docs: 'DOCS',
+    tools: 'TOOLS',
+    readinessTips: 'READINESS TIPS',
+    lookedUp: 'LOOKED UP',
+    loading: 'LOADING',
+    missing: 'MISSING',
+    optional: 'OPTIONAL',
+    info: 'INFO',
+    error: 'ERROR',
+    pass: 'PASS',
+    fail: 'FAIL',
+    warn: 'WARN',
+    pending: 'PENDING',
+    dnsError: 'DNS ERROR',
+    newDomain: 'NEW DOMAIN',
+    expired: 'EXPIRED',
+    noRecordsAvailable: 'No Records Available.',
+    noAdditionalGuidance: 'No additional guidance.',
+    noAdditionalMxDetails: 'No additional MX details available.',
+    additionalDetailsPlus: 'Additional Details +',
+    additionalDetailsMinus: 'Additional Details -',
+    copy: 'Copy',
+    copyEmailQuota: 'Copy Email Quota',
+    view: 'View',
+    type: 'Type',
+    addresses: 'Addresses',
+    ipv4: 'IPv4',
+    ipv6: 'IPv6',
+    none: 'None',
+    hostname: 'Hostname',
+    priority: 'Priority',
+    ipAddress: 'IP Address',
+    status: 'Status',
+    ipv4Addresses: 'IPv4 Addresses',
+    ipv6Addresses: 'IPv6 Addresses',
+    noIpAddressesFound: 'No IP Addresses Found',
+    detectedProvider: 'Detected provider',
+    loadingValue: 'Loading...',
+    usingIpParent: 'Using IP addresses from parent domain {domain} (no A/AAAA on {queryDomain}).',
+    noMxParentShowing: 'No MX records found on {domain}; showing MX for parent domain {lookupDomain}.',
+    noMxParentChecked: 'No MX records found on {domain} or parent {parentDomain}.',
+    resolvedUsingGuidance: 'Resolved using {lookupDomain} for guidance.',
+    effectivePolicyInherited: 'Effective policy inherited from parent domain {lookupDomain}.',
+    acsEmailDomainVerification: 'ACS Email Domain Verification',
+    acsEmailQuotaLimitIncrease: 'ACS Email Quota Limit Increase',
+    spfRecordBasics: 'SPF Record Basics',
+    dmarcRecordBasics: 'DMARC Record Basics',
+    dkimRecordBasics: 'DKIM Record Basics',
+    mxRecordBasics: 'MX Record Basics',
+    domainDossier: 'Domain Dossier (CentralOps)',
+    multiRblLookup: 'MultiRBL DNSBL Lookup',
+    copied: 'Copied! ✔',
+    languageLabel: 'Language',
+    pageTitle: 'Azure Communication Services - Email Domain Checker',
+    passing: 'Passing',
+    failed: 'Failed',
+    warningState: 'Warning',
+    verified: 'VERIFIED',
+    notVerified: 'NOT VERIFIED',
+    notStarted: 'NOT STARTED',
+    unknown: 'UNKNOWN',
+    checkingMxRecords: 'Checking MX records...',
+    checkingDnsblReputation: 'Checking DNSBL reputation...',
+    waitingForTxtLookup: 'Waiting for TXT lookup...',
+    waitingForBaseTxtLookup: 'Waiting for base TXT lookup...',
+    dnsTxtLookup: 'DNS TXT Lookup',
+    acsTxtMsDomainVerification: 'ACS TXT (ms-domain-verification)',
+    acsReadiness: 'ACS Readiness',
+    resolvedSuccessfully: 'Resolved successfully.',
+    addAcsTxtFromPortal: 'Add the ACS TXT from the Azure portal.',
+    missingRequiredAcsTxt: 'Missing required ACS TXT.',
+    unableDetermineAcsTxtValue: 'Unable to determine ACS TXT value.',
+    txtLookupFailedOrTimedOut: 'TXT lookup failed or timed out.',
+    msDomainVerificationFound: 'ms-domain-verification TXT found.',
+    noSpfRecordDetected: 'No SPF record detected.',
+    noMxRecordsDetected: 'No MX records detected.',
+    checkingValue: 'Checking...',
+    yes: 'Yes',
+    no: 'No',
+    source: 'Source',
+    creationDate: 'Creation Date',
+    registryExpiryDate: 'Registry Expiry Date',
+    registrarLabel: 'Registrar',
+    registrantLabel: 'Registrant',
+    domainAgeLabel: 'Domain Age',
+    domainExpiringIn: 'Domain Expiring in',
+    daysUntilExpiry: 'Days until expiry',
+    statusLabel: 'Status',
+    noRegistrationInformation: 'No registration information available.',
+    registrationDetailsUnavailable: 'Registration details unavailable.',
+    newDomainUnderDays: 'New domain (under {days} days){suffix}',
+    noteDomainLessThanDays: 'Domain is less than {days} days old.',
+    rawLabel: 'Raw',
+    zonesQueried: 'Zones queried',
+    totalQueries: 'Total queries',
+    errorsCount: 'Errors',
+    listed: 'Listed',
+    notListed: 'Not listed',
+    riskLabel: 'Risk',
+    reputationWord: 'Reputation',
+    noSuccessfulQueries: 'Unknown (no successful queries)',
+    listingsLabel: 'Listings',
+    clean: 'Clean',
+    excellent: 'Excellent',
+    great: 'Great',
+    good: 'Good',
+    fair: 'Fair',
+    poor: 'Poor',
+    ageLabel: 'Age',
+    expiresInLabel: 'Expires in',
+    acsReadyMessage: 'This domain appears ready for Azure Communication Services domain verification.',
+    guidanceDnsTxtFailed: 'DNS TXT lookup failed or timed out. Other DNS records may still resolve.',
+    guidanceSpfMissingParent: 'SPF is missing on {domain}. Parent domain {lookupDomain} publishes SPF, but SPF does not automatically apply to the queried subdomain.',
+    guidanceSpfMissing: 'SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent).',
+    guidanceAcsMissingParent: 'ACS ms-domain-verification TXT is missing on {domain}. Parent domain {lookupDomain} has an ACS TXT record, but it does not verify the queried subdomain.',
+    guidanceAcsMissing: 'ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.',
+    guidanceMxMissingParentFallback: 'No MX records found on {domain}; using parent domain {lookupDomain} MX records as a fallback.',
+    guidanceMxMissingCheckedParent: 'No MX records detected for {domain} or its parent {parentDomain}. Mail flow will not function until MX records are configured.',
+    guidanceMxMissing: 'No MX records detected. Mail flow will not function until MX records are configured.',
+    guidanceMxParentShown: 'No MX records found on {domain}; results shown are from parent domain {lookupDomain}.',
+    guidanceDmarcMissing: 'DMARC is missing. Add a _dmarc.{domain} TXT record to reduce spoofing risk.',
+    guidanceDmarcInherited: 'Effective DMARC policy is inherited from parent domain {lookupDomain}.',
+    guidanceDmarcMoreInfo: 'For more information about DMARC TXT record syntax, see: {url}',
+    guidanceDkim1Missing: 'DKIM selector1 (selector1-azurecomm-prod-net) is missing.',
+    guidanceDkim2Missing: 'DKIM selector2 (selector2-azurecomm-prod-net) is missing.',
+    guidanceCnameMissing: 'CNAME is not configured on the queried host. Validate this is expected for your scenario.',
+    guidanceMxProviderDetected: 'Detected MX provider: {provider}',
+    guidanceMxMicrosoftSpf: 'Your MX indicates Microsoft 365, but SPF does not include spf.protection.outlook.com. Verify your SPF includes the correct provider include.',
+    guidanceMxGoogleSpf: 'Your MX indicates Google Workspace, but SPF does not include _spf.google.com. Verify your SPF includes the correct provider include.',
+    guidanceMxZohoSpf: 'Your MX indicates Zoho, but SPF does not include include:zoho.com. Verify your SPF includes the correct provider include.',
+    guidanceDomainExpired: 'Domain registration appears expired. Renew the domain before proceeding.',
+    guidanceDomainVeryYoung: 'Domain was registered very recently (within {days} days). This is treated as an error signal for verification; ask the customer to allow more time.',
+    guidanceDomainYoung: 'Domain was registered recently (within {days} days). Ask the customer to allow more time; Microsoft uses this signal to help prevent spammers from setting up new web addresses.',
+    promptEnterDomain: 'Please enter a domain.',
+    promptEnterValidDomain: 'Please enter a valid domain name (example: example.com).',
+    clipboardUnavailable: 'Clipboard API not available in this browser.',
+    linkCopiedToClipboard: 'Link copied to clipboard.',
+    failedCopyLink: 'Failed to copy link to clipboard.',
+    copiedToClipboard: 'Copied to clipboard.',
+    failedCopyToClipboard: 'Failed to copy to clipboard.',
+    nothingToCopyFor: 'Nothing to copy for {field}.',
+    copiedFieldToClipboard: 'Copied {field} to clipboard.',
+    failedCopyFieldToClipboard: 'Failed to copy {field} to clipboard.',
+    screenshotClipboardUnsupported: 'Screenshot clipboard support is not available in this browser.',
+    screenshotContainerNotFound: 'Container not found for screenshot.',
+    screenshotCaptureFailed: 'Failed to capture screenshot.',
+    screenshotCopiedToClipboard: 'Screenshot copied to clipboard.',
+    failedCopyScreenshot: 'Failed to copy screenshot to clipboard.',
+    screenshotRenderFailed: 'Screenshot capture failed.',
+    issueReportingNotConfigured: 'Issue reporting is not configured.',
+    issueReportConfirm: 'This will open the issue tracker and include {detail}. Continue?',
+    issueReportDetailDomain: 'the domain name "{domain}"',
+    issueReportDetailInput: 'the domain name from the input box',
+    authSignInNotConfigured: 'Microsoft sign-in is not configured. Confirm the ACS_ENTRA_CLIENT_ID was injected into the page and refresh.',
+    authLibraryLoadFailed: 'Microsoft sign-in library failed to load. Verify access to the MSAL CDN or provide a local msal-browser.min.js file.',
+    authInitFailed: 'Microsoft sign-in failed to initialize. Check the browser console for details.',
+    authInitFailedWithReason: 'Microsoft sign-in failed to initialize: {reason}',
+    authSetClientIdAndRestart: 'Microsoft sign-in is not configured. Set the ACS_ENTRA_CLIENT_ID environment variable and restart.',
+    authSigningIn: 'Signing in...',
+    authSignInCancelled: 'Sign-in was cancelled.',
+    authSignInFailed: 'Sign-in failed: {reason}',
+    authUnknownError: 'Unknown error',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois',
+    dmarcMonitorOnly: 'DMARC for {domain} is monitor-only (p=none). For stronger protection against spoofing, move to enforcement with p=quarantine or p=reject after validating legitimate mail sources.',
+    dmarcQuarantine: 'DMARC for {domain} is set to p=quarantine. For the strongest anti-spoofing posture, consider p=reject once you confirm valid mail is fully aligned.',
+    dmarcPct: 'DMARC enforcement for {domain} is only applied to {pct}% of messages (pct={pct}). Use pct=100 for full protection once rollout is validated.',
+    dmarcAdkimRelaxed: 'DKIM alignment for {domain} uses relaxed mode (adkim=r). Consider strict alignment (adkim=s) if your sending infrastructure supports it for tighter domain protection.',
+    dmarcAspfRelaxed: 'SPF alignment for {domain} uses relaxed mode (aspf=r). Consider strict alignment (aspf=s) if your senders consistently use the exact domain.',
+    dmarcMissingSp: 'DMARC for subdomains of {lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like {domain}, consider adding sp=quarantine or sp=reject for clearer protection.',
+    dmarcMissingRua: 'DMARC for {domain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact.',
+    dmarcMissingRuf: 'DMARC for {domain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations.'
+  },
+  es: {
+    languageName: 'Español',
+    appHeading: 'Azure Communication Services<br/>Comprobador de dominio de correo',
+    placeholderDomain: 'ejemplo.com',
+    lookup: 'Buscar',
+    checkingShort: 'Comprobando',
+    themeDark: 'Modo oscuro 🌙',
+    themeLight: 'Modo claro ☀️',
+    copyLink: 'Copiar vínculo 🔗',
+    copyScreenshot: 'Copiar captura 📸',
+    downloadJson: 'Descargar JSON 📥',
+    reportIssue: 'Reportar problema 🐛',
+    signInMicrosoft: 'Iniciar sesión con Microsoft 🔒',
+    signOut: 'Cerrar sesión',
+    recent: 'Recientes',
+    footer: 'ACS Email Domain Checker v{version} • Escrito por: Blake Drumm • Generado por PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Volver arriba</a>',
+    statusChecking: 'Comprobando {domain} ⏳',
+    statusSomeChecksFailed: 'Algunas comprobaciones fallaron ❌',
+    statusTxtFailed: 'La búsqueda TXT falló ❌ — otros registros DNS aún pueden resolverse.',
+    statusCollectedOn: 'Recopilado el: {value}',
+    emailQuota: 'Cuota de correo',
+    domainVerification: 'Verificación del dominio',
+    domainRegistration: 'Registro del dominio (WHOIS/RDAP)',
+    domain: 'Dominio',
+    mxRecords: 'Registros MX',
+    spfQueried: 'SPF (TXT del dominio consultado)',
+    acsDomainVerificationTxt: 'TXT de verificación de dominio ACS',
+    txtRecordsQueried: 'Registros TXT (dominio consultado)',
+    dmarc: 'DMARC',
+    reputationDnsbl: 'Reputación (DNSBL)',
+    cname: 'CNAME',
+    guidance: 'Guía 💡',
+    helpfulLinks: 'Enlaces útiles',
+    externalTools: 'Herramientas externas',
+    checklist: 'LISTA',
+    verificationTag: 'VERIFICACIÓN',
+    docs: 'DOCS',
+    tools: 'HERRAMIENTAS',
+    readinessTips: 'CONSEJOS',
+    lookedUp: 'CONSULTADO',
+    loading: 'CARGANDO',
+    missing: 'FALTA',
+    optional: 'OPCIONAL',
+    info: 'INFO',
+    error: 'ERROR',
+    pass: 'OK',
+    fail: 'FALLO',
+    warn: 'AVISO',
+    pending: 'PENDIENTE',
+    dnsError: 'ERROR DNS',
+    newDomain: 'DOMINIO NUEVO',
+    expired: 'VENCIDO',
+    noRecordsAvailable: 'No hay registros disponibles.',
+    noAdditionalGuidance: 'No hay orientación adicional.',
+    noAdditionalMxDetails: 'No hay detalles MX adicionales disponibles.',
+    additionalDetailsPlus: 'Detalles adicionales +',
+    additionalDetailsMinus: 'Detalles adicionales -',
+    copy: 'Copiar',
+    copyEmailQuota: 'Copiar cuota de correo',
+    view: 'Ver',
+    type: 'Tipo',
+    addresses: 'Direcciones',
+    ipv4: 'IPv4',
+    ipv6: 'IPv6',
+    none: 'Ninguno',
+    hostname: 'Nombre de host',
+    priority: 'Prioridad',
+    ipAddress: 'Dirección IP',
+    status: 'Estado',
+    ipv4Addresses: 'Direcciones IPv4',
+    ipv6Addresses: 'Direcciones IPv6',
+    noIpAddressesFound: 'No se encontraron IP',
+    detectedProvider: 'Proveedor detectado',
+    loadingValue: 'Cargando...',
+    usingIpParent: 'Usando direcciones IP del dominio primario {domain} (sin A/AAAA en {queryDomain}).',
+    noMxParentShowing: 'No se encontraron MX en {domain}; se muestran los MX del dominio primario {lookupDomain}.',
+    noMxParentChecked: 'No se encontraron MX en {domain} ni en el dominio primario {parentDomain}.',
+    resolvedUsingGuidance: 'Resuelto usando {lookupDomain} como referencia.',
+    effectivePolicyInherited: 'La directiva efectiva se hereda del dominio primario {lookupDomain}.',
+    acsEmailDomainVerification: 'Verificación de dominio de correo ACS',
+    acsEmailQuotaLimitIncrease: 'Aumento del límite de cuota de correo ACS',
+    spfRecordBasics: 'Conceptos básicos de SPF',
+    dmarcRecordBasics: 'Conceptos básicos de DMARC',
+    dkimRecordBasics: 'Conceptos básicos de DKIM',
+    mxRecordBasics: 'Conceptos básicos de MX',
+    domainDossier: 'Domain Dossier (CentralOps)',
+    multiRblLookup: 'Consulta DNSBL de MultiRBL',
+    copied: '¡Copiado! ✔',
+    languageLabel: 'Idioma',
+    pageTitle: 'Azure Communication Services - Comprobador de dominio de correo',
+    passing: 'Correcto',
+    failed: 'Falló',
+    warningState: 'Aviso',
+    verified: 'VERIFICADO',
+    notVerified: 'NO VERIFICADO',
+    notStarted: 'NO INICIADO',
+    unknown: 'DESCONOCIDO',
+    checkingMxRecords: 'Comprobando registros MX...',
+    checkingDnsblReputation: 'Comprobando reputación DNSBL...',
+    waitingForTxtLookup: 'Esperando la búsqueda TXT...',
+    waitingForBaseTxtLookup: 'Esperando la búsqueda TXT base...',
+    dnsTxtLookup: 'Búsqueda DNS TXT',
+    acsTxtMsDomainVerification: 'TXT ACS (ms-domain-verification)',
+    acsReadiness: 'Estado de ACS',
+    resolvedSuccessfully: 'Resuelto correctamente.',
+    addAcsTxtFromPortal: 'Agregue el TXT de ACS desde Azure Portal.',
+    missingRequiredAcsTxt: 'Falta el TXT de ACS requerido.',
+    unableDetermineAcsTxtValue: 'No se pudo determinar el valor TXT de ACS.',
+    txtLookupFailedOrTimedOut: 'La búsqueda TXT falló o agotó el tiempo.',
+    msDomainVerificationFound: 'Se encontró el TXT ms-domain-verification.',
+    noSpfRecordDetected: 'No se detectó ningún registro SPF.',
+    noMxRecordsDetected: 'No se detectaron registros MX.',
+    checkingValue: 'Comprobando...',
+    yes: 'Sí',
+    no: 'No',
+    source: 'Origen',
+    creationDate: 'Fecha de creación',
+    registryExpiryDate: 'Fecha de expiración del registro',
+    registrarLabel: 'Registrador',
+    registrantLabel: 'Titular',
+    domainAgeLabel: 'Edad del dominio',
+    domainExpiringIn: 'El dominio vence en',
+    daysUntilExpiry: 'Días hasta el vencimiento',
+    statusLabel: 'Estado',
+    noRegistrationInformation: 'No hay información de registro disponible.',
+    registrationDetailsUnavailable: 'Detalles de registro no disponibles.',
+    newDomainUnderDays: 'Dominio nuevo (menos de {days} días){suffix}',
+    noteDomainLessThanDays: 'El dominio tiene menos de {days} días.',
+    rawLabel: 'Sin procesar',
+    zonesQueried: 'Zonas consultadas',
+    totalQueries: 'Consultas totales',
+    errorsCount: 'Errores',
+    listed: 'En listas',
+    notListed: 'No listado',
+    riskLabel: 'Riesgo',
+    reputationWord: 'Reputación',
+    noSuccessfulQueries: 'Desconocida (sin consultas correctas)',
+    listingsLabel: 'Listados',
+    clean: 'Limpio',
+    excellent: 'Excelente',
+    great: 'Muy buena',
+    good: 'Buena',
+    fair: 'Regular',
+    poor: 'Mala',
+    ageLabel: 'Edad',
+    expiresInLabel: 'Vence en',
+    acsReadyMessage: 'Este dominio parece listo para la verificación de dominio de Azure Communication Services.',
+    guidanceDnsTxtFailed: 'La búsqueda DNS TXT falló o agotó el tiempo. Otros registros DNS aún pueden resolverse.',
+    guidanceSpfMissingParent: 'Falta SPF en {domain}. El dominio primario {lookupDomain} publica SPF, pero SPF no se aplica automáticamente al subdominio consultado.',
+    guidanceSpfMissing: 'Falta SPF. Agregue v=spf1 include:spf.protection.outlook.com -all (o el equivalente de su proveedor).',
+    guidanceAcsMissingParent: 'Falta el TXT ACS ms-domain-verification en {domain}. El dominio primario {lookupDomain} tiene un TXT ACS, pero no verifica el subdominio consultado.',
+    guidanceAcsMissing: 'Falta el TXT ACS ms-domain-verification. Agregue el valor desde Azure Portal.',
+    guidanceMxMissingParentFallback: 'No se encontraron registros MX en {domain}; se usarán los MX del dominio primario {lookupDomain} como alternativa.',
+    guidanceMxMissingCheckedParent: 'No se detectaron registros MX para {domain} ni para su dominio primario {parentDomain}. El flujo de correo no funcionará hasta configurar MX.',
+    guidanceMxMissing: 'No se detectaron registros MX. El flujo de correo no funcionará hasta configurar MX.',
+    guidanceMxParentShown: 'No se encontraron registros MX en {domain}; los resultados mostrados son del dominio primario {lookupDomain}.',
+    guidanceDmarcMissing: 'Falta DMARC. Agregue un registro TXT _dmarc.{domain} para reducir el riesgo de suplantación.',
+    guidanceDmarcInherited: 'La directiva DMARC efectiva se hereda del dominio primario {lookupDomain}.',
+    guidanceDmarcMoreInfo: 'Para más información sobre la sintaxis del registro TXT DMARC, vea: {url}',
+    guidanceDkim1Missing: 'Falta DKIM selector1 (selector1-azurecomm-prod-net).',
+    guidanceDkim2Missing: 'Falta DKIM selector2 (selector2-azurecomm-prod-net).',
+    guidanceCnameMissing: 'CNAME no está configurado en el host consultado. Valide si esto es lo esperado para su escenario.',
+    guidanceMxProviderDetected: 'Proveedor MX detectado: {provider}',
+    guidanceMxMicrosoftSpf: 'Su MX indica Microsoft 365, pero SPF no incluye spf.protection.outlook.com. Verifique que SPF incluya el include correcto del proveedor.',
+    guidanceMxGoogleSpf: 'Su MX indica Google Workspace, pero SPF no incluye _spf.google.com. Verifique que SPF incluya el include correcto del proveedor.',
+    guidanceMxZohoSpf: 'Su MX indica Zoho, pero SPF no incluye include:zoho.com. Verifique que SPF incluya el include correcto del proveedor.',
+    guidanceDomainExpired: 'El registro del dominio parece expirado. Renuévelo antes de continuar.',
+    guidanceDomainVeryYoung: 'El dominio se registró muy recientemente (dentro de {days} días). Esto se trata como una señal de error para la verificación; pida al cliente que espere más tiempo.',
+    guidanceDomainYoung: 'El dominio se registró recientemente (dentro de {days} días). Pida al cliente que espere más tiempo; Microsoft usa esta señal para ayudar a evitar que los remitentes maliciosos configuren nuevos dominios.',
+    dmarcMonitorOnly: 'DMARC para {domain} está en modo solo supervisión (p=none). Para una protección más sólida contra la suplantación, cambie a enforcement con p=quarantine o p=reject después de validar las fuentes legítimas de correo.',
+    dmarcQuarantine: 'DMARC para {domain} está configurado con p=quarantine. Para la protección más fuerte contra la suplantación, considere p=reject cuando confirme que el correo legítimo está completamente alineado.',
+    dmarcPct: 'La aplicación de DMARC para {domain} solo se aplica al {pct}% de los mensajes (pct={pct}). Use pct=100 para una protección completa cuando termine la validación del despliegue.',
+    dmarcAdkimRelaxed: 'La alineación DKIM para {domain} usa modo relajado (adkim=r). Considere alineación estricta (adkim=s) si su infraestructura de envío lo permite para una protección más fuerte del dominio.',
+    dmarcAspfRelaxed: 'La alineación SPF para {domain} usa modo relajado (aspf=r). Considere alineación estricta (aspf=s) si sus remitentes usan siempre el dominio exacto.',
+    dmarcMissingSp: 'DMARC para subdominios de {lookupDomain} no define una directiva explícita para subdominios (sp=). Si envía desde subdominios como {domain}, considere agregar sp=quarantine o sp=reject para una protección más clara.',
+    dmarcMissingRua: 'DMARC para {domain} no publica informes agregados (rua=). Agregar un buzón de informes mejora la visibilidad sobre intentos de suplantación y el impacto de la aplicación.',
+    dmarcMissingRuf: 'DMARC para {domain} no publica informes forenses (ruf=). Si su proceso lo permite, estos informes pueden aportar más detalle para investigaciones.'
+  },
+  fr: {
+    languageName: 'Français',
+    appHeading: 'Azure Communication Services<br/>Vérificateur de domaine e-mail',
+    placeholderDomain: 'exemple.com',
+    lookup: 'Rechercher',
+    checkingShort: 'Vérification',
+    themeDark: 'Mode sombre 🌙',
+    themeLight: 'Mode clair ☀️',
+    copyLink: 'Copier le lien 🔗',
+    copyScreenshot: 'Copier la capture 📸',
+    downloadJson: 'Télécharger le JSON 📥',
+    reportIssue: 'Signaler un problème 🐛',
+    signInMicrosoft: 'Se connecter avec Microsoft 🔒',
+    signOut: 'Se déconnecter',
+    recent: 'Récents',
+    footer: 'ACS Email Domain Checker v{version} • Écrit par : Blake Drumm • Généré par PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Retour en haut</a>',
+    statusChecking: 'Vérification de {domain} ⏳',
+    statusSomeChecksFailed: 'Certaines vérifications ont échoué ❌',
+    statusTxtFailed: 'La recherche TXT a échoué ❌ — les autres enregistrements DNS peuvent encore répondre.',
+    statusCollectedOn: 'Collecté le : {value}',
+    emailQuota: 'Quota e-mail',
+    domainVerification: 'Vérification du domaine',
+    domainRegistration: 'Enregistrement du domaine (WHOIS/RDAP)',
+    domain: 'Domaine',
+    mxRecords: 'Enregistrements MX',
+    spfQueried: 'SPF (TXT du domaine interrogé)',
+    acsDomainVerificationTxt: 'TXT de vérification de domaine ACS',
+    txtRecordsQueried: 'Enregistrements TXT (domaine interrogé)',
+    dmarc: 'DMARC',
+    reputationDnsbl: 'Réputation (DNSBL)',
+    cname: 'CNAME',
+    guidance: 'Conseils 💡',
+    helpfulLinks: 'Liens utiles',
+    externalTools: 'Outils externes',
+    checklist: 'CHECKLIST',
+    verificationTag: 'VÉRIFICATION',
+    docs: 'DOCS',
+    tools: 'OUTILS',
+    readinessTips: 'CONSEILS',
+    lookedUp: 'CONSULTÉ',
+    loading: 'CHARGEMENT',
+    missing: 'MANQUANT',
+    optional: 'OPTIONNEL',
+    info: 'INFO',
+    error: 'ERREUR',
+    pass: 'OK',
+    fail: 'ÉCHEC',
+    warn: 'AVERT.',
+    pending: 'EN ATTENTE',
+    dnsError: 'ERREUR DNS',
+    newDomain: 'NOUVEAU DOMAINE',
+    expired: 'EXPIRÉ',
+    noRecordsAvailable: 'Aucun enregistrement disponible.',
+    noAdditionalGuidance: 'Aucun conseil supplémentaire.',
+    noAdditionalMxDetails: 'Aucun détail MX supplémentaire disponible.',
+    additionalDetailsPlus: 'Détails supplémentaires +',
+    additionalDetailsMinus: 'Détails supplémentaires -',
+    copy: 'Copier',
+    copyEmailQuota: 'Copier le quota e-mail',
+    view: 'Voir',
+    type: 'Type',
+    addresses: 'Adresses',
+    ipv4: 'IPv4',
+    ipv6: 'IPv6',
+    none: 'Aucune',
+    hostname: 'Nom d’hôte',
+    priority: 'Priorité',
+    ipAddress: 'Adresse IP',
+    status: 'Statut',
+    ipv4Addresses: 'Adresses IPv4',
+    ipv6Addresses: 'Adresses IPv6',
+    noIpAddressesFound: 'Aucune adresse IP trouvée',
+    detectedProvider: 'Fournisseur détecté',
+    loadingValue: 'Chargement...',
+    usingIpParent: 'Utilisation des adresses IP du domaine parent {domain} (aucun A/AAAA sur {queryDomain}).',
+    noMxParentShowing: 'Aucun MX trouvé sur {domain} ; affichage des MX du domaine parent {lookupDomain}.',
+    noMxParentChecked: 'Aucun MX trouvé sur {domain} ni sur le domaine parent {parentDomain}.',
+    resolvedUsingGuidance: 'Résolu avec {lookupDomain} à titre indicatif.',
+    effectivePolicyInherited: 'La stratégie effective est héritée du domaine parent {lookupDomain}.',
+    acsEmailDomainVerification: 'Vérification du domaine e-mail ACS',
+    acsEmailQuotaLimitIncrease: 'Augmentation de la limite de quota e-mail ACS',
+    spfRecordBasics: 'Notions de base SPF',
+    dmarcRecordBasics: 'Notions de base DMARC',
+    dkimRecordBasics: 'Notions de base DKIM',
+    mxRecordBasics: 'Notions de base MX',
+    domainDossier: 'Domain Dossier (CentralOps)',
+    multiRblLookup: 'Recherche DNSBL MultiRBL',
+    copied: 'Copié ! ✔',
+    languageLabel: 'Langue',
+    promptEnterDomain: 'Veuillez saisir un domaine.',
+    promptEnterValidDomain: 'Veuillez saisir un nom de domaine valide (exemple : example.com).',
+    clipboardUnavailable: 'L’API du presse-papiers n’est pas disponible dans ce navigateur.',
+    linkCopiedToClipboard: 'Lien copié dans le presse-papiers.',
+    failedCopyLink: 'Échec de la copie du lien dans le presse-papiers.',
+    copiedToClipboard: 'Copié dans le presse-papiers.',
+    failedCopyToClipboard: 'Échec de la copie dans le presse-papiers.',
+    nothingToCopyFor: 'Rien à copier pour {field}.',
+    copiedFieldToClipboard: '{field} copié dans le presse-papiers.',
+    failedCopyFieldToClipboard: 'Échec de la copie de {field} dans le presse-papiers.',
+    screenshotClipboardUnsupported: 'La prise en charge de la copie de capture d’écran n’est pas disponible dans ce navigateur.',
+    screenshotContainerNotFound: 'Conteneur introuvable pour la capture d’écran.',
+    screenshotCaptureFailed: 'Échec de la capture d’écran.',
+    screenshotCopiedToClipboard: 'Capture d’écran copiée dans le presse-papiers.',
+    failedCopyScreenshot: 'Échec de la copie de la capture d’écran dans le presse-papiers.',
+    screenshotRenderFailed: 'La capture d’écran a échoué.',
+    issueReportingNotConfigured: 'Le signalement de problème n’est pas configuré.',
+    issueReportConfirm: 'Le suivi des problèmes va s’ouvrir et inclure {detail}. Continuer ?',
+    issueReportDetailDomain: 'le nom de domaine « {domain} »',
+    issueReportDetailInput: 'le nom de domaine du champ de saisie',
+    authSignInNotConfigured: 'La connexion Microsoft n’est pas configurée. Vérifiez que ACS_ENTRA_CLIENT_ID a bien été injecté dans la page puis actualisez.',
+    authLibraryLoadFailed: 'La bibliothèque de connexion Microsoft n’a pas pu être chargée. Vérifiez l’accès au CDN MSAL ou fournissez un fichier local msal-browser.min.js.',
+    authInitFailed: 'L’initialisation de la connexion Microsoft a échoué. Vérifiez la console du navigateur pour plus de détails.',
+    authInitFailedWithReason: 'L’initialisation de la connexion Microsoft a échoué : {reason}',
+    authSetClientIdAndRestart: 'La connexion Microsoft n’est pas configurée. Définissez la variable d’environnement ACS_ENTRA_CLIENT_ID puis redémarrez.',
+    authSigningIn: 'Connexion en cours...',
+    authSignInCancelled: 'La connexion a été annulée.',
+    authSignInFailed: 'Échec de la connexion : {reason}',
+    authUnknownError: 'Erreur inconnue',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois'
+  },
+  de: {
+    languageName: 'Deutsch',
+    appHeading: 'Azure Communication Services<br/>E-Mail-Domain-Prüfer',
+    placeholderDomain: 'beispiel.de',
+    lookup: 'Prüfen',
+    checkingShort: 'Prüfung',
+    themeDark: 'Dunkler Modus 🌙',
+    themeLight: 'Heller Modus ☀️',
+    copyLink: 'Link kopieren 🔗',
+    copyScreenshot: 'Seitenbild kopieren 📸',
+    downloadJson: 'JSON herunterladen 📥',
+    reportIssue: 'Problem melden 🐛',
+    signInMicrosoft: 'Mit Microsoft anmelden 🔒',
+    signOut: 'Abmelden',
+    recent: 'Zuletzt verwendet',
+    footer: 'ACS Email Domain Checker v{version} • Erstellt von: Blake Drumm • Generiert mit PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Nach oben</a>',
+    statusChecking: 'Prüfe {domain} ⏳',
+    statusSomeChecksFailed: 'Einige Prüfungen sind fehlgeschlagen ❌',
+    statusTxtFailed: 'TXT-Abfrage fehlgeschlagen ❌ — andere DNS-Einträge können trotzdem auflösbar sein.',
+    statusCollectedOn: 'Erfasst am: {value}',
+    emailQuota: 'E-Mail-Kontingent',
+    domainVerification: 'Domainüberprüfung',
+    domainRegistration: 'Domainregistrierung (WHOIS/RDAP)',
+    domain: 'Domain',
+    mxRecords: 'MX-Einträge',
+    spfQueried: 'SPF (TXT der abgefragten Domain)',
+    acsDomainVerificationTxt: 'ACS-Domainverifizierungs-TXT',
+    txtRecordsQueried: 'TXT-Einträge (abgefragte Domain)',
+    dmarc: 'DMARC',
+    reputationDnsbl: 'Reputation (DNSBL)',
+    cname: 'CNAME',
+    guidance: 'Hinweise 💡',
+    helpfulLinks: 'Hilfreiche Links',
+    externalTools: 'Externe Tools',
+    checklist: 'CHECKLISTE',
+    verificationTag: 'VERIFIZIERUNG',
+    docs: 'DOKS',
+    tools: 'TOOLS',
+    readinessTips: 'TIPPS',
+    lookedUp: 'ABGEFRAGT',
+    loading: 'LADEN',
+    missing: 'FEHLT',
+    optional: 'OPTIONAL',
+    info: 'INFO',
+    error: 'FEHLER',
+    pass: 'OK',
+    fail: 'FEHLER',
+    warn: 'WARNUNG',
+    pending: 'AUSSTEHEND',
+    dnsError: 'DNS-FEHLER',
+    newDomain: 'NEUE DOMAIN',
+    expired: 'ABGELAUFEN',
+    noRecordsAvailable: 'Keine Einträge verfügbar.',
+    noAdditionalGuidance: 'Keine weiteren Hinweise.',
+    noAdditionalMxDetails: 'Keine zusätzlichen MX-Details verfügbar.',
+    additionalDetailsPlus: 'Zusätzliche Details +',
+    additionalDetailsMinus: 'Zusätzliche Details -',
+    copy: 'Kopieren',
+    copyEmailQuota: 'E-Mail-Kontingent kopieren',
+    view: 'Anzeigen',
+    type: 'Typ',
+    addresses: 'Adressen',
+    ipv4: 'IPv4',
+    ipv6: 'IPv6',
+    none: 'Keine',
+    hostname: 'Hostname',
+    priority: 'Priorität',
+    ipAddress: 'IP-Adresse',
+    status: 'Status',
+    ipv4Addresses: 'IPv4-Adressen',
+    ipv6Addresses: 'IPv6-Adressen',
+    noIpAddressesFound: 'Keine IP-Adressen gefunden',
+    detectedProvider: 'Erkannter Anbieter',
+    loadingValue: 'Wird geladen...',
+    usingIpParent: 'IP-Adressen der übergeordneten Domain {domain} werden verwendet (kein A/AAAA für {queryDomain}).',
+    noMxParentShowing: 'Keine MX-Einträge für {domain}; MX der übergeordneten Domain {lookupDomain} werden angezeigt.',
+    noMxParentChecked: 'Keine MX-Einträge für {domain} oder die übergeordnete Domain {parentDomain} gefunden.',
+    resolvedUsingGuidance: 'Zur Orientierung mit {lookupDomain} aufgelöst.',
+    effectivePolicyInherited: 'Die wirksame Richtlinie wird von der übergeordneten Domain {lookupDomain} geerbt.',
+    acsEmailDomainVerification: 'ACS-E-Mail-Domainverifizierung',
+    acsEmailQuotaLimitIncrease: 'ACS-E-Mail-Kontingenterhöhung',
+    spfRecordBasics: 'SPF-Grundlagen',
+    dmarcRecordBasics: 'DMARC-Grundlagen',
+    dkimRecordBasics: 'DKIM-Grundlagen',
+    mxRecordBasics: 'MX-Grundlagen',
+    domainDossier: 'Domain Dossier (CentralOps)',
+    multiRblLookup: 'MultiRBL-DNSBL-Abfrage',
+    copied: 'Kopiert! ✔',
+    languageLabel: 'Sprache',
+    promptEnterDomain: 'Bitte geben Sie eine Domain ein.',
+    promptEnterValidDomain: 'Bitte geben Sie einen gültigen Domainnamen ein (Beispiel: example.com).',
+    clipboardUnavailable: 'Die Zwischenablage-API ist in diesem Browser nicht verfügbar.',
+    linkCopiedToClipboard: 'Link in die Zwischenablage kopiert.',
+    failedCopyLink: 'Der Link konnte nicht in die Zwischenablage kopiert werden.',
+    copiedToClipboard: 'In die Zwischenablage kopiert.',
+    failedCopyToClipboard: 'Kopieren in die Zwischenablage fehlgeschlagen.',
+    nothingToCopyFor: 'Für {field} gibt es nichts zu kopieren.',
+    copiedFieldToClipboard: '{field} wurde in die Zwischenablage kopiert.',
+    failedCopyFieldToClipboard: '{field} konnte nicht in die Zwischenablage kopiert werden.',
+    screenshotClipboardUnsupported: 'Die Zwischenablageunterstützung für Screenshots ist in diesem Browser nicht verfügbar.',
+    screenshotContainerNotFound: 'Container für Screenshot nicht gefunden.',
+    screenshotCaptureFailed: 'Screenshot konnte nicht erstellt werden.',
+    screenshotCopiedToClipboard: 'Screenshot in die Zwischenablage kopiert.',
+    failedCopyScreenshot: 'Screenshot konnte nicht in die Zwischenablage kopiert werden.',
+    screenshotRenderFailed: 'Die Screenshot-Erstellung ist fehlgeschlagen.',
+    issueReportingNotConfigured: 'Die Problemmeldung ist nicht konfiguriert.',
+    issueReportConfirm: 'Der Issue-Tracker wird geöffnet und enthält {detail}. Fortfahren?',
+    issueReportDetailDomain: 'den Domainnamen „{domain}“',
+    issueReportDetailInput: 'den Domainnamen aus dem Eingabefeld',
+    authSignInNotConfigured: 'Microsoft-Anmeldung ist nicht konfiguriert. Prüfen Sie, ob ACS_ENTRA_CLIENT_ID in die Seite eingefügt wurde, und laden Sie sie neu.',
+    authLibraryLoadFailed: 'Die Microsoft-Anmeldebibliothek konnte nicht geladen werden. Prüfen Sie den Zugriff auf das MSAL-CDN oder stellen Sie eine lokale Datei `msal-browser.min.js` bereit.',
+    authInitFailed: 'Die Microsoft-Anmeldung konnte nicht initialisiert werden. Prüfen Sie die Browserkonsole auf Details.',
+    authInitFailedWithReason: 'Die Microsoft-Anmeldung konnte nicht initialisiert werden: {reason}',
+    authSetClientIdAndRestart: 'Microsoft-Anmeldung ist nicht konfiguriert. Legen Sie die Umgebungsvariable ACS_ENTRA_CLIENT_ID fest und starten Sie neu.',
+    authSigningIn: 'Anmeldung läuft...',
+    authSignInCancelled: 'Die Anmeldung wurde abgebrochen.',
+    authSignInFailed: 'Anmeldung fehlgeschlagen: {reason}',
+    authUnknownError: 'Unbekannter Fehler',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois'
+  },
+  'pt-BR': {
+    languageName: 'Português (Brasil)',
+    appHeading: 'Azure Communication Services<br/>Verificador de domínio de e-mail',
+    placeholderDomain: 'exemplo.com.br',
+    lookup: 'Verificar',
+    checkingShort: 'Verificando',
+    themeDark: 'Modo escuro 🌙',
+    themeLight: 'Modo claro ☀️',
+    copyLink: 'Copiar link 🔗',
+    copyScreenshot: 'Copiar captura da página 📸',
+    downloadJson: 'Baixar JSON 📥',
+    reportIssue: 'Relatar problema 🐛',
+    signInMicrosoft: 'Entrar com Microsoft 🔒',
+    signOut: 'Sair',
+    recent: 'Recentes',
+    footer: 'ACS Email Domain Checker v{version} • Escrito por: Blake Drumm • Gerado por PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Voltar ao topo</a>',
+    statusChecking: 'Verificando {domain} ⏳',
+    statusSomeChecksFailed: 'Algumas verificações falharam ❌',
+    statusTxtFailed: 'A consulta TXT falhou ❌ — outros registros DNS ainda podem resolver.',
+    statusCollectedOn: 'Coletado em: {value}',
+    emailQuota: 'Cota de e-mail',
+    domainVerification: 'Verificação de domínio',
+    domainRegistration: 'Registro de domínio (WHOIS/RDAP)',
+    domain: 'Domínio',
+    mxRecords: 'Registros MX',
+    spfQueried: 'SPF (TXT do domínio consultado)',
+    acsDomainVerificationTxt: 'TXT de verificação de domínio ACS',
+    txtRecordsQueried: 'Registros TXT (domínio consultado)',
+    dmarc: 'DMARC',
+    reputationDnsbl: 'Reputação (DNSBL)',
+    cname: 'CNAME',
+    guidance: 'Orientações 💡',
+    helpfulLinks: 'Links úteis',
+    externalTools: 'Ferramentas externas',
+    checklist: 'CHECKLIST',
+    verificationTag: 'VERIFICAÇÃO',
+    docs: 'DOCS',
+    tools: 'FERRAMENTAS',
+    readinessTips: 'DICAS',
+    lookedUp: 'CONSULTADO',
+    loading: 'CARREGANDO',
+    missing: 'AUSENTE',
+    optional: 'OPCIONAL',
+    info: 'INFO',
+    error: 'ERRO',
+    pass: 'OK',
+    fail: 'FALHA',
+    warn: 'AVISO',
+    pending: 'PENDENTE',
+    dnsError: 'ERRO DNS',
+    newDomain: 'DOMÍNIO NOVO',
+    expired: 'EXPIRADO',
+    noRecordsAvailable: 'Nenhum registro disponível.',
+    noAdditionalGuidance: 'Nenhuma orientação adicional.',
+    noAdditionalMxDetails: 'Nenhum detalhe MX adicional disponível.',
+    additionalDetailsPlus: 'Detalhes adicionais +',
+    additionalDetailsMinus: 'Detalhes adicionais -',
+    copy: 'Copiar',
+    copyEmailQuota: 'Copiar cota de e-mail',
+    view: 'Ver',
+    type: 'Tipo',
+    addresses: 'Endereços',
+    ipv4: 'IPv4',
+    ipv6: 'IPv6',
+    none: 'Nenhum',
+    hostname: 'Hostname',
+    priority: 'Prioridade',
+    ipAddress: 'Endereço IP',
+    status: 'Status',
+    ipv4Addresses: 'Endereços IPv4',
+    ipv6Addresses: 'Endereços IPv6',
+    noIpAddressesFound: 'Nenhum endereço IP encontrado',
+    detectedProvider: 'Provedor detectado',
+    loadingValue: 'Carregando...',
+    usingIpParent: 'Usando endereços IP do domínio pai {domain} (sem A/AAAA em {queryDomain}).',
+    noMxParentShowing: 'Nenhum MX encontrado em {domain}; exibindo MX do domínio pai {lookupDomain}.',
+    noMxParentChecked: 'Nenhum MX encontrado em {domain} ou no domínio pai {parentDomain}.',
+    resolvedUsingGuidance: 'Resolvido usando {lookupDomain} como referência.',
+    effectivePolicyInherited: 'A política efetiva é herdada do domínio pai {lookupDomain}.',
+    acsEmailDomainVerification: 'Verificação de domínio de e-mail ACS',
+    acsEmailQuotaLimitIncrease: 'Aumento do limite de cota de e-mail ACS',
+    spfRecordBasics: 'Noções básicas de SPF',
+    dmarcRecordBasics: 'Noções básicas de DMARC',
+    dkimRecordBasics: 'Noções básicas de DKIM',
+    mxRecordBasics: 'Noções básicas de MX',
+    domainDossier: 'Domain Dossier (CentralOps)',
+    multiRblLookup: 'Consulta DNSBL MultiRBL',
+    copied: 'Copiado! ✔',
+    languageLabel: 'Idioma',
+    promptEnterDomain: 'Insira um domínio.',
+    promptEnterValidDomain: 'Insira um nome de domínio válido (exemplo: example.com).',
+    clipboardUnavailable: 'A API da área de transferência não está disponível neste navegador.',
+    linkCopiedToClipboard: 'Link copiado para a área de transferência.',
+    failedCopyLink: 'Falha ao copiar o link para a área de transferência.',
+    copiedToClipboard: 'Copiado para a área de transferência.',
+    failedCopyToClipboard: 'Falha ao copiar para a área de transferência.',
+    nothingToCopyFor: 'Não há nada para copiar em {field}.',
+    copiedFieldToClipboard: '{field} copiado para a área de transferência.',
+    failedCopyFieldToClipboard: 'Falha ao copiar {field} para a área de transferência.',
+    screenshotClipboardUnsupported: 'O suporte para copiar capturas de tela para a área de transferência não está disponível neste navegador.',
+    screenshotContainerNotFound: 'Contêiner não encontrado para a captura de tela.',
+    screenshotCaptureFailed: 'Falha ao capturar a imagem da tela.',
+    screenshotCopiedToClipboard: 'Captura de tela copiada para a área de transferência.',
+    failedCopyScreenshot: 'Falha ao copiar a captura de tela para a área de transferência.',
+    screenshotRenderFailed: 'Falha na captura da tela.',
+    issueReportingNotConfigured: 'O relatório de problemas não está configurado.',
+    issueReportConfirm: 'Isso abrirá o rastreador de problemas e incluirá {detail}. Continuar?',
+    issueReportDetailDomain: 'o nome de domínio "{domain}"',
+    issueReportDetailInput: 'o nome de domínio da caixa de entrada',
+    authSignInNotConfigured: 'O login com Microsoft não está configurado. Confirme se ACS_ENTRA_CLIENT_ID foi injetado na página e atualize.',
+    authLibraryLoadFailed: 'A biblioteca de login da Microsoft não pôde ser carregada. Verifique o acesso ao CDN do MSAL ou forneça um arquivo local `msal-browser.min.js`.',
+    authInitFailed: 'Falha ao inicializar o login com Microsoft. Verifique o console do navegador para mais detalhes.',
+    authInitFailedWithReason: 'Falha ao inicializar o login com Microsoft: {reason}',
+    authSetClientIdAndRestart: 'O login com Microsoft não está configurado. Defina a variável de ambiente ACS_ENTRA_CLIENT_ID e reinicie.',
+    authSigningIn: 'Entrando...',
+    authSignInCancelled: 'O login foi cancelado.',
+    authSignInFailed: 'Falha no login: {reason}',
+    authUnknownError: 'Erro desconhecido',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois'
+  },
+  ar: {
+    languageName: 'العربية',
+    appHeading: 'Azure Communication Services<br/>مدقق نطاق البريد الإلكتروني',
+    placeholderDomain: 'example.sa',
+    lookup: 'تحقق',
+    checkingShort: 'جارٍ التحقق',
+    themeDark: 'الوضع الداكن 🌙',
+    themeLight: 'الوضع الفاتح ☀️',
+    copyLink: 'نسخ الرابط 🔗',
+    copyScreenshot: 'نسخ لقطة الصفحة 📸',
+    downloadJson: 'تنزيل JSON 📥',
+    reportIssue: 'الإبلاغ عن مشكلة 🐛',
+    signInMicrosoft: 'تسجيل الدخول باستخدام Microsoft 🔒',
+    signOut: 'تسجيل الخروج',
+    recent: 'الأخيرة',
+    languageLabel: 'اللغة',
+    pageTitle: 'Azure Communication Services - مدقق نطاق البريد الإلكتروني',
+    promptEnterDomain: 'يرجى إدخال نطاق.',
+    promptEnterValidDomain: 'يرجى إدخال اسم نطاق صالح (مثال: example.com).',
+    clipboardUnavailable: 'واجهة برمجة تطبيقات الحافظة غير متوفرة في هذا المتصفح.',
+    linkCopiedToClipboard: 'تم نسخ الرابط إلى الحافظة.',
+    failedCopyLink: 'تعذر نسخ الرابط إلى الحافظة.',
+    copiedToClipboard: 'تم النسخ إلى الحافظة.',
+    failedCopyToClipboard: 'تعذر النسخ إلى الحافظة.',
+    nothingToCopyFor: 'لا يوجد ما يمكن نسخه للحقل {field}.',
+    copiedFieldToClipboard: 'تم نسخ {field} إلى الحافظة.',
+    failedCopyFieldToClipboard: 'تعذر نسخ {field} إلى الحافظة.',
+    screenshotClipboardUnsupported: 'نسخ لقطات الشاشة إلى الحافظة غير مدعوم في هذا المتصفح.',
+    screenshotContainerNotFound: 'لم يتم العثور على الحاوية الخاصة بلقطة الشاشة.',
+    screenshotCaptureFailed: 'تعذر التقاط لقطة الشاشة.',
+    screenshotCopiedToClipboard: 'تم نسخ لقطة الشاشة إلى الحافظة.',
+    failedCopyScreenshot: 'تعذر نسخ لقطة الشاشة إلى الحافظة.',
+    screenshotRenderFailed: 'فشل التقاط لقطة الشاشة.',
+    issueReportingNotConfigured: 'الإبلاغ عن المشكلات غير مكوّن.',
+    issueReportConfirm: 'سيتم فتح متعقب المشكلات وسيشمل {detail}. هل تريد المتابعة؟',
+    issueReportDetailDomain: 'اسم النطاق "{domain}"',
+    issueReportDetailInput: 'اسم النطاق من مربع الإدخال',
+    authSignInNotConfigured: 'تسجيل الدخول باستخدام Microsoft غير مكوّن. تأكد من حقن ACS_ENTRA_CLIENT_ID في الصفحة ثم حدّثها.',
+    authLibraryLoadFailed: 'تعذر تحميل مكتبة تسجيل الدخول باستخدام Microsoft. تحقق من الوصول إلى شبكة CDN الخاصة بـ MSAL أو وفّر ملف `msal-browser.min.js` محليًا.',
+    authInitFailed: 'فشل تهيئة تسجيل الدخول باستخدام Microsoft. راجع وحدة تحكم المتصفح للحصول على التفاصيل.',
+    authInitFailedWithReason: 'فشل تهيئة تسجيل الدخول باستخدام Microsoft: {reason}',
+    authSetClientIdAndRestart: 'تسجيل الدخول باستخدام Microsoft غير مكوّن. عيّن متغير البيئة ACS_ENTRA_CLIENT_ID ثم أعد التشغيل.',
+    authSigningIn: 'جارٍ تسجيل الدخول...',
+    authSignInCancelled: 'تم إلغاء تسجيل الدخول.',
+    authSignInFailed: 'فشل تسجيل الدخول: {reason}',
+    authUnknownError: 'خطأ غير معروف',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois'
+  },
+  'zh-CN': {
+    languageName: '中文（简体）',
+    appHeading: 'Azure Communication Services<br/>电子邮件域检查器',
+    placeholderDomain: 'example.cn',
+    lookup: '检查',
+    checkingShort: '检查中',
+    themeDark: '深色模式 🌙',
+    themeLight: '浅色模式 ☀️',
+    copyLink: '复制链接 🔗',
+    copyScreenshot: '复制页面截图 📸',
+    downloadJson: '下载 JSON 📥',
+    reportIssue: '报告问题 🐛',
+    signInMicrosoft: '使用 Microsoft 登录 🔒',
+    signOut: '退出登录',
+    recent: '最近使用',
+    languageLabel: '语言',
+    pageTitle: 'Azure Communication Services - 电子邮件域检查器',
+    promptEnterDomain: '请输入域名。',
+    promptEnterValidDomain: '请输入有效的域名（例如：example.com）。',
+    clipboardUnavailable: '此浏览器不支持剪贴板 API。',
+    linkCopiedToClipboard: '链接已复制到剪贴板。',
+    failedCopyLink: '无法将链接复制到剪贴板。',
+    copiedToClipboard: '已复制到剪贴板。',
+    failedCopyToClipboard: '复制到剪贴板失败。',
+    nothingToCopyFor: '没有可复制的 {field}。',
+    copiedFieldToClipboard: '已将 {field} 复制到剪贴板。',
+    failedCopyFieldToClipboard: '无法将 {field} 复制到剪贴板。',
+    screenshotClipboardUnsupported: '此浏览器不支持将截图复制到剪贴板。',
+    screenshotContainerNotFound: '未找到截图容器。',
+    screenshotCaptureFailed: '截图失败。',
+    screenshotCopiedToClipboard: '截图已复制到剪贴板。',
+    failedCopyScreenshot: '无法将截图复制到剪贴板。',
+    screenshotRenderFailed: '截图渲染失败。',
+    issueReportingNotConfigured: '未配置问题报告功能。',
+    issueReportConfirm: '这将打开问题跟踪器，并包含{detail}。是否继续？',
+    issueReportDetailDomain: '域名“{domain}”',
+    issueReportDetailInput: '输入框中的域名',
+    authSignInNotConfigured: '未配置 Microsoft 登录。请确认页面中已注入 ACS_ENTRA_CLIENT_ID，然后刷新。',
+    authLibraryLoadFailed: 'Microsoft 登录库加载失败。请检查是否可以访问 MSAL CDN，或提供本地 `msal-browser.min.js` 文件。',
+    authInitFailed: 'Microsoft 登录初始化失败。请查看浏览器控制台了解详细信息。',
+    authInitFailedWithReason: 'Microsoft 登录初始化失败：{reason}',
+    authSetClientIdAndRestart: '未配置 Microsoft 登录。请设置 ACS_ENTRA_CLIENT_ID 环境变量并重新启动。',
+    authSigningIn: '正在登录...',
+    authSignInCancelled: '登录已取消。',
+    authSignInFailed: '登录失败：{reason}',
+    authUnknownError: '未知错误',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois'
+  }
+};
+
+['es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'].forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS.en, TRANSLATIONS[code]);
+});
+
+const TRANSLATION_EXTENSIONS = {
+  en: {
+    unitYearOne: 'year',
+    unitYearMany: 'years',
+    unitMonthOne: 'month',
+    unitMonthMany: 'months',
+    unitDayOne: 'day',
+    unitDayMany: 'days',
+    wordExpired: 'Expired',
+    mxPriorityLabel: 'Priority',
+    providerHintMicrosoft365: 'MX points to Exchange Online Protection (EOP).',
+    providerHintGoogleWorkspace: 'MX points to Google mail exchangers.',
+    providerHintCloudflare: 'MX points to Cloudflare (mx.cloudflare.net).',
+    providerHintProofpoint: 'MX points to Proofpoint-hosted mail.',
+    providerHintMimecast: 'MX points to Mimecast.',
+    providerHintZoho: 'MX points to Zoho Mail.',
+    providerHintUnknown: 'Provider not recognized from MX hostname.',
+    riskClean: 'Clean',
+    riskWarning: 'Warning',
+    riskElevated: 'Elevated risk'
+  },
+  fr: {
+    passing: 'Conforme',
+    failed: 'Échec',
+    warningState: 'Avertissement',
+    dnsTxtLookup: 'Recherche DNS TXT',
+    acsTxtMsDomainVerification: 'TXT ACS (ms-domain-verification)',
+    acsReadiness: 'État ACS',
+    resolvedSuccessfully: 'Résolution réussie.',
+    msDomainVerificationFound: 'TXT ms-domain-verification trouvé.',
+    addAcsTxtFromPortal: 'Ajoutez le TXT ACS depuis le portail Azure.',
+    source: 'Source',
+    creationDate: 'Date de création',
+    registryExpiryDate: 'Date d’expiration du registre',
+    registrarLabel: 'Bureau d’enregistrement',
+    registrantLabel: 'Titulaire',
+    domainAgeLabel: 'Âge du domaine',
+    domainExpiringIn: 'Le domaine expire dans',
+    daysUntilExpiry: 'Jours avant expiration',
+    ageLabel: 'Âge',
+    expiresInLabel: 'Expire dans',
+    zonesQueried: 'Zones interrogées',
+    totalQueries: 'Requêtes totales',
+    errorsCount: 'Erreurs',
+    listed: 'Listé',
+    notListed: 'Non listé',
+    riskLabel: 'Risque',
+    reputationWord: 'Réputation',
+    clean: 'Saine',
+    excellent: 'Excellente',
+    great: 'Très bonne',
+    good: 'Bonne',
+    fair: 'Moyenne',
+    poor: 'Faible',
+    yes: 'Oui',
+    no: 'Non',
+    none: 'Aucune',
+    priority: 'Priorité',
+    detectedProvider: 'Fournisseur détecté',
+    rawLabel: 'Brut',
+    noRegistrationInformation: 'Aucune information d’enregistrement disponible.',
+    registrationDetailsUnavailable: 'Détails d’enregistrement indisponibles.',
+    unitYearOne: 'an',
+    unitYearMany: 'ans',
+    unitMonthOne: 'mois',
+    unitMonthMany: 'mois',
+    unitDayOne: 'jour',
+    unitDayMany: 'jours',
+    wordExpired: 'Expiré',
+    mxPriorityLabel: 'Priorité',
+    providerHintMicrosoft365: 'Le MX pointe vers Exchange Online Protection (EOP).',
+    providerHintGoogleWorkspace: 'Le MX pointe vers les serveurs de messagerie Google.',
+    providerHintCloudflare: 'Le MX pointe vers Cloudflare (mx.cloudflare.net).',
+    providerHintProofpoint: 'Le MX pointe vers une messagerie hébergée par Proofpoint.',
+    providerHintMimecast: 'Le MX pointe vers Mimecast.',
+    providerHintZoho: 'Le MX pointe vers Zoho Mail.',
+    providerHintUnknown: 'Fournisseur non reconnu à partir du nom d’hôte MX.',
+    riskClean: 'Sain',
+    riskWarning: 'Avertissement',
+    riskElevated: 'Risque élevé'
+  },
+  de: {
+    passing: 'Erfolgreich',
+    failed: 'Fehlgeschlagen',
+    warningState: 'Warnung',
+    dnsTxtLookup: 'DNS-TXT-Abfrage',
+    acsTxtMsDomainVerification: 'ACS-TXT (ms-domain-verification)',
+    acsReadiness: 'ACS-Status',
+    resolvedSuccessfully: 'Erfolgreich aufgelöst.',
+    msDomainVerificationFound: 'ms-domain-verification-TXT gefunden.',
+    addAcsTxtFromPortal: 'Fügen Sie das ACS-TXT aus dem Azure-Portal hinzu.',
+    source: 'Quelle',
+    creationDate: 'Erstellungsdatum',
+    registryExpiryDate: 'Ablaufdatum der Registrierung',
+    registrarLabel: 'Registrar',
+    registrantLabel: 'Inhaber',
+    domainAgeLabel: 'Domainalter',
+    domainExpiringIn: 'Domain läuft ab in',
+    daysUntilExpiry: 'Tage bis Ablauf',
+    ageLabel: 'Alter',
+    expiresInLabel: 'Läuft ab in',
+    zonesQueried: 'Abgefragte Zonen',
+    totalQueries: 'Gesamtabfragen',
+    errorsCount: 'Fehler',
+    listed: 'Gelistet',
+    notListed: 'Nicht gelistet',
+    riskLabel: 'Risiko',
+    reputationWord: 'Reputation',
+    clean: 'Sauber',
+    excellent: 'Ausgezeichnet',
+    great: 'Sehr gut',
+    good: 'Gut',
+    fair: 'Mittel',
+    poor: 'Schwach',
+    yes: 'Ja',
+    no: 'Nein',
+    none: 'Keine',
+    priority: 'Priorität',
+    detectedProvider: 'Erkannter Anbieter',
+    rawLabel: 'Rohdaten',
+    noRegistrationInformation: 'Keine Registrierungsinformationen verfügbar.',
+    registrationDetailsUnavailable: 'Registrierungsdetails nicht verfügbar.',
+    unitYearOne: 'Jahr',
+    unitYearMany: 'Jahre',
+    unitMonthOne: 'Monat',
+    unitMonthMany: 'Monate',
+    unitDayOne: 'Tag',
+    unitDayMany: 'Tage',
+    wordExpired: 'Abgelaufen',
+    mxPriorityLabel: 'Priorität',
+    providerHintMicrosoft365: 'MX verweist auf Exchange Online Protection (EOP).',
+    providerHintGoogleWorkspace: 'MX verweist auf Google-Mail-Exchanger.',
+    providerHintCloudflare: 'MX verweist auf Cloudflare (mx.cloudflare.net).',
+    providerHintProofpoint: 'MX verweist auf von Proofpoint gehostete E-Mail.',
+    providerHintMimecast: 'MX verweist auf Mimecast.',
+    providerHintZoho: 'MX verweist auf Zoho Mail.',
+    providerHintUnknown: 'Anbieter konnte anhand des MX-Hostnamens nicht erkannt werden.',
+    riskClean: 'Sauber',
+    riskWarning: 'Warnung',
+    riskElevated: 'Erhöhtes Risiko'
+  },
+  'pt-BR': {
+    passing: 'Aprovado',
+    failed: 'Falhou',
+    warningState: 'Aviso',
+    dnsTxtLookup: 'Consulta DNS TXT',
+    acsTxtMsDomainVerification: 'TXT ACS (ms-domain-verification)',
+    acsReadiness: 'Prontidão do ACS',
+    resolvedSuccessfully: 'Resolvido com sucesso.',
+    msDomainVerificationFound: 'TXT ms-domain-verification encontrado.',
+    addAcsTxtFromPortal: 'Adicione o TXT do ACS no portal do Azure.',
+    source: 'Fonte',
+    creationDate: 'Data de criação',
+    registryExpiryDate: 'Data de expiração do registro',
+    registrarLabel: 'Registrador',
+    registrantLabel: 'Titular',
+    domainAgeLabel: 'Idade do domínio',
+    domainExpiringIn: 'O domínio expira em',
+    daysUntilExpiry: 'Dias até a expiração',
+    ageLabel: 'Idade',
+    expiresInLabel: 'Expira em',
+    zonesQueried: 'Zonas consultadas',
+    totalQueries: 'Consultas totais',
+    errorsCount: 'Erros',
+    listed: 'Listado',
+    notListed: 'Não listado',
+    riskLabel: 'Risco',
+    reputationWord: 'Reputação',
+    clean: 'Limpo',
+    excellent: 'Excelente',
+    great: 'Ótima',
+    good: 'Boa',
+    fair: 'Razoável',
+    poor: 'Ruim',
+    yes: 'Sim',
+    no: 'Não',
+    none: 'Nenhum',
+    priority: 'Prioridade',
+    detectedProvider: 'Provedor detectado',
+    rawLabel: 'Bruto',
+    noRegistrationInformation: 'Nenhuma informação de registro disponível.',
+    registrationDetailsUnavailable: 'Detalhes de registro indisponíveis.',
+    unitYearOne: 'ano',
+    unitYearMany: 'anos',
+    unitMonthOne: 'mês',
+    unitMonthMany: 'meses',
+    unitDayOne: 'dia',
+    unitDayMany: 'dias',
+    wordExpired: 'Expirado',
+    mxPriorityLabel: 'Prioridade',
+    providerHintMicrosoft365: 'O MX aponta para o Exchange Online Protection (EOP).',
+    providerHintGoogleWorkspace: 'O MX aponta para os trocadores de e-mail do Google.',
+    providerHintCloudflare: 'O MX aponta para a Cloudflare (mx.cloudflare.net).',
+    providerHintProofpoint: 'O MX aponta para e-mail hospedado pela Proofpoint.',
+    providerHintMimecast: 'O MX aponta para a Mimecast.',
+    providerHintZoho: 'O MX aponta para o Zoho Mail.',
+    providerHintUnknown: 'Provedor não reconhecido pelo nome do host MX.',
+    riskClean: 'Limpo',
+    riskWarning: 'Aviso',
+    riskElevated: 'Risco elevado'
+  },
+  ar: {
+    passing: 'ناجح',
+    failed: 'فشل',
+    warningState: 'تحذير',
+    dnsTxtLookup: 'استعلام DNS TXT',
+    acsTxtMsDomainVerification: 'TXT الخاص بـ ACS ‏(ms-domain-verification)',
+    acsReadiness: 'جاهزية ACS',
+    resolvedSuccessfully: 'تم الحل بنجاح.',
+    msDomainVerificationFound: 'تم العثور على TXT الخاص بـ ms-domain-verification.',
+    addAcsTxtFromPortal: 'أضف TXT الخاص بـ ACS من مدخل Azure.',
+    source: 'المصدر',
+    creationDate: 'تاريخ الإنشاء',
+    registryExpiryDate: 'تاريخ انتهاء التسجيل',
+    registrarLabel: 'المسجل',
+    registrantLabel: 'صاحب التسجيل',
+    domainAgeLabel: 'عمر النطاق',
+    domainExpiringIn: 'ينتهي النطاق خلال',
+    daysUntilExpiry: 'عدد الأيام حتى الانتهاء',
+    ageLabel: 'العمر',
+    expiresInLabel: 'ينتهي خلال',
+    zonesQueried: 'المناطق التي تم الاستعلام عنها',
+    totalQueries: 'إجمالي الاستعلامات',
+    errorsCount: 'الأخطاء',
+    listed: 'مدرج',
+    notListed: 'غير مدرج',
+    riskLabel: 'المخاطر',
+    reputationWord: 'السمعة',
+    clean: 'نظيف',
+    excellent: 'ممتاز',
+    great: 'رائع',
+    good: 'جيد',
+    fair: 'مقبول',
+    poor: 'ضعيف',
+    yes: 'نعم',
+    no: 'لا',
+    none: 'لا يوجد',
+    priority: 'الأولوية',
+    detectedProvider: 'موفر تم اكتشافه',
+    rawLabel: 'خام',
+    noRegistrationInformation: 'لا تتوفر معلومات تسجيل.',
+    registrationDetailsUnavailable: 'تفاصيل التسجيل غير متوفرة.',
+    unitYearOne: 'سنة',
+    unitYearMany: 'سنوات',
+    unitMonthOne: 'شهر',
+    unitMonthMany: 'أشهر',
+    unitDayOne: 'يوم',
+    unitDayMany: 'أيام',
+    wordExpired: 'منتهي الصلاحية',
+    mxPriorityLabel: 'الأولوية',
+    providerHintMicrosoft365: 'يشير MX إلى Exchange Online Protection ‏(EOP).',
+    providerHintGoogleWorkspace: 'يشير MX إلى خوادم البريد الخاصة بـ Google.',
+    providerHintCloudflare: 'يشير MX إلى Cloudflare ‏(mx.cloudflare.net).',
+    providerHintProofpoint: 'يشير MX إلى بريد مستضاف لدى Proofpoint.',
+    providerHintMimecast: 'يشير MX إلى Mimecast.',
+    providerHintZoho: 'يشير MX إلى Zoho Mail.',
+    providerHintUnknown: 'تعذر التعرف على الموفر من اسم مضيف MX.',
+    riskClean: 'نظيف',
+    riskWarning: 'تحذير',
+    riskElevated: 'مخاطر مرتفعة'
+  },
+  'zh-CN': {
+    passing: '通过',
+    failed: '失败',
+    warningState: '警告',
+    dnsTxtLookup: 'DNS TXT 查询',
+    acsTxtMsDomainVerification: 'ACS TXT（ms-domain-verification）',
+    acsReadiness: 'ACS 就绪状态',
+    resolvedSuccessfully: '解析成功。',
+    msDomainVerificationFound: '已找到 ms-domain-verification TXT。',
+    addAcsTxtFromPortal: '请从 Azure 门户添加 ACS TXT。',
+    source: '来源',
+    creationDate: '创建日期',
+    registryExpiryDate: '注册到期日期',
+    registrarLabel: '注册商',
+    registrantLabel: '注册人',
+    domainAgeLabel: '域名年龄',
+    domainExpiringIn: '域名将在以下时间后到期',
+    daysUntilExpiry: '距到期天数',
+    ageLabel: '年龄',
+    expiresInLabel: '到期时间',
+    zonesQueried: '已查询区域',
+    totalQueries: '查询总数',
+    errorsCount: '错误',
+    listed: '已列入',
+    notListed: '未列入',
+    riskLabel: '风险',
+    reputationWord: '信誉',
+    clean: '干净',
+    excellent: '优秀',
+    great: '很好',
+    good: '良好',
+    fair: '一般',
+    poor: '较差',
+    yes: '是',
+    no: '否',
+    none: '无',
+    priority: '优先级',
+    detectedProvider: '检测到的提供商',
+    rawLabel: '原始',
+    noRegistrationInformation: '没有可用的注册信息。',
+    registrationDetailsUnavailable: '注册详细信息不可用。',
+    unitYearOne: '年',
+    unitYearMany: '年',
+    unitMonthOne: '个月',
+    unitMonthMany: '个月',
+    unitDayOne: '天',
+    unitDayMany: '天',
+    wordExpired: '已过期',
+    mxPriorityLabel: '优先级',
+    providerHintMicrosoft365: 'MX 指向 Exchange Online Protection (EOP)。',
+    providerHintGoogleWorkspace: 'MX 指向 Google 邮件交换服务器。',
+    providerHintCloudflare: 'MX 指向 Cloudflare（mx.cloudflare.net）。',
+    providerHintProofpoint: 'MX 指向由 Proofpoint 托管的邮件服务。',
+    providerHintMimecast: 'MX 指向 Mimecast。',
+    providerHintZoho: 'MX 指向 Zoho Mail。',
+    providerHintUnknown: '无法从 MX 主机名识别提供商。',
+    riskClean: '干净',
+    riskWarning: '警告',
+    riskElevated: '高风险',
+    mxUsingParentNote: '（使用父域 {lookupDomain} 的 MX）',
+    parentCheckedNoMx: '已检查父域 {parentDomain}（无 MX）。',
+    expiredOn: '已于 {date} 过期',
+    registrationAppearsExpired: '域名注册似乎已过期。',
+    newDomainUnder90Days: '新域名，少于 90 天。',
+    newDomainUnder180Days: '新域名，少于 180 天。',
+    domainNameLabel: '域名',
+    domainStatusLabel: '域状态',
+    mxRecordsLabel: 'MX 记录',
+    spfStatusLabel: 'SPF 状态',
+    dkim1StatusLabel: 'DKIM1 状态',
+    dkim2StatusLabel: 'DKIM2 状态',
+    dmarcStatusLabel: 'DMARC 状态'
+  },
+  'hi-IN': {
+    languageName: 'हिन्दी (भारत)',
+    appHeading: 'Azure Communication Services<br/>ईमेल डोमेन परीक्षक',
+    placeholderDomain: 'example.in',
+    lookup: 'जाँचें',
+    checkingShort: 'जाँच हो रही है',
+    themeDark: 'डार्क मोड 🌙',
+    themeLight: 'लाइट मोड ☀️',
+    copyLink: 'लिंक कॉपी करें 🔗',
+    copyScreenshot: 'पेज स्क्रीनशॉट कॉपी करें 📸',
+    downloadJson: 'JSON डाउनलोड करें 📥',
+    reportIssue: 'समस्या रिपोर्ट करें 🐛',
+    signInMicrosoft: 'Microsoft से साइन इन करें 🔒',
+    signOut: 'साइन आउट',
+    recent: 'हाल के',
+    languageLabel: 'भाषा',
+    pageTitle: 'Azure Communication Services - ईमेल डोमेन परीक्षक',
+    footer: 'ACS Email Domain Checker v{version} • लेखक: Blake Drumm • PowerShell द्वारा जनरेटेड • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">ऊपर जाएँ</a>',
+    promptEnterDomain: 'कृपया एक डोमेन दर्ज करें।',
+    promptEnterValidDomain: 'कृपया एक मान्य डोमेन नाम दर्ज करें (उदाहरण: example.com)।',
+    clipboardUnavailable: 'इस ब्राउज़र में Clipboard API उपलब्ध नहीं है।',
+    linkCopiedToClipboard: 'लिंक क्लिपबोर्ड में कॉपी हो गया।',
+    failedCopyLink: 'लिंक क्लिपबोर्ड में कॉपी नहीं हो सका।',
+    copiedToClipboard: 'क्लिपबोर्ड में कॉपी किया गया।',
+    failedCopyToClipboard: 'क्लिपबोर्ड में कॉपी करना विफल रहा।',
+    nothingToCopyFor: '{field} के लिए कॉपी करने हेतु कुछ नहीं है।',
+    copiedFieldToClipboard: '{field} क्लिपबोर्ड में कॉपी किया गया।',
+    failedCopyFieldToClipboard: '{field} क्लिपबोर्ड में कॉपी नहीं किया जा सका।',
+    screenshotClipboardUnsupported: 'इस ब्राउज़र में स्क्रीनशॉट क्लिपबोर्ड समर्थन उपलब्ध नहीं है।',
+    screenshotContainerNotFound: 'स्क्रीनशॉट के लिए कंटेनर नहीं मिला।',
+    screenshotCaptureFailed: 'स्क्रीनशॉट कैप्चर नहीं हो सका।',
+    screenshotCopiedToClipboard: 'स्क्रीनशॉट क्लिपबोर्ड में कॉपी हो गया।',
+    failedCopyScreenshot: 'स्क्रीनशॉट क्लिपबोर्ड में कॉपी नहीं हो सका।',
+    screenshotRenderFailed: 'स्क्रीनशॉट कैप्चर विफल हुआ।',
+    issueReportingNotConfigured: 'समस्या रिपोर्टिंग कॉन्फ़िगर नहीं है।',
+    issueReportConfirm: 'यह issue tracker खोलेगा और इसमें {detail} शामिल होगा। जारी रखें?',
+    issueReportDetailDomain: 'डोमेन नाम "{domain}"',
+    issueReportDetailInput: 'इनपुट बॉक्स का डोमेन नाम',
+    authSignInNotConfigured: 'Microsoft साइन-इन कॉन्फ़िगर नहीं है। सुनिश्चित करें कि ACS_ENTRA_CLIENT_ID पेज में inject किया गया है और फिर refresh करें।',
+    authLibraryLoadFailed: 'Microsoft साइन-इन लाइब्रेरी लोड नहीं हो सकी। MSAL CDN की पहुँच जाँचें या स्थानीय msal-browser.min.js फ़ाइल उपलब्ध कराएँ।',
+    authInitFailed: 'Microsoft साइन-इन प्रारंभ नहीं हो सका। अधिक विवरण के लिए ब्राउज़र console देखें।',
+    authInitFailedWithReason: 'Microsoft साइन-इन प्रारंभ नहीं हो सका: {reason}',
+    authSetClientIdAndRestart: 'Microsoft साइन-इन कॉन्फ़िगर नहीं है। ACS_ENTRA_CLIENT_ID environment variable सेट करें और पुनः प्रारंभ करें।',
+    authSigningIn: 'साइन इन हो रहा है...',
+    authSignInCancelled: 'साइन-इन रद्द कर दिया गया।',
+    authSignInFailed: 'साइन-इन विफल: {reason}',
+    authUnknownError: 'अज्ञात त्रुटि',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois',
+    passing: 'सफल',
+    failed: 'विफल',
+    warningState: 'चेतावनी',
+    dnsTxtLookup: 'DNS TXT लुकअप',
+    acsTxtMsDomainVerification: 'ACS TXT (ms-domain-verification)',
+    acsReadiness: 'ACS तत्परता',
+    resolvedSuccessfully: 'सफलतापूर्वक resolved।',
+    msDomainVerificationFound: 'ms-domain-verification TXT मिला।',
+    addAcsTxtFromPortal: 'Azure portal से ACS TXT जोड़ें।',
+    source: 'स्रोत',
+    creationDate: 'निर्माण तिथि',
+    registryExpiryDate: 'रजिस्ट्री समाप्ति तिथि',
+    registrarLabel: 'रजिस्ट्रार',
+    registrantLabel: 'पंजीयक',
+    domainAgeLabel: 'डोमेन आयु',
+    domainExpiringIn: 'डोमेन समाप्त होगा',
+    daysUntilExpiry: 'समाप्ति तक दिन',
+    ageLabel: 'आयु',
+    expiresInLabel: 'समाप्ति',
+    zonesQueried: 'पूछे गए ज़ोन',
+    totalQueries: 'कुल क्वेरी',
+    errorsCount: 'त्रुटियाँ',
+    listed: 'सूचीबद्ध',
+    notListed: 'सूचीबद्ध नहीं',
+    riskLabel: 'जोखिम',
+    reputationWord: 'प्रतिष्ठा',
+    clean: 'स्वच्छ',
+    excellent: 'उत्कृष्ट',
+    great: 'बहुत अच्छा',
+    good: 'अच्छा',
+    fair: 'सामान्य',
+    poor: 'कमज़ोर',
+    yes: 'हाँ',
+    no: 'नहीं',
+    none: 'कोई नहीं',
+    priority: 'प्राथमिकता',
+    detectedProvider: 'पहचाना गया प्रदाता',
+    rawLabel: 'रॉ',
+    noRegistrationInformation: 'कोई पंजीकरण जानकारी उपलब्ध नहीं है।',
+    registrationDetailsUnavailable: 'पंजीकरण विवरण उपलब्ध नहीं है।',
+    unitYearOne: 'वर्ष',
+    unitYearMany: 'वर्ष',
+    unitMonthOne: 'माह',
+    unitMonthMany: 'माह',
+    unitDayOne: 'दिन',
+    unitDayMany: 'दिन',
+    wordExpired: 'समाप्त',
+    mxPriorityLabel: 'प्राथमिकता',
+    providerHintMicrosoft365: 'MX Exchange Online Protection (EOP) की ओर इंगित करता है।',
+    providerHintGoogleWorkspace: 'MX Google mail exchangers की ओर इंगित करता है।',
+    providerHintCloudflare: 'MX Cloudflare (mx.cloudflare.net) की ओर इंगित करता है।',
+    providerHintProofpoint: 'MX Proofpoint-hosted mail की ओर इंगित करता है।',
+    providerHintMimecast: 'MX Mimecast की ओर इंगित करता है।',
+    providerHintZoho: 'MX Zoho Mail की ओर इंगित करता है।',
+    providerHintUnknown: 'MX hostname से provider पहचाना नहीं गया।',
+    riskClean: 'स्वच्छ',
+    riskWarning: 'चेतावनी',
+    riskElevated: 'उच्च जोखिम',
+    mxUsingParentNote: '(मूल डोमेन {lookupDomain} से MX उपयोग किया जा रहा है)',
+    parentCheckedNoMx: 'मूल {parentDomain} की जाँच की गई (MX नहीं मिला)।',
+    expiredOn: '{date} को समाप्त',
+    registrationAppearsExpired: 'पंजीकरण समाप्त प्रतीत होता है।',
+    newDomainUnder90Days: '90 दिनों से कम पुराना नया डोमेन।',
+    newDomainUnder180Days: '180 दिनों से कम पुराना नया डोमेन।',
+    domainNameLabel: 'डोमेन नाम',
+    domainStatusLabel: 'डोमेन स्थिति',
+    mxRecordsLabel: 'MX रिकॉर्ड',
+    spfStatusLabel: 'SPF स्थिति',
+    dkim1StatusLabel: 'DKIM1 स्थिति',
+    dkim2StatusLabel: 'DKIM2 स्थिति',
+    dmarcStatusLabel: 'DMARC स्थिति'
+  },
+  'ja-JP': {
+    languageName: '日本語（日本）',
+    appHeading: 'Azure Communication Services<br/>メール ドメイン チェッカー',
+    placeholderDomain: 'example.jp',
+    lookup: '確認',
+    checkingShort: '確認中',
+    themeDark: 'ダーク モード 🌙',
+    themeLight: 'ライト モード ☀️',
+    copyLink: 'リンクをコピー 🔗',
+    copyScreenshot: 'ページのスクリーンショットをコピー 📸',
+    downloadJson: 'JSON をダウンロード 📥',
+    reportIssue: '問題を報告 🐛',
+    signInMicrosoft: 'Microsoft でサインイン 🔒',
+    signOut: 'サインアウト',
+    recent: '最近',
+    languageLabel: '言語',
+    pageTitle: 'Azure Communication Services - メール ドメイン チェッカー',
+    footer: 'ACS Email Domain Checker v{version} • 作成者: Blake Drumm • PowerShell により生成 • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">先頭へ戻る</a>',
+    promptEnterDomain: 'ドメインを入力してください。',
+    promptEnterValidDomain: '有効なドメイン名を入力してください（例: example.com）。',
+    clipboardUnavailable: 'このブラウザーでは Clipboard API を利用できません。',
+    linkCopiedToClipboard: 'リンクをクリップボードにコピーしました。',
+    failedCopyLink: 'リンクをクリップボードにコピーできませんでした。',
+    copiedToClipboard: 'クリップボードにコピーしました。',
+    failedCopyToClipboard: 'クリップボードへのコピーに失敗しました。',
+    nothingToCopyFor: '{field} にコピーする内容がありません。',
+    copiedFieldToClipboard: '{field} をクリップボードにコピーしました。',
+    failedCopyFieldToClipboard: '{field} をクリップボードにコピーできませんでした。',
+    screenshotClipboardUnsupported: 'このブラウザーではスクリーンショットのクリップボード機能を利用できません。',
+    screenshotContainerNotFound: 'スクリーンショット用のコンテナーが見つかりません。',
+    screenshotCaptureFailed: 'スクリーンショットの取得に失敗しました。',
+    screenshotCopiedToClipboard: 'スクリーンショットをクリップボードにコピーしました。',
+    failedCopyScreenshot: 'スクリーンショットをクリップボードにコピーできませんでした。',
+    screenshotRenderFailed: 'スクリーンショットの取得に失敗しました。',
+    issueReportingNotConfigured: '問題報告が構成されていません。',
+    issueReportConfirm: 'Issue tracker を開き、{detail} を含めます。続行しますか?',
+    issueReportDetailDomain: 'ドメイン名 "{domain}"',
+    issueReportDetailInput: '入力ボックスのドメイン名',
+    authSignInNotConfigured: 'Microsoft サインインが構成されていません。ACS_ENTRA_CLIENT_ID がページに埋め込まれていることを確認し、更新してください。',
+    authLibraryLoadFailed: 'Microsoft サインイン ライブラリの読み込みに失敗しました。MSAL CDN へのアクセスを確認するか、ローカルの msal-browser.min.js を用意してください。',
+    authInitFailed: 'Microsoft サインインの初期化に失敗しました。詳細はブラウザー コンソールを確認してください。',
+    authInitFailedWithReason: 'Microsoft サインインの初期化に失敗しました: {reason}',
+    authSetClientIdAndRestart: 'Microsoft サインインが構成されていません。ACS_ENTRA_CLIENT_ID 環境変数を設定して再起動してください。',
+    authSigningIn: 'サインイン中...',
+    authSignInCancelled: 'サインインはキャンセルされました。',
+    authSignInFailed: 'サインインに失敗しました: {reason}',
+    authUnknownError: '不明なエラー',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois',
+    passing: '成功',
+    failed: '失敗',
+    warningState: '警告',
+    dnsTxtLookup: 'DNS TXT 参照',
+    acsTxtMsDomainVerification: 'ACS TXT (ms-domain-verification)',
+    acsReadiness: 'ACS 準備状況',
+    resolvedSuccessfully: '正常に解決されました。',
+    msDomainVerificationFound: 'ms-domain-verification TXT が見つかりました。',
+    addAcsTxtFromPortal: 'Azure portal から ACS TXT を追加してください。',
+    source: 'ソース',
+    creationDate: '作成日',
+    registryExpiryDate: 'レジストリ有効期限',
+    registrarLabel: 'レジストラ',
+    registrantLabel: '登録者',
+    domainAgeLabel: 'ドメイン年齢',
+    domainExpiringIn: '有効期限まで',
+    daysUntilExpiry: '有効期限までの日数',
+    ageLabel: '年齢',
+    expiresInLabel: '期限まで',
+    zonesQueried: '照会したゾーン',
+    totalQueries: '総クエリ数',
+    errorsCount: 'エラー',
+    listed: '掲載あり',
+    notListed: '掲載なし',
+    riskLabel: 'リスク',
+    reputationWord: '評価',
+    clean: 'クリーン',
+    excellent: '優秀',
+    great: 'とても良い',
+    good: '良い',
+    fair: '普通',
+    poor: '低い',
+    yes: 'はい',
+    no: 'いいえ',
+    none: 'なし',
+    priority: '優先度',
+    detectedProvider: '検出されたプロバイダー',
+    rawLabel: '生データ',
+    noRegistrationInformation: '登録情報は利用できません。',
+    registrationDetailsUnavailable: '登録詳細は利用できません。',
+    unitYearOne: '年',
+    unitYearMany: '年',
+    unitMonthOne: 'か月',
+    unitMonthMany: 'か月',
+    unitDayOne: '日',
+    unitDayMany: '日',
+    wordExpired: '期限切れ',
+    mxPriorityLabel: '優先度',
+    providerHintMicrosoft365: 'MX は Exchange Online Protection (EOP) を指しています。',
+    providerHintGoogleWorkspace: 'MX は Google mail exchangers を指しています。',
+    providerHintCloudflare: 'MX は Cloudflare (mx.cloudflare.net) を指しています。',
+    providerHintProofpoint: 'MX は Proofpoint-hosted mail を指しています。',
+    providerHintMimecast: 'MX は Mimecast を指しています。',
+    providerHintZoho: 'MX は Zoho Mail を指しています。',
+    providerHintUnknown: 'MX ホスト名からプロバイダーを特定できませんでした。',
+    riskClean: 'クリーン',
+    riskWarning: '警告',
+    riskElevated: '高リスク',
+    mxUsingParentNote: '（親ドメイン {lookupDomain} の MX を使用）',
+    parentCheckedNoMx: '親ドメイン {parentDomain} を確認しました（MX なし）。',
+    expiredOn: '{date} に期限切れ',
+    registrationAppearsExpired: '登録は期限切れのようです。',
+    newDomainUnder90Days: '90 日未満の新しいドメイン。',
+    newDomainUnder180Days: '180 日未満の新しいドメイン。',
+    domainNameLabel: 'ドメイン名',
+    domainStatusLabel: 'ドメインの状態',
+    mxRecordsLabel: 'MX レコード',
+    spfStatusLabel: 'SPF 状態',
+    dkim1StatusLabel: 'DKIM1 状態',
+    dkim2StatusLabel: 'DKIM2 状態',
+    dmarcStatusLabel: 'DMARC 状態'
+  },
+  'ru-RU': {
+    languageName: 'Русский (Россия)',
+    appHeading: 'Azure Communication Services<br/>Проверка почтового домена',
+    placeholderDomain: 'example.ru',
+    lookup: 'Проверить',
+    checkingShort: 'Проверка',
+    themeDark: 'Тёмный режим 🌙',
+    themeLight: 'Светлый режим ☀️',
+    copyLink: 'Копировать ссылку 🔗',
+    copyScreenshot: 'Копировать снимок страницы 📸',
+    downloadJson: 'Скачать JSON 📥',
+    reportIssue: 'Сообщить о проблеме 🐛',
+    signInMicrosoft: 'Войти через Microsoft 🔒',
+    signOut: 'Выйти',
+    recent: 'Недавние',
+    languageLabel: 'Язык',
+    pageTitle: 'Azure Communication Services - Проверка почтового домена',
+    footer: 'ACS Email Domain Checker v{version} • Автор: Blake Drumm • Сгенерировано PowerShell • <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Наверх</a>',
+    promptEnterDomain: 'Введите домен.',
+    promptEnterValidDomain: 'Введите допустимое доменное имя (например: example.com).',
+    clipboardUnavailable: 'Clipboard API недоступен в этом браузере.',
+    linkCopiedToClipboard: 'Ссылка скопирована в буфер обмена.',
+    failedCopyLink: 'Не удалось скопировать ссылку в буфер обмена.',
+    copiedToClipboard: 'Скопировано в буфер обмена.',
+    failedCopyToClipboard: 'Не удалось скопировать в буфер обмена.',
+    nothingToCopyFor: 'Нет данных для копирования для {field}.',
+    copiedFieldToClipboard: '{field} скопировано в буфер обмена.',
+    failedCopyFieldToClipboard: 'Не удалось скопировать {field} в буфер обмена.',
+    screenshotClipboardUnsupported: 'Поддержка копирования снимков экрана в буфер обмена недоступна в этом браузере.',
+    screenshotContainerNotFound: 'Контейнер для снимка экрана не найден.',
+    screenshotCaptureFailed: 'Не удалось создать снимок экрана.',
+    screenshotCopiedToClipboard: 'Снимок экрана скопирован в буфер обмена.',
+    failedCopyScreenshot: 'Не удалось скопировать снимок экрана в буфер обмена.',
+    screenshotRenderFailed: 'Не удалось создать снимок экрана.',
+    issueReportingNotConfigured: 'Отправка сообщений о проблемах не настроена.',
+    issueReportConfirm: 'Будет открыт трекер задач, включая {detail}. Продолжить?',
+    issueReportDetailDomain: 'имя домена "{domain}"',
+    issueReportDetailInput: 'имя домена из поля ввода',
+    authSignInNotConfigured: 'Вход через Microsoft не настроен. Убедитесь, что ACS_ENTRA_CLIENT_ID внедрён в страницу, и обновите её.',
+    authLibraryLoadFailed: 'Не удалось загрузить библиотеку входа Microsoft. Проверьте доступ к MSAL CDN или предоставьте локальный файл msal-browser.min.js.',
+    authInitFailed: 'Не удалось инициализировать вход через Microsoft. Подробности смотрите в консоли браузера.',
+    authInitFailedWithReason: 'Не удалось инициализировать вход через Microsoft: {reason}',
+    authSetClientIdAndRestart: 'Вход через Microsoft не настроен. Установите переменную среды ACS_ENTRA_CLIENT_ID и перезапустите приложение.',
+    authSigningIn: 'Выполняется вход...',
+    authSignInCancelled: 'Вход был отменён.',
+    authSignInFailed: 'Ошибка входа: {reason}',
+    authUnknownError: 'Неизвестная ошибка',
+    authMicrosoftLabel: 'Microsoft',
+    rawWhoisLabel: 'whois',
+    passing: 'Успешно',
+    failed: 'Ошибка',
+    warningState: 'Предупреждение',
+    dnsTxtLookup: 'Поиск DNS TXT',
+    acsTxtMsDomainVerification: 'ACS TXT (ms-domain-verification)',
+    acsReadiness: 'Готовность ACS',
+    resolvedSuccessfully: 'Успешно разрешено.',
+    msDomainVerificationFound: 'TXT ms-domain-verification найден.',
+    addAcsTxtFromPortal: 'Добавьте ACS TXT из портала Azure.',
+    source: 'Источник',
+    creationDate: 'Дата создания',
+    registryExpiryDate: 'Дата окончания регистрации',
+    registrarLabel: 'Регистратор',
+    registrantLabel: 'Владелец',
+    domainAgeLabel: 'Возраст домена',
+    domainExpiringIn: 'Срок действия истекает через',
+    daysUntilExpiry: 'Дней до истечения',
+    ageLabel: 'Возраст',
+    expiresInLabel: 'Истекает через',
+    zonesQueried: 'Проверено зон',
+    totalQueries: 'Всего запросов',
+    errorsCount: 'Ошибки',
+    listed: 'В списках',
+    notListed: 'Не в списках',
+    riskLabel: 'Риск',
+    reputationWord: 'Репутация',
+    clean: 'Чисто',
+    excellent: 'Отлично',
+    great: 'Очень хорошо',
+    good: 'Хорошо',
+    fair: 'Удовлетворительно',
+    poor: 'Плохо',
+    yes: 'Да',
+    no: 'Нет',
+    none: 'Нет',
+    priority: 'Приоритет',
+    detectedProvider: 'Обнаруженный провайдер',
+    rawLabel: 'Исходные данные',
+    noRegistrationInformation: 'Информация о регистрации недоступна.',
+    registrationDetailsUnavailable: 'Сведения о регистрации недоступны.',
+    unitYearOne: 'год',
+    unitYearMany: 'лет',
+    unitMonthOne: 'месяц',
+    unitMonthMany: 'месяцев',
+    unitDayOne: 'день',
+    unitDayMany: 'дней',
+    wordExpired: 'Истёк',
+    mxPriorityLabel: 'Приоритет',
+    providerHintMicrosoft365: 'MX указывает на Exchange Online Protection (EOP).',
+    providerHintGoogleWorkspace: 'MX указывает на почтовые серверы Google.',
+    providerHintCloudflare: 'MX указывает на Cloudflare (mx.cloudflare.net).',
+    providerHintProofpoint: 'MX указывает на почту, размещённую в Proofpoint.',
+    providerHintMimecast: 'MX указывает на Mimecast.',
+    providerHintZoho: 'MX указывает на Zoho Mail.',
+    providerHintUnknown: 'Провайдер не распознан по имени хоста MX.',
+    riskClean: 'Чисто',
+    riskWarning: 'Предупреждение',
+    riskElevated: 'Повышенный риск',
+    mxUsingParentNote: '(используется MX родительского домена {lookupDomain})',
+    parentCheckedNoMx: 'Проверен родительский домен {parentDomain} (MX не найден).',
+    expiredOn: 'Истёк {date}',
+    registrationAppearsExpired: 'Регистрация домена, похоже, истекла.',
+    newDomainUnder90Days: 'Новый домен младше 90 дней.',
+    newDomainUnder180Days: 'Новый домен младше 180 дней.',
+    domainNameLabel: 'Имя домена',
+    domainStatusLabel: 'Статус домена',
+    mxRecordsLabel: 'MX-записи',
+    spfStatusLabel: 'Статус SPF',
+    dkim1StatusLabel: 'Статус DKIM1',
+    dkim2StatusLabel: 'Статус DKIM2',
+    dmarcStatusLabel: 'Статус DMARC'
+  },
+  ar: {
+    mxUsingParentNote: '(باستخدام MX من النطاق الأصل {lookupDomain})',
+    parentCheckedNoMx: 'تم التحقق من النطاق الأصل {parentDomain} (لا يوجد MX).',
+    expiredOn: 'منتهي في {date}',
+    registrationAppearsExpired: 'يبدو أن تسجيل النطاق قد انتهت صلاحيته.',
+    newDomainUnder90Days: 'نطاق جديد أقل من 90 يومًا.',
+    newDomainUnder180Days: 'نطاق جديد أقل من 180 يومًا.',
+    domainNameLabel: 'اسم النطاق',
+    domainStatusLabel: 'حالة النطاق',
+    mxRecordsLabel: 'سجلات MX',
+    spfStatusLabel: 'حالة SPF',
+    dkim1StatusLabel: 'حالة DKIM1',
+    dkim2StatusLabel: 'حالة DKIM2',
+    dmarcStatusLabel: 'حالة DMARC'
+  }
+};
+
+Object.keys(TRANSLATION_EXTENSIONS).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, TRANSLATION_EXTENSIONS[code]);
+});
+
+const REMAINING_TRANSLATION_OVERRIDES = {
+  'zh-CN': {
+    emailQuota: '电子邮件配额',
+    domainVerification: '域验证',
+    domainRegistration: '域注册 (WHOIS/RDAP)',
+    mxRecords: 'MX 记录',
+    spfQueried: 'SPF（查询域 TXT）',
+    acsDomainVerificationTxt: 'ACS 域验证 TXT',
+    txtRecordsQueried: 'TXT 记录（查询域）',
+    dmarc: 'DMARC',
+    cname: 'CNAME',
+    guidance: '指导 💡',
+    helpfulLinks: '有用链接',
+    externalTools: '外部工具',
+    acsReadyMessage: '此域看起来已准备好进行 Azure Communication Services 域验证。',
+    guidanceMxProviderDetected: '检测到的 MX 提供商: {provider}',
+    guidanceDomainExpired: '域名注册似乎已过期。请先续订域名。',
+    guidanceDomainVeryYoung: '该域名注册时间非常近（{days} 天内）。这会被视为验证错误信号；请让客户再等待一段时间。',
+    guidanceDomainYoung: '该域名注册时间较近（{days} 天内）。请让客户再等待一段时间；Microsoft 使用此信号帮助防止垃圾邮件发送者建立新域名。',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
+  },
+  'hi-IN': {
+    emailQuota: 'ईमेल कोटा',
+    domainVerification: 'डोमेन सत्यापन',
+    domainRegistration: 'डोमेन पंजीकरण (WHOIS/RDAP)',
+    mxRecords: 'MX रिकॉर्ड',
+    spfQueried: 'SPF (क्वेरी किए गए डोमेन का TXT)',
+    acsDomainVerificationTxt: 'ACS डोमेन सत्यापन TXT',
+    txtRecordsQueried: 'TXT रिकॉर्ड (क्वेरी किया गया डोमेन)',
+    dmarc: 'DMARC',
+    cname: 'CNAME',
+    guidance: 'मार्गदर्शन 💡',
+    helpfulLinks: 'उपयोगी लिंक',
+    externalTools: 'बाहरी टूल',
+    acsReadyMessage: 'यह डोमेन Azure Communication Services डोमेन सत्यापन के लिए तैयार प्रतीत होता है।',
+    guidanceMxProviderDetected: 'पता चला MX प्रदाता: {provider}',
+    guidanceDomainExpired: 'डोमेन पंजीकरण समाप्त प्रतीत होता है। आगे बढ़ने से पहले डोमेन नवीनीकृत करें।',
+    guidanceDomainVeryYoung: 'डोमेन बहुत हाल ही में पंजीकृत हुआ है ({days} दिनों के भीतर)। इसे सत्यापन के लिए त्रुटि संकेत माना जाता है; ग्राहक से कुछ और समय प्रतीक्षा करने को कहें।',
+    guidanceDomainYoung: 'डोमेन हाल ही में पंजीकृत हुआ है ({days} दिनों के भीतर)। ग्राहक से कुछ और समय प्रतीक्षा करने को कहें; Microsoft इस संकेत का उपयोग स्पैमर को नए वेब पते सेट करने से रोकने में मदद के लिए करता है।',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
+  },
+  'ja-JP': {
+    emailQuota: 'メール クォータ',
+    domainVerification: 'ドメイン検証',
+    domainRegistration: 'ドメイン登録 (WHOIS/RDAP)',
+    mxRecords: 'MX レコード',
+    spfQueried: 'SPF（照会ドメイン TXT）',
+    acsDomainVerificationTxt: 'ACS ドメイン検証 TXT',
+    txtRecordsQueried: 'TXT レコード（照会ドメイン）',
+    dmarc: 'DMARC',
+    cname: 'CNAME',
+    guidance: 'ガイダンス 💡',
+    helpfulLinks: '参考リンク',
+    externalTools: '外部ツール',
+    acsReadyMessage: 'このドメインは Azure Communication Services のドメイン検証の準備ができているようです。',
+    guidanceMxProviderDetected: '検出された MX プロバイダー: {provider}',
+    guidanceDomainExpired: 'ドメイン登録は期限切れのようです。続行する前にドメインを更新してください。',
+    guidanceDomainVeryYoung: 'ドメインはごく最近登録されました（{days} 日以内）。これは検証上のエラー シグナルとして扱われます。顧客にもう少し待つよう案内してください。',
+    guidanceDomainYoung: 'ドメインは最近登録されました（{days} 日以内）。顧客にもう少し待つよう案内してください。Microsoft はこのシグナルを使用してスパマーによる新しい Web アドレスの設定防止に役立てています。',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
+  },
+  'ru-RU': {
+    emailQuota: 'Квота электронной почты',
+    domainVerification: 'Проверка домена',
+    domainRegistration: 'Регистрация домена (WHOIS/RDAP)',
+    mxRecords: 'MX-записи',
+    spfQueried: 'SPF (TXT запрошенного домена)',
+    acsDomainVerificationTxt: 'TXT проверки домена ACS',
+    txtRecordsQueried: 'TXT-записи (запрошенный домен)',
+    dmarc: 'DMARC',
+    cname: 'CNAME',
+    guidance: 'Рекомендации 💡',
+    helpfulLinks: 'Полезные ссылки',
+    externalTools: 'Внешние инструменты',
+    acsReadyMessage: 'Этот домен выглядит готовым к проверке домена Azure Communication Services.',
+    guidanceMxProviderDetected: 'Обнаружен MX-провайдер: {provider}',
+    guidanceDomainExpired: 'Срок регистрации домена, похоже, истёк. Продлите домен перед продолжением.',
+    guidanceDomainVeryYoung: 'Домен был зарегистрирован совсем недавно (в пределах {days} дней). Это считается сигналом ошибки для проверки; попросите клиента подождать ещё немного.',
+    guidanceDomainYoung: 'Домен был зарегистрирован недавно (в пределах {days} дней). Попросите клиента подождать ещё немного; Microsoft использует этот сигнал, чтобы предотвращать создание новых адресов спамерами.',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
+  },
+  'ar': {
+    emailQuota: 'حصة البريد الإلكتروني',
+    domainVerification: 'التحقق من النطاق',
+    domainRegistration: 'تسجيل النطاق (WHOIS/RDAP)',
+    mxRecords: 'سجلات MX',
+    spfQueried: 'SPF (TXT للنطاق المستعلم عنه)',
+    acsDomainVerificationTxt: 'TXT للتحقق من نطاق ACS',
+    txtRecordsQueried: 'سجلات TXT (النطاق المستعلم عنه)',
+    guidance: 'إرشادات 💡',
+    helpfulLinks: 'روابط مفيدة',
+    externalTools: 'أدوات خارجية',
+    acsReadyMessage: 'يبدو أن هذا النطاق جاهز للتحقق من نطاق Azure Communication Services.',
+    guidanceMxProviderDetected: 'موفر MX المكتشف: {provider}',
+    guidanceDomainExpired: 'يبدو أن تسجيل النطاق قد انتهت صلاحيته. جدّد النطاق قبل المتابعة.',
+    guidanceDomainVeryYoung: 'تم تسجيل النطاق مؤخرًا جدًا (خلال {days} يومًا). يُعامل هذا كإشارة خطأ للتحقق؛ اطلب من العميل الانتظار مدة أطول.',
+    guidanceDomainYoung: 'تم تسجيل النطاق مؤخرًا (خلال {days} يومًا). اطلب من العميل الانتظار مدة أطول؛ تستخدم Microsoft هذه الإشارة للمساعدة في منع مرسلي البريد العشوائي من إعداد عناوين ويب جديدة.',
+    dkim1Title: 'DKIM1',
+    dkim2Title: 'DKIM2'
+  }
+};
+
+Object.keys(REMAINING_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, REMAINING_TRANSLATION_OVERRIDES[code]);
+});
+
+const LANG_PARAM = 'lang';
+const LANGUAGE_OPTIONS = ['en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'];
+const RTL_LANGUAGES = new Set(['ar']);
+const LANGUAGE_FLAG_URLS = {
+  en: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/us.svg',
+  es: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/es.svg',
+  fr: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/fr.svg',
+  de: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/de.svg',
+  'pt-BR': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/br.svg',
+  ar: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/sa.svg',
+  'zh-CN': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/cn.svg',
+  'hi-IN': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/in.svg',
+  'ja-JP': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/jp.svg',
+  'ru-RU': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/ru.svg'
+};
+
+let currentLanguage = 'en';
 
 let screenshotStatusToken = 0;
 
 let activeLookup = { runId: 0, controllers: [] };
+
+function normalizeLanguageCode(lang) {
+  const value = String(lang || '').trim().toLowerCase();
+  if (!value) return 'en';
+  if (value === 'ptbr' || value.startsWith('pt-br') || value.startsWith('pt_br') || value.startsWith('pt')) return 'pt-BR';
+  if (value.startsWith('es')) return 'es';
+  if (value.startsWith('fr')) return 'fr';
+  if (value.startsWith('de')) return 'de';
+  if (value.startsWith('ar')) return 'ar';
+  if (value === 'zh' || value.startsWith('zh-cn') || value.startsWith('zh_cn') || value.startsWith('zh-hans')) return 'zh-CN';
+  if (value === 'hi' || value.startsWith('hi-in') || value.startsWith('hi_in')) return 'hi-IN';
+  if (value === 'ja' || value.startsWith('ja-jp') || value.startsWith('ja_jp')) return 'ja-JP';
+  if (value === 'ru' || value.startsWith('ru-ru') || value.startsWith('ru_ru')) return 'ru-RU';
+  return 'en';
+}
+
+function isRtlLanguage(language) {
+  return RTL_LANGUAGES.has(normalizeLanguageCode(language));
+}
+
+function getLanguageFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const lang = params.get(LANG_PARAM) || params.get('language');
+    return lang ? normalizeLanguageCode(lang) : null;
+  } catch {
+    return null;
+  }
+}
+
+function updateLanguageUrlParameter() {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set(LANG_PARAM, currentLanguage);
+    window.history.replaceState({}, '', url);
+  } catch {}
+}
+
+function getSavedLanguage() {
+  try {
+    return localStorage.getItem(LANG_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function detectLanguage() {
+  const urlLanguage = getLanguageFromUrl();
+  if (urlLanguage) return urlLanguage;
+  const saved = getSavedLanguage();
+  if (saved) return normalizeLanguageCode(saved);
+  return normalizeLanguageCode(navigator.language || navigator.userLanguage || 'en');
+}
+
+function t(key, params = {}) {
+  const langTable = TRANSLATIONS[currentLanguage] || TRANSLATIONS.en;
+  let text = langTable[key] || TRANSLATIONS.en[key] || key;
+  return String(text).replace(/\{(\w+)\}/g, (_, token) => {
+    const value = Object.prototype.hasOwnProperty.call(params, token) ? params[token] : `{${token}}`;
+    return value === null || value === undefined ? '' : String(value);
+  });
+}
+
+function translateBadge(label) {
+  const normalized = String(label || '').trim().toUpperCase();
+  const map = {
+    'CHECKLIST': 'checklist',
+    'VERIFICATION': 'verificationTag',
+    'DOCS': 'docs',
+    'TOOLS': 'tools',
+    'READINESS TIPS': 'readinessTips',
+    'LOOKED UP': 'lookedUp',
+    'LOADING': 'loading',
+    'MISSING': 'missing',
+    'OPTIONAL': 'optional',
+    'INFO': 'info',
+    'ERROR': 'error',
+    'PASS': 'pass',
+    'FAIL': 'fail',
+    'WARN': 'warn',
+    'PENDING': 'pending',
+    'DNS ERROR': 'dnsError',
+    'NEW DOMAIN': 'newDomain',
+    'EXPIRED': 'expired'
+  };
+  return map[normalized] ? t(map[normalized]) : label;
+}
+
+function getLanguageButtonHtml(code) {
+  const flagUrl = LANGUAGE_FLAG_URLS[code] || '';
+  const name = (TRANSLATIONS[code] && TRANSLATIONS[code].languageName) ? TRANSLATIONS[code].languageName : code;
+  const safeName = escapeHtml(name);
+  const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="lazy" />` : '';
+  return `${flagHtml}<span>${safeName}</span><span class="caret">&#x25BE;</span>`;
+}
+
+function closeLanguageMenu() {
+  const menu = document.getElementById('languageSelectMenu');
+  const button = document.getElementById('languageSelectBtn');
+  if (menu) menu.classList.remove('open');
+  if (button) button.setAttribute('aria-expanded', 'false');
+}
+
+function toggleLanguageMenu() {
+  const menu = document.getElementById('languageSelectMenu');
+  const button = document.getElementById('languageSelectBtn');
+  if (!menu || !button) return;
+  const willOpen = !menu.classList.contains('open');
+  menu.classList.toggle('open', willOpen);
+  button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+}
+
+function populateLanguageSelect() {
+  const button = document.getElementById('languageSelectBtn');
+  const menu = document.getElementById('languageSelectMenu');
+  if (!button || !menu) return;
+
+  button.innerHTML = getLanguageButtonHtml(currentLanguage);
+  button.setAttribute('aria-label', `${t('languageLabel')}: ${TRANSLATIONS[currentLanguage].languageName}`);
+
+  menu.innerHTML = LANGUAGE_OPTIONS.map(code => {
+    const selected = code === currentLanguage ? ' active' : '';
+    return `<button type="button" class="language-option${selected}" role="option" aria-selected="${code === currentLanguage ? 'true' : 'false'}" onclick="changeLanguage('${code}')">${getLanguageButtonHtml(code).replace('<span class="caret">&#x25BE;</span>', '')}</button>`;
+  }).join('');
+}
+
+function applyLanguageToStaticUi() {
+  document.documentElement.lang = currentLanguage;
+  document.documentElement.dir = isRtlLanguage(currentLanguage) ? 'rtl' : 'ltr';
+  document.title = t('pageTitle');
+
+  const heading = document.getElementById('appHeading');
+  if (heading) heading.innerHTML = t('appHeading');
+
+  const input = document.getElementById('domainInput');
+  if (input) input.placeholder = t('placeholderDomain');
+
+  const lookupBtn = document.getElementById('lookupBtn');
+  if (lookupBtn && !lookupBtn.innerHTML.includes('spinner')) lookupBtn.innerHTML = t('lookup');
+
+  const themeBtn = document.getElementById('themeToggleBtn');
+  if (themeBtn) {
+    themeBtn.innerHTML = document.documentElement.classList.contains('dark') ? t('themeLight') : t('themeDark');
+  }
+
+  const copyLinkBtn = document.getElementById('copyLinkBtn');
+  if (copyLinkBtn) copyLinkBtn.innerHTML = t('copyLink');
+
+  const screenshotBtn = document.getElementById('screenshotBtn');
+  if (screenshotBtn) screenshotBtn.innerHTML = t('copyScreenshot');
+
+  const downloadBtn = document.getElementById('downloadBtn');
+  if (downloadBtn) downloadBtn.innerHTML = t('downloadJson');
+
+  const reportBtn = document.getElementById('reportIssueBtn');
+  if (reportBtn) reportBtn.innerHTML = t('reportIssue');
+
+  const signInBtn = document.getElementById('msSignInBtn');
+  if (signInBtn && signInBtn.style.display !== 'none') signInBtn.innerHTML = t('signInMicrosoft');
+
+  const signOutBtn = document.getElementById('msSignOutBtn');
+  if (signOutBtn) signOutBtn.innerHTML = t('signOut');
+
+  const footer = document.getElementById('footerText');
+  if (footer) footer.innerHTML = t('footer', { version: appVersion });
+
+  populateLanguageSelect();
+  loadHistory();
+}
+
+function applyLanguage(language, persist = true) {
+  currentLanguage = normalizeLanguageCode(language);
+  if (persist) {
+    try { localStorage.setItem(LANG_KEY, currentLanguage); } catch {}
+  }
+  updateLanguageUrlParameter();
+  applyLanguageToStaticUi();
+  closeLanguageMenu();
+  if (lastResult) render(lastResult);
+}
+
+function changeLanguage(language) {
+  applyLanguage(language, true);
+}
 
 function cancelInflightLookup() {
   for (const c of (activeLookup.controllers || [])) {
@@ -5349,7 +7329,7 @@ function renderHistory(items) {
       <button type="button" class="history-remove" title="Remove" aria-label="Remove" onclick='event.stopPropagation(); removeHistory(${arg})'>&#x2715;</button>
     </span>`;
   }).join(" ");
-  container.innerHTML = "Recent: " + chips;
+  container.innerHTML = escapeHtml(t('recent')) + ": " + chips;
 }
 
 function removeHistory(domain) {
@@ -5399,9 +7379,9 @@ function toggleCard(header) {
       mxDetails.style.display = "none";
       const btns = header.querySelectorAll("button");
       for (const b of btns) {
-        const t = (b.textContent || "").trim();
-        if (t.startsWith("Additional Details")) {
-          b.textContent = "Additional Details +";
+        const buttonText = (b.textContent || "").trim();
+        if (buttonText === t('additionalDetailsPlus') || buttonText === t('additionalDetailsMinus') || buttonText.startsWith('Additional Details')) {
+          b.textContent = t('additionalDetailsPlus');
           break;
         }
       }
@@ -5437,56 +7417,68 @@ function formatLocalDateTime(isoString) {
   const d = new Date(isoString);
   if (isNaN(d.getTime())) return null;
 
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-    timeZoneName: 'short'
-  });
+  try {
+    return new Intl.DateTimeFormat(currentLanguage, {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short'
+    }).format(d);
+  } catch {
+    return d.toLocaleString();
+  }
+}
 
-  const parts = fmt.formatToParts(d).reduce((acc, p) => {
-    acc[p.type] = p.value;
-    return acc;
-  }, {});
+function formatLocalizedCount(count, singularKey, pluralKey) {
+  const value = Number.parseInt(count, 10);
+  if (!Number.isFinite(value)) return String(count || '');
+  return `${value} ${t(value === 1 ? singularKey : pluralKey)}`;
+}
 
-  const tzRaw = parts.timeZoneName || '';
-  const month = parts.month || '';
-  const dayNum = parseInt(parts.day, 10);
-  const ordinal = (n) => {
-    const v = n % 100;
-    if (v >= 11 && v <= 13) return 'th';
-    switch (n % 10) {
-      case 1: return 'st';
-      case 2: return 'nd';
-      case 3: return 'rd';
-      default: return 'th';
-    }
-  };
-  const day = isNaN(dayNum) ? (parts.day || '') : `${dayNum}${ordinal(dayNum)}`;
-  const year = parts.year || '';
-  const hour = parts.hour || '';
-  const minute = parts.minute || '';
-  const dayPeriod = parts.dayPeriod || '';
+function localizeDurationText(text) {
+  const source = String(text || '').trim();
+  if (!source) return source;
+  if (/^expired$/i.test(source)) return t('wordExpired');
 
-  const offsetMinutes = d.getTimezoneOffset();
-  const sign = offsetMinutes <= 0 ? '+' : '-';
-  const absMinutes = Math.abs(offsetMinutes);
-  const offsetHours = String(Math.floor(absMinutes / 60)).padStart(2, '0');
-  const offsetMins = String(absMinutes % 60).padStart(2, '0');
-  const offsetLabel = `UTC${sign}${offsetHours}:${offsetMins}`;
-
-  let tzAbbr = tzRaw;
-  const tzUpper = tzRaw.toUpperCase();
-  if (!/[A-Z]{2,4}/.test(tzUpper) || tzUpper.startsWith('UTC')) {
-    if (offsetMinutes === 300) tzAbbr = 'EST';
-    else if (offsetMinutes === 240) tzAbbr = 'EDT';
-    else tzAbbr = offsetLabel;
+  const parts = [];
+  const regex = /(\d+)\s+(year|years|month|months|day|days)/gi;
+  let match;
+  while ((match = regex.exec(source)) !== null) {
+    const count = Number.parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    if (unit.startsWith('year')) parts.push(formatLocalizedCount(count, 'unitYearOne', 'unitYearMany'));
+    else if (unit.startsWith('month')) parts.push(formatLocalizedCount(count, 'unitMonthOne', 'unitMonthMany'));
+    else if (unit.startsWith('day')) parts.push(formatLocalizedCount(count, 'unitDayOne', 'unitDayMany'));
   }
 
-  return `${month} ${day}, ${year} at ${hour}:${minute} ${dayPeriod} ${tzAbbr ? `(${tzAbbr})` : ''}`.trim();
+  return parts.length > 0 ? parts.join(', ') : source;
+}
+
+function localizeMxRecordText(text) {
+  return String(text || '').replace(/\(Priority\s+(\d+)\)/gi, `(${t('mxPriorityLabel')} $1)`);
+}
+
+function localizeRiskSummary(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'clean') return t('riskClean');
+  if (normalized === 'warning') return t('riskWarning');
+  if (normalized === 'elevatedrisk') return t('riskElevated');
+  return value || t('unknown');
+}
+
+function getLocalizedMxProviderHint(provider, fallbackHint) {
+  switch (String(provider || '')) {
+    case 'Microsoft 365 / Exchange Online': return t('providerHintMicrosoft365');
+    case 'Google Workspace / Gmail': return t('providerHintGoogleWorkspace');
+    case 'Cloudflare Email Routing': return t('providerHintCloudflare');
+    case 'Proofpoint': return t('providerHintProofpoint');
+    case 'Mimecast': return t('providerHintMimecast');
+    case 'Zoho Mail': return t('providerHintZoho');
+    case 'Unknown': return t('providerHintUnknown');
+    default: return fallbackHint || '';
+  }
 }
 
 function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) {
@@ -5514,33 +7506,33 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   const ruf = (tags.ruf || '').trim();
 
   if (policy === 'none') {
-    guidance.push(`DMARC for ${targetDomain} is monitor-only (p=none). For stronger protection against spoofing, move to enforcement with p=quarantine or p=reject after validating legitimate mail sources.`);
+    guidance.push(t('dmarcMonitorOnly', { domain: targetDomain }));
   } else if (policy === 'quarantine') {
-    guidance.push(`DMARC for ${targetDomain} is set to p=quarantine. For the strongest anti-spoofing posture, consider p=reject once you confirm valid mail is fully aligned.`);
+    guidance.push(t('dmarcQuarantine', { domain: targetDomain }));
   }
 
   if (Number.isFinite(pct) && pct >= 0 && pct < 100) {
-    guidance.push(`DMARC enforcement for ${targetDomain} is only applied to ${pct}% of messages (pct=${pct}). Use pct=100 for full protection once rollout is validated.`);
+    guidance.push(t('dmarcPct', { domain: targetDomain, pct }));
   }
 
   if (adkim === 'r') {
-    guidance.push(`DKIM alignment for ${targetDomain} uses relaxed mode (adkim=r). Consider strict alignment (adkim=s) if your sending infrastructure supports it for tighter domain protection.`);
+    guidance.push(t('dmarcAdkimRelaxed', { domain: targetDomain }));
   }
 
   if (aspf === 'r') {
-    guidance.push(`SPF alignment for ${targetDomain} uses relaxed mode (aspf=r). Consider strict alignment (aspf=s) if your senders consistently use the exact domain.`);
+    guidance.push(t('dmarcAspfRelaxed', { domain: targetDomain }));
   }
 
   if (domain && lookupDomain && inherited === true && lookupDomain !== domain && !Object.prototype.hasOwnProperty.call(tags, 'sp')) {
-    guidance.push(`DMARC for subdomains of ${lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like ${domain}, consider adding sp=quarantine or sp=reject for clearer protection.`);
+    guidance.push(t('dmarcMissingSp', { lookupDomain, domain }));
   }
 
   if (!rua) {
-    guidance.push(`DMARC for ${targetDomain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact.`);
+    guidance.push(t('dmarcMissingRua', { domain: targetDomain }));
   }
 
   if (!ruf) {
-    guidance.push(`DMARC for ${targetDomain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations.`);
+    guidance.push(t('dmarcMissingRuf', { domain: targetDomain }));
   }
 
   return guidance;
@@ -5678,10 +7670,10 @@ function applyTheme(theme) {
   const btn  = document.getElementById("themeToggleBtn");
   if (theme === "dark") {
     root.classList.add("dark");
-    if (btn) btn.innerHTML = "Light mode &#x2600;&#xFE0F;";
+    if (btn) btn.innerHTML = t('themeLight');
   } else {
     root.classList.remove("dark");
-    if (btn) btn.innerHTML = "Dark mode &#x1F319;";
+    if (btn) btn.innerHTML = t('themeDark');
   }
   localStorage.setItem("acsTheme", theme);
 }
@@ -5716,10 +7708,24 @@ document.addEventListener('mouseenter', (e) => {
   }
 }, true);
 
+document.addEventListener('click', (e) => {
+  const dropdown = document.getElementById('languageDropdown');
+  if (!dropdown) return;
+  if (!dropdown.contains(e.target)) {
+    closeLanguageMenu();
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeLanguageMenu();
+  }
+});
+
 function copyShareLink() {
   const btn = document.getElementById("copyLinkBtn");
   if (!navigator.clipboard) {
-    setStatus("Clipboard API not available in this browser.");
+    setStatus(t('clipboardUnavailable'));
     return;
   }
 
@@ -5731,18 +7737,19 @@ function copyShareLink() {
   } else {
     url.searchParams.delete("domain");
   }
+  url.searchParams.set(LANG_PARAM, currentLanguage);
 
   navigator.clipboard.writeText(url.toString())
     .then(() => {
       if (btn) {
         const original = btn.innerHTML;
-        btn.innerHTML = "Copied! &#x2714;";
+        btn.innerHTML = escapeHtml(t('copied'));
         setTimeout(() => { btn.innerHTML = original; }, 2000);
       } else {
-        setStatus("Link copied to clipboard.");
+        setStatus(t('linkCopiedToClipboard'));
       }
     })
-    .catch(() => setStatus("Failed to copy link to clipboard."));
+    .catch(() => setStatus(t('failedCopyLink')));
 }
 
 function copyText(text, btn) {
@@ -5753,7 +7760,7 @@ function copyText(text, btn) {
   const html = (payload && typeof payload === 'object' && payload !== null) ? payload.html : null;
 
   if (!navigator.clipboard) {
-    setStatus("Clipboard API not available in this browser.");
+    setStatus(t('clipboardUnavailable'));
     return;
   }
 
@@ -5772,13 +7779,13 @@ function copyText(text, btn) {
     .then(() => {
       if (btn && btn.tagName === "BUTTON") {
         const originalText = btn.innerHTML;
-        btn.innerHTML = "Copied! &#x2714;";
+        btn.innerHTML = escapeHtml(t('copied'));
         setTimeout(() => { btn.innerHTML = originalText; }, 2000);
       } else {
-        setStatus("Copied to clipboard.");
+        setStatus(t('copiedToClipboard'));
       }
     })
-    .catch(() => setStatus("Failed to copy to clipboard."));
+    .catch(() => setStatus(t('failedCopyToClipboard')));
 }
 
 function copyField(btn, key) {
@@ -5792,7 +7799,7 @@ function copyField(btn, key) {
 
   const el = document.getElementById("field-" + fieldKey);
   if (!el) {
-    setStatus("Nothing to copy for " + escapeHtml(fieldKey) + ".");
+    setStatus(t('nothingToCopyFor', { field: fieldKey }));
     return;
   }
 
@@ -5812,25 +7819,25 @@ function copyField(btn, key) {
     }
   }
   if (!navigator.clipboard) {
-    setStatus("Clipboard API not available in this browser.");
+    setStatus(t('clipboardUnavailable'));
     return;
   }
   navigator.clipboard.writeText(text)
     .then(() => {
       if (button && button.tagName === "BUTTON") {
         const originalText = button.innerHTML;
-        button.innerHTML = "Copied! &#x2714;";
+        button.innerHTML = escapeHtml(t('copied'));
         setTimeout(() => { button.innerHTML = originalText; }, 2000);
       } else {
-        setStatus("Copied " + escapeHtml(fieldKey) + " to clipboard.");
+        setStatus(t('copiedFieldToClipboard', { field: fieldKey }));
       }
     })
-    .catch(() => setStatus("Failed to copy " + escapeHtml(fieldKey) + " to clipboard."));
+    .catch(() => setStatus(t('failedCopyFieldToClipboard', { field: fieldKey })));
 }
 
 function screenshotPage() {
   if (!window.html2canvas || !navigator.clipboard || typeof ClipboardItem === "undefined") {
-    setStatus("Screenshot clipboard support is not available in this browser.");
+    setStatus(t('screenshotClipboardUnsupported'));
     return;
   }
 
@@ -5841,7 +7848,7 @@ function screenshotPage() {
   // Capture only the container div instead of the entire body
   const container = document.querySelector(".container");
   if (!container) {
-    setStatus("Container not found for screenshot.");
+    setStatus(t('screenshotContainerNotFound'));
     return;
   }
 
@@ -5854,25 +7861,25 @@ function screenshotPage() {
   }).then(canvas => {
     canvas.toBlob(blob => {
       if (!blob) {
-        setStatus("Failed to capture screenshot.");
+        setStatus(t('screenshotCaptureFailed'));
         return;
       }
       const item = new ClipboardItem({ "image/png": blob });
       navigator.clipboard.write([item])
         .then(() => {
-          setStatus("Screenshot copied to clipboard.");
+          setStatus(t('screenshotCopiedToClipboard'));
           setTimeout(() => {
             if (myToken !== screenshotStatusToken) return;
             const el = document.getElementById("status");
-            if (el && el.innerHTML === "Screenshot copied to clipboard.") {
+            if (el && el.innerHTML === t('screenshotCopiedToClipboard')) {
               el.innerHTML = previousStatusHtml;
             }
           }, 2500);
         })
-        .catch(() => setStatus("Failed to copy screenshot to clipboard."));
+        .catch(() => setStatus(t('failedCopyScreenshot')));
     });
   }).catch(() => {
-    setStatus("Screenshot capture failed.");
+    setStatus(t('screenshotRenderFailed'));
   });
 }
 
@@ -5898,12 +7905,12 @@ function reportIssue() {
   const domain = normalizeDomain((document.getElementById("domainInput") || {}).value || "");
   const targetUrl = buildIssueUrl(domain);
   if (!targetUrl) {
-    setStatus("Issue reporting is not configured.");
+    setStatus(t('issueReportingNotConfigured'));
     return;
   }
 
-  const detail = domain ? `the domain name "${domain}"` : "the domain name from the input box";
-  const ok = window.confirm(`This will open the issue tracker and include ${detail}. Continue?`);
+  const detail = domain ? t('issueReportDetailDomain', { domain }) : t('issueReportDetailInput');
+  const ok = window.confirm(t('issueReportConfirm', { detail }));
   if (!ok) return;
 
   window.open(targetUrl, '_blank', 'noopener');
@@ -5919,12 +7926,12 @@ function lookup() {
   toggleClearBtn();
 
   if (!domain) {
-    setStatus("Please enter a domain.");
+    setStatus(t('promptEnterDomain'));
     return;
   }
 
   if (!isValidDomain(domain)) {
-    setStatus("Please enter a valid domain name (example: example.com).");
+    setStatus(t('promptEnterValidDomain'));
     return;
   }
 
@@ -5939,12 +7946,13 @@ function lookup() {
 
   const url = new URL(window.location.href);
   url.searchParams.set("domain", domain);
+  url.searchParams.set(LANG_PARAM, currentLanguage);
   window.history.replaceState({}, "", url);
 
   // Keep Lookup clickable so another click can cancel/restart
   btn.disabled = false;
   if (screenshotBtn) screenshotBtn.disabled = true;
-  btn.innerHTML = 'Checking <span class="spinner"></span>';
+  btn.innerHTML = `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`;
   // setStatus("Checking " + escapeHtml(domain) + " &#x23F3;");
 
   function parseHttpError(r, bodyText) {
@@ -5992,16 +8000,16 @@ function lookup() {
     const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
 
     if (loaded.base && r.dnsFailed) {
-      guidance.push("DNS TXT lookup failed or timed out. Other DNS records may still resolve.");
+      guidance.push(t('guidanceDnsTxtFailed'));
       return guidance;
     }
 
     if (loaded.base) {
       if (!r.spfPresent) {
         if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
-          guidance.push("SPF is missing on " + (r.domain || "") + ". Parent domain " + r.txtLookupDomain + " publishes SPF, but SPF does not automatically apply to the queried subdomain.");
+          guidance.push(t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
         } else {
-          guidance.push("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent). ");
+          guidance.push(t('guidanceSpfMissing'));
         }
       }
       if (Array.isArray(r.spfGuidance) && r.spfGuidance.length > 0) {
@@ -6009,9 +8017,9 @@ function lookup() {
       }
       if (!r.acsPresent) {
         if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
-          guidance.push("ACS ms-domain-verification TXT is missing on " + (r.domain || "") + ". Parent domain " + r.txtLookupDomain + " has an ACS TXT record, but it does not verify the queried subdomain.");
+          guidance.push(t('guidanceAcsMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
         } else {
-          guidance.push("ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.");
+          guidance.push(t('guidanceAcsMissing'));
         }
       }
     }
@@ -6021,36 +8029,36 @@ function lookup() {
       const hasMx = mxList && mxList.length > 0;
       if (!hasMx) {
         if (r.mxFallbackDomainChecked && r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-          guidance.push("No MX records found on " + (r.domain || "") + "; using parent domain " + r.mxLookupDomain + " MX records as a fallback.");
+          guidance.push(t('guidanceMxMissingParentFallback', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
         } else if (r.mxFallbackDomainChecked && !r.mxFallbackUsed) {
-          guidance.push("No MX records detected for " + (r.domain || "") + " or its parent " + r.mxFallbackDomainChecked + ". Mail flow will not function until MX records are configured.");
+          guidance.push(t('guidanceMxMissingCheckedParent', { domain: r.domain || '', parentDomain: r.mxFallbackDomainChecked }));
         } else {
-          guidance.push("No MX records detected. Mail flow will not function until MX records are configured.");
+          guidance.push(t('guidanceMxMissing'));
         }
       } else if (r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-        guidance.push("No MX records found on " + (r.domain || "") + "; results shown are from parent domain " + r.mxLookupDomain + ".");
+        guidance.push(t('guidanceMxParentShown', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
       }
       if (r.mxProvider && r.mxProvider !== "Unknown") {
-        guidance.push("Detected MX provider: " + r.mxProvider);
+        guidance.push(t('guidanceMxProviderDetected', { provider: r.mxProvider }));
       }
     }
 
     if (loaded.whois) {
       if (r.whoisIsExpired === true) {
-        guidance.push("Domain registration appears expired. Renew the domain before proceeding.");
+        guidance.push(t('guidanceDomainExpired'));
       } else if (r.whoisIsVeryYoungDomain === true) {
         const d = (r.whoisNewDomainErrorThresholdDays || 90);
-        guidance.push("Domain was registered very recently (within " + String(d) + " days). This is treated as an error signal for verification; ask the customer to allow more time.");
+        guidance.push(t('guidanceDomainVeryYoung', { days: String(d) }));
       } else if (r.whoisIsYoungDomain === true) {
         const d = (r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180);
-        guidance.push("Domain was registered recently (within " + String(d) + " days). Ask the customer to allow more time; Microsoft uses this signal to help prevent spammers from setting up new web addresses.");
+        guidance.push(t('guidanceDomainYoung', { days: String(d) }));
       }
     }
 
     if (loaded.dmarc && !r.dmarc) {
-      guidance.push("DMARC is missing. Add a _dmarc." + (r.domain || "") + " TXT record to reduce spoofing risk.");
+      guidance.push(t('guidanceDmarcMissing', { domain: r.domain || '' }));
     } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
-      guidance.push("Effective DMARC policy is inherited from parent domain " + r.dmarcLookupDomain + ".");
+      guidance.push(t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }));
     }
     let dmarcActionable = false;
     if (loaded.dmarc && r.dmarc) {
@@ -6059,30 +8067,30 @@ function lookup() {
       guidance.push(...dmarcSecurityGuidance);
     }
     if ((loaded.dmarc && !r.dmarc) || dmarcActionable) {
-      guidance.push(`For more information about DMARC TXT record syntax, see: ${dmarcHelpUrl}`);
+      guidance.push(t('guidanceDmarcMoreInfo', { url: dmarcHelpUrl }));
     }
 
     if (loaded.dkim) {
-      if (!r.dkim1) guidance.push("DKIM selector1 (selector1-azurecomm-prod-net) is missing.");
-      if (!r.dkim2) guidance.push("DKIM selector2 (selector2-azurecomm-prod-net) is missing.");
+      if (!r.dkim1) guidance.push(t('guidanceDkim1Missing'));
+      if (!r.dkim2) guidance.push(t('guidanceDkim2Missing'));
     }
 
     if (loaded.cname && !r.cname) {
-      guidance.push("CNAME is not configured on the queried host. Validate this is expected for your scenario.");
+      guidance.push(t('guidanceCnameMissing'));
     }
 
     if (loaded.base && loaded.mx && r.mxProvider === "Microsoft 365 / Exchange Online" && r.spfPresent && r.spfValue && !/spf\.protection\.outlook\.com/i.test(r.spfValue)) {
-      guidance.push("Your MX indicates Microsoft 365, but SPF does not include spf.protection.outlook.com. Verify your SPF includes the correct provider include.");
+      guidance.push(t('guidanceMxMicrosoftSpf'));
     }
     if (loaded.base && loaded.mx && r.mxProvider === "Google Workspace / Gmail" && r.spfPresent && r.spfValue && !/_spf\.google\.com/i.test(r.spfValue)) {
-      guidance.push("Your MX indicates Google Workspace, but SPF does not include _spf.google.com. Verify your SPF includes the correct provider include.");
+      guidance.push(t('guidanceMxGoogleSpf'));
     }
     if (loaded.base && loaded.mx && r.mxProvider === "Zoho Mail" && r.spfPresent && r.spfValue && !/include:zoho\.com/i.test(r.spfValue)) {
-      guidance.push("Your MX indicates Zoho, but SPF does not include include:zoho.com. Verify your SPF includes the correct provider include.");
+      guidance.push(t('guidanceMxZohoSpf'));
     }
 
     if (loaded.base && r.acsReady) {
-      guidance.push("This domain appears ready for Azure Communication Services domain verification.");
+      guidance.push(t('acsReadyMessage'));
     }
 
     return guidance;
@@ -6191,7 +8199,7 @@ function lookup() {
       if (runId !== activeLookup.runId) return;
       btn.disabled = false;
       if (screenshotBtn) screenshotBtn.disabled = false;
-      btn.innerHTML = "Lookup";
+      btn.innerHTML = t('lookup');
     });
 }
 
@@ -6223,15 +8231,16 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
   // Always escape the title text to prevent XSS via crafted DNS responses.
   // Use titleSuffixHtml for trusted HTML additions (e.g., info-dot buttons, links).
   const safeTitle = escapeHtml(title);
+  const translatedLabel = label ? escapeHtml(translateBadge(label)) : "";
   return `
   <div class="card"${cardId ? ` id="${cardId}"` : ''}>
     <div class="card-header" onclick="toggleCard(this)">
       <span class="chevron">&#x25BC;</span>
-      ${label ? `<span class="tag ${cls}">${label}</span>` : ""}
+      ${label ? `<span class="tag ${cls}">${translatedLabel}</span>` : ""}
       <strong>${safeTitle}</strong>${titleSuffixHtml ? ' ' + titleSuffixHtml : ''}
-      ${showCopy ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, '${key}')">Copy</button>` : ""}
+      ${showCopy ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, '${key}')">${escapeHtml(t('copy'))}</button>` : ""}
     </div>
-    <div id="field-${key}" class="code card-content">${escapeHtml(value || "No Records Available.")}</div>
+    <div id="field-${key}" class="code card-content">${escapeHtml(value || t('noRecordsAvailable'))}</div>
   </div>`;
 }
 
@@ -6248,16 +8257,16 @@ function toggleMxDetails(element) {
   if (isCollapsed && header) {
     toggleCard(header);
     el.style.display = "block";
-    element.textContent = 'Additional Details -';
+    element.textContent = t('additionalDetailsMinus');
     return;
   }
 
   const current = el.style.display;
   const isOpen = (!current || current === "none");
   if (isOpen) {
-    element.textContent = 'Additional Details -';
+    element.textContent = t('additionalDetailsMinus');
   } else {
-    element.textContent = 'Additional Details +';
+    element.textContent = t('additionalDetailsPlus');
   }
   el.style.display = isOpen ? "block" : "none";
 }
@@ -6281,18 +8290,18 @@ function render(r) {
   let statusText = "";
 
   if (!allLoaded) {
-    statusText = "Checking " + escapeHtml(r.domain || "") + " &#x23F3;";
+    statusText = escapeHtml(t('statusChecking', { domain: r.domain || '' }));
   } else if (anyError) {
-    statusText = "Some checks failed &#x274C;";
+    statusText = escapeHtml(t('statusSomeChecksFailed'));
   } else if (loaded.base && r.dnsFailed) {
-    statusText = "TXT lookup failed &#x274C; &mdash; other DNS records may still resolve.";
+    statusText = escapeHtml(t('statusTxtFailed'));
   } else {
     // Determine overall status for Email Quota and Domain Verification
 
     // Domain Verification: strictly based on ACS readiness (ms-domain-verification TXT)
-    let domainVerStatus = "Failed &#x274C;";
+    let domainVerStatus = `${escapeHtml(t('failed'))} &#x274C;`;
     if (r.acsReady) {
-      domainVerStatus = "Passing &#x2705;";
+      domainVerStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     }
 
     // Email Quota: aggregation of MX, SPF, DMARC, DKIM, Reputation, Registration
@@ -6342,18 +8351,18 @@ function render(r) {
     // 4. SPF
     if (!r.spfPresent) { quotaWarn = true; }
 
-    let emailQuotaStatus = "Passing &#x2705;";
+    let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     if (quotaFail) {
-        emailQuotaStatus = "Failed &#x274C;";
+        emailQuotaStatus = `${escapeHtml(t('failed'))} &#x274C;`;
     } else if (quotaWarn) {
-        emailQuotaStatus = "Warning &#x26A0;&#xFE0F;";
+        emailQuotaStatus = `${escapeHtml(t('warningState'))} &#x26A0;&#xFE0F;`;
     }
 
-    statusText = `Email Quota: ${emailQuotaStatus} | Domain Verification: ${domainVerStatus}`;
+    statusText = `${escapeHtml(t('emailQuota'))}: ${emailQuotaStatus} | ${escapeHtml(t('domainVerification'))}: ${domainVerStatus}`;
   }
 
   const statusWithTime = gatheredAtLocal
-    ? `${statusText}<div style="font-size:12px;color:var(--status);margin-top:2px;">Collected on: ${escapeHtml(gatheredAtLocal)}</div>`
+    ? `${statusText}<div style="font-size:12px;color:var(--status);margin-top:2px;">${escapeHtml(t('statusCollectedOn', { value: gatheredAtLocal }))}</div>`
     : statusText;
 
   setStatus(statusWithTime);
@@ -6378,11 +8387,12 @@ function render(r) {
     }
   };
   const quotaRow = (name, state, detail, infoTitle = null, targetId = null, extraHtml = '') => {
-    const badge = `<span class="tag ${quotaStateClass(state)} status-pill">${escapeHtml(state.toUpperCase())}</span>`;
+    const stateKeyMap = { pass: 'pass', fail: 'fail', error: 'error', warn: 'warn', pending: 'pending' };
+    const badge = `<span class="tag ${quotaStateClass(state)} status-pill">${escapeHtml(t(stateKeyMap[state] || String(state || '').toLowerCase()))}</span>`;
     const nameHtml = escapeHtml(name)
       + (infoTitle ? ` <button type="button" class="info-dot" aria-label="${escapeHtml(infoTitle)}" data-info="${escapeHtml(infoTitle)}">i</button>` : "")
       + (extraHtml ? ` ${extraHtml}` : '');
-    const link = targetId ? `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); scrollToSection('${targetId}')">View</button>` : '';
+    const link = targetId ? `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); scrollToSection('${targetId}')">${escapeHtml(t('view'))}</button>` : '';
     return `<div class="status-row"><span class="status-name">${nameHtml}</span><span class="status-pills">${link}${badge}</span></div>` + (detail ? `<div class="code" style="margin:6px 0 10px 0;">${escapeHtml(detail)}</div>` : '');
   };
 
@@ -6402,37 +8412,37 @@ function render(r) {
   // 1) MX Records
   let mxStatusText = '';
     if (!loaded.mx && !errors.mx) {
-    mxCopyDetail = 'Checking MX records...';
-    quotaItems.push(quotaRow('MX Records', 'pending', mxCopyDetail, null, 'mx'));
+    mxCopyDetail = t('checkingMxRecords');
+    quotaItems.push(quotaRow(t('mxRecords'), 'pending', mxCopyDetail, null, 'mx'));
     quotaLines.push(`**MX Records:** PENDING${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
     quotaLinesHtml.push(`<strong>MX Records:</strong> PENDING${mxCopyDetail ? ' - ' + escapeHtml(mxCopyDetail) : ''}`);
-    mxStatusText = 'Checking...';
+    mxStatusText = t('checkingValue');
   } else if (errors.mx) {
     mxCopyDetail = errors.mx;
-    quotaItems.push(quotaRow('MX Records', 'error', mxCopyDetail, null, 'mx'));
+    quotaItems.push(quotaRow(t('mxRecords'), 'error', mxCopyDetail, null, 'mx'));
     quotaLines.push(`**MX Records:** ERROR${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
     quotaLinesHtml.push(`<strong>MX Records:</strong> ERROR${mxCopyDetail ? ' - ' + escapeHtml(mxCopyDetail) : ''}`);
-    mxStatusText = 'Error';
+    mxStatusText = t('error');
   } else {
     const hasMx = Array.isArray(r.mxRecords) && r.mxRecords.length > 0;
     const mxRecordsText = (r.mxRecords || []).join(', ');
     if (hasMx) {
       let note = '';
       if (mxFallbackUsed && mxLookupDomain && mxLookupDomain !== r.domain) {
-        note = ` (using MX from ${mxLookupDomain})`;
+        note = ` ${t('mxUsingParentNote', { lookupDomain: mxLookupDomain })}`;
       }
-      mxCopyDetail = (mxRecordsText || 'MX records detected.') + note;
+      mxCopyDetail = localizeMxRecordText(mxRecordsText || t('mxRecords')) + note;
     } else {
-      mxCopyDetail = 'No MX records detected.';
+      mxCopyDetail = t('noMxRecordsDetected');
       if (mxFallbackChecked && mxFallbackChecked !== r.domain) {
-        mxCopyDetail += ` Checked parent ${mxFallbackChecked} (no MX).`;
+        mxCopyDetail += ` ${t('parentCheckedNoMx', { parentDomain: mxFallbackChecked })}`;
       }
     }
     const mxState = hasMx ? 'PASS' : 'FAIL';
-    quotaItems.push(quotaRow('MX Records', hasMx ? 'pass' : 'fail', mxCopyDetail, null, 'mx'));
+    quotaItems.push(quotaRow(t('mxRecords'), hasMx ? 'pass' : 'fail', mxCopyDetail, null, 'mx'));
     quotaLines.push(`**MX Records:** ${mxState}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
     quotaLinesHtml.push(`<strong>MX Records:</strong> ${escapeHtml(mxState)}${mxCopyDetail ? ' - ' + escapeHtml(mxCopyDetail) : ''}`);
-    mxStatusText = hasMx ? 'Yes' : 'No';
+    mxStatusText = hasMx ? t('yes') : t('no');
   }
 
   quotaCopyPlainLines.push(`MX Records:   ${mxStatusText || 'Unknown'}`);
@@ -6446,7 +8456,7 @@ function render(r) {
   const reputationInfo = "Default DNSBL checks use a safer free/no-budget set: Spamcop, Barracuda, PSBL, DroneBL, and 0spam. Optional user-supplied zones may also be queried. Reputation = percent of not-listed over successful DNSBL queries. Ratings: Excellent ≥99%, Great ≥90%, Good ≥75%, Fair ≥50%, Poor otherwise. Risk summary: 0 hits = Clean, 1 hit = Warning, 2+ hits = ElevatedRisk. Listed entries are shown when present; errors reduce confidence.";
   let repStateForCopy = '';
   if (!loaded.reputation && !errors.reputation) {
-    repCopyDetail = 'Checking DNSBL reputation...';
+    repCopyDetail = t('checkingDnsblReputation');
     // Only pass plain name to quotaRow if we modify quotaRow or pass raw HTML differently.
     // However, quotaRow escapes name. Let's look at quotaRow definition in the user code above.
     // quotaRow calculates: const nameHtml = escapeHtml(name) + ...
@@ -6487,13 +8497,13 @@ function render(r) {
 
     // Let's start by modifying the quotaRow definition to support a suffix.
 
-    quotaItems.push(quotaRow('Reputation (DNSBL)', 'pending', repCopyDetail, reputationInfo, 'reputation', multiRblHtml));
+    quotaItems.push(quotaRow(t('reputationDnsbl'), 'pending', repCopyDetail, reputationInfo, 'reputation', multiRblHtml));
     quotaLines.push(`**Reputation (DNSBL):** PENDING${repCopyDetail ? ' - ' + repCopyDetail : ''}`);
     quotaLinesHtml.push(`<strong>Reputation (DNSBL):</strong> PENDING${repCopyDetail ? ' - ' + escapeHtml(repCopyDetail) : ''}`);
     repStateForCopy = 'PENDING';
   } else if (errors.reputation) {
     repCopyDetail = errors.reputation;
-    quotaItems.push(quotaRow('Reputation (DNSBL)', 'error', repCopyDetail, reputationInfo, 'reputation', multiRblHtml));
+    quotaItems.push(quotaRow(t('reputationDnsbl'), 'error', repCopyDetail, reputationInfo, 'reputation', multiRblHtml));
     quotaLines.push(`**Reputation (DNSBL):** ERROR${repCopyDetail ? ' - ' + repCopyDetail : ''}`);
     quotaLinesHtml.push(`<strong>Reputation (DNSBL):</strong> ERROR${repCopyDetail ? ' - ' + escapeHtml(repCopyDetail) : ''}`);
     repStateForCopy = 'ERROR';
@@ -6508,13 +8518,14 @@ function render(r) {
     const valid = Math.max(0, total - errorCount);
     const percent = (valid > 0) ? Math.max(0, Math.min(100, Math.round((notListed / valid) * 100))) : null;
     const rating = percent === null ? 'unknown' : (percent >= 99 ? 'excellent' : percent >= 90 ? 'great' : percent >= 75 ? 'good' : percent >= 50 ? 'fair' : 'poor');
-    const ratingLabel = rating.charAt(0).toUpperCase() + rating.slice(1);
+      const ratingMap = { excellent: t('excellent'), great: t('great'), good: t('good'), fair: t('fair'), poor: t('poor'), unknown: t('unknown') };
+      const ratingLabel = ratingMap[rating] || rating;
     const state = listed > 0 ? 'warn' : (percent === null ? 'warn' : (percent >= 75 ? 'pass' : 'warn'));
-    const riskSummary = (summary.riskSummary || 'Clean');
+      const riskSummary = (summary.riskSummary || 'Clean') === 'Clean' ? t('clean') : (summary.riskSummary || 'Clean');
     const baseDetail = percent === null
-      ? `Risk: ${riskSummary} | Queries: ${total}, Not listed: ${notListed}`
-      : `Risk: ${riskSummary} | Rating: ${ratingLabel} (${percent}%) | Listed: ${listed}, Not listed: ${notListed}`;
-    const parentNote = repUsedParent ? `Used parent domain ${rep.lookupDomain} (no IP targets found for ${r.domain || ''}).` : '';
+      ? `${t('riskLabel')}: ${riskSummary} | ${t('totalQueries')}: ${total}, ${t('notListed')}: ${notListed}`
+      : `${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${ratingLabel} (${percent}%) | ${t('listed')}: ${listed}, ${t('notListed')}: ${notListed}`;
+      const parentNote = repUsedParent ? t('usingIpParent', { domain: rep.lookupDomain, queryDomain: r.domain || '' }) : '';
     const detail = parentNote ? `${baseDetail} | ${parentNote}` : baseDetail;
     repCopyDetail = detail;
     repStats = {
@@ -6526,7 +8537,7 @@ function render(r) {
       listed,
       notListed: summary.notListedCount || 0
     };
-    quotaItems.push(quotaRow('Reputation (DNSBL)', state, detail, reputationInfo, 'reputation', multiRblHtml));
+    quotaItems.push(quotaRow(t('reputationDnsbl'), state, detail, reputationInfo, 'reputation', multiRblHtml));
     quotaLines.push(`**Reputation (DNSBL):** ${state.toUpperCase()}${detail ? ' - ' + detail : ''}`);
     quotaLinesHtml.push(`<strong>Reputation (DNSBL):</strong> ${escapeHtml(state.toUpperCase())}${detail ? ' - ' + escapeHtml(detail) : ''}`);
     repStateForCopy = state.toUpperCase();
@@ -6538,44 +8549,46 @@ function render(r) {
   const whoisHasData = !!(r.whoisSource || r.whoisCreationDateUtc || r.whoisExpiryDateUtc || r.whoisRegistrar || r.whoisRegistrant || r.whoisAgeHuman || r.whoisExpiryHuman);
 
   if (!loaded.whois && !errors.whois) {
-    quotaItems.push(quotaRow('Domain Registration', 'pending', 'WHOIS/RDAP lookup in progress...', null, 'whois'));
+    quotaItems.push(quotaRow(t('domainRegistration'), 'pending', t('loadingValue'), null, 'whois'));
     regState = 'PENDING';
   } else if (whoisErrorText) {
-    quotaItems.push(quotaRow('Domain Registration', 'error', whoisErrorText, null, 'whois'));
+    quotaItems.push(quotaRow(t('domainRegistration'), 'error', whoisErrorText, null, 'whois'));
     regState = 'ERROR';
     quotaLines.push(`**Domain Registration:** ${regState}${whoisErrorText ? ' - ' + whoisErrorText : ''}`);
     quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${whoisErrorText ? ' - ' + escapeHtml(whoisErrorText) : ''}`);
   } else if (!whoisHasData) {
-    const msg = 'Registration details unavailable.';
-    quotaItems.push(quotaRow('Domain Registration', 'error', msg, null, 'whois'));
+    const msg = t('registrationDetailsUnavailable');
+    quotaItems.push(quotaRow(t('domainRegistration'), 'error', msg, null, 'whois'));
     regState = 'ERROR';
     quotaLines.push(`**Domain Registration:** ${regState} - ${msg}`);
     quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)} - ${escapeHtml(msg)}`);
   } else {
     if (r.whoisIsExpired === true) {
-      const expText = r.whoisExpiryDateUtc ? `Expired on ${r.whoisExpiryDateUtc}` : 'Registration appears expired.';
-      quotaItems.push(quotaRow('Domain Registration', 'fail', expText, null, 'whois'));
+      const expText = r.whoisExpiryDateUtc ? t('expiredOn', { date: r.whoisExpiryDateUtc }) : t('registrationAppearsExpired');
+      quotaItems.push(quotaRow(t('domainRegistration'), 'fail', expText, null, 'whois'));
       regState = 'FAIL';
       quotaLines.push(`**Domain Registration:** ${regState}${expText ? ' - ' + expText : ''}`);
       quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${expText ? ' - ' + escapeHtml(expText) : ''}`);
     } else if (r.whoisIsVeryYoungDomain === true) {
-      const text = `New domain (under ${String(r.whoisNewDomainErrorThresholdDays || 90)} days)${r.whoisAgeHuman ? ': ' + r.whoisAgeHuman : ''}`.trim();
-      quotaItems.push(quotaRow('Domain Registration', 'fail', text || 'New domain under 90 days.', null, 'whois'));
+      const suffix = r.whoisAgeHuman ? ': ' + r.whoisAgeHuman : '';
+      const text = t('newDomainUnderDays', { days: String(r.whoisNewDomainErrorThresholdDays || 90), suffix }).trim();
+      quotaItems.push(quotaRow(t('domainRegistration'), 'fail', text || t('newDomainUnder90Days'), null, 'whois'));
       regState = 'FAIL';
       quotaLines.push(`**Domain Registration:** ${regState}${text ? ' - ' + text : ''}`);
       quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${text ? ' - ' + escapeHtml(text) : ''}`);
     } else if (r.whoisIsYoungDomain === true) {
-      const text = `New domain (under ${String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180)} days)${r.whoisAgeHuman ? ': ' + r.whoisAgeHuman : ''}`.trim();
-      quotaItems.push(quotaRow('Domain Registration', 'warn', text || 'New domain under 180 days.', null, 'whois'));
+      const suffix = r.whoisAgeHuman ? ': ' + r.whoisAgeHuman : '';
+      const text = t('newDomainUnderDays', { days: String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180), suffix }).trim();
+      quotaItems.push(quotaRow(t('domainRegistration'), 'warn', text || t('newDomainUnder180Days'), null, 'whois'));
       regState = 'WARN';
       quotaLines.push(`**Domain Registration:** ${regState}${text ? ' - ' + text : ''}`);
       quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${text ? ' - ' + escapeHtml(text) : ''}`);
     } else {
       const parts = [];
-      if (r.whoisAgeHuman) { parts.push(`Age: ${r.whoisAgeHuman}`); }
-      if (r.whoisExpiryHuman) { parts.push(`Expires in: ${r.whoisExpiryHuman}`); }
-      const ageText = parts.join(' | ') || 'Registration details available.';
-      quotaItems.push(quotaRow('Domain Registration', 'pass', ageText, null, 'whois'));
+      if (r.whoisAgeHuman) { parts.push(`${t('ageLabel')}: ${r.whoisAgeHuman}`); }
+      if (r.whoisExpiryHuman) { parts.push(`${t('expiresInLabel')}: ${r.whoisExpiryHuman}`); }
+      const ageText = parts.join(' | ') || t('resolvedSuccessfully');
+      quotaItems.push(quotaRow(t('domainRegistration'), 'pass', ageText, null, 'whois'));
       regState = 'PASS';
       quotaLines.push(`**Domain Registration:** ${regState}${ageText ? ' - ' + ageText : ''}`);
       quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${ageText ? ' - ' + escapeHtml(ageText) : ''}`);
@@ -6584,32 +8597,32 @@ function render(r) {
 
   // 4) SPF
   if (!loaded.base && !errors.base) {
-    quotaItems.push(quotaRow('SPF (queried domain TXT)', 'pending', 'Waiting for TXT lookup...', null, 'spf'));
+    quotaItems.push(quotaRow(t('spfQueried'), 'pending', t('waitingForTxtLookup'), null, 'spf'));
     quotaLines.push('**SPF (queried domain TXT):** PENDING - Waiting for TXT lookup...');
     quotaLinesHtml.push('<strong>SPF (queried domain TXT):</strong> PENDING - Waiting for TXT lookup...');
   } else if (errors.base) {
-    quotaItems.push(quotaRow('SPF (queried domain TXT)', 'error', errors.base, null, 'spf'));
+    quotaItems.push(quotaRow(t('spfQueried'), 'error', errors.base, null, 'spf'));
     quotaLines.push(`**SPF (queried domain TXT):** ERROR${errors.base ? ' - ' + errors.base : ''}`);
     quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> ERROR${errors.base ? ' - ' + escapeHtml(errors.base) : ''}`);
   } else if (r.dnsFailed) {
-    quotaItems.push(quotaRow('SPF (queried domain TXT)', 'warn', r.dnsError || 'TXT lookup failed.', null, 'spf'));
-    quotaLines.push(`**SPF (queried domain TXT):** WARN${r.dnsError ? ' - ' + r.dnsError : ' - TXT lookup failed.'}`);
-    quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> WARN${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - TXT lookup failed.'}`);
+    quotaItems.push(quotaRow(t('spfQueried'), 'warn', r.dnsError || t('txtLookupFailedOrTimedOut'), null, 'spf'));
+    quotaLines.push(`**${t('spfQueried')}:** WARN${r.dnsError ? ' - ' + r.dnsError : ' - ' + t('txtLookupFailedOrTimedOut')}`);
+    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> WARN${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
   } else {
-    quotaItems.push(quotaRow('SPF (queried domain TXT)', r.spfPresent ? 'pass' : 'warn', r.spfPresent ? r.spfValue : 'No SPF record detected.', null, 'spf'));
+    quotaItems.push(quotaRow(t('spfQueried'), r.spfPresent ? 'pass' : 'warn', r.spfPresent ? r.spfValue : t('noSpfRecordDetected'), null, 'spf'));
     const spfState = r.spfPresent ? 'PASS' : 'WARN';
-    quotaLines.push(`**SPF (queried domain TXT):** ${spfState}${r.spfPresent ? ' - ' + r.spfValue : ' - No SPF record detected.'}`);
-    quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> ${escapeHtml(spfState)}${r.spfPresent ? ' - ' + escapeHtml(r.spfValue) : ' - No SPF record detected.'}`);
+    quotaLines.push(`**${t('spfQueried')}:** ${spfState}${r.spfPresent ? ' - ' + r.spfValue : ' - ' + t('noSpfRecordDetected')}`);
+    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfState)}${r.spfPresent ? ' - ' + escapeHtml(r.spfValue) : ' - ' + escapeHtml(t('noSpfRecordDetected'))}`);
   }
 
   // Domain age / expiry for copy block
-  const ageText = r.whoisAgeHuman || 'Unknown';
-  const expiryText = r.whoisIsExpired === true ? 'Expired' : (r.whoisExpiryHuman || 'Unknown');
+  const ageText = localizeDurationText(r.whoisAgeHuman) || t('unknown');
+  const expiryText = r.whoisIsExpired === true ? t('wordExpired') : (localizeDurationText(r.whoisExpiryHuman) || t('unknown'));
   quotaCopyPlainLines.push('');
-  quotaCopyPlainLines.push(`Domain Age:  ${ageText}`);
-  quotaCopyPlainLines.push(`Domain Expires in: ${expiryText}`);
-  quotaCopyHtmlLines.push(`<div><strong>Domain Age:</strong> ${escapeHtml(ageText)}</div>`);
-  quotaCopyHtmlLines.push(`<div><strong>Domain Expires in:</strong> ${escapeHtml(expiryText)}</div>`);
+  quotaCopyPlainLines.push(`${t('domainAgeLabel')}:  ${ageText}`);
+  quotaCopyPlainLines.push(`${t('domainExpiringIn')}: ${expiryText}`);
+  quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('domainAgeLabel'))}:</strong> ${escapeHtml(ageText)}</div>`);
+  quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('domainExpiringIn'))}:</strong> ${escapeHtml(expiryText)}</div>`);
 
   quotaCopyPlainLines.push('');
   quotaCopyPlainLines.push(`Reputation (DNSBL) [MultiRBL: ${multiRblLink}] - ${repStateForCopy || 'UNKNOWN'}${repCopyDetail ? ' - ' + repCopyDetail : ''}`);
@@ -6633,60 +8646,60 @@ function render(r) {
     : '');
 
   const domainStatusText = (!loaded.base && !errors.base)
-    ? 'PENDING'
+    ? t('pending')
     : (errors.base
-      ? 'ERROR'
-      : (r.acsPresent ? 'VERIFIED' : 'NOT VERIFIED'));
+      ? t('error')
+      : (r.acsPresent ? t('verified') : t('notVerified')));
 
   const spfStatusText = (!loaded.base && !errors.base)
-    ? 'PENDING'
+    ? t('pending')
     : (errors.base
-      ? 'ERROR'
-      : (r.spfPresent ? 'VERIFIED' : 'NOT STARTED'));
+      ? t('error')
+      : (r.spfPresent ? t('verified') : t('notStarted')));
 
   const dkim1StatusText = (!loaded.dkim && !errors.dkim)
-    ? 'PENDING'
+    ? t('pending')
     : (errors.dkim
-      ? 'ERROR'
-      : (r.dkim1 ? 'VERIFIED' : 'NOT STARTED'));
+      ? t('error')
+      : (r.dkim1 ? t('verified') : t('notStarted')));
 
   const dkim2StatusText = (!loaded.dkim && !errors.dkim)
-    ? 'PENDING'
+    ? t('pending')
     : (errors.dkim
-      ? 'ERROR'
-      : (r.dkim2 ? 'VERIFIED' : 'NOT STARTED'));
+      ? t('error')
+      : (r.dkim2 ? t('verified') : t('notStarted')));
 
   const dmarcStatusText = (!loaded.dmarc && !errors.dmarc)
-    ? 'PENDING'
+    ? t('pending')
     : (errors.dmarc
-      ? 'ERROR'
-      : (r.dmarc ? 'VERIFIED' : 'NOT STARTED'));
+      ? t('error')
+      : (r.dmarc ? t('verified') : t('notStarted')));
 
   const plainTable = [];
   plainTable.push('| Field | Value |');
   plainTable.push('| --- | --- |');
-  plainTable.push(`| Domain Name | ${domainForCopy || 'Unknown'} |`);
-  plainTable.push(`| Domain Status | ${domainStatusText} |`);
-  plainTable.push(`| MX Records | ${mxStatusText || 'Unknown'}${mxCopyDetail ? ` - ${mxCopyDetail}` : ''} |`);
-  plainTable.push(`| Domain Age | ${ageText} |`);
-  plainTable.push(`| Domain Expires in | ${expiryText} |`);
-  plainTable.push(`| SPF Status | ${spfStatusText} |`);
-  plainTable.push(`| DKIM1 Status | ${dkim1StatusText} |`);
-  plainTable.push(`| DKIM2 Status | ${dkim2StatusText} |`);
-  plainTable.push(`| DMARC Status | ${dmarcStatusText} |`);
+  plainTable.push(`| ${t('domainNameLabel')} | ${domainForCopy || t('unknown')} |`);
+  plainTable.push(`| ${t('domainStatusLabel')} | ${domainStatusText} |`);
+  plainTable.push(`| ${t('mxRecordsLabel')} | ${mxStatusText || t('unknown')}${mxCopyDetail ? ` - ${mxCopyDetail}` : ''} |`);
+  plainTable.push(`| ${t('domainAgeLabel')} | ${ageText} |`);
+  plainTable.push(`| ${t('domainExpiringIn')} | ${expiryText} |`);
+  plainTable.push(`| ${t('spfStatusLabel')} | ${spfStatusText} |`);
+  plainTable.push(`| ${t('dkim1StatusLabel')} | ${dkim1StatusText} |`);
+  plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
+  plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
   plainTable.push(`| Reputation (DNSBL) | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
 
   const htmlTableRows = [];
   const addRow = (name, value) => { htmlTableRows.push(`<tr><th>${escapeHtml(name)}</th><td>${escapeHtml(value)}</td></tr>`); };
-  addRow('Domain Name', domainForCopy || 'Unknown');
-  addRow('Domain Status', domainStatusText);
-  addRow('MX Records', `${mxStatusText || 'Unknown'}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
-  addRow('Domain Age', ageText);
-  addRow('Domain Expires in', expiryText);
-  addRow('SPF Status', spfStatusText);
-  addRow('DKIM1 Status', dkim1StatusText);
-  addRow('DKIM2 Status', dkim2StatusText);
-  addRow('DMARC Status', dmarcStatusText);
+  addRow(t('domainNameLabel'), domainForCopy || t('unknown'));
+  addRow(t('domainStatusLabel'), domainStatusText);
+  addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
+  addRow(t('domainAgeLabel'), ageText);
+  addRow(t('domainExpiringIn'), expiryText);
+  addRow(t('spfStatusLabel'), spfStatusText);
+  addRow(t('dkim1StatusLabel'), dkim1StatusText);
+  addRow(t('dkim2StatusLabel'), dkim2StatusText);
+  addRow(t('dmarcStatusLabel'), dmarcStatusText);
   // Manual push for Reputation to include parsed HTML link (multiRblHtml)
   htmlTableRows.push(`<tr><th>Reputation (DNSBL)</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
 
@@ -6700,9 +8713,9 @@ function render(r) {
   <div class="card" id="card-email-quota">
     <div class="card-header" onclick="toggleCard(this)">
       <span class="chevron">&#x25BC;</span>
-      <span class="tag tag-info">CHECKLIST</span>
-      <strong>Email Quota</strong>
-      <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(window.quotaCopyText, this)">Copy Email Quota</button>
+      <span class="tag tag-info">${escapeHtml(t('checklist'))}</span>
+      <strong>${escapeHtml(t('emailQuota'))}</strong>
+      <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(window.quotaCopyText, this)">${escapeHtml(t('copyEmailQuota'))}</button>
     </div>
     <div class="card-content">
       <div class="status-summary">${quotaItems.join('')}</div>
@@ -6713,34 +8726,35 @@ function render(r) {
   // Domain Verification box (ACS requirements)
   const verificationItems = [];
   const verifyRow = (name, state, detail, targetId = null) => {
-    const badge = `<span class="tag ${quotaStateClass(state)} status-pill">${escapeHtml(state.toUpperCase())}</span>`;
-    const link = targetId ? `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); scrollToSection('${targetId}')">View</button>` : '';
+    const stateKeyMap = { pass: 'pass', fail: 'fail', error: 'error', warn: 'warn', pending: 'pending' };
+    const badge = `<span class="tag ${quotaStateClass(state)} status-pill">${escapeHtml(t(stateKeyMap[state] || String(state || '').toLowerCase()))}</span>`;
+    const link = targetId ? `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); scrollToSection('${targetId}')">${escapeHtml(t('view'))}</button>` : '';
     return `<div class="status-row"><span class="status-name">${escapeHtml(name)}</span><span class="status-pills">${link}${badge}</span></div>` + (detail ? `<div class="code" style="margin:6px 0 10px 0;">${escapeHtml(detail)}</div>` : '');
   };
 
   if (!loaded.base && !errors.base) {
-    verificationItems.push(verifyRow('DNS TXT Lookup', 'pending', 'Waiting for base TXT lookup...', 'txtRecords'));
-    verificationItems.push(verifyRow('ACS TXT (ms-domain-verification)', 'pending', 'Waiting for base TXT lookup...', 'acsTxt'));
+    verificationItems.push(verifyRow(t('dnsTxtLookup'), 'pending', t('waitingForBaseTxtLookup'), 'txtRecords'));
+    verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), 'pending', t('waitingForBaseTxtLookup'), 'acsTxt'));
   } else if (errors.base) {
-    verificationItems.push(verifyRow('DNS TXT Lookup', 'error', errors.base, 'txtRecords'));
-    verificationItems.push(verifyRow('ACS TXT (ms-domain-verification)', 'error', 'Unable to determine ACS TXT value.', 'acsTxt'));
+    verificationItems.push(verifyRow(t('dnsTxtLookup'), 'error', errors.base, 'txtRecords'));
+    verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), 'error', t('unableDetermineAcsTxtValue'), 'acsTxt'));
   } else if (r.dnsFailed) {
-    verificationItems.push(verifyRow('DNS TXT Lookup', 'fail', r.dnsError || 'TXT lookup failed or timed out.', 'txtRecords'));
-    verificationItems.push(verifyRow('ACS TXT (ms-domain-verification)', 'fail', 'Missing ms-domain-verification TXT.', 'acsTxt'));
+    verificationItems.push(verifyRow(t('dnsTxtLookup'), 'fail', r.dnsError || t('txtLookupFailedOrTimedOut'), 'txtRecords'));
+    verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), 'fail', t('missingRequiredAcsTxt'), 'acsTxt'));
   } else {
-    verificationItems.push(verifyRow('DNS TXT Lookup', 'pass', 'Resolved successfully.', 'txtRecords'));
-    verificationItems.push(verifyRow('ACS TXT (ms-domain-verification)', r.acsPresent ? 'pass' : 'fail', r.acsPresent ? 'ms-domain-verification TXT found.' : 'Add the ACS TXT from the Azure portal.', 'acsTxt'));
+    verificationItems.push(verifyRow(t('dnsTxtLookup'), 'pass', t('resolvedSuccessfully'), 'txtRecords'));
+    verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), r.acsPresent ? 'pass' : 'fail', r.acsPresent ? t('msDomainVerificationFound') : t('addAcsTxtFromPortal'), 'acsTxt'));
   }
 
   // Overall ACS readiness
-  verificationItems.push(verifyRow('ACS Readiness', (loaded.base && !errors.base && !r.dnsFailed && r.acsPresent) ? 'pass' : (loaded.base && !errors.base ? 'fail' : 'pending'), r.acsReady ? 'Domain appears ready for ACS verification.' : 'Missing required ACS TXT.', 'verification'));
+  verificationItems.push(verifyRow(t('acsReadiness'), (loaded.base && !errors.base && !r.dnsFailed && r.acsPresent) ? 'pass' : (loaded.base && !errors.base ? 'fail' : 'pending'), r.acsReady ? t('acsReadyMessage') : t('missingRequiredAcsTxt'), 'verification'));
 
   cards.push(`
   <div class="card" id="card-verification">
     <div class="card-header" onclick="toggleCard(this)">
       <span class="chevron">&#x25BC;</span>
-      <span class="tag tag-info">VERIFICATION</span>
-      <strong>Domain Verification</strong>
+      <span class="tag tag-info">${escapeHtml(t('verificationTag'))}</span>
+      <strong>${escapeHtml(t('domainVerification'))}</strong>
     </div>
     <div class="card-content">
       <div class="status-summary">${verificationItems.join('')}</div>
@@ -6754,8 +8768,8 @@ function render(r) {
   // Domain Registration card now appears second
   if (!loaded.whois && !errors.whois) {
     cards.push(card(
-      "Domain Registration (WHOIS/RDAP)",
-      "Loading...",
+      t('domainRegistration'),
+      t('loadingValue'),
       "LOADING",
       "tag-info",
       "whois",
@@ -6763,7 +8777,7 @@ function render(r) {
     ));
   } else if (errors.whois) {
     cards.push(card(
-      "Domain Registration (WHOIS/RDAP)",
+      t('domainRegistration'),
       errors.whois,
       "ERROR",
       "tag-fail",
@@ -6775,34 +8789,34 @@ function render(r) {
     const isYoung = r.whoisIsYoungDomain === true;
     const isVeryYoung = r.whoisIsVeryYoungDomain === true;
     const whoisLines = [];
-    if (r.whoisSource) whoisLines.push("Source: " + r.whoisSource);
-    if (r.whoisCreationDateUtc) whoisLines.push("Creation Date: " + r.whoisCreationDateUtc);
-    if (r.whoisExpiryDateUtc) whoisLines.push("Registry Expiry Date: " + r.whoisExpiryDateUtc);
-    if (r.whoisRegistrar) whoisLines.push("Registrar: " + r.whoisRegistrar);
-    if (r.whoisRegistrant) whoisLines.push("Registrant: " + r.whoisRegistrant);
+    if (r.whoisSource) whoisLines.push(t('source') + ": " + r.whoisSource);
+    if (r.whoisCreationDateUtc) whoisLines.push(t('creationDate') + ": " + r.whoisCreationDateUtc);
+    if (r.whoisExpiryDateUtc) whoisLines.push(t('registryExpiryDate') + ": " + r.whoisExpiryDateUtc);
+    if (r.whoisRegistrar) whoisLines.push(t('registrarLabel') + ": " + r.whoisRegistrar);
+    if (r.whoisRegistrant) whoisLines.push(t('registrantLabel') + ": " + r.whoisRegistrant);
     if (r.whoisAgeHuman) {
-      whoisLines.push("Domain Age: " + r.whoisAgeHuman);
+      whoisLines.push(t('domainAgeLabel') + ": " + r.whoisAgeHuman);
     } else if (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) {
-      whoisLines.push("Domain Age (days): " + String(r.whoisAgeDays));
+      whoisLines.push(t('domainAgeLabel') + " (days): " + String(r.whoisAgeDays));
     }
     if (r.whoisExpiryHuman) {
-      whoisLines.push("Domain Expiring in: " + r.whoisExpiryHuman);
+      whoisLines.push(t('domainExpiringIn') + ": " + r.whoisExpiryHuman);
     }
     if (isExpired) {
-      whoisLines.push("Status: EXPIRED");
+      whoisLines.push(t('statusLabel') + ": " + t('expired'));
     } else if (isVeryYoung) {
-      whoisLines.push("Note: Domain is less than " + String(r.whoisNewDomainErrorThresholdDays || 90) + " days old.");
+      whoisLines.push(t('noteDomainLessThanDays', { days: String(r.whoisNewDomainErrorThresholdDays || 90) }));
     } else if (isYoung) {
-      whoisLines.push("Note: Domain is less than " + String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180) + " days old.");
+      whoisLines.push(t('noteDomainLessThanDays', { days: String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180) }));
     }
     if (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) {
-      whoisLines.push("Days until expiry: " + String(r.whoisExpiryDays));
+      whoisLines.push(t('daysUntilExpiry') + ": " + String(r.whoisExpiryDays));
     }
     if (r.whoisRawText && !r.whoisCreationDateUtc && !r.whoisExpiryDateUtc && !r.whoisRegistrar && !r.whoisRegistrant) {
-      const rawLabel = r.whoisSource || 'whois';
-      whoisLines.push("Raw (" + rawLabel + "):\n" + r.whoisRawText);
+      const rawLabel = r.whoisSource || t('rawWhoisLabel');
+      whoisLines.push(t('rawLabel') + " (" + rawLabel + "):\n" + r.whoisRawText);
     }
-    if (r.whoisError) whoisLines.push("Error: " + r.whoisError);
+    if (r.whoisError) whoisLines.push(t('error') + ": " + r.whoisError);
 
     let whoisLabel = "INFO";
     let whoisTagClass = "tag-info";
@@ -6818,8 +8832,8 @@ function render(r) {
     }
 
     cards.push(card(
-      "Domain Registration (WHOIS/RDAP)",
-      whoisLines.join("\n") || "No registration information available.",
+      t('domainRegistration'),
+      whoisLines.join("\n") || t('noRegistrationInformation'),
       whoisLabel,
       whoisTagClass,
       "whois",
@@ -6837,7 +8851,7 @@ function render(r) {
     const domainClass = basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info");
 
     const ipNote = baseLoaded && ipUsedParent
-      ? `<div class="code code-lite" style="margin-top:6px;">Using IP addresses from parent domain ${escapeHtml(ipLookupDomain)} (no A/AAAA on ${escapeHtml(r.domain || '')}).</div>`
+      ? `<div class="code code-lite" style="margin-top:6px;">${escapeHtml(t('usingIpParent', { domain: ipLookupDomain, queryDomain: r.domain || '' }))}</div>`
       : '';
 
     const ipvTable = baseLoaded ? `
@@ -6845,13 +8859,13 @@ function render(r) {
         <table class="mx-table">
           <thead>
             <tr>
-              <th style="width: 120px;">Type</th>
-              <th>Addresses</th>
+              <th style="width: 120px;">${escapeHtml(t('type'))}</th>
+              <th>${escapeHtml(t('addresses'))}</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>IPv4</td><td>${ipv4List.length ? ipv4List.map(escapeHtml).join(', ') : 'None'}</td></tr>
-            <tr><td>IPv6</td><td>${ipv6List.length ? ipv6List.map(escapeHtml).join(', ') : 'None'}</td></tr>
+            <tr><td>${escapeHtml(t('ipv4'))}</td><td>${ipv4List.length ? ipv4List.map(escapeHtml).join(', ') : escapeHtml(t('none'))}</td></tr>
+            <tr><td>${escapeHtml(t('ipv6'))}</td><td>${ipv6List.length ? ipv6List.map(escapeHtml).join(', ') : escapeHtml(t('none'))}</td></tr>
           </tbody>
         </table>
       </div>
@@ -6861,11 +8875,11 @@ function render(r) {
       <div class="card" id="card-domain">
         <div class="card-header" onclick="toggleCard(this)">
           <span class="chevron">&#x25BC;</span>
-          <span class="tag ${domainClass}">${domainLabel}</span>
-          <strong>Domain</strong>
+          <span class="tag ${domainClass}">${escapeHtml(translateBadge(domainLabel))}</span>
+          <strong>${escapeHtml(t('domain'))}</strong>
         </div>
         <div class="card-content">
-          <div id="field-domain" class="code code-lite">${escapeHtml(r.domain || 'No Records Available.')}</div>
+      <div id="field-domain" class="code code-lite">${escapeHtml(r.domain || t('noRecordsAvailable'))}</div>
           ${ipNote}${ipvTable}
         </div>
       </div>
@@ -6875,8 +8889,8 @@ function render(r) {
   // MX (placed directly below Domain per UI request)
   if (!loaded.mx && !errors.mx) {
     cards.push(card(
-      "MX Records",
-      "Loading...",
+      t('mxRecords'),
+      t('loadingValue'),
       "LOADING",
       "tag-info",
       "mx",
@@ -6884,7 +8898,7 @@ function render(r) {
     ));
   } else if (errors.mx) {
     cards.push(card(
-      "MX Records",
+      t('mxRecords'),
       errors.mx,
       "ERROR",
       "tag-fail",
@@ -6894,9 +8908,9 @@ function render(r) {
   } else {
     let mxFallbackNote = '';
     if (mxFallbackUsed && mxLookupDomain && mxLookupDomain !== r.domain) {
-      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">No MX records found on ${escapeHtml(r.domain || '')}; showing MX for parent domain ${escapeHtml(mxLookupDomain)}.</div>`;
+      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('noMxParentShowing', { domain: r.domain || '', lookupDomain: mxLookupDomain }))}</div>`;
     } else if ((!r.mxRecords || r.mxRecords.length === 0) && mxFallbackChecked && mxFallbackChecked !== r.domain) {
-      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">No MX records found on ${escapeHtml(r.domain || '')} or parent ${escapeHtml(mxFallbackChecked)}.</div>`;
+      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('noMxParentChecked', { domain: r.domain || '', parentDomain: mxFallbackChecked }))}</div>`;
     }
 
     const ipv4Records = (r.mxRecordsDetailed || []).filter(rec => rec.Type === "IPv4");
@@ -6915,13 +8929,13 @@ function render(r) {
       ).join("");
 
       mxDetailsContent += `<div style="margin-bottom: 12px;">
-        <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">IPv4 Addresses</div>
+        <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">${escapeHtml(t('ipv4Addresses'))}</div>
         <table class="mx-table">
           <thead>
             <tr>
-              <th>Hostname</th>
-              <th>Priority</th>
-              <th>IP Address</th>
+              <th>${escapeHtml(t('hostname'))}</th>
+              <th>${escapeHtml(t('priority'))}</th>
+              <th>${escapeHtml(t('ipAddress'))}</th>
             </tr>
           </thead>
           <tbody>${ipv4Rows}</tbody>
@@ -6939,13 +8953,13 @@ function render(r) {
       ).join("");
 
       mxDetailsContent += `<div style="margin-bottom: 12px;">
-        <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">IPv6 Addresses</div>
+        <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">${escapeHtml(t('ipv6Addresses'))}</div>
         <table class="mx-table">
           <thead>
             <tr>
-              <th>Hostname</th>
-              <th>Priority</th>
-              <th>IP Address</th>
+              <th>${escapeHtml(t('hostname'))}</th>
+              <th>${escapeHtml(t('priority'))}</th>
+              <th>${escapeHtml(t('ipAddress'))}</th>
             </tr>
           </thead>
           <tbody>${ipv6Rows}</tbody>
@@ -6963,13 +8977,13 @@ function render(r) {
       ).join("");
 
       mxDetailsContent += `<div>
-        <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">No IP Addresses Found</div>
+        <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">${escapeHtml(t('noIpAddressesFound'))}</div>
         <table class="mx-table">
           <thead>
             <tr>
-              <th>Hostname</th>
-              <th>Priority</th>
-              <th>Status</th>
+              <th>${escapeHtml(t('hostname'))}</th>
+              <th>${escapeHtml(t('priority'))}</th>
+              <th>${escapeHtml(t('status'))}</th>
             </tr>
           </thead>
           <tbody>${noIpRows}</tbody>
@@ -6978,31 +8992,31 @@ function render(r) {
     }
 
     if (!mxDetailsContent) {
-      mxDetailsContent = '<div class="code">No additional MX details available.</div>';
+      mxDetailsContent = `<div class="code">${escapeHtml(t('noAdditionalMxDetails'))}</div>`;
     }
 
     cards.push(`
   <div class="card" id="card-mx">
     <div class="card-header" onclick="toggleCard(this)">
       <span class="chevron">&#x25BC;</span>
-      <span class="tag tag-info">INFO</span>
-      <strong>MX Records</strong>
+      <span class="tag tag-info">${escapeHtml(t('info'))}</span>
+      <strong>${escapeHtml(t('mxRecords'))}</strong>
       <button type="button"
               class="copy-btn hide-on-screenshot"
               style="margin-left: auto;"
               onclick="event.stopPropagation(); toggleMxDetails(this)">
-        Additional Details +
+        ${escapeHtml(t('additionalDetailsPlus'))}
       </button>
       <button type="button"
               class="copy-btn hide-on-screenshot"
               onclick="event.stopPropagation(); copyField(this, 'mx')">
-        Copy
+        ${escapeHtml(t('copy'))}
       </button>
     </div>
     <div class="card-content">
       ${mxFallbackNote}
-      ${r.mxProvider ? `<div class="code" style="margin-bottom:6px;">Detected provider: ${escapeHtml(r.mxProvider)}${r.mxProviderHint ? " — " + escapeHtml(r.mxProviderHint) : ""}</div>` : ""}
-      <div id="field-mx" class="code">${escapeHtml((r.mxRecords || []).join("\n") || "No Records Available.")}</div>
+      ${r.mxProvider ? `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('detectedProvider'))}: ${escapeHtml(r.mxProvider)}${getLocalizedMxProviderHint(r.mxProvider, r.mxProviderHint) ? " — " + escapeHtml(getLocalizedMxProviderHint(r.mxProvider, r.mxProviderHint)) : ""}</div>` : ""}
+      <div id="field-mx" class="code">${escapeHtml((r.mxRecords || []).join("\n") || t('noRecordsAvailable'))}</div>
       <div id="mxDetails" style="margin-top:6px; display:none;">${mxDetailsContent}</div>
     </div>
   </div>
@@ -7011,30 +9025,30 @@ function render(r) {
 
   // Match card order to the Check Summary.
   const spfCardValue = loaded.base
-    ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} SPF (informational only):\n${r.parentSpfValue || ''}`) : null))
+    ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || "Error") : "Loading...");
   const spfExpandedSection = loaded.base && r.spfExpandedText
-    ? `\n\n--- SPF Nested Analysis ---\n${r.spfExpandedText}`
+    ? `\n\n--- ${t('spfRecordBasics')} ---\n${r.spfExpandedText}`
     : '';
   cards.push(card(
-    "SPF (queried domain TXT)",
-    (spfCardValue || "No Records Available.") + spfExpandedSection,
+    t('spfQueried'),
+    (spfCardValue || t('noRecordsAvailable')) + spfExpandedSection,
     basePending ? "LOADING" : (baseError ? "ERROR" : (r.spfPresent ? "PASS" : "OPTIONAL")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : (r.spfPresent ? "tag-pass" : "tag-info")),
     "spf"
   ));
 
   cards.push(card(
-    "ACS Domain Verification TXT",
-    loaded.base ? (r.acsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} ACS TXT (informational only):\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || "Error") : "Loading..."),
+    t('acsDomainVerificationTxt'),
+    loaded.base ? (r.acsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No record on ${r.domain}\n\nParent domain ${r.txtLookupDomain} ACS TXT (informational only):\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     basePending ? "LOADING" : (baseError ? "ERROR" : (r.acsPresent ? "PASS" : "MISSING")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : (r.acsPresent ? "tag-pass" : "tag-fail")),
     "acsTxt"
   ));
 
   cards.push(card(
-    "TXT Records (queried domain)",
-    loaded.base ? (((r.txtRecords || []).join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No TXT records on ${r.domain}\n\nParent domain ${r.txtLookupDomain} TXT records (informational only):\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || "Error") : "Loading..."),
+    t('txtRecordsQueried'),
+    loaded.base ? (((r.txtRecords || []).join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`No TXT records on ${r.domain}\n\nParent domain ${r.txtLookupDomain} TXT records (informational only):\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     basePending ? "LOADING" : (baseError ? "ERROR" : "INFO"),
     basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info"),
     "txtRecords",
@@ -7042,8 +9056,8 @@ function render(r) {
   ));
 
   cards.push(card(
-    "DMARC",
-    loaded.dmarc ? (r.dmarc ? (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain ? (`${r.dmarc}\n\nEffective policy inherited from parent domain ${r.dmarcLookupDomain}.`) : r.dmarc) : null) : (errors.dmarc ? errors.dmarc : "Loading..."),
+    t('dmarc'),
+    loaded.dmarc ? (r.dmarc ? (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain ? (`${r.dmarc}\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`) : r.dmarc) : null) : (errors.dmarc ? errors.dmarc : t('loadingValue')),
     (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (r.dmarc ? "PASS" : "OPTIONAL")),
     (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info")),
     "dmarc"
@@ -7052,7 +9066,7 @@ function render(r) {
   // include full selector host with domain in title
   cards.push(card(
     `DKIM1 (selector1-azurecomm-prod-net._domainkey.${r.domain || ""})`,
-    loaded.dkim ? r.dkim1 : (errors.dkim ? errors.dkim : "Loading..."),
+    loaded.dkim ? r.dkim1 : (errors.dkim ? errors.dkim : t('loadingValue')),
     (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim1 ? "PASS" : "OPTIONAL")),
     (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim1 ? "tag-pass" : "tag-info")),
     "dkim1"
@@ -7060,7 +9074,7 @@ function render(r) {
 
   cards.push(card(
     `DKIM2 (selector2-azurecomm-prod-net._domainkey.${r.domain || ""})`,
-    loaded.dkim ? r.dkim2 : (errors.dkim ? errors.dkim : "Loading..."),
+    loaded.dkim ? r.dkim2 : (errors.dkim ? errors.dkim : t('loadingValue')),
     (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim2 ? "PASS" : "OPTIONAL")),
     (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim2 ? "tag-pass" : "tag-info")),
     "dkim2"
@@ -7069,8 +9083,8 @@ function render(r) {
   // Reputation / DNSBL
   if (!loaded.reputation && !errors.reputation) {
     cards.push(card(
-      'Reputation (DNSBL)',
-      "Loading...",
+      t('reputationDnsbl'),
+      t('loadingValue'),
       "LOADING",
       "tag-info",
       "reputation",
@@ -7079,7 +9093,7 @@ function render(r) {
     ));
   } else if (errors.reputation) {
     cards.push(card(
-      'Reputation (DNSBL)',
+      t('reputationDnsbl'),
       errors.reputation,
       "ERROR",
       "tag-fail",
@@ -7102,40 +9116,42 @@ function render(r) {
       percent = Math.max(0, Math.min(100, Math.round((notListed / validQueries) * 100)));
     }
 
-    let rating = "Unknown";
+    let rating = t('unknown');
     if (percent !== null) {
-      if (percent >= 99) rating = "Excellent";
-      else if (percent >= 90) rating = "Great";
-      else if (percent >= 75) rating = "Good";
-      else if (percent >= 50) rating = "Fair";
-      else rating = "Poor";
+      if (percent >= 99) rating = t('excellent');
+      else if (percent >= 90) rating = t('great');
+      else if (percent >= 75) rating = t('good');
+      else if (percent >= 50) rating = t('fair');
+      else rating = t('poor');
     }
 
-    const statusLabel = percent === null ? "UNKNOWN" : `${rating.toUpperCase()} (${percent}%)`;
+    const statusLabel = percent === null ? t('unknown') : `${rating.toUpperCase()} (${percent}%)`;
     const statusClass = percent === null ? "tag-info"
       : (percent >= 90 ? "tag-pass"
       : (percent >= 75 ? "tag-info" : "tag-fail"));
 
     // Show only listed entries to avoid noise
     const listedItems = (rep.results || []).filter(x => x && x.listed === true);
-    let body = `Zones queried: ${rep.rblZones ? rep.rblZones.length : 0}\n` +
-               `Total queries: ${total}\n` +
-               `Errors: ${errorCount}`;
+    let body = `${t('zonesQueried')}: ${rep.rblZones ? rep.rblZones.length : 0}\n` +
+               `${t('totalQueries')}: ${total}\n` +
+               `${t('errorsCount')}: ${errorCount}`;
     if (percent !== null) {
-      body += `\nRisk: ${summary.riskSummary || 'Clean'}`;
-      body += `\nReputation: ${rating} (${percent}%)`;
-      body += `\nListed: ${listed}\nNot listed: ${notListed}`;
+    const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
+      body += `\n${t('riskLabel')}: ${riskSummary}`;
+      body += `\n${t('reputationWord')}: ${rating} (${percent}%)`;
+      body += `\n${t('listed')}: ${listed}\n${t('notListed')}: ${notListed}`;
     } else {
-      body += `\nRisk: ${summary.riskSummary || 'Clean'}`;
-      body += "\nReputation: Unknown (no successful queries)";
+      const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
+      body += `\n${t('riskLabel')}: ${riskSummary}`;
+      body += `\n${t('reputationWord')}: ${t('noSuccessfulQueries')}`;
     }
     if (listedItems.length > 0) {
       const lines = listedItems.map(x => `IP ${x.ip} listed on ${x.queriedZone}${x.listedAddress ? ` (${x.listedAddress})` : ''}`);
-      body += "\n\nListings:\n" + lines.join("\n");
+      body += `\n\n${t('listingsLabel')}:\n` + lines.join("\n");
     }
 
     cards.push(card(
-      'Reputation (DNSBL)',
+      t('reputationDnsbl'),
       body,
       statusLabel,
       statusClass,
@@ -7146,8 +9162,8 @@ function render(r) {
   }
 
   cards.push(card(
-    "CNAME",
-    loaded.cname ? (r.cname ? (r.cnameUsedWwwFallback && r.cnameLookupDomain && r.cnameLookupDomain !== r.domain ? (`${r.cname}\n\nResolved using ${r.cnameLookupDomain} for guidance.`) : r.cname) : null) : (errors.cname ? errors.cname : "Loading..."),
+    t('cname'),
+    loaded.cname ? (r.cname ? (r.cnameUsedWwwFallback && r.cnameLookupDomain && r.cnameLookupDomain !== r.domain ? (`${r.cname}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.cnameLookupDomain })}`) : r.cname) : null) : (errors.cname ? errors.cname : t('loadingValue')),
     (!loaded.cname && !errors.cname) ? "LOADING" : (errors.cname ? "ERROR" : (r.cname ? "PASS" : "FAIL")),
     (!loaded.cname && !errors.cname) ? "tag-info" : (errors.cname ? "tag-fail" : (r.cname ? "tag-pass" : "tag-fail")),
     "cname"
@@ -7158,12 +9174,12 @@ function render(r) {
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="chevron">&#x25BC;</span>
-        <span class="tag tag-info">READINESS TIPS</span>
-        <strong>Guidance &#x1F4A1;</strong>
+        <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
+        <strong>${escapeHtml(t('guidance'))}</strong>
       </div>
       <div id="field-guidance" class="card-content">
         <ul class="guidance">
-          ${guidanceItems || "<li>No additional guidance.</li>"}
+          ${guidanceItems || `<li>${escapeHtml(t('noAdditionalGuidance'))}</li>`}
         </ul>
       </div>
     </div>
@@ -7173,17 +9189,17 @@ function render(r) {
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="chevron">&#x25BC;</span>
-        <span class="tag tag-info">DOCS</span>
-        <strong>Helpful Links</strong>
+        <span class="tag tag-info">${escapeHtml(t('docs'))}</span>
+        <strong>${escapeHtml(t('helpfulLinks'))}</strong>
       </div>
       <div class="card-content">
         <ul class="guidance">
-          <li><a href="https://learn.microsoft.com/azure/communication-services/quickstarts/email/add-custom-verified-domains" target="_blank" rel="noopener">ACS Email Domain Verification</a></li>
-          <li><a href="https://learn.microsoft.com/azure/communication-services/concepts/email/email-quota-increase" target="_blank" rel="noopener">ACS Email Quota Limit Increase</a></li>
-          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure" target="_blank" rel="noopener">SPF Record Basics</a></li>
-          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records" target="_blank" rel="noopener">DMARC Record Basics</a></li>
-          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dkim-configure" target="_blank" rel="noopener">DKIM Record Basics</a></li>
-          <li><a href="https://learn.microsoft.com/microsoft-365/admin/setup/add-dns-records?view=o365-worldwide" target="_blank" rel="noopener">MX Record Basics</a></li>
+          <li><a href="https://learn.microsoft.com/azure/communication-services/quickstarts/email/add-custom-verified-domains" target="_blank" rel="noopener">${escapeHtml(t('acsEmailDomainVerification'))}</a></li>
+          <li><a href="https://learn.microsoft.com/azure/communication-services/concepts/email/email-quota-increase" target="_blank" rel="noopener">${escapeHtml(t('acsEmailQuotaLimitIncrease'))}</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure" target="_blank" rel="noopener">${escapeHtml(t('spfRecordBasics'))}</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records" target="_blank" rel="noopener">${escapeHtml(t('dmarcRecordBasics'))}</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dkim-configure" target="_blank" rel="noopener">${escapeHtml(t('dkimRecordBasics'))}</a></li>
+          <li><a href="https://learn.microsoft.com/microsoft-365/admin/setup/add-dns-records?view=o365-worldwide" target="_blank" rel="noopener">${escapeHtml(t('mxRecordBasics'))}</a></li>
         </ul>
       </div>
     </div>
@@ -7196,13 +9212,13 @@ function render(r) {
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="chevron">&#x25BC;</span>
-        <span class="tag tag-info">TOOLS</span>
-        <strong>External Tools</strong>
+        <span class="tag tag-info">${escapeHtml(t('tools'))}</span>
+        <strong>${escapeHtml(t('externalTools'))}</strong>
       </div>
       <div class="card-content">
         <ul class="guidance">
-          <li><a href="${centralOps}" target="_blank" rel="noopener">Domain Dossier (CentralOps)</a></li>
-          <li><a href="${multiRbl}" target="_blank" rel="noopener">MultiRBL DNSBL Lookup</a></li>
+          <li><a href="${centralOps}" target="_blank" rel="noopener">${escapeHtml(t('domainDossier'))}</a></li>
+          <li><a href="${multiRbl}" target="_blank" rel="noopener">${escapeHtml(t('multiRblLookup'))}</a></li>
         </ul>
       </div>
     </div>
@@ -7219,6 +9235,8 @@ document.getElementById("domainInput").addEventListener("keyup", function (e) {
 
 // Theme + query-domain initialization
 window.addEventListener("load", function () {
+  currentLanguage = detectLanguage();
+
   // 1. Check for saved theme
   // 2. If none, check system preference (Dark vs Light)
   const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -7227,6 +9245,7 @@ window.addEventListener("load", function () {
   const savedTheme = localStorage.getItem("acsTheme") || defaultTheme;
 
   applyTheme(savedTheme);
+  applyLanguage(currentLanguage, false);
   loadHistory();
   toggleClearBtn();
 
@@ -7291,10 +9310,10 @@ async function initMsAuth() {
     if (btn) {
       btn.style.display = '';
       btn.disabled = false;
-      btn.innerHTML = 'Sign in with Microsoft &#x1F512;';
+      btn.innerHTML = t('signInMicrosoft');
     }
     msalInitError = 'Missing ACS_ENTRA_CLIENT_ID in the served HTML.';
-    setStatus('Microsoft sign-in is not configured. Confirm the ACS_ENTRA_CLIENT_ID was injected into the page and refresh.');
+    setStatus(t('authSignInNotConfigured'));
     return;
   }
 
@@ -7302,13 +9321,13 @@ async function initMsAuth() {
     await ensureMsalLoaded();
   } catch (e) {
     msalInitError = e?.message || 'MSAL library not loaded.';
-    setStatus('Microsoft sign-in library failed to load. Verify access to the MSAL CDN or provide a local msal-browser.min.js file.');
+    setStatus(t('authLibraryLoadFailed'));
     return;
   }
 
   if (typeof msal === 'undefined') {
     msalInitError = 'MSAL library not loaded.';
-    setStatus('Microsoft sign-in library failed to load. Verify access to the MSAL CDN or provide a local msal-browser.min.js file.');
+    setStatus(t('authLibraryLoadFailed'));
     return;
   }
 
@@ -7359,23 +9378,23 @@ async function initMsAuth() {
   } catch (e) {
     console.error('MSAL initialization error:', e);
     msalInitError = e?.message || 'Unknown initialization error.';
-    setStatus('Microsoft sign-in failed to initialize. Check the browser console for details.');
+    setStatus(t('authInitFailed'));
   }
 }
 
 async function msSignIn() {
   if (!msalInstance) {
     if (msalInitError) {
-      setStatus('Microsoft sign-in failed to initialize: ' + msalInitError);
+      setStatus(t('authInitFailedWithReason', { reason: msalInitError }));
     } else {
-      setStatus('Microsoft sign-in is not configured. Set the ACS_ENTRA_CLIENT_ID environment variable and restart.');
+      setStatus(t('authSetClientIdAndRestart'));
     }
     return;
   }
 
   try {
     const btn = document.getElementById('msSignInBtn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Signing in...'; }
+    if (btn) { btn.disabled = true; btn.textContent = t('authSigningIn'); }
 
     // Use redirect flow for best compatibility with browser / popup blockers.
     await msalInstance.loginRedirect({
@@ -7385,12 +9404,12 @@ async function msSignIn() {
   } catch (e) {
     console.error('Sign-in error:', e);
     const btn = document.getElementById('msSignInBtn');
-    if (btn) { btn.disabled = false; btn.innerHTML = 'Sign in with Microsoft &#x1F512;'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = t('signInMicrosoft'); }
 
     if (e && e.errorCode === 'user_cancelled') {
-      setStatus('Sign-in was cancelled.');
+      setStatus(t('authSignInCancelled'));
     } else {
-      setStatus('Sign-in failed: ' + (e?.errorMessage || e?.message || 'Unknown error'));
+      setStatus(t('authSignInFailed', { reason: e?.errorMessage || e?.message || t('authUnknownError') }));
     }
   }
 }
@@ -7448,7 +9467,7 @@ function updateAuthUI(authData) {
       const name = escapeHtml(authData.displayName || msAuthAccount.name || '');
       if (authData.isMicrosoftEmployee) {
         statusEl.className = 'ms-auth-status ms-employee hide-on-screenshot';
-        statusEl.innerHTML = '&#x2705; ' + name + ' (Microsoft)';
+        statusEl.innerHTML = '&#x2705; ' + name + ' (' + escapeHtml(t('authMicrosoftLabel')) + ')';
       } else {
         statusEl.className = 'ms-auth-status ms-external hide-on-screenshot';
         statusEl.innerHTML = '&#x1F464; ' + name;
@@ -7458,7 +9477,7 @@ function updateAuthUI(authData) {
     if (signInBtn) {
       signInBtn.style.display = '';
       signInBtn.disabled = false;
-      signInBtn.innerHTML = 'Sign in with Microsoft &#x1F512;';
+      signInBtn.innerHTML = t('signInMicrosoft');
     }
     if (signOutBtn) signOutBtn.style.display = 'none';
     if (statusEl) statusEl.style.display = 'none';
