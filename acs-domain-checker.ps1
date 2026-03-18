@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Local web UI + REST API to inspect DNS records used for Azure Communication Services (ACS) domain verification.
 
@@ -5955,6 +5955,47 @@ ul.guidance li {
   color: #a3bffa;
   border-color: #3b5bdb;
 }
+
+/* Base style for all status icons */
+.status-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toolbar-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.guidance-title-icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* Specific color filters */
+.icon-error {
+  filter: invert(26%) sepia(88%) saturate(2258%) hue-rotate(346deg) brightness(89%) contrast(93%);
+}
+
+.icon-warning {
+  filter: invert(72%) sepia(55%) saturate(2852%) hue-rotate(1deg) brightness(105%) contrast(105%);
+}
+
+.icon-success {
+  filter: invert(31%) sepia(81%) saturate(543%) hue-rotate(74deg) brightness(94%) contrast(97%);
+}
+
+.icon-info {
+  filter: invert(31%) sepia(94%) saturate(1436%) hue-rotate(189deg) brightness(92%) contrast(101%);
+}
 </style>
 
 <!-- html2canvas for screenshot capture -->
@@ -6025,12 +6066,12 @@ async function ensureMsalLoaded() {
     <button id="languageSelectBtn" type="button" class="language-trigger" onclick="toggleLanguageMenu()" aria-haspopup="listbox" aria-expanded="false"></button>
     <div id="languageSelectMenu" class="language-menu" role="listbox"></div>
   </div>
-  <button id="themeToggleBtn" type="button" class="hide-on-screenshot" onclick="toggleTheme()">Dark mode &#x1F319;</button>
-  <button id="copyLinkBtn" type="button" class="hide-on-screenshot" onclick="copyShareLink()">Copy link &#x1F517;</button>
-  <button id="screenshotBtn" type="button" class="hide-on-screenshot" onclick="screenshotPage()">Copy page screenshot &#x1F4F8;</button>
-  <button id="downloadBtn" type="button" class="hide-on-screenshot" onclick="downloadReport()" style="display:none;">Download JSON &#x1F4E5;</button>
-  <button id="reportIssueBtn" type="button" class="hide-on-screenshot" onclick="reportIssue()" style="display:none;" title="Report an issue (includes the domain name)">Report issue &#x1F41B;</button>
-  <button id="msSignInBtn" type="button" class="hide-on-screenshot ms-sign-in-btn" onclick="msSignIn()">Sign in with Microsoft &#x1F512;</button>
+  <button id="themeToggleBtn" type="button" class="hide-on-screenshot" onclick="toggleTheme()">Dark mode</button>
+  <button id="copyLinkBtn" type="button" class="hide-on-screenshot" onclick="copyShareLink()">Copy link</button>
+  <button id="screenshotBtn" type="button" class="hide-on-screenshot" onclick="screenshotPage()">Copy page screenshot</button>
+  <button id="downloadBtn" type="button" class="hide-on-screenshot" onclick="downloadReport()" style="display:none;">Download JSON</button>
+  <button id="reportIssueBtn" type="button" class="hide-on-screenshot" onclick="reportIssue()" style="display:none;" title="Report an issue (includes the domain name)">Report issue</button>
+  <button id="msSignInBtn" type="button" class="hide-on-screenshot ms-sign-in-btn" onclick="msSignIn()">Sign in with Microsoft</button>
   <span id="msAuthStatus" class="ms-auth-status hide-on-screenshot" style="display:none;"></span>
   <button id="msSignOutBtn" type="button" class="hide-on-screenshot" onclick="msSignOut()" style="display:none;">Sign out</button>
 </div>
@@ -6093,7 +6134,7 @@ const TRANSLATIONS = {
     dmarc: 'DMARC',
     reputationDnsbl: 'Reputation (DNSBL)',
     cname: 'CNAME',
-    guidance: 'Guidance 💡',
+    guidance: 'Guidance',
     helpfulLinks: 'Helpful Links',
     externalTools: 'External Tools',
     checklist: 'CHECKLIST',
@@ -6316,7 +6357,7 @@ const TRANSLATIONS = {
     dmarc: 'DMARC',
     reputationDnsbl: 'Reputación (DNSBL)',
     cname: 'CNAME',
-    guidance: 'Guía 💡',
+    guidance: 'Guía',
     helpfulLinks: 'Enlaces útiles',
     externalTools: 'Herramientas externas',
     checklist: 'LISTA',
@@ -6495,7 +6536,7 @@ const TRANSLATIONS = {
     dmarc: 'DMARC',
     reputationDnsbl: 'Réputation (DNSBL)',
     cname: 'CNAME',
-    guidance: 'Conseils 💡',
+    guidance: 'Conseils',
     helpfulLinks: 'Liens utiles',
     externalTools: 'Outils externes',
     checklist: 'CHECKLIST',
@@ -6616,7 +6657,7 @@ const TRANSLATIONS = {
     dmarc: 'DMARC',
     reputationDnsbl: 'Reputation (DNSBL)',
     cname: 'CNAME',
-    guidance: 'Hinweise 💡',
+    guidance: 'Hinweise',
     helpfulLinks: 'Hilfreiche Links',
     externalTools: 'Externe Tools',
     checklist: 'CHECKLISTE',
@@ -6737,7 +6778,7 @@ const TRANSLATIONS = {
     dmarc: 'DMARC',
     reputationDnsbl: 'Reputação (DNSBL)',
     cname: 'CNAME',
-    guidance: 'Orientações 💡',
+    guidance: 'Orientações',
     helpfulLinks: 'Links úteis',
     externalTools: 'Ferramentas externas',
     checklist: 'CHECKLIST',
@@ -7671,7 +7712,7 @@ const REMAINING_TRANSLATION_OVERRIDES = {
     txtRecordsQueried: 'TXT 记录（查询域）',
     dmarc: 'DMARC',
     cname: 'CNAME',
-    guidance: '指导 💡',
+    guidance: '指导',
     helpfulLinks: '有用链接',
     externalTools: '外部工具',
     acsReadyMessage: '此域看起来已准备好进行 Azure Communication Services 域验证。',
@@ -7692,7 +7733,7 @@ const REMAINING_TRANSLATION_OVERRIDES = {
     txtRecordsQueried: 'TXT रिकॉर्ड (क्वेरी किया गया डोमेन)',
     dmarc: 'DMARC',
     cname: 'CNAME',
-    guidance: 'मार्गदर्शन 💡',
+    guidance: 'मार्गदर्शन',
     helpfulLinks: 'उपयोगी लिंक',
     externalTools: 'बाहरी टूल',
     acsReadyMessage: 'यह डोमेन Azure Communication Services डोमेन सत्यापन के लिए तैयार प्रतीत होता है।',
@@ -7713,7 +7754,7 @@ const REMAINING_TRANSLATION_OVERRIDES = {
     txtRecordsQueried: 'TXT レコード（照会ドメイン）',
     dmarc: 'DMARC',
     cname: 'CNAME',
-    guidance: 'ガイダンス 💡',
+    guidance: 'ガイダンス',
     helpfulLinks: '参考リンク',
     externalTools: '外部ツール',
     acsReadyMessage: 'このドメインは Azure Communication Services のドメイン検証の準備ができているようです。',
@@ -7734,7 +7775,7 @@ const REMAINING_TRANSLATION_OVERRIDES = {
     txtRecordsQueried: 'TXT-записи (запрошенный домен)',
     dmarc: 'DMARC',
     cname: 'CNAME',
-    guidance: 'Рекомендации 💡',
+    guidance: 'Рекомендации',
     helpfulLinks: 'Полезные ссылки',
     externalTools: 'Внешние инструменты',
     acsReadyMessage: 'Этот домен выглядит готовым к проверке домена Azure Communication Services.',
@@ -7753,7 +7794,7 @@ const REMAINING_TRANSLATION_OVERRIDES = {
     spfQueried: 'SPF (TXT للنطاق المستعلم عنه)',
     acsDomainVerificationTxt: 'TXT للتحقق من نطاق ACS',
     txtRecordsQueried: 'سجلات TXT (النطاق المستعلم عنه)',
-    guidance: 'إرشادات 💡',
+    guidance: 'إرشادات',
     helpfulLinks: 'روابط مفيدة',
     externalTools: 'أدوات خارجية',
     acsReadyMessage: 'يبدو أن هذا النطاق جاهز للتحقق من نطاق Azure Communication Services.',
@@ -8973,6 +9014,19 @@ const LANGUAGE_FLAG_URLS = {
   'ru-RU': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/ru.svg'
 };
 
+const LANGUAGE_DISPLAY_NAMES = {
+  en: 'English',
+  es: 'Espa\u00f1ol',
+  fr: 'Fran\u00e7ais',
+  de: 'Deutsch',
+  'pt-BR': 'Portugu\u00eas (Brasil)',
+  ar: '\u0627\u0644\u0639\u0631\u0628\u064a\u0629',
+  'zh-CN': '\u4e2d\u6587\uff08\u7b80\u4f53\uff09',
+  'hi-IN': '\u0939\u093f\u0928\u094d\u0926\u0940 (\u092d\u093e\u0930\u0924)',
+  'ja-JP': '\u65e5\u672c\u8a9e\uff08\u65e5\u672c\uff09',
+  'ru-RU': '\u0420\u0443\u0441\u0441\u043a\u0438\u0439 (\u0420\u043e\u0441\u0441\u0438\u044f)'
+};
+
 let currentLanguage = 'en';
 
 let screenshotStatusToken = 0;
@@ -9037,10 +9091,70 @@ function detectLanguage() {
 function t(key, params = {}) {
   const langTable = TRANSLATIONS[currentLanguage] || TRANSLATIONS.en;
   let text = langTable[key] || TRANSLATIONS.en[key] || key;
-  return String(text).replace(/\{(\w+)\}/g, (_, token) => {
+  const resolved = String(text).replace(/\{(\w+)\}/g, (_, token) => {
     const value = Object.prototype.hasOwnProperty.call(params, token) ? params[token] : `{${token}}`;
     return value === null || value === undefined ? '' : String(value);
   });
+
+  return stripUiEmoji(repairMojibake(resolved));
+}
+
+function looksLikeMojibake(text) {
+  return /(?:Ã.|Â.|â.|ðŸ|Ð.|Ñ.|Ø.|Ù.|ã.|à.|ï.)/.test(String(text || ''));
+}
+
+function repairMojibake(text) {
+  const value = String(text || '');
+  if (!looksLikeMojibake(value)) return value;
+
+  try {
+    const bytes = new Uint8Array(Array.from(value, ch => ch.charCodeAt(0) & 0xFF));
+    const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    if (decoded && !looksLikeMojibake(decoded)) return decoded;
+  } catch {}
+
+  try {
+    const decoded = decodeURIComponent(escape(value));
+    if (decoded && !looksLikeMojibake(decoded)) return decoded;
+  } catch {}
+
+  return value;
+}
+
+function stripUiEmoji(text) {
+  return String(text || '')
+    .replace(/[🌙☀🔗📸📥🐛🔒⏳❌💡]/g, '')
+    .replace(/\uFE0F/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+const UI_LABEL_ICONS = {
+  themeDark: { icon: 'moon-star', className: 'icon-info' },
+  themeLight: { icon: 'sun', className: 'icon-warning' },
+  copyLink: { icon: 'link', className: 'icon-info' },
+  copyScreenshot: { icon: 'camera', className: 'icon-info' },
+  downloadJson: { icon: 'download', className: 'icon-success' },
+  reportIssue: { icon: 'bug', className: 'icon-warning' },
+  signInMicrosoft: { icon: 'lock-keyhole', className: 'icon-info' },
+  guidance: { icon: 'lightbulb', className: 'icon-warning guidance-title-icon' }
+};
+
+function getLucideIconUrl(iconName) {
+  return `https://cdn.jsdelivr.net/npm/lucide-static/icons/${iconName}.svg`;
+}
+
+function renderLabelWithIcon(key) {
+  const config = UI_LABEL_ICONS[key];
+  const text = escapeHtml(t(key));
+  if (!config) return text;
+
+  const iconHtml = `<img src="${getLucideIconUrl(config.icon)}" class="toolbar-icon ${config.className}" alt="" aria-hidden="true" />`;
+  return `<span class="inline-label">${text}${iconHtml}</span>`;
+}
+
+function getLanguageDisplayName(code) {
+  return repairMojibake(LANGUAGE_DISPLAY_NAMES[code] || ((TRANSLATIONS[code] && TRANSLATIONS[code].languageName) ? TRANSLATIONS[code].languageName : code));
 }
 
 function translateBadge(label) {
@@ -9070,7 +9184,7 @@ function translateBadge(label) {
 
 function getLanguageButtonHtml(code) {
   const flagUrl = LANGUAGE_FLAG_URLS[code] || '';
-  const name = (TRANSLATIONS[code] && TRANSLATIONS[code].languageName) ? TRANSLATIONS[code].languageName : code;
+  const name = getLanguageDisplayName(code);
   const safeName = escapeHtml(name);
   const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="lazy" />` : '';
   return `${flagHtml}<span>${safeName}</span><span class="caret">&#x25BE;</span>`;
@@ -9098,7 +9212,7 @@ function populateLanguageSelect() {
   if (!button || !menu) return;
 
   button.innerHTML = getLanguageButtonHtml(currentLanguage);
-  button.setAttribute('aria-label', `${t('languageLabel')}: ${TRANSLATIONS[currentLanguage].languageName}`);
+  button.setAttribute('aria-label', `${t('languageLabel')}: ${getLanguageDisplayName(currentLanguage)}`);
 
   menu.innerHTML = LANGUAGE_OPTIONS.map(code => {
     const selected = code === currentLanguage ? ' active' : '';
@@ -9126,24 +9240,24 @@ function applyLanguageToStaticUi() {
 
   const themeBtn = document.getElementById('themeToggleBtn');
   if (themeBtn) {
-    themeBtn.innerHTML = document.documentElement.classList.contains('dark') ? t('themeLight') : t('themeDark');
+    themeBtn.innerHTML = document.documentElement.classList.contains('dark') ? renderLabelWithIcon('themeLight') : renderLabelWithIcon('themeDark');
   }
 
   const copyLinkBtn = document.getElementById('copyLinkBtn');
-  if (copyLinkBtn) copyLinkBtn.innerHTML = t('copyLink');
+  if (copyLinkBtn) copyLinkBtn.innerHTML = renderLabelWithIcon('copyLink');
 
   const screenshotBtn = document.getElementById('screenshotBtn');
-  if (screenshotBtn) screenshotBtn.innerHTML = t('copyScreenshot');
+  if (screenshotBtn) screenshotBtn.innerHTML = renderLabelWithIcon('copyScreenshot');
 
   const downloadBtn = document.getElementById('downloadBtn');
-  if (downloadBtn) downloadBtn.innerHTML = t('downloadJson');
+  if (downloadBtn) downloadBtn.innerHTML = renderLabelWithIcon('downloadJson');
 
   const reportBtn = document.getElementById('reportIssueBtn');
-  if (reportBtn) reportBtn.innerHTML = t('reportIssue');
+  if (reportBtn) reportBtn.innerHTML = renderLabelWithIcon('reportIssue');
   if (reportBtn) reportBtn.title = t('reportIssueTitle');
 
   const signInBtn = document.getElementById('msSignInBtn');
-  if (signInBtn && signInBtn.style.display !== 'none') signInBtn.innerHTML = t('signInMicrosoft');
+  if (signInBtn && signInBtn.style.display !== 'none') signInBtn.innerHTML = renderLabelWithIcon('signInMicrosoft');
 
   const signOutBtn = document.getElementById('msSignOutBtn');
   if (signOutBtn) signOutBtn.innerHTML = t('signOut');
@@ -9556,33 +9670,33 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   const ruf = (tags.ruf || '').trim();
 
   if (policy === 'none') {
-    guidance.push(t('dmarcMonitorOnly', { domain: targetDomain }));
+    guidance.push({ type: 'attention', text: t('dmarcMonitorOnly', { domain: targetDomain }) });
   } else if (policy === 'quarantine') {
-    guidance.push(t('dmarcQuarantine', { domain: targetDomain }));
+    guidance.push({ type: 'attention', text: t('dmarcQuarantine', { domain: targetDomain }) });
   }
 
   if (Number.isFinite(pct) && pct >= 0 && pct < 100) {
-    guidance.push(t('dmarcPct', { domain: targetDomain, pct }));
+    guidance.push({ type: 'attention', text: t('dmarcPct', { domain: targetDomain, pct }) });
   }
 
   if (adkim === 'r') {
-    guidance.push(t('dmarcAdkimRelaxed', { domain: targetDomain }));
+    guidance.push({ type: 'info', text: t('dmarcAdkimRelaxed', { domain: targetDomain }) });
   }
 
   if (aspf === 'r') {
-    guidance.push(t('dmarcAspfRelaxed', { domain: targetDomain }));
+    guidance.push({ type: 'info', text: t('dmarcAspfRelaxed', { domain: targetDomain }) });
   }
 
   if (domain && lookupDomain && inherited === true && lookupDomain !== domain && !Object.prototype.hasOwnProperty.call(tags, 'sp')) {
-    guidance.push(t('dmarcMissingSp', { lookupDomain, domain }));
+    guidance.push({ type: 'attention', text: t('dmarcMissingSp', { lookupDomain, domain }) });
   }
 
   if (!rua) {
-    guidance.push(t('dmarcMissingRua', { domain: targetDomain }));
+    guidance.push({ type: 'attention', text: t('dmarcMissingRua', { domain: targetDomain }) });
   }
 
   if (!ruf) {
-    guidance.push(t('dmarcMissingRuf', { domain: targetDomain }));
+    guidance.push({ type: 'info', text: t('dmarcMissingRuf', { domain: targetDomain }) });
   }
 
   return guidance;
@@ -9594,26 +9708,26 @@ function buildGuidance(r) {
   const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
 
   if (loaded.base && r.dnsFailed) {
-    guidance.push(t('guidanceDnsTxtFailed'));
+    guidance.push({ type: 'error', text: t('guidanceDnsTxtFailed') });
     return guidance;
   }
 
   if (loaded.base) {
     if (!r.spfPresent) {
       if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
-        guidance.push(t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
+        guidance.push({ type: 'attention', text: t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
-        guidance.push(t('guidanceSpfMissing'));
+        guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
       }
     }
     if (r.spfPresent && r.spfHasRequiredInclude !== true) {
-      guidance.push(t('spfOutlookRequirementMissing'));
+      guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
     }
     if (!r.acsPresent) {
       if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
-        guidance.push(t('guidanceAcsMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }));
+        guidance.push({ type: 'attention', text: t('guidanceAcsMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
-        guidance.push(t('guidanceAcsMissing'));
+        guidance.push({ type: 'attention', text: t('guidanceAcsMissing') });
       }
     }
   }
@@ -9623,36 +9737,36 @@ function buildGuidance(r) {
     const hasMx = Array.isArray(mxList) && mxList.length > 0;
     if (!hasMx) {
       if (r.mxFallbackDomainChecked && r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-        guidance.push(t('guidanceMxMissingParentFallback', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
+        guidance.push({ type: 'attention', text: t('guidanceMxMissingParentFallback', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }) });
       } else if (r.mxFallbackDomainChecked && !r.mxFallbackUsed) {
-        guidance.push(t('guidanceMxMissingCheckedParent', { domain: r.domain || '', parentDomain: r.mxFallbackDomainChecked }));
+        guidance.push({ type: 'attention', text: t('guidanceMxMissingCheckedParent', { domain: r.domain || '', parentDomain: r.mxFallbackDomainChecked }) });
       } else {
-        guidance.push(t('guidanceMxMissing'));
+        guidance.push({ type: 'attention', text: t('guidanceMxMissing') });
       }
     } else if (r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-      guidance.push(t('guidanceMxParentShown', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }));
+      guidance.push({ type: 'info', text: t('guidanceMxParentShown', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }) });
     }
     if (r.mxProvider && r.mxProvider !== 'Unknown') {
-      guidance.push(t('guidanceMxProviderDetected', { provider: r.mxProvider }));
+      guidance.push({ type: 'info', text: t('guidanceMxProviderDetected', { provider: r.mxProvider }) });
     }
   }
 
   if (loaded.whois) {
     if (r.whoisIsExpired === true) {
-      guidance.push(t('guidanceDomainExpired'));
+      guidance.push({ type: 'attention', text: t('guidanceDomainExpired') });
     } else if (r.whoisIsVeryYoungDomain === true) {
       const d = r.whoisNewDomainErrorThresholdDays || 90;
-      guidance.push(t('guidanceDomainVeryYoung', { days: String(d) }));
+      guidance.push({ type: 'attention', text: t('guidanceDomainVeryYoung', { days: String(d) }) });
     } else if (r.whoisIsYoungDomain === true) {
       const d = r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180;
-      guidance.push(t('guidanceDomainYoung', { days: String(d) }));
+      guidance.push({ type: 'attention', text: t('guidanceDomainYoung', { days: String(d) }) });
     }
   }
 
   if (loaded.dmarc && !r.dmarc) {
-    guidance.push(t('guidanceDmarcMissing', { domain: r.domain || '' }));
+    guidance.push({ type: 'attention', text: t('guidanceDmarcMissing', { domain: r.domain || '' }) });
   } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
-    guidance.push(t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }));
+    guidance.push({ type: 'info', text: t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }) });
   }
 
   let dmarcActionable = false;
@@ -9663,30 +9777,30 @@ function buildGuidance(r) {
   }
 
   if ((loaded.dmarc && !r.dmarc) || dmarcActionable) {
-    guidance.push(t('guidanceDmarcMoreInfo', { url: dmarcHelpUrl }));
+    guidance.push({ type: 'info', text: t('guidanceDmarcMoreInfo', { url: dmarcHelpUrl }) });
   }
 
   if (loaded.dkim) {
-    if (!r.dkim1) guidance.push(t('guidanceDkim1Missing'));
-    if (!r.dkim2) guidance.push(t('guidanceDkim2Missing'));
+    if (!r.dkim1) guidance.push({ type: 'attention', text: t('guidanceDkim1Missing') });
+    if (!r.dkim2) guidance.push({ type: 'attention', text: t('guidanceDkim2Missing') });
   }
 
   if (loaded.cname && !r.cname) {
-    guidance.push(t('guidanceCnameMissing'));
+    guidance.push({ type: 'attention', text: t('guidanceCnameMissing') });
   }
 
   if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && r.spfPresent && r.spfHasRequiredInclude === false) {
-    guidance.push(t('guidanceMxMicrosoftSpf'));
+    guidance.push({ type: 'attention', text: t('guidanceMxMicrosoftSpf') });
   }
   if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && r.spfPresent && r.spfValue && !/_spf\.google\.com/i.test(r.spfValue)) {
-    guidance.push(t('guidanceMxGoogleSpf'));
+    guidance.push({ type: 'attention', text: t('guidanceMxGoogleSpf') });
   }
   if (loaded.base && loaded.mx && r.mxProvider === 'Zoho Mail' && r.spfPresent && r.spfValue && !/include:zoho\.com/i.test(r.spfValue)) {
-    guidance.push(t('guidanceMxZohoSpf'));
+    guidance.push({ type: 'attention', text: t('guidanceMxZohoSpf') });
   }
 
   if (loaded.base && r.acsReady) {
-    guidance.push(t('acsReadyMessage'));
+    guidance.push({ type: 'success', text: t('acsReadyMessage') });
   }
 
   return guidance;
@@ -9834,10 +9948,10 @@ function applyTheme(theme) {
   const btn  = document.getElementById("themeToggleBtn");
   if (theme === "dark") {
     root.classList.add("dark");
-    if (btn) btn.innerHTML = t('themeLight');
+    if (btn) btn.innerHTML = renderLabelWithIcon('themeLight');
   } else {
     root.classList.remove("dark");
-    if (btn) btn.innerHTML = t('themeDark');
+    if (btn) btn.innerHTML = renderLabelWithIcon('themeDark');
   }
   localStorage.setItem("acsTheme", theme);
 }
@@ -11256,13 +11370,48 @@ function render(r) {
     "cname"
   ));
 
-  const guidanceItems = (r.guidance || []).map(g => "<li>" + linkifyText(g) + "</li>").join("");
+  const guidanceItems = (r.guidance || []).map(g => {
+    let iconHtml = '';
+    let text = g;
+    let type = 'info';
+
+    if (typeof g === 'object' && g !== null) {
+      text = g.text;
+      type = g.type || 'info';
+    }
+
+    let iconClass = 'icon-info';
+    let iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg';
+    let iconTitle = 'Informational';
+
+    if (type === 'error') {
+      iconClass = 'icon-error';
+      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/alert-circle.svg';
+      iconTitle = 'Error';
+    } else if (type === 'attention') {
+      iconClass = 'icon-warning';
+      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg';
+      iconTitle = 'Needs Attention';
+    } else if (type === 'success') {
+      iconClass = 'icon-success';
+      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/check-circle.svg';
+      iconTitle = 'Success';
+    }
+
+    iconHtml = `<img src="${iconSrc}" class="status-icon ${iconClass}" alt="${iconTitle}" title="${iconTitle}" />`;
+
+    return '<li style="display:flex; align-items:flex-start; gap:8px; margin-bottom:8px;">' + iconHtml + '<span style="padding-top:2px;">' + linkifyText(text) + '</span></li>';
+  }).join("");
   cards.push(`
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="chevron">&#x25BC;</span>
         <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
-        <strong>${escapeHtml(t('guidance'))}</strong>
+        <strong>${renderLabelWithIcon('guidance')}</strong>
+        <div class="card-icons" style="margin-left: auto; font-size: 0.8em; display: flex; align-items: center; gap: 6px;">
+           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg" class="status-icon icon-warning" style="width: 14px; height: 14px; margin-right: 0;" alt="Attention"/> <span style="margin-right: 8px;">Attention</span>
+           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg" class="status-icon icon-info" style="width: 14px; height: 14px; margin-right: 0;" alt="Informational"/> <span>Informational</span>
+        </div>
       </div>
       <div id="field-guidance" class="card-content">
         <ul class="guidance">
