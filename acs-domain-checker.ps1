@@ -5697,6 +5697,21 @@ button.primary:disabled {
   padding: 0;
 }
 
+.guidance-code {
+  display: inline-block;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 0.92em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.checked-domain {
+  font-style: italic;
+}
+
 .kv-grid {
   display: grid;
   grid-template-columns: max-content 1fr;
@@ -9556,6 +9571,56 @@ function linkifyText(text) {
   });
 }
 
+function escapeRegex(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function applyCheckedDomainEmphasis(html, checkedDomain) {
+  const domain = String(checkedDomain || '').trim();
+  if (!domain) return String(html || '');
+
+  const escapedDomain = escapeHtml(domain);
+  if (!escapedDomain) return String(html || '');
+
+  return String(html || '').replace(new RegExp(escapeRegex(escapedDomain), 'gi'), '<em class="checked-domain">$&</em>');
+}
+
+function formatGuidanceText(text, checkedDomain) {
+  let value = String(text || '');
+  const protectedTokens = [];
+
+  const protect = (pattern) => {
+    value = value.replace(pattern, (match) => {
+      const token = `__GUIDANCE_CODE_${protectedTokens.length}__`;
+      protectedTokens.push(match);
+      return token;
+    });
+  };
+
+  protect(/v=spf1\s+include:spf\.protection\.outlook\.com\s+-all/gi);
+  protect(/\b(?:p|sp)=(?:none|quarantine|reject)\b/gi);
+  protect(/\bpct=\d+\b/gi);
+  protect(/\b(?:adkim|aspf)=[rs]\b/gi);
+  protect(/\b(?:rua|ruf)=\b/gi);
+  protect(/_dmarc\.[a-z0-9.-]+/gi);
+  protect(/\binclude:spf\.protection\.outlook\.com\b/gi);
+  protect(/\bspf\.protection\.outlook\.com\b/gi);
+  protect(/\b_spf\.google\.com\b/gi);
+  protect(/\binclude:zoho\.com\b/gi);
+  protect(/\bms-domain-verification\b/gi);
+  protect(/\bselector[12]-azurecomm-prod-net\b/gi);
+
+  let formatted = linkifyText(value);
+  formatted = formatted.replace(/`([^`]+)`/g, '<code class="guidance-code">$1</code>');
+  formatted = applyCheckedDomainEmphasis(formatted, checkedDomain);
+  formatted = formatted.replace(/__GUIDANCE_CODE_(\d+)__/g, (_, index) => {
+    const token = protectedTokens[Number(index)] || '';
+    return `<code class="guidance-code">${escapeHtml(token)}</code>`;
+  });
+
+  return formatted;
+}
+
 function formatLocalDateTime(isoString) {
   if (!isoString) return null;
   const d = new Date(isoString);
@@ -10395,9 +10460,11 @@ function scrollToSection(key) {
 
 function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = '') {
   const cardId = key ? `card-${key}` : '';
+  const checkedDomain = (lastResult && lastResult.domain) ? String(lastResult.domain) : '';
   // Always escape the title text to prevent XSS via crafted DNS responses.
   // Use titleSuffixHtml for trusted HTML additions (e.g., info-dot buttons, links).
-  const safeTitle = escapeHtml(title);
+  const safeTitle = applyCheckedDomainEmphasis(escapeHtml(title), checkedDomain);
+  const safeValue = applyCheckedDomainEmphasis(escapeHtml(value || t('noRecordsAvailable')), checkedDomain);
   const translatedLabel = label ? escapeHtml(translateBadge(label)) : "";
   return `
   <div class="card"${cardId ? ` id="${cardId}"` : ''}>
@@ -10407,7 +10474,7 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
       <strong>${safeTitle}</strong>${titleSuffixHtml ? ' ' + titleSuffixHtml : ''}
       ${showCopy ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, '${key}')">${escapeHtml(t('copy'))}</button>` : ""}
     </div>
-    <div id="field-${key}" class="code card-content">${escapeHtml(value || t('noRecordsAvailable'))}</div>
+    <div id="field-${key}" class="code card-content">${safeValue}</div>
   </div>`;
 }
 
@@ -11400,7 +11467,7 @@ function render(r) {
 
     iconHtml = `<img src="${iconSrc}" class="status-icon ${iconClass}" alt="${iconTitle}" title="${iconTitle}" />`;
 
-    return '<li style="display:flex; align-items:flex-start; gap:8px; margin-bottom:8px;">' + iconHtml + '<span style="padding-top:2px;">' + linkifyText(text) + '</span></li>';
+    return '<li style="display:flex; align-items:flex-start; gap:8px; margin-bottom:8px;">' + iconHtml + '<span style="padding-top:2px;">' + formatGuidanceText(text, r.domain || '') + '</span></li>';
   }).join("");
   cards.push(`
     <div class="card">
