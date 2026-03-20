@@ -6256,8 +6256,6 @@ async function ensureMsalLoaded() {
       <button id="azureRunDomainSearchBtn" type="button" onclick="runAzureQueryTemplate('domainSearch')">Run domain search</button>
       <button id="azureRunAcsSearchBtn" type="button" onclick="runAzureQueryTemplate('acsSearch')">Run ACS search</button>
     </div>
-    <div id="azureDiagnosticsStatus" class="azure-status"></div>
-    <div id="azureDiagnosticsResults" class="azure-results-container">Sign in and select a workspace to begin.</div>
   </div>
 </div>
 <div id="results" class="cards"></div>
