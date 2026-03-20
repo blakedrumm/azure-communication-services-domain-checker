@@ -2560,7 +2560,7 @@ function Set-SecurityHeaders {
       $styleSrcParts = @("'self'", $nonceToken) | Where-Object { $_ }
       $scriptSrc = 'script-src ' + ($scriptSrcParts -join ' ')
       $styleSrc = 'style-src ' + ($styleSrcParts -join ' ')
-      $Context.Response.Headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com; frame-ancestors 'none'"
+      $Context.Response.Headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-ancestors 'none'"
     }
   } catch { }
 }
@@ -5995,6 +5995,98 @@ ul.guidance li {
   height: 14px;
 }
 
+.azure-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.azure-panel-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.azure-panel-field label {
+  font-size: 12px;
+  color: var(--status);
+}
+
+.azure-panel-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--card-bg);
+  color: var(--fg);
+}
+
+.azure-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.azure-panel-actions button {
+  padding: 7px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--button-border-secondary);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  cursor: pointer;
+}
+
+.azure-panel-actions button.primary {
+  background: var(--button-bg);
+  color: var(--button-fg);
+  border-color: var(--button-bg);
+}
+
+.azure-note {
+  font-size: 12px;
+  color: var(--status);
+  margin-bottom: 12px;
+}
+
+.azure-status {
+  font-size: 12px;
+  color: var(--status);
+  margin-bottom: 10px;
+  min-height: 18px;
+}
+
+.azure-status.error {
+  color: #ef4444;
+}
+
+.azure-result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.azure-result-table th,
+.azure-result-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.azure-result-table th {
+  background: var(--border);
+}
+
+.azure-result-meta {
+  font-size: 12px;
+  color: var(--status);
+  margin-bottom: 8px;
+}
+
 /* Specific color filters */
 .icon-error {
   filter: invert(26%) sepia(88%) saturate(2258%) hue-rotate(346deg) brightness(89%) contrast(93%);
@@ -6104,6 +6196,40 @@ async function ensureMsalLoaded() {
   <div id="history" class="history hide-on-screenshot"></div>
 </div>
 <div id="status"></div>
+<div id="azureDiagnosticsCard" class="card hide-on-screenshot" style="display:none; margin-bottom: 12px;">
+  <div class="card-header" onclick="toggleCard(this)">
+    <span class="chevron">&#x25BC;</span>
+    <span class="tag tag-info" id="azureDiagnosticsTag">AZURE</span>
+    <strong id="azureDiagnosticsTitle">Azure Workspace Diagnostics</strong>
+  </div>
+  <div class="card-content">
+    <div id="azureDiagnosticsHint" class="azure-note">Sign in to query customer Azure subscriptions and Log Analytics workspaces directly from your browser session.</div>
+    <div class="azure-panel-grid">
+      <div class="azure-panel-field">
+        <label for="azureSubscriptionSelect" id="azureSubscriptionLabel">Subscription</label>
+        <select id="azureSubscriptionSelect"></select>
+      </div>
+      <div class="azure-panel-field">
+        <label for="azureResourceSelect" id="azureResourceLabel">ACS Resource</label>
+        <select id="azureResourceSelect"></select>
+      </div>
+      <div class="azure-panel-field">
+        <label for="azureWorkspaceSelect" id="azureWorkspaceLabel">Workspace</label>
+        <select id="azureWorkspaceSelect"></select>
+      </div>
+    </div>
+    <div class="azure-panel-actions">
+      <button id="azureLoadSubscriptionsBtn" type="button" onclick="loadAzureSubscriptions()">Load subscriptions</button>
+      <button id="azureDiscoverResourcesBtn" type="button" onclick="discoverAzureResources()">Discover ACS resources</button>
+      <button id="azureDiscoverWorkspacesBtn" type="button" onclick="discoverAzureWorkspaces()">Discover workspaces</button>
+      <button id="azureRunInventoryBtn" type="button" class="primary" onclick="runAzureQueryTemplate('workspaceInventory')">Run workspace inventory</button>
+      <button id="azureRunDomainSearchBtn" type="button" onclick="runAzureQueryTemplate('domainSearch')">Run domain search</button>
+      <button id="azureRunAcsSearchBtn" type="button" onclick="runAzureQueryTemplate('acsSearch')">Run ACS search</button>
+    </div>
+    <div id="azureDiagnosticsStatus" class="azure-status"></div>
+    <div id="azureDiagnosticsResults" class="code">Sign in and select a workspace to begin.</div>
+  </div>
+</div>
 <div id="results" class="cards"></div>
 
 <div class="footer" id="footerText">
@@ -6339,7 +6465,40 @@ const TRANSLATIONS = {
     spfStatusLabel: 'SPF Status',
     dkim1StatusLabel: 'DKIM1 Status',
     dkim2StatusLabel: 'DKIM2 Status',
-    dmarcStatusLabel: 'DMARC Status'
+    dmarcStatusLabel: 'DMARC Status',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Azure Workspace Diagnostics',
+    azureDiagnosticsHint: 'Sign in to query customer Azure subscriptions and Log Analytics workspaces directly from your browser session. No customer query data is sent to the local server.',
+    azureSubscription: 'Subscription',
+    azureAcsResource: 'ACS Resource',
+    azureWorkspace: 'Workspace',
+    azureLoadSubscriptions: 'Load subscriptions',
+    azureDiscoverResources: 'Discover ACS resources',
+    azureDiscoverWorkspaces: 'Discover workspaces',
+    azureRunInventory: 'Run workspace inventory',
+    azureRunDomainSearch: 'Run domain search',
+    azureRunAcsSearch: 'Run ACS search',
+    azureSignInRequired: 'Sign in with Microsoft to query Azure subscriptions and Log Analytics from the browser.',
+    azureLoadingSubscriptions: 'Loading subscriptions...',
+    azureLoadingResources: 'Discovering ACS resources...',
+    azureLoadingWorkspaces: 'Discovering connected workspaces...',
+    azureRunningQuery: 'Running query: {name}',
+    azureNoSubscriptions: 'No Azure subscriptions were returned for this user.',
+    azureNoResources: 'No ACS resources were found in the selected subscription.',
+    azureNoWorkspaces: 'No connected Log Analytics workspaces were found. Check diagnostic settings on the selected ACS resources.',
+    azureSelectSubscriptionFirst: 'Select a subscription first.',
+    azureSelectWorkspaceFirst: 'Select a workspace first.',
+    azureDomainRequired: 'Enter a domain before running the domain search query.',
+    azureWorkspaceInventory: 'Workspace inventory',
+    azureDomainSearch: 'Domain search',
+    azureAcsSearch: 'ACS search',
+    azureResultsSummary: 'Tenant: {tenant} • Subscription: {subscription} • Workspace: {workspace}',
+    azureQueryReturnedNoTables: 'The query completed but returned no tables.',
+    azureQueryFailed: 'Azure query failed: {reason}',
+    azureDiscoverSuccess: 'Discovery complete. Select a workspace and run a query.',
+    azureSignedInAs: 'Signed in as {user}',
+    azureConsentRequired: 'Additional Azure permissions are required. Approve the consent prompt to continue.',
+    azureQueryTextLabel: 'Executed query'
   },
   es: {
     languageName: 'Español',
@@ -9277,11 +9436,48 @@ function applyLanguageToStaticUi() {
   const signOutBtn = document.getElementById('msSignOutBtn');
   if (signOutBtn) signOutBtn.innerHTML = t('signOut');
 
+  const azureTag = document.getElementById('azureDiagnosticsTag');
+  if (azureTag) azureTag.textContent = t('azureTag');
+
+  const azureTitle = document.getElementById('azureDiagnosticsTitle');
+  if (azureTitle) azureTitle.textContent = t('azureDiagnosticsTitle');
+
+  const azureHint = document.getElementById('azureDiagnosticsHint');
+  if (azureHint) azureHint.textContent = t('azureDiagnosticsHint');
+
+  const azureSubscriptionLabel = document.getElementById('azureSubscriptionLabel');
+  if (azureSubscriptionLabel) azureSubscriptionLabel.textContent = t('azureSubscription');
+
+  const azureResourceLabel = document.getElementById('azureResourceLabel');
+  if (azureResourceLabel) azureResourceLabel.textContent = t('azureAcsResource');
+
+  const azureWorkspaceLabel = document.getElementById('azureWorkspaceLabel');
+  if (azureWorkspaceLabel) azureWorkspaceLabel.textContent = t('azureWorkspace');
+
+  const azureLoadSubscriptionsBtn = document.getElementById('azureLoadSubscriptionsBtn');
+  if (azureLoadSubscriptionsBtn) azureLoadSubscriptionsBtn.textContent = t('azureLoadSubscriptions');
+
+  const azureDiscoverResourcesBtn = document.getElementById('azureDiscoverResourcesBtn');
+  if (azureDiscoverResourcesBtn) azureDiscoverResourcesBtn.textContent = t('azureDiscoverResources');
+
+  const azureDiscoverWorkspacesBtn = document.getElementById('azureDiscoverWorkspacesBtn');
+  if (azureDiscoverWorkspacesBtn) azureDiscoverWorkspacesBtn.textContent = t('azureDiscoverWorkspaces');
+
+  const azureRunInventoryBtn = document.getElementById('azureRunInventoryBtn');
+  if (azureRunInventoryBtn) azureRunInventoryBtn.textContent = t('azureRunInventory');
+
+  const azureRunDomainSearchBtn = document.getElementById('azureRunDomainSearchBtn');
+  if (azureRunDomainSearchBtn) azureRunDomainSearchBtn.textContent = t('azureRunDomainSearch');
+
+  const azureRunAcsSearchBtn = document.getElementById('azureRunAcsSearchBtn');
+  if (azureRunAcsSearchBtn) azureRunAcsSearchBtn.textContent = t('azureRunAcsSearch');
+
   const footer = document.getElementById('footerText');
   if (footer) footer.innerHTML = t('footer', { version: appVersion });
 
   populateLanguageSelect();
   loadHistory();
+  renderAzureDiagnosticsUi();
 
   if (typeof updateAuthUI === 'function') {
     updateAuthUI(lastAuthData);
@@ -11536,6 +11732,17 @@ document.getElementById("domainInput").addEventListener("keyup", function (e) {
   }
 });
 
+document.getElementById('azureSubscriptionSelect').addEventListener('change', function () {
+  azureDiagnosticsState.resources = [];
+  azureDiagnosticsState.workspaces = [];
+  renderAzureDiagnosticsUi();
+});
+
+document.getElementById('azureResourceSelect').addEventListener('change', function () {
+  azureDiagnosticsState.workspaces = [];
+  renderAzureDiagnosticsUi();
+});
+
 // Theme + query-domain initialization
 window.addEventListener("load", function () {
   currentLanguage = detectLanguage();
@@ -11580,6 +11787,18 @@ let msalInstance = null;
 let msAuthAccount = null;
 let isMsEmployee = false;
 let msalInitError = null;
+const ARM_SCOPES = ['https://management.azure.com/user_impersonation'];
+const LOG_ANALYTICS_SCOPES = ['https://api.loganalytics.io/.default'];
+const GRAPH_SCOPES = ['User.Read'];
+let azureDiagnosticsState = {
+  subscriptions: [],
+  resources: [],
+  workspaces: [],
+  lastQueryText: '',
+  lastQueryName: '',
+  lastResult: null,
+  isBusy: false
+};
 
 function getMsalConfig() {
   // The client ID is injected server-side from ACS_ENTRA_CLIENT_ID env var.
@@ -11734,21 +11953,30 @@ async function msSignOut() {
 
 async function verifyMsAccount(accessToken) {
   try {
-    const resp = await fetch('/api/auth/verify', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + accessToken
+    let profile = null;
+    try {
+      const resp = await fetch('https://graph.microsoft.com/v1.0/me', {
+        headers: {
+          'Authorization': 'Bearer ' + accessToken
+        }
+      });
+      if (resp.ok) {
+        profile = await resp.json();
       }
-    });
+    } catch {}
 
-    if (!resp.ok) {
-      console.error('Auth verify failed:', resp.status);
-      updateAuthUI(null);
-      return;
-    }
+    const claims = (msAuthAccount && msAuthAccount.idTokenClaims) ? msAuthAccount.idTokenClaims : {};
+    const userPrincipalName = String((profile && (profile.userPrincipalName || profile.mail)) || msAuthAccount?.username || claims.preferred_username || '').trim();
+    const displayName = String((profile && profile.displayName) || msAuthAccount?.name || claims.name || userPrincipalName || '').trim();
+    const tenantId = String(claims.tid || '').trim();
 
-    const data = await resp.json();
+    const data = {
+      displayName,
+      userPrincipalName,
+      tenantId,
+      isMicrosoftEmployee: /@(microsoft\.com|microsoftsupport\.com)$/i.test(userPrincipalName)
+    };
+
     isMsEmployee = data.isMicrosoftEmployee === true;
     updateAuthUI(data);
   } catch (e) {
@@ -11786,6 +12014,419 @@ function updateAuthUI(authData) {
     if (signOutBtn) signOutBtn.style.display = 'none';
     if (statusEl) statusEl.style.display = 'none';
     isMsEmployee = false;
+  }
+
+  renderAzureDiagnosticsUi();
+}
+
+function setAzureDiagnosticsStatus(message, isError = false) {
+  const el = document.getElementById('azureDiagnosticsStatus');
+  if (!el) return;
+  el.textContent = message || '';
+  el.className = isError ? 'azure-status error' : 'azure-status';
+}
+
+function setAzureDiagnosticsResultsHtml(html) {
+  const el = document.getElementById('azureDiagnosticsResults');
+  if (!el) return;
+  el.innerHTML = html || '';
+}
+
+function getSelectedAzureSubscriptionId() {
+  const el = document.getElementById('azureSubscriptionSelect');
+  return el ? String(el.value || '') : '';
+}
+
+function getSelectedAzureResourceId() {
+  const el = document.getElementById('azureResourceSelect');
+  return el ? String(el.value || '') : '';
+}
+
+function getSelectedAzureWorkspaceId() {
+  const el = document.getElementById('azureWorkspaceSelect');
+  return el ? String(el.value || '') : '';
+}
+
+function renderAzureSelectOptions(selectId, items, getValue, getLabel, emptyText) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  const currentValue = el.value;
+  const options = (items || []).map(item => {
+    const value = String(getValue(item) || '');
+    const label = String(getLabel(item) || value);
+    return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+  });
+  if (options.length === 0) {
+    el.innerHTML = `<option value="">${escapeHtml(emptyText)}</option>`;
+    return;
+  }
+  el.innerHTML = options.join('');
+  if (currentValue && items.some(item => String(getValue(item) || '') === currentValue)) {
+    el.value = currentValue;
+  }
+}
+
+function getAzureAuthDisplayName() {
+  return (lastAuthData && (lastAuthData.displayName || lastAuthData.userPrincipalName))
+    ? String(lastAuthData.displayName || lastAuthData.userPrincipalName)
+    : '';
+}
+
+function renderAzureDiagnosticsUi() {
+  const card = document.getElementById('azureDiagnosticsCard');
+  if (!card) return;
+
+  const signedIn = !!(msAuthAccount && msalInstance);
+  card.style.display = (getMsalConfig() && signedIn) ? '' : 'none';
+
+  renderAzureSelectOptions(
+    'azureSubscriptionSelect',
+    azureDiagnosticsState.subscriptions,
+    item => item.subscriptionId,
+    item => `${item.displayName || item.subscriptionId}${item.tenantId ? ` (${item.tenantId})` : ''}`,
+    t('azureNoSubscriptions')
+  );
+
+  renderAzureSelectOptions(
+    'azureResourceSelect',
+    azureDiagnosticsState.resources,
+    item => item.id,
+    item => `${item.name} [${item.type}]`,
+    t('azureNoResources')
+  );
+
+  renderAzureSelectOptions(
+    'azureWorkspaceSelect',
+    azureDiagnosticsState.workspaces,
+    item => item.id,
+    item => `${item.name}${item.customerId ? ` (${item.customerId})` : ''}`,
+    t('azureNoWorkspaces')
+  );
+
+  const hint = document.getElementById('azureDiagnosticsHint');
+  if (hint) {
+    hint.textContent = signedIn
+      ? t('azureSignedInAs', { user: getAzureAuthDisplayName() || t('authMicrosoftLabel') })
+      : t('azureDiagnosticsHint');
+  }
+
+  ['azureLoadSubscriptionsBtn','azureDiscoverResourcesBtn','azureDiscoverWorkspacesBtn','azureRunInventoryBtn','azureRunDomainSearchBtn','azureRunAcsSearchBtn']
+    .forEach(id => {
+      const btn = document.getElementById(id);
+      if (btn) btn.disabled = !signedIn || azureDiagnosticsState.isBusy;
+    });
+
+  if (!signedIn) {
+    setAzureDiagnosticsStatus(t('azureSignInRequired'), false);
+  }
+}
+
+function escapeKqlString(text) {
+  return String(text || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+async function acquireAzureAccessToken(scopes) {
+  if (!msalInstance || !msAuthAccount) {
+    throw new Error(t('azureSignInRequired'));
+  }
+
+  const request = {
+    scopes,
+    account: msAuthAccount
+  };
+
+  try {
+    const silent = await msalInstance.acquireTokenSilent(request);
+    return silent.accessToken;
+  } catch (e) {
+    const requiresInteraction = e instanceof msal.InteractionRequiredAuthError ||
+      ['interaction_required', 'consent_required', 'login_required'].includes(String(e?.errorCode || '').toLowerCase());
+    if (!requiresInteraction) throw e;
+
+    setAzureDiagnosticsStatus(t('azureConsentRequired'));
+    const popup = await msalInstance.acquireTokenPopup({
+      scopes,
+      account: msAuthAccount,
+      prompt: 'consent'
+    });
+    return popup.accessToken;
+  }
+}
+
+async function armFetchJson(url, options = {}) {
+  const token = await acquireAzureAccessToken(ARM_SCOPES);
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`ARM ${response.status}: ${text || response.statusText}`);
+  }
+  return response.json();
+}
+
+async function armFetchAll(url) {
+  const items = [];
+  let next = url;
+  while (next) {
+    const data = await armFetchJson(next);
+    if (Array.isArray(data.value)) items.push(...data.value);
+    next = data.nextLink || null;
+  }
+  return items;
+}
+
+async function loadAzureSubscriptions() {
+  try {
+    azureDiagnosticsState.isBusy = true;
+    renderAzureDiagnosticsUi();
+    setAzureDiagnosticsStatus(t('azureLoadingSubscriptions'));
+
+    const data = await armFetchAll('https://management.azure.com/subscriptions?api-version=2020-01-01');
+    azureDiagnosticsState.subscriptions = (data || [])
+      .filter(item => String(item.state || '').toLowerCase() === 'enabled' || !item.state)
+      .map(item => ({
+        subscriptionId: item.subscriptionId,
+        displayName: item.displayName || item.subscriptionId,
+        tenantId: item.tenantId || ''
+      }));
+
+    azureDiagnosticsState.resources = [];
+    azureDiagnosticsState.workspaces = [];
+    renderAzureDiagnosticsUi();
+    setAzureDiagnosticsStatus(
+      azureDiagnosticsState.subscriptions.length > 0
+        ? `${azureDiagnosticsState.subscriptions.length} ${t('azureSubscription').toLowerCase()}(s) loaded.`
+        : t('azureNoSubscriptions')
+    );
+  } catch (e) {
+    console.error('Azure subscription load failed:', e);
+    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
+  } finally {
+    azureDiagnosticsState.isBusy = false;
+    renderAzureDiagnosticsUi();
+  }
+}
+
+async function discoverAzureResources() {
+  const subscriptionId = getSelectedAzureSubscriptionId();
+  if (!subscriptionId) {
+    setAzureDiagnosticsStatus(t('azureSelectSubscriptionFirst'), true);
+    return;
+  }
+
+  try {
+    azureDiagnosticsState.isBusy = true;
+    renderAzureDiagnosticsUi();
+    setAzureDiagnosticsStatus(t('azureLoadingResources'));
+
+    const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`);
+    azureDiagnosticsState.resources = (resources || [])
+      .filter(item => /^microsoft\.communication\//i.test(String(item.type || '')))
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+    azureDiagnosticsState.workspaces = [];
+    renderAzureDiagnosticsUi();
+    setAzureDiagnosticsStatus(
+      azureDiagnosticsState.resources.length > 0
+        ? `${azureDiagnosticsState.resources.length} ACS resource(s) discovered.`
+        : t('azureNoResources')
+    );
+  } catch (e) {
+    console.error('Azure resource discovery failed:', e);
+    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
+  } finally {
+    azureDiagnosticsState.isBusy = false;
+    renderAzureDiagnosticsUi();
+  }
+}
+
+async function getWorkspaceMetadata(workspaceResourceId) {
+  const data = await armFetchJson(`https://management.azure.com${workspaceResourceId}?api-version=2022-10-01`);
+  return {
+    id: data.id,
+    name: data.name,
+    location: data.location,
+    customerId: data.properties && data.properties.customerId ? data.properties.customerId : '',
+    resourceGroup: data.id ? (data.id.split('/')[4] || '') : ''
+  };
+}
+
+async function discoverAzureWorkspaces() {
+  const subscriptionId = getSelectedAzureSubscriptionId();
+  if (!subscriptionId) {
+    setAzureDiagnosticsStatus(t('azureSelectSubscriptionFirst'), true);
+    return;
+  }
+
+  const selectedResourceId = getSelectedAzureResourceId();
+  const resourcesToCheck = selectedResourceId
+    ? azureDiagnosticsState.resources.filter(item => item.id === selectedResourceId)
+    : azureDiagnosticsState.resources;
+
+  try {
+    azureDiagnosticsState.isBusy = true;
+    renderAzureDiagnosticsUi();
+    setAzureDiagnosticsStatus(t('azureLoadingWorkspaces'));
+
+    const workspaceMap = new Map();
+
+    for (const resource of resourcesToCheck) {
+      const diagnostics = await armFetchJson(`https://management.azure.com${resource.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`);
+      for (const setting of (diagnostics.value || [])) {
+        if (setting.workspaceId) {
+          workspaceMap.set(setting.workspaceId.toLowerCase(), setting.workspaceId);
+        }
+      }
+    }
+
+    if (workspaceMap.size === 0) {
+      const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`);
+      for (const resource of resources) {
+        if (String(resource.type || '').toLowerCase() === 'microsoft.operationalinsights/workspaces') {
+          workspaceMap.set(String(resource.id).toLowerCase(), resource.id);
+        }
+      }
+    }
+
+    const workspaces = [];
+    for (const workspaceId of workspaceMap.values()) {
+      try {
+        workspaces.push(await getWorkspaceMetadata(workspaceId));
+      } catch (e) {
+        console.warn('Workspace metadata load failed for', workspaceId, e);
+      }
+    }
+
+    azureDiagnosticsState.workspaces = workspaces.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+    renderAzureDiagnosticsUi();
+    setAzureDiagnosticsStatus(
+      azureDiagnosticsState.workspaces.length > 0
+        ? t('azureDiscoverSuccess')
+        : t('azureNoWorkspaces')
+    );
+  } catch (e) {
+    console.error('Azure workspace discovery failed:', e);
+    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
+  } finally {
+    azureDiagnosticsState.isBusy = false;
+    renderAzureDiagnosticsUi();
+  }
+}
+
+function buildAzureQueryTemplate(templateName) {
+  const domain = String((document.getElementById('domainInput')?.value || '').trim());
+  switch (templateName) {
+    case 'workspaceInventory':
+      return {
+        name: t('azureWorkspaceInventory'),
+        query: 'union withsource=TableName * | summarize Rows=count() by TableName | top 25 by Rows desc'
+      };
+    case 'domainSearch':
+      if (!domain) throw new Error(t('azureDomainRequired'));
+      return {
+        name: t('azureDomainSearch'),
+        query: `search in (*) "${escapeKqlString(domain)}" | take 100`
+      };
+    case 'acsSearch':
+      return {
+        name: t('azureAcsSearch'),
+        query: 'search in (*) "Microsoft.Communication" | take 100'
+      };
+    default:
+      throw new Error('Unknown Azure query template: ' + templateName);
+  }
+}
+
+function renderLogAnalyticsResult(result) {
+  if (!result || !Array.isArray(result.tables) || result.tables.length === 0) {
+    return `<div>${escapeHtml(t('azureQueryReturnedNoTables'))}</div>`;
+  }
+
+  const workspace = azureDiagnosticsState.workspaces.find(item => item.id === getSelectedAzureWorkspaceId());
+  const subscription = azureDiagnosticsState.subscriptions.find(item => item.subscriptionId === getSelectedAzureSubscriptionId());
+  const meta = `<div class="azure-result-meta">${escapeHtml(t('azureResultsSummary', {
+    tenant: lastAuthData?.tenantId || 'n/a',
+    subscription: subscription?.displayName || subscription?.subscriptionId || 'n/a',
+    workspace: workspace?.name || workspace?.customerId || 'n/a'
+  }))}</div>`;
+  const queryText = azureDiagnosticsState.lastQueryText
+    ? `<div class="azure-result-meta"><strong>${escapeHtml(t('azureQueryTextLabel'))}:</strong> <code class="guidance-code">${escapeHtml(azureDiagnosticsState.lastQueryText)}</code></div>`
+    : '';
+
+  const tablesHtml = result.tables.map(table => {
+    const columns = Array.isArray(table.columns) ? table.columns : [];
+    const rows = Array.isArray(table.rows) ? table.rows.slice(0, 100) : [];
+    return `
+      <div style="margin-bottom: 12px;">
+        <div class="azure-result-meta"><strong>${escapeHtml(table.name || 'Table')}</strong> — ${rows.length} row(s)</div>
+        <table class="azure-result-table">
+          <thead><tr>${columns.map(col => `<th>${escapeHtml(col.name || '')}</th>`).join('')}</tr></thead>
+          <tbody>
+            ${rows.map(row => `<tr>${columns.map((col, index) => `<td>${escapeHtml(row[index] === null || row[index] === undefined ? '' : String(row[index]))}</td>`).join('')}</tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }).join('');
+
+  return meta + queryText + tablesHtml;
+}
+
+async function runAzureQueryTemplate(templateName) {
+  const workspaceId = getSelectedAzureWorkspaceId();
+  if (!workspaceId) {
+    setAzureDiagnosticsStatus(t('azureSelectWorkspaceFirst'), true);
+    return;
+  }
+
+  const workspace = azureDiagnosticsState.workspaces.find(item => item.id === workspaceId);
+  if (!workspace || !workspace.customerId) {
+    setAzureDiagnosticsStatus(t('azureSelectWorkspaceFirst'), true);
+    return;
+  }
+
+  try {
+    azureDiagnosticsState.isBusy = true;
+    renderAzureDiagnosticsUi();
+
+    const template = buildAzureQueryTemplate(templateName);
+    azureDiagnosticsState.lastQueryText = template.query;
+    azureDiagnosticsState.lastQueryName = template.name;
+    setAzureDiagnosticsStatus(t('azureRunningQuery', { name: template.name }));
+
+    const token = await acquireAzureAccessToken(LOG_ANALYTICS_SCOPES);
+    const response = await fetch(`https://api.loganalytics.io/v1/workspaces/${encodeURIComponent(workspace.customerId)}/query`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: template.query,
+        timespan: 'P1D'
+      })
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`${response.status}: ${text || response.statusText}`);
+    }
+
+    const result = await response.json();
+    azureDiagnosticsState.lastResult = result;
+    setAzureDiagnosticsResultsHtml(renderLogAnalyticsResult(result));
+    setAzureDiagnosticsStatus(`${template.name} completed.`);
+  } catch (e) {
+    console.error('Azure Log Analytics query failed:', e);
+    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
+  } finally {
+    azureDiagnosticsState.isBusy = false;
+    renderAzureDiagnosticsUi();
   }
 }
 </script>
