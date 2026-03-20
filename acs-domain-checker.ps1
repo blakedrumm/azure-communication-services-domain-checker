@@ -12126,7 +12126,23 @@ function escapeKqlString(text) {
 }
 
 async function acquireAzureAccessToken(scopes) {
-  if (!msalInstance || !msAuthAccount) {
+  if (!msalInstance) {
+    throw new Error(t('azureSignInRequired'));
+  }
+
+  if (!msAuthAccount) {
+    setAzureDiagnosticsStatus(t('azureConsentRequired'));
+    const loginResponse = await msalInstance.loginPopup({
+      scopes: Array.from(new Set([...(scopes || []), ...GRAPH_SCOPES])),
+      prompt: 'select_account'
+    });
+    if (loginResponse && loginResponse.account) {
+      msAuthAccount = loginResponse.account;
+      await verifyMsAccount(loginResponse.accessToken || '');
+    }
+  }
+
+  if (!msAuthAccount) {
     throw new Error(t('azureSignInRequired'));
   }
 
