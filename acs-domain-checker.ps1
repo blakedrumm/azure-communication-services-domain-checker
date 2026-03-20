@@ -6063,22 +6063,55 @@ ul.guidance li {
   color: #ef4444;
 }
 
+.azure-results-container {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  white-space: normal;
+  word-break: normal;
+}
+
+.azure-results-container:empty {
+  display: none;
+}
+
+.azure-result-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+
 .azure-result-table {
-  width: 100%;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .azure-result-table th,
 .azure-result-table td {
-  padding: 6px 8px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.azure-result-table td.azure-cell-wrap {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .azure-result-table th {
   background: var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .azure-result-meta {
@@ -6224,7 +6257,7 @@ async function ensureMsalLoaded() {
       <button id="azureRunAcsSearchBtn" type="button" onclick="runAzureQueryTemplate('acsSearch')">Run ACS search</button>
     </div>
     <div id="azureDiagnosticsStatus" class="azure-status"></div>
-    <div id="azureDiagnosticsResults" class="code">Sign in and select a workspace to begin.</div>
+    <div id="azureDiagnosticsResults" class="azure-results-container">Sign in and select a workspace to begin.</div>
   </div>
 </div>
 <div id="results" class="cards"></div>
@@ -12369,7 +12402,7 @@ function buildAzureQueryTemplate(templateName) {
     case 'workspaceInventory':
       return {
         name: t('azureWorkspaceInventory'),
-        query: 'union withsource=TableName * | summarize Rows=count() by TableName | top 25 by Rows desc'
+        query: 'union withsource=SourceTable * | summarize Rows=count() by SourceTable | top 25 by Rows desc'
       };
     case 'domainSearch':
       if (!domain) throw new Error(t('azureDomainRequired'));
@@ -12406,15 +12439,22 @@ function renderLogAnalyticsResult(result) {
   const tablesHtml = result.tables.map(table => {
     const columns = Array.isArray(table.columns) ? table.columns : [];
     const rows = Array.isArray(table.rows) ? table.rows.slice(0, 100) : [];
+    const totalRows = Array.isArray(table.rows) ? table.rows.length : 0;
+    const truncatedNote = totalRows > 100 ? ` (showing 100 of ${totalRows})` : '';
     return `
-      <div style="margin-bottom: 12px;">
-        <div class="azure-result-meta"><strong>${escapeHtml(table.name || 'Table')}</strong> — ${rows.length} row(s)</div>
-        <table class="azure-result-table">
-          <thead><tr>${columns.map(col => `<th>${escapeHtml(col.name || '')}</th>`).join('')}</tr></thead>
-          <tbody>
-            ${rows.map(row => `<tr>${columns.map((col, index) => `<td>${escapeHtml(row[index] === null || row[index] === undefined ? '' : String(row[index]))}</td>`).join('')}</tr>`).join('')}
-          </tbody>
-        </table>
+      <div>
+        <div class="azure-result-meta"><strong>${escapeHtml(table.name || 'Table')}</strong> — ${rows.length} row(s)${truncatedNote}</div>
+        <div class="azure-result-table-wrap">
+          <table class="azure-result-table">
+            <thead><tr>${columns.map(col => `<th>${escapeHtml(col.name || '')}</th>`).join('')}</tr></thead>
+            <tbody>
+              ${rows.map(row => `<tr>${columns.map((col, index) => {
+                const val = row[index] === null || row[index] === undefined ? '' : String(row[index]);
+                return `<td title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+              }).join('')}</tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
       </div>`;
   }).join('');
 
