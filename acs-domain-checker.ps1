@@ -834,7 +834,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.4.0'
+$script:AppVersion = '1.4.1'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -6219,9 +6219,6 @@ async function ensureMsalLoaded() {
       </div>
     </div>
     <div class="azure-panel-actions">
-      <button id="azureLoadSubscriptionsBtn" type="button" onclick="loadAzureSubscriptions()">Load subscriptions</button>
-      <button id="azureDiscoverResourcesBtn" type="button" onclick="discoverAzureResources()">Discover ACS resources</button>
-      <button id="azureDiscoverWorkspacesBtn" type="button" onclick="discoverAzureWorkspaces()">Discover workspaces</button>
       <button id="azureRunInventoryBtn" type="button" class="primary" onclick="runAzureQueryTemplate('workspaceInventory')">Run workspace inventory</button>
       <button id="azureRunDomainSearchBtn" type="button" onclick="runAzureQueryTemplate('domainSearch')">Run domain search</button>
       <button id="azureRunAcsSearchBtn" type="button" onclick="runAzureQueryTemplate('acsSearch')">Run ACS search</button>
@@ -9454,15 +9451,6 @@ function applyLanguageToStaticUi() {
   const azureWorkspaceLabel = document.getElementById('azureWorkspaceLabel');
   if (azureWorkspaceLabel) azureWorkspaceLabel.textContent = t('azureWorkspace');
 
-  const azureLoadSubscriptionsBtn = document.getElementById('azureLoadSubscriptionsBtn');
-  if (azureLoadSubscriptionsBtn) azureLoadSubscriptionsBtn.textContent = t('azureLoadSubscriptions');
-
-  const azureDiscoverResourcesBtn = document.getElementById('azureDiscoverResourcesBtn');
-  if (azureDiscoverResourcesBtn) azureDiscoverResourcesBtn.textContent = t('azureDiscoverResources');
-
-  const azureDiscoverWorkspacesBtn = document.getElementById('azureDiscoverWorkspacesBtn');
-  if (azureDiscoverWorkspacesBtn) azureDiscoverWorkspacesBtn.textContent = t('azureDiscoverWorkspaces');
-
   const azureRunInventoryBtn = document.getElementById('azureRunInventoryBtn');
   if (azureRunInventoryBtn) azureRunInventoryBtn.textContent = t('azureRunInventory');
 
@@ -11736,11 +11724,13 @@ document.getElementById('azureSubscriptionSelect').addEventListener('change', fu
   azureDiagnosticsState.resources = [];
   azureDiagnosticsState.workspaces = [];
   renderAzureDiagnosticsUi();
+  discoverAzureResources();
 });
 
 document.getElementById('azureResourceSelect').addEventListener('change', function () {
   azureDiagnosticsState.workspaces = [];
   renderAzureDiagnosticsUi();
+  discoverAzureWorkspaces();
 });
 
 // Theme + query-domain initialization
@@ -11788,7 +11778,7 @@ let msAuthAccount = null;
 let isMsEmployee = false;
 let msalInitError = null;
 const ARM_SCOPES = ['https://management.azure.com/user_impersonation'];
-const LOG_ANALYTICS_SCOPES = ['https://api.loganalytics.io/.default'];
+const LOG_ANALYTICS_SCOPES = ['https://api.loganalytics.io/Data.Read'];
 const GRAPH_SCOPES = ['User.Read'];
 let azureDiagnosticsState = {
   subscriptions: [],
@@ -11919,8 +11909,11 @@ async function msSignIn() {
     if (btn) { btn.disabled = true; btn.textContent = t('authSigningIn'); }
 
     // Use redirect flow for best compatibility with browser / popup blockers.
+    // Request Graph scopes for the token, plus pre-consent ARM and Log Analytics
+    // via extraScopesToConsent so acquireTokenSilent works later without popups.
     await msalInstance.loginRedirect({
-      scopes: ['User.Read'],
+      scopes: GRAPH_SCOPES,
+      extraScopesToConsent: [...ARM_SCOPES, ...LOG_ANALYTICS_SCOPES],
       prompt: 'select_account'
     });
   } catch (e) {
@@ -12017,6 +12010,10 @@ function updateAuthUI(authData) {
   }
 
   renderAzureDiagnosticsUi();
+
+  if (authData && msAuthAccount) {
+    loadAzureSubscriptions();
+  }
 }
 
 function setAzureDiagnosticsStatus(message, isError = false) {
@@ -12110,7 +12107,7 @@ function renderAzureDiagnosticsUi() {
       : t('azureDiagnosticsHint');
   }
 
-  ['azureLoadSubscriptionsBtn','azureDiscoverResourcesBtn','azureDiscoverWorkspacesBtn','azureRunInventoryBtn','azureRunDomainSearchBtn','azureRunAcsSearchBtn']
+  ['azureRunInventoryBtn','azureRunDomainSearchBtn','azureRunAcsSearchBtn']
     .forEach(id => {
       const btn = document.getElementById(id);
       if (btn) btn.disabled = !signedIn || azureDiagnosticsState.isBusy;
@@ -12155,16 +12152,26 @@ async function acquireAzureAccessToken(scopes) {
       ['interaction_required', 'consent_required', 'login_required'].includes(String(e?.errorCode || '').toLowerCase());
     if (!requiresInteraction) throw e;
 
-    setAzureDiagnosticsStatus(t('azureConsentRequired'));
-    const popupRequest = {
-      scopes,
-      account: msAuthAccount
-    };
-    if (loginHint) {
-      popupRequest.loginHint = loginHint;
+    // Try once more with forceRefresh before falling back to redirect
+    try {
+      const retry = await msalInstance.acquireTokenSilent({ ...request, forceRefresh: true });
+      return retry.accessToken;
+    } catch (_retryErr) {
+      // Silent retry also failed; use redirect to get consent.
+      // This avoids opening a popup that shows a mini copy of the website.
+      setAzureDiagnosticsStatus(t('azureConsentRequired'));
+      const redirectRequest = {
+        scopes,
+        account: msAuthAccount
+      };
+      if (loginHint) {
+        redirectRequest.loginHint = loginHint;
+      }
+      await msalInstance.acquireTokenRedirect(redirectRequest);
+      // Page will redirect; code below this line will not execute.
+      // After redirect, handleRedirectPromise in initMsAuth will resume the session.
+      return '';
     }
-    const popup = await msalInstance.acquireTokenPopup(popupRequest);
-    return popup.accessToken;
   }
 }
 
@@ -12219,6 +12226,14 @@ async function loadAzureSubscriptions() {
         ? `${azureDiagnosticsState.subscriptions.length} ${t('azureSubscription').toLowerCase()}(s) loaded.`
         : t('azureNoSubscriptions')
     );
+
+    if (azureDiagnosticsState.subscriptions.length > 0) {
+      const subSelect = document.getElementById('azureSubscriptionSelect');
+      if (subSelect && subSelect.options.length > 0) subSelect.selectedIndex = 0;
+      azureDiagnosticsState.isBusy = false;
+      await discoverAzureResources();
+      return;
+    }
   } catch (e) {
     console.error('Azure subscription load failed:', e);
     setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
@@ -12252,6 +12267,14 @@ async function discoverAzureResources() {
         ? `${azureDiagnosticsState.resources.length} ACS resource(s) discovered.`
         : t('azureNoResources')
     );
+
+    if (azureDiagnosticsState.resources.length > 0) {
+      const resSelect = document.getElementById('azureResourceSelect');
+      if (resSelect && resSelect.options.length > 0) resSelect.selectedIndex = 0;
+      azureDiagnosticsState.isBusy = false;
+      await discoverAzureWorkspaces();
+      return;
+    }
   } catch (e) {
     console.error('Azure resource discovery failed:', e);
     setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
@@ -12320,6 +12343,12 @@ async function discoverAzureWorkspaces() {
 
     azureDiagnosticsState.workspaces = workspaces.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
     renderAzureDiagnosticsUi();
+
+    if (azureDiagnosticsState.workspaces.length > 0) {
+      const wsSelect = document.getElementById('azureWorkspaceSelect');
+      if (wsSelect && wsSelect.options.length > 0) wsSelect.selectedIndex = 0;
+    }
+
     setAzureDiagnosticsStatus(
       azureDiagnosticsState.workspaces.length > 0
         ? t('azureDiscoverSuccess')
