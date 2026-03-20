@@ -11918,6 +11918,17 @@ async function msSignIn() {
     const btn = document.getElementById('msSignInBtn');
     if (btn) { btn.disabled = true; btn.textContent = t('authSigningIn'); }
 
+    if (typeof msalInstance.clearCache === 'function') {
+      try { await msalInstance.clearCache(); } catch {}
+    }
+    msAuthAccount = null;
+    try {
+      const existing = msalInstance.getAllAccounts();
+      for (const acct of existing) {
+        try { await msalInstance.logoutPopup({ account: acct, mainWindowRedirectUri: window.location.origin + window.location.pathname }); } catch {}
+      }
+    } catch {}
+
     // Use redirect flow for best compatibility with browser / popup blockers.
     await msalInstance.loginRedirect({
       scopes: ['User.Read'],
@@ -12113,7 +12124,7 @@ function renderAzureDiagnosticsUi() {
   ['azureLoadSubscriptionsBtn','azureDiscoverResourcesBtn','azureDiscoverWorkspacesBtn','azureRunInventoryBtn','azureRunDomainSearchBtn','azureRunAcsSearchBtn']
     .forEach(id => {
       const btn = document.getElementById(id);
-      if (btn) btn.disabled = !signedIn || azureDiagnosticsState.isBusy;
+      if (btn) btn.disabled = azureDiagnosticsState.isBusy;
     });
 
   if (!signedIn) {
