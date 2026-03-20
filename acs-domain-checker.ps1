@@ -11918,17 +11918,6 @@ async function msSignIn() {
     const btn = document.getElementById('msSignInBtn');
     if (btn) { btn.disabled = true; btn.textContent = t('authSigningIn'); }
 
-    if (typeof msalInstance.clearCache === 'function') {
-      try { await msalInstance.clearCache(); } catch {}
-    }
-    msAuthAccount = null;
-    try {
-      const existing = msalInstance.getAllAccounts();
-      for (const acct of existing) {
-        try { await msalInstance.logoutPopup({ account: acct, mainWindowRedirectUri: window.location.origin + window.location.pathname }); } catch {}
-      }
-    } catch {}
-
     // Use redirect flow for best compatibility with browser / popup blockers.
     await msalInstance.loginRedirect({
       scopes: ['User.Read'],
@@ -12124,7 +12113,7 @@ function renderAzureDiagnosticsUi() {
   ['azureLoadSubscriptionsBtn','azureDiscoverResourcesBtn','azureDiscoverWorkspacesBtn','azureRunInventoryBtn','azureRunDomainSearchBtn','azureRunAcsSearchBtn']
     .forEach(id => {
       const btn = document.getElementById(id);
-      if (btn) btn.disabled = azureDiagnosticsState.isBusy;
+      if (btn) btn.disabled = !signedIn || azureDiagnosticsState.isBusy;
     });
 
   if (!signedIn) {
@@ -12136,26 +12125,22 @@ function escapeKqlString(text) {
   return String(text || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+function getMsAuthLoginHint() {
+  if (msAuthAccount) {
+    return msAuthAccount.username || (msAuthAccount.idTokenClaims && msAuthAccount.idTokenClaims.preferred_username) || '';
+  }
+  if (lastAuthData && lastAuthData.userPrincipalName) {
+    return lastAuthData.userPrincipalName;
+  }
+  return '';
+}
+
 async function acquireAzureAccessToken(scopes) {
-  if (!msalInstance) {
+  if (!msalInstance || !msAuthAccount) {
     throw new Error(t('azureSignInRequired'));
   }
 
-  if (!msAuthAccount) {
-    setAzureDiagnosticsStatus(t('azureConsentRequired'));
-    const loginResponse = await msalInstance.loginPopup({
-      scopes: Array.from(new Set([...(scopes || []), ...GRAPH_SCOPES])),
-      prompt: 'select_account'
-    });
-    if (loginResponse && loginResponse.account) {
-      msAuthAccount = loginResponse.account;
-      await verifyMsAccount(loginResponse.accessToken || '');
-    }
-  }
-
-  if (!msAuthAccount) {
-    throw new Error(t('azureSignInRequired'));
-  }
+  const loginHint = getMsAuthLoginHint();
 
   const request = {
     scopes,
@@ -12171,11 +12156,14 @@ async function acquireAzureAccessToken(scopes) {
     if (!requiresInteraction) throw e;
 
     setAzureDiagnosticsStatus(t('azureConsentRequired'));
-    const popup = await msalInstance.acquireTokenPopup({
+    const popupRequest = {
       scopes,
-      account: msAuthAccount,
-      prompt: 'consent'
-    });
+      account: msAuthAccount
+    };
+    if (loginHint) {
+      popupRequest.loginHint = loginHint;
+    }
+    const popup = await msalInstance.acquireTokenPopup(popupRequest);
     return popup.accessToken;
   }
 }
