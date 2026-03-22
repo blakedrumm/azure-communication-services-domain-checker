@@ -26,12 +26,12 @@
   Runs a one-shot domain check, writes JSON to stdout, and exits without starting the web server.
 
 .PARAMETER TermsOfServiceUrl
-  Optional URL displayed as a "Terms of Service" link in the page footer.
-  Falls back to the ACS_TOS_URL environment variable when not specified.
+  Terms of Service: supply an external URL (https://...) to link out, or a local file path
+  (.html / .txt) to serve at the /terms route. Falls back to the ACS_TOS_URL environment variable.
 
 .PARAMETER PrivacyStatementUrl
-  Optional URL displayed as a "Privacy" link in the page footer.
-  Falls back to the ACS_PRIVACY_URL environment variable when not specified.
+  Privacy Statement: supply an external URL (https://...) to link out, or a local file path
+  (.html / .txt) to serve at the /privacy route. Falls back to the ACS_PRIVACY_URL environment variable.
 
 .EXAMPLE
   # Start on the default port
@@ -69,8 +69,8 @@
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
   - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 60; set to 0 to disable).
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
-  - ACS_TOS_URL                  : Fallback for -TermsOfServiceUrl. Optional Terms of Service link in the page footer.
-  - ACS_PRIVACY_URL              : Fallback for -PrivacyStatementUrl. Optional Privacy Statement link in the page footer.
+  - ACS_TOS_URL                  : Fallback for -TermsOfServiceUrl. External URL or local file path for Terms of Service.
+  - ACS_PRIVACY_URL              : Fallback for -PrivacyStatementUrl. External URL or local file path for Privacy Statement.
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
                                    Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
 
@@ -107,6 +107,7 @@ param(
   [string]$AnonymousMetricsFile,
 
   # Optional footer links (also settable via ACS_TOS_URL / ACS_PRIVACY_URL env vars).
+  # Each value can be an external URL (https://...) or a local file path to serve at /terms or /privacy.
   [string]$TermsOfServiceUrl,
   [string]$PrivacyStatementUrl
 )
@@ -12619,10 +12620,46 @@ if ([string]::IsNullOrWhiteSpace($issueUrl)) { $issueUrl = '' }
 $htmlPage = $htmlPage.Replace('__ACS_ISSUE_URL__', $issueUrl)
 
 $tosUrl = if (-not [string]::IsNullOrWhiteSpace($TermsOfServiceUrl)) { $TermsOfServiceUrl } elseif (-not [string]::IsNullOrWhiteSpace($env:ACS_TOS_URL)) { $env:ACS_TOS_URL } else { '' }
-$htmlPage = $htmlPage.Replace('__ACS_TOS_URL__', $tosUrl)
-
 $privacyUrl = if (-not [string]::IsNullOrWhiteSpace($PrivacyStatementUrl)) { $PrivacyStatementUrl } elseif (-not [string]::IsNullOrWhiteSpace($env:ACS_PRIVACY_URL)) { $env:ACS_PRIVACY_URL } else { '' }
-$htmlPage = $htmlPage.Replace('__ACS_PRIVACY_URL__', $privacyUrl)
+
+# Resolve each value: if it looks like an external URL use it directly as a link;
+# if it is a local file path, read the content and serve it at /terms or /privacy.
+$script:TosLinkHref = ''
+$script:TosPageHtml = ''
+$script:PrivacyLinkHref = ''
+$script:PrivacyPageHtml = ''
+
+foreach ($entry in @(
+  @{ Value = $tosUrl;     LinkVar = 'TosLinkHref';     PageVar = 'TosPageHtml';     Route = '/terms';   Title = 'Terms of Service' },
+  @{ Value = $privacyUrl; LinkVar = 'PrivacyLinkHref'; PageVar = 'PrivacyPageHtml'; Route = '/privacy'; Title = 'Privacy Statement' }
+)) {
+  $val = ($entry.Value).Trim()
+  if ([string]::IsNullOrWhiteSpace($val)) { continue }
+  if ($val -match '^https?://') {
+    # External URL — footer links directly to it
+    Set-Variable -Name "script:$($entry.LinkVar)" -Value $val
+  } else {
+    # Treat as local file path
+    $resolvedPath = if ([System.IO.Path]::IsPathRooted($val)) { $val } else { Join-Path $PSScriptRoot $val }
+    if (Test-Path -LiteralPath $resolvedPath) {
+      $fileContent = [System.IO.File]::ReadAllText($resolvedPath, [Text.Encoding]::UTF8)
+      $isHtmlFile = $resolvedPath -match '\.html?$'
+      if ($isHtmlFile) {
+        Set-Variable -Name "script:$($entry.PageVar)" -Value $fileContent
+      } else {
+        # Wrap plain text in a minimal styled HTML page
+        $escaped = [System.Net.WebUtility]::HtmlEncode($fileContent).Replace("`n", "<br/>`n")
+        Set-Variable -Name "script:$($entry.PageVar)" -Value "<!DOCTYPE html><html><head><meta charset='utf-8'><title>$($entry.Title)</title><style>body{font-family:system-ui,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;line-height:1.6;color:#333}@media(prefers-color-scheme:dark){body{background:#1e1e1e;color:#ddd}}</style></head><body><h1>$($entry.Title)</h1>$escaped</body></html>"
+      }
+      Set-Variable -Name "script:$($entry.LinkVar)" -Value $entry.Route
+    } else {
+      Write-Warning "$($entry.Title) file not found: $resolvedPath"
+    }
+  }
+}
+
+$htmlPage = $htmlPage.Replace('__ACS_TOS_URL__', $script:TosLinkHref)
+$htmlPage = $htmlPage.Replace('__ACS_PRIVACY_URL__', $script:PrivacyLinkHref)
 
 # Optional local MSAL script path (for environments that block CDNs)
 $msalLocalPath = $env:ACS_MSAL_LOCAL_PATH
@@ -12781,7 +12818,7 @@ function Invoke-InflightCleanup {
 }
 
 $handlerScript = @'
-param($ctx, $htmlPage, $domainLocks, $msalLocalPath)
+param($ctx, $htmlPage, $domainLocks, $msalLocalPath, $tosPageHtml, $privacyPageHtml)
 
 # TcpListener shim may not always provide a fully populated Url object.
 $path = $null
@@ -12846,6 +12883,18 @@ if ($metricsEnabled) {
     }
     $nonce = [Convert]::ToBase64String($nonceBytes)
     Write-Html -Context $ctx -Html $htmlPage -Nonce $nonce
+    return
+  }
+
+  # 1-tos) Serve Terms of Service page
+  if ($path -eq "/terms" -and -not [string]::IsNullOrWhiteSpace($tosPageHtml)) {
+    Write-Html -Context $ctx -Html $tosPageHtml -Nonce $null
+    return
+  }
+
+  # 1-privacy) Serve Privacy Statement page
+  if ($path -eq "/privacy" -and -not [string]::IsNullOrWhiteSpace($privacyPageHtml)) {
+    Write-Html -Context $ctx -Html $privacyPageHtml -Nonce $null
     return
   }
 
@@ -13321,7 +13370,7 @@ try {
         # Run the handler in the RunspacePool so multiple requests can be processed concurrently.
         $ps = [PowerShell]::Create()
         $ps.RunspacePool = $pool
-        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath)
+        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
 
         $async = $ps.BeginInvoke()
         $inflight.Add([pscustomobject]@{ Ps = $ps; Async = $async })
@@ -13374,7 +13423,7 @@ try {
         # Run the same handler script used by HttpListener.
         $ps = [PowerShell]::Create()
         $ps.RunspacePool = $pool
-        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath)
+        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
 
         $async = $ps.BeginInvoke()
         $inflight.Add([pscustomobject]@{ Ps = $ps; Async = $async })
