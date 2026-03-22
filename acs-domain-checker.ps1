@@ -12408,9 +12408,11 @@ async function loadAzureSubscriptions() {
         let added = 0;
         let skippedState = 0;
         let skippedDupe = 0;
+        const excludedStates = ['disabled', 'deleted'];
         for (const item of (subs || [])) {
           const state = String(item.state || '').toLowerCase();
-          if (state !== 'enabled' && item.state) { skippedState++; continue; }
+          console.log(`[AzureDiag] Step 2.${i + 1}: sub state="${item.state}" (lowered="${state}")`);
+          if (excludedStates.includes(state)) { skippedState++; continue; }
           if (seenSubscriptionIds.has(item.subscriptionId)) { skippedDupe++; continue; }
           seenSubscriptionIds.add(item.subscriptionId);
           allSubscriptions.push({
