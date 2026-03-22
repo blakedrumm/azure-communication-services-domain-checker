@@ -12167,11 +12167,7 @@ function renderAzureDiagnosticsUi() {
     'azureSubscriptionSelect',
     azureDiagnosticsState.subscriptions,
     item => item.subscriptionId,
-    item => {
-      const name = item.displayName || item.subscriptionId;
-      const stateTag = (item.state && item.state.toLowerCase() !== 'enabled') ? ` [${item.state}]` : '';
-      return `${name}${stateTag}${item.tenantId ? ` (${item.tenantId})` : ''}`;
-    },
+    item => `${item.displayName || item.subscriptionId}${item.tenantId ? ` (${item.tenantId})` : ''}`,
     t('azureNoSubscriptions')
   );
 
@@ -12390,81 +12386,35 @@ async function loadAzureSubscriptions() {
     renderAzureDiagnosticsUi();
     setAzureDiagnosticsStatus(t('azureLoadingSubscriptions'));
 
-    // ARM GET /subscriptions with the home-tenant token already returns every
-    // subscription the signed-in user can see, including cross-tenant subs
-    // visible via Azure RBAC / guest roles.  Per-tenant token acquisition is
-    // not needed (and fails without admin consent in foreign tenants).
+    // ARM GET /subscriptions returns every subscription the signed-in user
+    // can see.  Cross-tenant subscriptions may appear with state="Disabled"
+    // because the token was not issued by their home tenant — this does NOT
+    // mean they are actually disabled, so we keep them all.
     console.log('[AzureDiag] Step 1: Listing all subscriptions via GET /subscriptions...');
     const rawSubs = await armFetchAll('https://management.azure.com/subscriptions?api-version=2020-01-01');
     console.log(`[AzureDiag] Step 1 result: ${rawSubs.length} subscription(s) returned from ARM`);
 
-    // Keep all subscriptions (including Disabled) but annotate state in the object.
-    // The dropdown label will show the state for non-Enabled subscriptions so the
-    // user knows what they are selecting.
-    const allSubscriptions = [];
-    for (const item of (rawSubs || [])) {
-      const state = String(item.state || '');
-      console.log(`[AzureDiag] Step 1: sub="${(item.displayName || item.subscriptionId || '').substring(0, 30)}", state="${state}"`);
-      allSubscriptions.push({
+    const allSubscriptions = (rawSubs || []).map(item => {
+      console.log(`[AzureDiag] Step 1: sub="${(item.displayName || item.subscriptionId || '').substring(0, 30)}", state="${item.state}", tenant=${(item.tenantId || '').substring(0, 8)}...`);
+      return {
         subscriptionId: item.subscriptionId,
         displayName: item.displayName || item.subscriptionId,
-        tenantId: item.tenantId || '',
-        state: state
-      });
-    }
+        tenantId: item.tenantId || ''
+      };
+    });
     console.log(`[AzureDiag] Step 1 complete: ${allSubscriptions.length} subscription(s) kept`);
 
-    // Step 2: Filter to only subscriptions that contain ACS resources.
-    // Only check Enabled subscriptions — Disabled ones cannot list resources.
-    console.log(`[AzureDiag] Step 2: Filtering for ACS resources...`);
-    const acsSubscriptions = [];
-    const enabledSubs = allSubscriptions.filter(s => s.state.toLowerCase() === 'enabled');
-    console.log(`[AzureDiag] Step 2: ${enabledSubs.length} Enabled subscription(s) to check for ACS resources`);
-    if (enabledSubs.length > 0) {
-      setAzureDiagnosticsStatus(t('azureFilteringAcsSubscriptions', {
-        current: '0',
-        total: String(enabledSubs.length)
-      }));
-      for (let i = 0; i < enabledSubs.length; i++) {
-        const sub = enabledSubs[i];
-        const subLabel = sub.subscriptionId.substring(0, 8) + '...';
-        setAzureDiagnosticsStatus(t('azureFilteringAcsSubscriptions', {
-          current: String(i + 1),
-          total: String(enabledSubs.length)
-        }));
-        try {
-          const resources = await armFetchAll(
-            `https://management.azure.com/subscriptions/${encodeURIComponent(sub.subscriptionId)}/resources?$filter=resourceType eq 'Microsoft.Communication/CommunicationServices'&api-version=2021-04-01`,
-            sub.tenantId || null
-          );
-          console.log(`[AzureDiag] Step 2.${i + 1}: sub=${subLabel} has ${(resources || []).length} ACS resource(s)`);
-          if (resources && resources.length > 0) {
-            sub.hasAcsResources = true;
-            acsSubscriptions.push(sub);
-          }
-        } catch (filterErr) {
-          const errCode = String(filterErr?.errorCode || filterErr?.name || 'unknown');
-          console.warn(`[AzureDiag] Step 2.${i + 1}: ACS filter FAILED for sub=${subLabel}, errorCode=${errCode} — including anyway`);
-          acsSubscriptions.push(sub);
-        }
-      }
-    }
-    console.log(`[AzureDiag] Step 2 complete: ${acsSubscriptions.length} subscription(s) have ACS resources (or failed check)`);
-
-    // Use ACS-filtered list if any were found, otherwise fall back to all subscriptions
-    azureDiagnosticsState.subscriptions = acsSubscriptions.length > 0 ? acsSubscriptions : allSubscriptions;
-    console.log(`[AzureDiag] Final subscription count: ${azureDiagnosticsState.subscriptions.length} (used ${acsSubscriptions.length > 0 ? 'ACS-filtered' : 'all'})`);
-
+    azureDiagnosticsState.subscriptions = allSubscriptions;
     azureDiagnosticsState.resources = [];
     azureDiagnosticsState.workspaces = [];
     renderAzureDiagnosticsUi();
     setAzureDiagnosticsStatus(
-      azureDiagnosticsState.subscriptions.length > 0
-        ? `${azureDiagnosticsState.subscriptions.length} ${t('azureSubscription').toLowerCase()}(s) loaded${acsSubscriptions.length > 0 ? ' (filtered to ACS)' : ''}.`
+      allSubscriptions.length > 0
+        ? `${allSubscriptions.length} ${t('azureSubscription').toLowerCase()}(s) loaded.`
         : t('azureNoSubscriptions')
     );
 
-    if (azureDiagnosticsState.subscriptions.length > 0) {
+    if (allSubscriptions.length > 0) {
       const subSelect = document.getElementById('azureSubscriptionSelect');
       if (subSelect && subSelect.options.length > 0) subSelect.selectedIndex = 0;
       // Release busy before chaining so that discoverAzureResources can set it again cleanly
@@ -12511,15 +12461,6 @@ async function discoverAzureResources() {
     return;
   }
   const tenantId = getSelectedSubscriptionTenantId();
-  const subState = getSelectedSubscriptionState();
-  if (subState && subState.toLowerCase() !== 'enabled') {
-    console.log(`[AzureDiag] discoverAzureResources: skipping — subscription state is "${subState}"`);
-    azureDiagnosticsState.resources = [];
-    azureDiagnosticsState.workspaces = [];
-    renderAzureDiagnosticsUi();
-    setAzureDiagnosticsStatus(t('azureSubscriptionNotEnabled', { state: subState }), true);
-    return;
-  }
 
   try {
     azureDiagnosticsState.isBusy = true;
