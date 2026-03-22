@@ -12386,23 +12386,62 @@ async function loadAzureSubscriptions() {
     renderAzureDiagnosticsUi();
     setAzureDiagnosticsStatus(t('azureLoadingSubscriptions'));
 
-    // ARM GET /subscriptions returns every subscription the signed-in user
-    // can see.  Cross-tenant subscriptions may appear with state="Disabled"
-    // because the token was not issued by their home tenant — this does NOT
-    // mean they are actually disabled, so we keep them all.
-    console.log('[AzureDiag] Step 1: Listing all subscriptions via GET /subscriptions...');
-    const rawSubs = await armFetchAll('https://management.azure.com/subscriptions?api-version=2020-01-01');
-    console.log(`[AzureDiag] Step 1 result: ${rawSubs.length} subscription(s) returned from ARM`);
+    // Step 1: Enumerate all tenants the user has access to.
+    // The home-tenant token can list tenants even if it cannot get tokens for them.
+    console.log('[AzureDiag] Step 1: Enumerating tenants via GET /tenants...');
+    let tenants = [];
+    try {
+      tenants = await armFetchAll('https://management.azure.com/tenants?api-version=2020-01-01');
+      console.log(`[AzureDiag] Step 1 result: ${tenants.length} tenant(s) returned`);
+    } catch (tenantErr) {
+      const errCode = String(tenantErr?.errorCode || tenantErr?.name || tenantErr?.message || 'unknown').substring(0, 100);
+      console.warn(`[AzureDiag] Step 1 FAILED: ${errCode} — falling back to default tenant`);
+      tenants = [];
+    }
+    const tenantIds = tenants.length > 0
+      ? tenants.map(tn => String(tn.tenantId || '')).filter(Boolean)
+      : [null]; // null = use default (home) tenant
+    console.log(`[AzureDiag] Step 1 final: ${tenantIds.length} tenant ID(s) to query: [${tenantIds.map(t => t ? t.substring(0, 8) + '...' : 'default').join(', ')}]`);
 
-    const allSubscriptions = (rawSubs || []).map(item => {
-      console.log(`[AzureDiag] Step 1: sub="${(item.displayName || item.subscriptionId || '').substring(0, 30)}", state="${item.state}", tenant=${(item.tenantId || '').substring(0, 8)}...`);
-      return {
-        subscriptionId: item.subscriptionId,
-        displayName: item.displayName || item.subscriptionId,
-        tenantId: item.tenantId || ''
-      };
-    });
-    console.log(`[AzureDiag] Step 1 complete: ${allSubscriptions.length} subscription(s) kept`);
+    // Step 2: For each tenant, silently acquire an ARM token and list subscriptions.
+    // Cross-tenant token acquisition will fail for tenants where the app has no
+    // consent (AADSTS65001) or where conditional access blocks it (AADSTS53003).
+    // Those failures are expected and silently skipped.
+    console.log('[AzureDiag] Step 2: Loading subscriptions per tenant...');
+    const allSubscriptions = [];
+    const seenSubscriptionIds = new Set();
+    for (let i = 0; i < tenantIds.length; i++) {
+      const tid = tenantIds[i];
+      const tenantLabel = tid ? tid.substring(0, 8) + '...' : 'default';
+      console.log(`[AzureDiag] Step 2.${i + 1}: Loading subscriptions for tenant=${tenantLabel}`);
+      setAzureDiagnosticsStatus(t('azureLoadingTenantSubscriptions', {
+        tenant: tenantLabel.length > 12 ? tenantLabel.substring(0, 12) + '...' : tenantLabel,
+        current: String(i + 1),
+        total: String(tenantIds.length)
+      }));
+      try {
+        const subs = await armFetchAllSilent('https://management.azure.com/subscriptions?api-version=2020-01-01', tid);
+        console.log(`[AzureDiag] Step 2.${i + 1}: ARM returned ${(subs || []).length} raw subscription(s) for tenant=${tenantLabel}`);
+        let added = 0;
+        let skippedDupe = 0;
+        for (const item of (subs || [])) {
+          if (seenSubscriptionIds.has(item.subscriptionId)) { skippedDupe++; continue; }
+          seenSubscriptionIds.add(item.subscriptionId);
+          allSubscriptions.push({
+            subscriptionId: item.subscriptionId,
+            displayName: item.displayName || item.subscriptionId,
+            tenantId: item.tenantId || tid || ''
+          });
+          added++;
+        }
+        console.log(`[AzureDiag] Step 2.${i + 1}: added=${added}, skippedDupe=${skippedDupe}`);
+      } catch (subErr) {
+        const errCode = String(subErr?.errorCode || subErr?.name || 'unknown');
+        const errMsg = String(subErr?.message || '').substring(0, 150);
+        console.warn(`[AzureDiag] Step 2.${i + 1}: FAILED for tenant=${tenantLabel}, errorCode=${errCode}, message=${errMsg}`);
+      }
+    }
+    console.log(`[AzureDiag] Step 2 complete: ${allSubscriptions.length} total subscription(s) across all tenants`);
 
     azureDiagnosticsState.subscriptions = allSubscriptions;
     azureDiagnosticsState.resources = [];
@@ -12445,13 +12484,6 @@ function getSelectedSubscriptionTenantId() {
   if (!subId) return null;
   const sub = azureDiagnosticsState.subscriptions.find(s => s.subscriptionId === subId);
   return (sub && sub.tenantId) ? sub.tenantId : null;
-}
-
-function getSelectedSubscriptionState() {
-  const subId = getSelectedAzureSubscriptionId();
-  if (!subId) return '';
-  const sub = azureDiagnosticsState.subscriptions.find(s => s.subscriptionId === subId);
-  return (sub && sub.state) ? sub.state : '';
 }
 
 async function discoverAzureResources() {
