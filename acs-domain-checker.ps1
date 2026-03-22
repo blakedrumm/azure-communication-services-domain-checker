@@ -12234,6 +12234,8 @@ async function acquireAzureAccessToken(scopes, tenantId, silentOnly) {
   }
 
   const loginHint = getMsAuthLoginHint();
+  const homeTenantId = msAuthAccount.tenantId || '';
+  const isCrossTenant = tenantId && tenantId !== homeTenantId;
 
   const request = {
     scopes,
@@ -12241,6 +12243,14 @@ async function acquireAzureAccessToken(scopes, tenantId, silentOnly) {
   };
   if (tenantId) {
     request.authority = `https://login.microsoftonline.com/${tenantId}`;
+  }
+  // For cross-tenant requests, always force a fresh token from the target
+  // tenant's authority.  MSAL v2 cache keys do not always differentiate by
+  // tenant for the same resource, so without forceRefresh the cached home-
+  // tenant token is returned and ARM sees subscriptions as "Disabled".
+  if (isCrossTenant) {
+    request.forceRefresh = true;
+    console.log(`[AzureDiag] acquireToken: cross-tenant detected (home=${homeTenantId.substring(0, 8)}...), forcing refresh`);
   }
 
   try {
