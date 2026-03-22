@@ -25,14 +25,6 @@
 .PARAMETER TestDomain
   Runs a one-shot domain check, writes JSON to stdout, and exits without starting the web server.
 
-.PARAMETER TermsOfServiceUrl
-  Terms of Service: supply an external URL (https://...) to link out, or a local file path
-  (.html / .txt) to serve at the /terms route. Falls back to the ACS_TOS_URL environment variable.
-
-.PARAMETER PrivacyStatementUrl
-  Privacy Statement: supply an external URL (https://...) to link out, or a local file path
-  (.html / .txt) to serve at the /privacy route. Falls back to the ACS_PRIVACY_URL environment variable.
-
 .EXAMPLE
   # Start on the default port
   .\acs-domain-checker.ps1
@@ -69,8 +61,6 @@
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
   - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 60; set to 0 to disable).
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
-  - ACS_TOS_URL                  : Fallback for -TermsOfServiceUrl. External URL or local file path for Terms of Service.
-  - ACS_PRIVACY_URL              : Fallback for -PrivacyStatementUrl. External URL or local file path for Privacy Statement.
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
                                    Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
 
@@ -104,12 +94,7 @@ param(
   # - Enabled only when `-EnableAnonymousMetrics` is used.
   # - Persists counters and first-seen/restart metadata to a local JSON file.
   # - Does not persist session ids.
-  [string]$AnonymousMetricsFile,
-
-  # Optional footer links (also settable via ACS_TOS_URL / ACS_PRIVACY_URL env vars).
-  # Each value can be an external URL (https://...) or a local file path to serve at /terms or /privacy.
-  [string]$TermsOfServiceUrl,
-  [string]$PrivacyStatementUrl
+  [string]$AnonymousMetricsFile
 )
 
 Add-Type -AssemblyName System.Net
@@ -6160,8 +6145,6 @@ ul.guidance li {
 const entraTenant = '__ENTRA_TENANT_ID__';
 const acsApiKey = '__ACS_API_KEY__';
 const acsIssueUrl = '__ACS_ISSUE_URL__';
-const acsTosUrl = '__ACS_TOS_URL__';
-const acsPrivacyUrl = '__ACS_PRIVACY_URL__';
 const appVersion = '__APP_VERSION__';
 const msalSources = [
   '/assets/msal-browser.min.js',
@@ -9533,14 +9516,8 @@ function applyLanguageToStaticUi() {
   const footer = document.getElementById('footerText');
   if (footer) {
     let footerHtml = t('footer', { version: appVersion });
-    const tosUrl = (acsTosUrl || '').trim();
-    const privUrl = (acsPrivacyUrl || '').trim();
-    if (tosUrl && !tosUrl.startsWith('__')) {
-      footerHtml += ' &bull; <a href="' + escapeHtml(tosUrl) + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('termsOfService')) + '</a>';
-    }
-    if (privUrl && !privUrl.startsWith('__')) {
-      footerHtml += ' &bull; <a href="' + escapeHtml(privUrl) + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('privacyStatement')) + '</a>';
-    }
+    footerHtml += ' &bull; <a href="/terms" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('termsOfService')) + '</a>';
+    footerHtml += ' &bull; <a href="/privacy" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('privacyStatement')) + '</a>';
     footer.innerHTML = footerHtml;
   }
 
@@ -12619,47 +12596,133 @@ $issueUrl = $env:ACS_ISSUE_URL
 if ([string]::IsNullOrWhiteSpace($issueUrl)) { $issueUrl = '' }
 $htmlPage = $htmlPage.Replace('__ACS_ISSUE_URL__', $issueUrl)
 
-$tosUrl = if (-not [string]::IsNullOrWhiteSpace($TermsOfServiceUrl)) { $TermsOfServiceUrl } elseif (-not [string]::IsNullOrWhiteSpace($env:ACS_TOS_URL)) { $env:ACS_TOS_URL } else { '' }
-$privacyUrl = if (-not [string]::IsNullOrWhiteSpace($PrivacyStatementUrl)) { $PrivacyStatementUrl } elseif (-not [string]::IsNullOrWhiteSpace($env:ACS_PRIVACY_URL)) { $env:ACS_PRIVACY_URL } else { '' }
-
-# Resolve each value: if it looks like an external URL use it directly as a link;
-# if it is a local file path, read the content and serve it at /terms or /privacy.
-$script:TosLinkHref = ''
-$script:TosPageHtml = ''
-$script:PrivacyLinkHref = ''
-$script:PrivacyPageHtml = ''
-
-foreach ($entry in @(
-  @{ Value = $tosUrl;     LinkVar = 'TosLinkHref';     PageVar = 'TosPageHtml';     Route = '/terms';   Title = 'Terms of Service' },
-  @{ Value = $privacyUrl; LinkVar = 'PrivacyLinkHref'; PageVar = 'PrivacyPageHtml'; Route = '/privacy'; Title = 'Privacy Statement' }
-)) {
-  $val = ($entry.Value).Trim()
-  if ([string]::IsNullOrWhiteSpace($val)) { continue }
-  if ($val -match '^https?://') {
-    # External URL — footer links directly to it
-    Set-Variable -Name "script:$($entry.LinkVar)" -Value $val
-  } else {
-    # Treat as local file path
-    $resolvedPath = if ([System.IO.Path]::IsPathRooted($val)) { $val } else { Join-Path $PSScriptRoot $val }
-    if (Test-Path -LiteralPath $resolvedPath) {
-      $fileContent = [System.IO.File]::ReadAllText($resolvedPath, [Text.Encoding]::UTF8)
-      $isHtmlFile = $resolvedPath -match '\.html?$'
-      if ($isHtmlFile) {
-        Set-Variable -Name "script:$($entry.PageVar)" -Value $fileContent
-      } else {
-        # Wrap plain text in a minimal styled HTML page
-        $escaped = [System.Net.WebUtility]::HtmlEncode($fileContent).Replace("`n", "<br/>`n")
-        Set-Variable -Name "script:$($entry.PageVar)" -Value "<!DOCTYPE html><html><head><meta charset='utf-8'><title>$($entry.Title)</title><style>body{font-family:system-ui,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;line-height:1.6;color:#333}@media(prefers-color-scheme:dark){body{background:#1e1e1e;color:#ddd}}</style></head><body><h1>$($entry.Title)</h1>$escaped</body></html>"
-      }
-      Set-Variable -Name "script:$($entry.LinkVar)" -Value $entry.Route
-    } else {
-      Write-Warning "$($entry.Title) file not found: $resolvedPath"
-    }
+# ------------------- Embedded Terms of Service page -------------------
+$script:TosPageHtml = @'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Terms of Service - ACS Email Domain Checker</title>
+<style>
+  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
   }
-}
+  body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--fg); max-width: 800px; margin: 40px auto; padding: 0 24px; line-height: 1.7; }
+  h1 { border-bottom: 2px solid var(--border); padding-bottom: 12px; }
+  h2 { margin-top: 1.6em; }
+  a { color: var(--link); }
+  .back { display: inline-block; margin-bottom: 16px; text-decoration: none; }
+</style>
+</head>
+<body>
+<a class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<h1>Terms of Service</h1>
+<p><strong>Last updated:</strong> June 2025</p>
 
-$htmlPage = $htmlPage.Replace('__ACS_TOS_URL__', $script:TosLinkHref)
-$htmlPage = $htmlPage.Replace('__ACS_PRIVACY_URL__', $script:PrivacyLinkHref)
+<h2>1. Acceptance of Terms</h2>
+<p>By accessing or using the ACS Email Domain Checker (&ldquo;the Tool&rdquo;), you agree to be bound by these Terms of Service. If you do not agree, do not use the Tool.</p>
+
+<h2>2. Description of the Tool</h2>
+<p>The Tool performs DNS lookups and provides guidance related to Azure Communication Services email domain verification. It is intended for informational and troubleshooting purposes only.</p>
+
+<h2>3. No Warranty</h2>
+<p>The Tool is provided <strong>&ldquo;as is&rdquo;</strong> and <strong>&ldquo;as available&rdquo;</strong> without warranties of any kind, either express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. DNS results may be cached, incomplete, or affected by network conditions.</p>
+
+<h2>4. Limitation of Liability</h2>
+<p>In no event shall the authors or contributors be liable for any direct, indirect, incidental, special, or consequential damages arising out of or in connection with your use of the Tool.</p>
+
+<h2>5. Acceptable Use</h2>
+<p>You agree not to use the Tool to:</p>
+<ul>
+  <li>Perform unauthorized or abusive DNS queries.</li>
+  <li>Attempt to disrupt or overload the service.</li>
+  <li>Violate any applicable laws or regulations.</li>
+</ul>
+
+<h2>6. Data &amp; Privacy</h2>
+<p>The Tool does not collect personally identifiable information. Optional anonymous usage metrics (when enabled) contain only HMAC-hashed domain names and aggregate counters. See the <a href="/privacy">Privacy Statement</a> for details.</p>
+
+<h2>7. Third-Party Services</h2>
+<p>The Tool may interact with third-party DNS resolvers, WHOIS providers, and Azure APIs. Your use of those services is subject to their respective terms.</p>
+
+<h2>8. Changes to These Terms</h2>
+<p>These terms may be updated from time to time. Continued use of the Tool after changes constitutes acceptance of the revised terms.</p>
+
+<h2>9. Contact</h2>
+<p>For questions about these terms, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+</body>
+</html>
+'@
+
+# ------------------- Embedded Privacy Statement page -------------------
+$script:PrivacyPageHtml = @'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Privacy Statement - ACS Email Domain Checker</title>
+<style>
+  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
+  }
+  body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--fg); max-width: 800px; margin: 40px auto; padding: 0 24px; line-height: 1.7; }
+  h1 { border-bottom: 2px solid var(--border); padding-bottom: 12px; }
+  h2 { margin-top: 1.6em; }
+  a { color: var(--link); }
+  .back { display: inline-block; margin-bottom: 16px; text-decoration: none; }
+</style>
+</head>
+<body>
+<a class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<h1>Privacy Statement</h1>
+<p><strong>Last updated:</strong> June 2025</p>
+
+<h2>1. Overview</h2>
+<p>The ACS Email Domain Checker (&ldquo;the Tool&rdquo;) is designed with privacy in mind. This statement explains what data the Tool does and does not collect.</p>
+
+<h2>2. Data We Do Not Collect</h2>
+<ul>
+  <li><strong>No personal information</strong> &mdash; the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.</li>
+  <li><strong>No tracking cookies</strong> &mdash; the Tool does not use advertising or analytics tracking cookies.</li>
+  <li><strong>No query logging</strong> &mdash; domain names you look up are not stored on the server.</li>
+</ul>
+
+<h2>3. Anonymous Usage Metrics (Optional)</h2>
+<p>When anonymous metrics are enabled, the Tool collects:</p>
+<ul>
+  <li>HMAC-hashed domain names (irreversible; the original domain cannot be recovered).</li>
+  <li>Aggregate lookup counters and first-seen timestamps.</li>
+  <li>A random session identifier (not persisted across restarts).</li>
+</ul>
+<p>Anonymous metrics can be disabled entirely with the <code>-DisableAnonymousMetrics</code> flag.</p>
+
+<h2>4. Microsoft Entra ID Authentication</h2>
+<p>If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser&rsquo;s session storage and are never sent to the Tool&rsquo;s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.</p>
+
+<h2>5. Azure Resource Queries</h2>
+<p>When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool&rsquo;s server does not proxy, log, or store any Azure data.</p>
+
+<h2>6. DNS Lookups</h2>
+<p>DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.</p>
+
+<h2>7. Local Storage</h2>
+<p>The Tool uses your browser&rsquo;s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.</p>
+
+<h2>8. Third-Party Services</h2>
+<p>The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.</p>
+
+<h2>9. Changes to This Statement</h2>
+<p>This privacy statement may be updated from time to time. Changes take effect when published in the Tool.</p>
+
+<h2>10. Contact</h2>
+<p>For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+</body>
+</html>
+'@
 
 # Optional local MSAL script path (for environments that block CDNs)
 $msalLocalPath = $env:ACS_MSAL_LOCAL_PATH
