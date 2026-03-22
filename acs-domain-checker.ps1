@@ -834,7 +834,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.4.1'
+$script:AppVersion = '1.4.2'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -12152,7 +12152,12 @@ function renderAzureDiagnosticsUi() {
 }
 
 function escapeKqlString(text) {
-  return String(text || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return String(text || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
 }
 
 function getMsAuthLoginHint() {
@@ -12228,10 +12233,14 @@ async function armFetchJson(url, options = {}) {
 async function armFetchAll(url) {
   const items = [];
   let next = url;
-  while (next) {
+  const maxPages = 50;
+  let page = 0;
+  while (next && page < maxPages) {
+    page++;
     const data = await armFetchJson(next);
     if (Array.isArray(data.value)) items.push(...data.value);
-    next = data.nextLink || null;
+    // ARM uses '@odata.nextLink' (or sometimes 'nextLink') for pagination
+    next = data['@odata.nextLink'] || data.nextLink || null;
   }
   return items;
 }
@@ -12263,8 +12272,15 @@ async function loadAzureSubscriptions() {
     if (azureDiagnosticsState.subscriptions.length > 0) {
       const subSelect = document.getElementById('azureSubscriptionSelect');
       if (subSelect && subSelect.options.length > 0) subSelect.selectedIndex = 0;
+      // Release busy before chaining so that discoverAzureResources can set it again cleanly
       azureDiagnosticsState.isBusy = false;
-      await discoverAzureResources();
+      renderAzureDiagnosticsUi();
+      try {
+        await discoverAzureResources();
+      } catch (chainErr) {
+        console.error('Azure resource discovery chain failed:', chainErr);
+        setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: chainErr?.message || t('authUnknownError') }), true);
+      }
       return;
     }
   } catch (e) {
@@ -12304,8 +12320,15 @@ async function discoverAzureResources() {
     if (azureDiagnosticsState.resources.length > 0) {
       const resSelect = document.getElementById('azureResourceSelect');
       if (resSelect && resSelect.options.length > 0) resSelect.selectedIndex = 0;
+      // Release busy before chaining so that discoverAzureWorkspaces can set it again cleanly
       azureDiagnosticsState.isBusy = false;
-      await discoverAzureWorkspaces();
+      renderAzureDiagnosticsUi();
+      try {
+        await discoverAzureWorkspaces();
+      } catch (chainErr) {
+        console.error('Azure workspace discovery chain failed:', chainErr);
+        setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: chainErr?.message || t('authUnknownError') }), true);
+      }
       return;
     }
   } catch (e) {
@@ -12318,7 +12341,9 @@ async function discoverAzureResources() {
 }
 
 async function getWorkspaceMetadata(workspaceResourceId) {
-  const data = await armFetchJson(`https://management.azure.com${workspaceResourceId}?api-version=2022-10-01`);
+  // Ensure the resource ID starts with '/' for a valid ARM URL
+  const normalizedId = workspaceResourceId.startsWith('/') ? workspaceResourceId : '/' + workspaceResourceId;
+  const data = await armFetchJson(`https://management.azure.com${normalizedId}?api-version=2022-10-01`);
   return {
     id: data.id,
     name: data.name,
@@ -12348,11 +12373,17 @@ async function discoverAzureWorkspaces() {
     const workspaceMap = new Map();
 
     for (const resource of resourcesToCheck) {
-      const diagnostics = await armFetchJson(`https://management.azure.com${resource.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`);
-      for (const setting of (diagnostics.value || [])) {
-        if (setting.workspaceId) {
-          workspaceMap.set(setting.workspaceId.toLowerCase(), setting.workspaceId);
+      try {
+        const diagnostics = await armFetchJson(`https://management.azure.com${resource.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`);
+        for (const setting of (diagnostics.value || [])) {
+          // The workspaceId lives under setting.properties, not at the top level
+          const wsId = (setting.properties && setting.properties.workspaceId) || setting.workspaceId || '';
+          if (wsId) {
+            workspaceMap.set(wsId.toLowerCase(), wsId);
+          }
         }
+      } catch (diagErr) {
+        console.warn('Diagnostic settings read failed for', resource.id, diagErr);
       }
     }
 
