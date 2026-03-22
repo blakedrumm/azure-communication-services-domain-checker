@@ -12224,7 +12224,12 @@ function getMsAuthLoginHint() {
 }
 
 async function acquireAzureAccessToken(scopes, tenantId, silentOnly) {
+  const scopeLabel = (scopes || []).map(s => String(s).split('/').pop()).join(',');
+  const tenantLabel = tenantId ? tenantId.substring(0, 8) + '...' : 'default';
+  console.log(`[AzureDiag] acquireToken: scope=${scopeLabel}, tenant=${tenantLabel}, silentOnly=${!!silentOnly}`);
+
   if (!msalInstance || !msAuthAccount) {
+    console.warn('[AzureDiag] acquireToken: FAILED — msalInstance or msAuthAccount is null');
     throw new Error(t('azureSignInRequired'));
   }
 
@@ -12240,22 +12245,30 @@ async function acquireAzureAccessToken(scopes, tenantId, silentOnly) {
 
   try {
     const silent = await msalInstance.acquireTokenSilent(request);
+    console.log(`[AzureDiag] acquireToken: silent OK for tenant=${tenantLabel}, tokenLength=${silent.accessToken ? silent.accessToken.length : 0}`);
     return silent.accessToken;
   } catch (e) {
+    const errorCode = String(e?.errorCode || e?.name || 'unknown');
+    console.warn(`[AzureDiag] acquireToken: silent FAILED for tenant=${tenantLabel}, errorCode=${errorCode}`);
     const requiresInteraction = e instanceof msal.InteractionRequiredAuthError ||
       ['interaction_required', 'consent_required', 'login_required'].includes(String(e?.errorCode || '').toLowerCase());
     if (!requiresInteraction) throw e;
 
     // Try once more with forceRefresh before falling back to redirect
     try {
+      console.log(`[AzureDiag] acquireToken: retrying with forceRefresh for tenant=${tenantLabel}`);
       const retry = await msalInstance.acquireTokenSilent({ ...request, forceRefresh: true });
+      console.log(`[AzureDiag] acquireToken: forceRefresh OK for tenant=${tenantLabel}`);
       return retry.accessToken;
     } catch (_retryErr) {
+      const retryCode = String(_retryErr?.errorCode || _retryErr?.name || 'unknown');
+      console.warn(`[AzureDiag] acquireToken: forceRefresh FAILED for tenant=${tenantLabel}, errorCode=${retryCode}`);
       // In silentOnly mode, do not redirect; just throw so callers can skip this tenant.
       if (silentOnly) throw _retryErr;
 
       // Silent retry also failed; use redirect to get consent.
       // This avoids opening a popup that shows a mini copy of the website.
+      console.log('[AzureDiag] acquireToken: falling back to redirect for consent');
       setAzureDiagnosticsStatus(t('azureConsentRequired'));
       const redirectRequest = {
         scopes,
@@ -12293,6 +12306,8 @@ async function armFetchJson(url, options = {}, tenantId) {
 }
 
 async function armFetchJsonSilent(url, options = {}, tenantId) {
+  const urlPath = url.replace('https://management.azure.com', '');
+  console.log(`[AzureDiag] armFetchSilent: ${urlPath.substring(0, 120)}${urlPath.length > 120 ? '...' : ''}`);
   const token = await acquireAzureAccessToken(ARM_SCOPES, tenantId, true);
   const response = await fetch(url, {
     ...options,
@@ -12302,8 +12317,10 @@ async function armFetchJsonSilent(url, options = {}, tenantId) {
       Accept: 'application/json'
     }
   });
+  console.log(`[AzureDiag] armFetchSilent: HTTP ${response.status} for ${urlPath.substring(0, 80)}`);
   if (!response.ok) {
     const text = await response.text();
+    console.warn(`[AzureDiag] armFetchSilent: FAILED HTTP ${response.status} — ${(text || '').substring(0, 200)}`);
     throw new Error(`ARM ${response.status}: ${text || response.statusText}`);
   }
   return response.json();
@@ -12332,36 +12349,54 @@ async function armFetchAllSilent(url, tenantId) {
   while (next && page < maxPages) {
     page++;
     const data = await armFetchJsonSilent(next, {}, tenantId);
+    const pageCount = Array.isArray(data.value) ? data.value.length : 0;
     if (Array.isArray(data.value)) items.push(...data.value);
+    const hasNext = !!(data['@odata.nextLink'] || data.nextLink);
+    console.log(`[AzureDiag] armFetchAllSilent: page=${page}, itemsOnPage=${pageCount}, totalSoFar=${items.length}, hasNextPage=${hasNext}`);
     next = data['@odata.nextLink'] || data.nextLink || null;
   }
+  console.log(`[AzureDiag] armFetchAllSilent: DONE pages=${page}, totalItems=${items.length}`);
   return items;
 }
 
 async function loadAzureSubscriptions() {
+  console.log('[AzureDiag] ===== loadAzureSubscriptions START =====');
+  console.log('[AzureDiag] msalInstance exists:', !!msalInstance);
+  console.log('[AzureDiag] msAuthAccount exists:', !!msAuthAccount);
+  if (msAuthAccount) {
+    console.log('[AzureDiag] account homeAccountId length:', (msAuthAccount.homeAccountId || '').length);
+    console.log('[AzureDiag] account environment:', msAuthAccount.environment || 'n/a');
+    console.log('[AzureDiag] account tenantId:', msAuthAccount.tenantId ? msAuthAccount.tenantId.substring(0, 8) + '...' : 'n/a');
+  }
   try {
     azureDiagnosticsState.isBusy = true;
     renderAzureDiagnosticsUi();
     setAzureDiagnosticsStatus(t('azureLoadingTenants'));
 
     // Step 1: Enumerate all tenants the user has access to
+    console.log('[AzureDiag] Step 1: Enumerating tenants via GET /tenants...');
     let tenants = [];
     try {
       tenants = await armFetchAllSilent('https://management.azure.com/tenants?api-version=2020-01-01');
+      console.log(`[AzureDiag] Step 1 result: ${tenants.length} tenant(s) returned`);
     } catch (tenantErr) {
-      console.warn('Tenant enumeration failed, falling back to default tenant:', tenantErr);
+      const errCode = String(tenantErr?.errorCode || tenantErr?.name || tenantErr?.message || 'unknown').substring(0, 100);
+      console.warn(`[AzureDiag] Step 1 FAILED: ${errCode} — falling back to default tenant`);
       tenants = [];
     }
     const tenantIds = tenants.length > 0
       ? tenants.map(tn => String(tn.tenantId || '')).filter(Boolean)
       : [null]; // null = use default (home) tenant
+    console.log(`[AzureDiag] Step 1 final: ${tenantIds.length} tenant ID(s) to query: [${tenantIds.map(t => t ? t.substring(0, 8) + '...' : 'default').join(', ')}]`);
 
     // Step 2: For each tenant, acquire a token and list subscriptions
+    console.log('[AzureDiag] Step 2: Loading subscriptions per tenant...');
     const allSubscriptions = [];
     const seenSubscriptionIds = new Set();
     for (let i = 0; i < tenantIds.length; i++) {
       const tid = tenantIds[i];
-      const tenantLabel = tid || 'default';
+      const tenantLabel = tid ? tid.substring(0, 8) + '...' : 'default';
+      console.log(`[AzureDiag] Step 2.${i + 1}: Loading subscriptions for tenant=${tenantLabel}`);
       setAzureDiagnosticsStatus(t('azureLoadingTenantSubscriptions', {
         tenant: tenantLabel.length > 12 ? tenantLabel.substring(0, 12) + '...' : tenantLabel,
         current: String(i + 1),
@@ -12369,25 +12404,33 @@ async function loadAzureSubscriptions() {
       }));
       try {
         const subs = await armFetchAllSilent('https://management.azure.com/subscriptions?api-version=2020-01-01', tid);
+        console.log(`[AzureDiag] Step 2.${i + 1}: ARM returned ${(subs || []).length} raw subscription(s) for tenant=${tenantLabel}`);
+        let added = 0;
+        let skippedState = 0;
+        let skippedDupe = 0;
         for (const item of (subs || [])) {
           const state = String(item.state || '').toLowerCase();
-          if (state !== 'enabled' && item.state) continue;
-          if (seenSubscriptionIds.has(item.subscriptionId)) continue;
+          if (state !== 'enabled' && item.state) { skippedState++; continue; }
+          if (seenSubscriptionIds.has(item.subscriptionId)) { skippedDupe++; continue; }
           seenSubscriptionIds.add(item.subscriptionId);
           allSubscriptions.push({
             subscriptionId: item.subscriptionId,
             displayName: item.displayName || item.subscriptionId,
             tenantId: item.tenantId || tid || ''
           });
+          added++;
         }
+        console.log(`[AzureDiag] Step 2.${i + 1}: added=${added}, skippedState=${skippedState}, skippedDupe=${skippedDupe}`);
       } catch (subErr) {
-        // Token acquisition for this tenant may fail silently (e.g. guest without consent);
-        // log and continue to the next tenant.
-        console.warn(`Subscription load failed for tenant ${tenantLabel}:`, subErr);
+        const errCode = String(subErr?.errorCode || subErr?.name || 'unknown');
+        const errMsg = String(subErr?.message || '').substring(0, 150);
+        console.warn(`[AzureDiag] Step 2.${i + 1}: FAILED for tenant=${tenantLabel}, errorCode=${errCode}, message=${errMsg}`);
       }
     }
+    console.log(`[AzureDiag] Step 2 complete: ${allSubscriptions.length} total subscription(s) across all tenants`);
 
     // Step 3: Filter to only subscriptions that contain ACS resources
+    console.log(`[AzureDiag] Step 3: Filtering ${allSubscriptions.length} subscription(s) for ACS resources...`);
     const acsSubscriptions = [];
     if (allSubscriptions.length > 0) {
       setAzureDiagnosticsStatus(t('azureFilteringAcsSubscriptions', {
@@ -12396,6 +12439,7 @@ async function loadAzureSubscriptions() {
       }));
       for (let i = 0; i < allSubscriptions.length; i++) {
         const sub = allSubscriptions[i];
+        const subLabel = sub.subscriptionId.substring(0, 8) + '...';
         setAzureDiagnosticsStatus(t('azureFilteringAcsSubscriptions', {
           current: String(i + 1),
           total: String(allSubscriptions.length)
@@ -12405,21 +12449,23 @@ async function loadAzureSubscriptions() {
             `https://management.azure.com/subscriptions/${encodeURIComponent(sub.subscriptionId)}/resources?$filter=resourceType eq 'Microsoft.Communication/CommunicationServices'&api-version=2021-04-01`,
             sub.tenantId || null
           );
+          console.log(`[AzureDiag] Step 3.${i + 1}: sub=${subLabel} has ${(resources || []).length} ACS resource(s)`);
           if (resources && resources.length > 0) {
             sub.hasAcsResources = true;
             acsSubscriptions.push(sub);
           }
         } catch (filterErr) {
-          // If the filter call fails (e.g. permission), still include the subscription
-          // so the user can try manually.
-          console.warn(`ACS resource check failed for ${sub.subscriptionId}:`, filterErr);
+          const errCode = String(filterErr?.errorCode || filterErr?.name || 'unknown');
+          console.warn(`[AzureDiag] Step 3.${i + 1}: ACS filter FAILED for sub=${subLabel}, errorCode=${errCode} — including anyway`);
           acsSubscriptions.push(sub);
         }
       }
     }
+    console.log(`[AzureDiag] Step 3 complete: ${acsSubscriptions.length} subscription(s) have ACS resources (or failed check)`);
 
     // Use ACS-filtered list if any were found, otherwise fall back to all subscriptions
     azureDiagnosticsState.subscriptions = acsSubscriptions.length > 0 ? acsSubscriptions : allSubscriptions;
+    console.log(`[AzureDiag] Final subscription count: ${azureDiagnosticsState.subscriptions.length} (used ${acsSubscriptions.length > 0 ? 'ACS-filtered' : 'all'})`);
 
     azureDiagnosticsState.resources = [];
     azureDiagnosticsState.workspaces = [];
@@ -12444,8 +12490,11 @@ async function loadAzureSubscriptions() {
       }
       return;
     }
+    console.log('[AzureDiag] ===== loadAzureSubscriptions END (no subscriptions) =====');
   } catch (e) {
-    console.error('Azure subscription load failed:', e);
+    const errCode = String(e?.errorCode || e?.name || 'unknown');
+    const errMsg = String(e?.message || '').substring(0, 200);
+    console.error(`[AzureDiag] loadAzureSubscriptions OUTER ERROR: errorCode=${errCode}, message=${errMsg}`);
     setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
   } finally {
     azureDiagnosticsState.isBusy = false;
