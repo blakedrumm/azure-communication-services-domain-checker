@@ -6512,6 +6512,9 @@ const TRANSLATIONS = {
     azureRunAcsSearch: 'Run ACS search',
     azureSignInRequired: 'Sign in with Microsoft to query Azure subscriptions and Log Analytics from the browser.',
     azureLoadingSubscriptions: 'Loading subscriptions...',
+    azureLoadingTenants: 'Discovering tenants...',
+    azureLoadingTenantSubscriptions: 'Loading subscriptions for tenant {tenant} ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'Checking {current}/{total} subscriptions for ACS resources...',
     azureLoadingResources: 'Discovering ACS resources...',
     azureLoadingWorkspaces: 'Discovering connected workspaces...',
     azureRunningQuery: 'Running query: {name}',
@@ -11862,6 +11865,7 @@ function getMsalConfig() {
     auth: {
       clientId: clientId,
       authority: `https://login.microsoftonline.com/${authorityTenant}`,
+      knownAuthorities: ['login.microsoftonline.com'],
       redirectUri: window.location.origin + window.location.pathname,
       postLogoutRedirectUri: window.location.origin + window.location.pathname
     },
@@ -11991,12 +11995,36 @@ async function msSignOut() {
   if (!msalInstance) return;
 
   try {
+    // Clear the MSAL token cache locally without redirecting to the Microsoft
+    // logout page.  This avoids the account-picker screen and keeps the user
+    // on the current page.  The next sign-in still uses prompt:'select_account'
+    // so the user can choose a different account if needed.
+    const accounts = msalInstance.getAllAccounts() || [];
+    for (const acct of accounts) {
+      // MSAL v2 removeAccount is synchronous in the browser cache but returns void.
+      // It only removes the local cache entry, it does not call Microsoft's logout endpoint.
+      try { msalInstance.setActiveAccount(null); } catch {}
+    }
+    // Clear all MSAL-related entries from session storage
+    const keysToRemove = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (key && (key.startsWith('msal.') || key.includes('login.microsoftonline.com') || key.includes('msal'))) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach(k => sessionStorage.removeItem(k));
+
     msAuthAccount = null;
     isMsEmployee = false;
+    azureDiagnosticsState.subscriptions = [];
+    azureDiagnosticsState.resources = [];
+    azureDiagnosticsState.workspaces = [];
+    azureDiagnosticsState.lastResult = null;
+    azureDiagnosticsState.lastQueryText = '';
+    azureDiagnosticsState.lastQueryName = '';
+    setAzureDiagnosticsResultsHtml('');
     updateAuthUI(null);
-    await msalInstance.logoutRedirect({
-      postLogoutRedirectUri: window.location.origin + window.location.pathname
-    });
   } catch (e) {
     console.error('Sign-out error:', e);
   }
@@ -12195,7 +12223,7 @@ function getMsAuthLoginHint() {
   return '';
 }
 
-async function acquireAzureAccessToken(scopes) {
+async function acquireAzureAccessToken(scopes, tenantId, silentOnly) {
   if (!msalInstance || !msAuthAccount) {
     throw new Error(t('azureSignInRequired'));
   }
@@ -12206,6 +12234,9 @@ async function acquireAzureAccessToken(scopes) {
     scopes,
     account: msAuthAccount
   };
+  if (tenantId) {
+    request.authority = `https://login.microsoftonline.com/${tenantId}`;
+  }
 
   try {
     const silent = await msalInstance.acquireTokenSilent(request);
@@ -12220,6 +12251,9 @@ async function acquireAzureAccessToken(scopes) {
       const retry = await msalInstance.acquireTokenSilent({ ...request, forceRefresh: true });
       return retry.accessToken;
     } catch (_retryErr) {
+      // In silentOnly mode, do not redirect; just throw so callers can skip this tenant.
+      if (silentOnly) throw _retryErr;
+
       // Silent retry also failed; use redirect to get consent.
       // This avoids opening a popup that shows a mini copy of the website.
       setAzureDiagnosticsStatus(t('azureConsentRequired'));
@@ -12227,6 +12261,9 @@ async function acquireAzureAccessToken(scopes) {
         scopes,
         account: msAuthAccount
       };
+      if (tenantId) {
+        redirectRequest.authority = `https://login.microsoftonline.com/${tenantId}`;
+      }
       if (loginHint) {
         redirectRequest.loginHint = loginHint;
       }
@@ -12238,8 +12275,8 @@ async function acquireAzureAccessToken(scopes) {
   }
 }
 
-async function armFetchJson(url, options = {}) {
-  const token = await acquireAzureAccessToken(ARM_SCOPES);
+async function armFetchJson(url, options = {}, tenantId) {
+  const token = await acquireAzureAccessToken(ARM_SCOPES, tenantId);
   const response = await fetch(url, {
     ...options,
     headers: {
@@ -12255,16 +12292,47 @@ async function armFetchJson(url, options = {}) {
   return response.json();
 }
 
-async function armFetchAll(url) {
+async function armFetchJsonSilent(url, options = {}, tenantId) {
+  const token = await acquireAzureAccessToken(ARM_SCOPES, tenantId, true);
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`ARM ${response.status}: ${text || response.statusText}`);
+  }
+  return response.json();
+}
+
+async function armFetchAll(url, tenantId) {
   const items = [];
   let next = url;
   const maxPages = 50;
   let page = 0;
   while (next && page < maxPages) {
     page++;
-    const data = await armFetchJson(next);
+    const data = await armFetchJson(next, {}, tenantId);
     if (Array.isArray(data.value)) items.push(...data.value);
     // ARM uses '@odata.nextLink' (or sometimes 'nextLink') for pagination
+    next = data['@odata.nextLink'] || data.nextLink || null;
+  }
+  return items;
+}
+
+async function armFetchAllSilent(url, tenantId) {
+  const items = [];
+  let next = url;
+  const maxPages = 50;
+  let page = 0;
+  while (next && page < maxPages) {
+    page++;
+    const data = await armFetchJsonSilent(next, {}, tenantId);
+    if (Array.isArray(data.value)) items.push(...data.value);
     next = data['@odata.nextLink'] || data.nextLink || null;
   }
   return items;
@@ -12274,23 +12342,91 @@ async function loadAzureSubscriptions() {
   try {
     azureDiagnosticsState.isBusy = true;
     renderAzureDiagnosticsUi();
-    setAzureDiagnosticsStatus(t('azureLoadingSubscriptions'));
+    setAzureDiagnosticsStatus(t('azureLoadingTenants'));
 
-    const data = await armFetchAll('https://management.azure.com/subscriptions?api-version=2020-01-01');
-    azureDiagnosticsState.subscriptions = (data || [])
-      .filter(item => String(item.state || '').toLowerCase() === 'enabled' || !item.state)
-      .map(item => ({
-        subscriptionId: item.subscriptionId,
-        displayName: item.displayName || item.subscriptionId,
-        tenantId: item.tenantId || ''
+    // Step 1: Enumerate all tenants the user has access to
+    let tenants = [];
+    try {
+      tenants = await armFetchAllSilent('https://management.azure.com/tenants?api-version=2020-01-01');
+    } catch (tenantErr) {
+      console.warn('Tenant enumeration failed, falling back to default tenant:', tenantErr);
+      tenants = [];
+    }
+    const tenantIds = tenants.length > 0
+      ? tenants.map(tn => String(tn.tenantId || '')).filter(Boolean)
+      : [null]; // null = use default (home) tenant
+
+    // Step 2: For each tenant, acquire a token and list subscriptions
+    const allSubscriptions = [];
+    const seenSubscriptionIds = new Set();
+    for (let i = 0; i < tenantIds.length; i++) {
+      const tid = tenantIds[i];
+      const tenantLabel = tid || 'default';
+      setAzureDiagnosticsStatus(t('azureLoadingTenantSubscriptions', {
+        tenant: tenantLabel.length > 12 ? tenantLabel.substring(0, 12) + '...' : tenantLabel,
+        current: String(i + 1),
+        total: String(tenantIds.length)
       }));
+      try {
+        const subs = await armFetchAllSilent('https://management.azure.com/subscriptions?api-version=2020-01-01', tid);
+        for (const item of (subs || [])) {
+          const state = String(item.state || '').toLowerCase();
+          if (state !== 'enabled' && item.state) continue;
+          if (seenSubscriptionIds.has(item.subscriptionId)) continue;
+          seenSubscriptionIds.add(item.subscriptionId);
+          allSubscriptions.push({
+            subscriptionId: item.subscriptionId,
+            displayName: item.displayName || item.subscriptionId,
+            tenantId: item.tenantId || tid || ''
+          });
+        }
+      } catch (subErr) {
+        // Token acquisition for this tenant may fail silently (e.g. guest without consent);
+        // log and continue to the next tenant.
+        console.warn(`Subscription load failed for tenant ${tenantLabel}:`, subErr);
+      }
+    }
+
+    // Step 3: Filter to only subscriptions that contain ACS resources
+    const acsSubscriptions = [];
+    if (allSubscriptions.length > 0) {
+      setAzureDiagnosticsStatus(t('azureFilteringAcsSubscriptions', {
+        current: '0',
+        total: String(allSubscriptions.length)
+      }));
+      for (let i = 0; i < allSubscriptions.length; i++) {
+        const sub = allSubscriptions[i];
+        setAzureDiagnosticsStatus(t('azureFilteringAcsSubscriptions', {
+          current: String(i + 1),
+          total: String(allSubscriptions.length)
+        }));
+        try {
+          const resources = await armFetchAllSilent(
+            `https://management.azure.com/subscriptions/${encodeURIComponent(sub.subscriptionId)}/resources?$filter=resourceType eq 'Microsoft.Communication/CommunicationServices'&api-version=2021-04-01`,
+            sub.tenantId || null
+          );
+          if (resources && resources.length > 0) {
+            sub.hasAcsResources = true;
+            acsSubscriptions.push(sub);
+          }
+        } catch (filterErr) {
+          // If the filter call fails (e.g. permission), still include the subscription
+          // so the user can try manually.
+          console.warn(`ACS resource check failed for ${sub.subscriptionId}:`, filterErr);
+          acsSubscriptions.push(sub);
+        }
+      }
+    }
+
+    // Use ACS-filtered list if any were found, otherwise fall back to all subscriptions
+    azureDiagnosticsState.subscriptions = acsSubscriptions.length > 0 ? acsSubscriptions : allSubscriptions;
 
     azureDiagnosticsState.resources = [];
     azureDiagnosticsState.workspaces = [];
     renderAzureDiagnosticsUi();
     setAzureDiagnosticsStatus(
       azureDiagnosticsState.subscriptions.length > 0
-        ? `${azureDiagnosticsState.subscriptions.length} ${t('azureSubscription').toLowerCase()}(s) loaded.`
+        ? `${azureDiagnosticsState.subscriptions.length} ${t('azureSubscription').toLowerCase()}(s) loaded${acsSubscriptions.length > 0 ? ' (filtered to ACS)' : ''}.`
         : t('azureNoSubscriptions')
     );
 
@@ -12317,19 +12453,27 @@ async function loadAzureSubscriptions() {
   }
 }
 
+function getSelectedSubscriptionTenantId() {
+  const subId = getSelectedAzureSubscriptionId();
+  if (!subId) return null;
+  const sub = azureDiagnosticsState.subscriptions.find(s => s.subscriptionId === subId);
+  return (sub && sub.tenantId) ? sub.tenantId : null;
+}
+
 async function discoverAzureResources() {
   const subscriptionId = getSelectedAzureSubscriptionId();
   if (!subscriptionId) {
     setAzureDiagnosticsStatus(t('azureSelectSubscriptionFirst'), true);
     return;
   }
+  const tenantId = getSelectedSubscriptionTenantId();
 
   try {
     azureDiagnosticsState.isBusy = true;
     renderAzureDiagnosticsUi();
     setAzureDiagnosticsStatus(t('azureLoadingResources'));
 
-    const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`);
+    const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`, tenantId);
     azureDiagnosticsState.resources = (resources || [])
       .filter(item => /^microsoft\.communication\//i.test(String(item.type || '')))
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
@@ -12368,7 +12512,8 @@ async function discoverAzureResources() {
 async function getWorkspaceMetadata(workspaceResourceId) {
   // Ensure the resource ID starts with '/' for a valid ARM URL
   const normalizedId = workspaceResourceId.startsWith('/') ? workspaceResourceId : '/' + workspaceResourceId;
-  const data = await armFetchJson(`https://management.azure.com${normalizedId}?api-version=2022-10-01`);
+  const tenantId = getSelectedSubscriptionTenantId();
+  const data = await armFetchJson(`https://management.azure.com${normalizedId}?api-version=2022-10-01`, {}, tenantId);
   return {
     id: data.id,
     name: data.name,
@@ -12384,6 +12529,7 @@ async function discoverAzureWorkspaces() {
     setAzureDiagnosticsStatus(t('azureSelectSubscriptionFirst'), true);
     return;
   }
+  const tenantId = getSelectedSubscriptionTenantId();
 
   const selectedResourceId = getSelectedAzureResourceId();
   const resourcesToCheck = selectedResourceId
@@ -12399,7 +12545,7 @@ async function discoverAzureWorkspaces() {
 
     for (const resource of resourcesToCheck) {
       try {
-        const diagnostics = await armFetchJson(`https://management.azure.com${resource.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`);
+        const diagnostics = await armFetchJson(`https://management.azure.com${resource.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`, {}, tenantId);
         for (const setting of (diagnostics.value || [])) {
           // The workspaceId lives under setting.properties, not at the top level
           const wsId = (setting.properties && setting.properties.workspaceId) || setting.workspaceId || '';
@@ -12413,7 +12559,7 @@ async function discoverAzureWorkspaces() {
     }
 
     if (workspaceMap.size === 0) {
-      const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`);
+      const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`, tenantId);
       for (const resource of resources) {
         if (String(resource.type || '').toLowerCase() === 'microsoft.operationalinsights/workspaces') {
           workspaceMap.set(String(resource.id).toLowerCase(), resource.id);
