@@ -11838,7 +11838,7 @@ let msalInstance = null;
 let msAuthAccount = null;
 let isMsEmployee = false;
 let msalInitError = null;
-const ARM_SCOPES = ['https://management.azure.com/user_impersonation'];
+const ARM_SCOPES = ['https://management.azure.com/.default'];
 const LOG_ANALYTICS_SCOPES = ['https://api.loganalytics.io/Data.Read'];
 const GRAPH_SCOPES = ['User.Read'];
 let azureDiagnosticsState = {
@@ -11975,7 +11975,7 @@ async function msSignIn() {
     // via extraScopesToConsent so acquireTokenSilent works later without popups.
     await msalInstance.loginRedirect({
       scopes: GRAPH_SCOPES,
-      extraScopesToConsent: [...ARM_SCOPES, ...LOG_ANALYTICS_SCOPES],
+      extraScopesToConsent: ['https://management.azure.com/user_impersonation', ...LOG_ANALYTICS_SCOPES],
       prompt: 'select_account'
     });
   } catch (e) {
@@ -12245,7 +12245,9 @@ async function acquireAzureAccessToken(scopes, tenantId, silentOnly) {
 
   try {
     const silent = await msalInstance.acquireTokenSilent(request);
-    console.log(`[AzureDiag] acquireToken: silent OK for tenant=${tenantLabel}, tokenLength=${silent.accessToken ? silent.accessToken.length : 0}`);
+    const tokenTenant = silent.tenantId || silent.account?.tenantId || 'n/a';
+    const tokenTenantLabel = tokenTenant !== 'n/a' ? tokenTenant.substring(0, 8) + '...' : 'n/a';
+    console.log(`[AzureDiag] acquireToken: silent OK for tenant=${tenantLabel}, tokenTenant=${tokenTenantLabel}, tokenLength=${silent.accessToken ? silent.accessToken.length : 0}, fromCache=${!!silent.fromCache}`);
     return silent.accessToken;
   } catch (e) {
     const errorCode = String(e?.errorCode || e?.name || 'unknown');
