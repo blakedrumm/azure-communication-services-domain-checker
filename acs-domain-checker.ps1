@@ -6237,6 +6237,13 @@ async function ensureMsalLoaded() {
   </div>
   <div class="card-content">
     <div id="azureDiagnosticsHint" class="azure-note">Sign in to query customer Azure subscriptions and Log Analytics workspaces directly from your browser session.</div>
+    <div id="azureSwitchDirectoryRow" class="azure-panel-field" style="display:none; margin-bottom:10px;">
+      <label for="azureTenantInput" id="azureSwitchDirectoryLabel" style="font-size:12px;">Switch directory (tenant ID or domain)</label>
+      <div style="display:flex; gap:6px;">
+        <input id="azureTenantInput" type="text" placeholder="e.g. contoso.onmicrosoft.com" style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--input-bg); color:var(--fg); font-size:13px;" />
+        <button id="azureSwitchDirectoryBtn" type="button" onclick="switchAzureDirectory()" style="white-space:nowrap;">Switch</button>
+      </div>
+    </div>
     <div class="azure-panel-grid">
       <div class="azure-panel-field">
         <label for="azureSubscriptionSelect" id="azureSubscriptionLabel">Subscription</label>
@@ -6534,7 +6541,9 @@ const TRANSLATIONS = {
     azureDiscoverSuccess: 'Discovery complete. Select a workspace and run a query.',
     azureSignedInAs: 'Signed in as {user}',
     azureConsentRequired: 'Additional Azure permissions are required. Approve the consent prompt to continue.',
-    azureQueryTextLabel: 'Executed query'
+    azureQueryTextLabel: 'Executed query',
+    azureSwitchDirectory: 'Switch directory (tenant ID or domain)',
+    azureSwitchBtn: 'Switch'
   },
   es: {
     languageName: 'Español',
@@ -9502,6 +9511,11 @@ function applyLanguageToStaticUi() {
   const azureSubscriptionLabel = document.getElementById('azureSubscriptionLabel');
   if (azureSubscriptionLabel) azureSubscriptionLabel.textContent = t('azureSubscription');
 
+  const azureSwitchDirectoryLabel = document.getElementById('azureSwitchDirectoryLabel');
+  if (azureSwitchDirectoryLabel) azureSwitchDirectoryLabel.textContent = t('azureSwitchDirectory');
+  const azureSwitchDirectoryBtn = document.getElementById('azureSwitchDirectoryBtn');
+  if (azureSwitchDirectoryBtn) azureSwitchDirectoryBtn.textContent = t('azureSwitchBtn');
+
   const azureResourceLabel = document.getElementById('azureResourceLabel');
   if (azureResourceLabel) azureResourceLabel.textContent = t('azureAcsResource');
 
@@ -12163,6 +12177,9 @@ function renderAzureDiagnosticsUi() {
   const signedIn = !!(msAuthAccount && msalInstance);
   card.style.display = (getMsalConfig() && signedIn) ? '' : 'none';
 
+  const switchRow = document.getElementById('azureSwitchDirectoryRow');
+  if (switchRow) switchRow.style.display = signedIn ? '' : 'none';
+
   renderAzureSelectOptions(
     'azureSubscriptionSelect',
     azureDiagnosticsState.subscriptions,
@@ -12370,6 +12387,31 @@ async function armFetchAllSilent(url, tenantId) {
   }
   console.log(`[AzureDiag] armFetchAllSilent: DONE pages=${page}, totalItems=${items.length}`);
   return items;
+}
+
+async function switchAzureDirectory() {
+  const input = document.getElementById('azureTenantInput');
+  const tenantValue = (input ? input.value : '').trim();
+  if (!tenantValue) {
+    setAzureDiagnosticsStatus('Enter a tenant ID or domain name (e.g. contoso.onmicrosoft.com).', true);
+    return;
+  }
+  if (!msalInstance) {
+    setAzureDiagnosticsStatus(t('azureSignInRequired'), true);
+    return;
+  }
+  console.log(`[AzureDiag] switchAzureDirectory: re-authenticating against tenant "${tenantValue}"`);
+  try {
+    await msalInstance.loginRedirect({
+      scopes: GRAPH_SCOPES,
+      extraScopesToConsent: [...ARM_SCOPES, ...LOG_ANALYTICS_SCOPES],
+      authority: `https://login.microsoftonline.com/${encodeURIComponent(tenantValue)}`,
+      prompt: 'login'
+    });
+  } catch (e) {
+    console.error('[AzureDiag] switchAzureDirectory failed:', e);
+    setAzureDiagnosticsStatus(t('authSignInFailed', { reason: e?.message || t('authUnknownError') }), true);
+  }
 }
 
 async function loadAzureSubscriptions() {
