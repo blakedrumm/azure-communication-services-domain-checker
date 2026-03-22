@@ -6520,6 +6520,7 @@ const TRANSLATIONS = {
     azureRunningQuery: 'Running query: {name}',
     azureNoSubscriptions: 'No Azure subscriptions were returned for this user.',
     azureNoResources: 'No ACS resources were found in the selected subscription.',
+    azureSubscriptionNotEnabled: 'The selected subscription is {state}. Resource discovery requires an Enabled subscription.',
     azureNoWorkspaces: 'No connected Log Analytics workspaces were found. Check diagnostic settings on the selected ACS resources.',
     azureSelectSubscriptionFirst: 'Select a subscription first.',
     azureSelectWorkspaceFirst: 'Select a workspace first.',
@@ -12496,6 +12497,13 @@ function getSelectedSubscriptionTenantId() {
   return (sub && sub.tenantId) ? sub.tenantId : null;
 }
 
+function getSelectedSubscriptionState() {
+  const subId = getSelectedAzureSubscriptionId();
+  if (!subId) return '';
+  const sub = azureDiagnosticsState.subscriptions.find(s => s.subscriptionId === subId);
+  return (sub && sub.state) ? sub.state : '';
+}
+
 async function discoverAzureResources() {
   const subscriptionId = getSelectedAzureSubscriptionId();
   if (!subscriptionId) {
@@ -12503,6 +12511,15 @@ async function discoverAzureResources() {
     return;
   }
   const tenantId = getSelectedSubscriptionTenantId();
+  const subState = getSelectedSubscriptionState();
+  if (subState && subState.toLowerCase() !== 'enabled') {
+    console.log(`[AzureDiag] discoverAzureResources: skipping — subscription state is "${subState}"`);
+    azureDiagnosticsState.resources = [];
+    azureDiagnosticsState.workspaces = [];
+    renderAzureDiagnosticsUi();
+    setAzureDiagnosticsStatus(t('azureSubscriptionNotEnabled', { state: subState }), true);
+    return;
+  }
 
   try {
     azureDiagnosticsState.isBusy = true;
