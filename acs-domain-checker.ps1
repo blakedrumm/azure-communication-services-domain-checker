@@ -10059,8 +10059,9 @@ function applyLanguageToStaticUi() {
   const footer = document.getElementById('footerText');
   if (footer) {
     let footerHtml = t('footer', { version: appVersion });
-    footerHtml += ' &bull; <a href="/terms" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('termsOfService')) + '</a>';
-    footerHtml += ' &bull; <a href="/privacy" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('privacyStatement')) + '</a>';
+    const langSuffix = currentLanguage ? '?lang=' + encodeURIComponent(currentLanguage) : '';
+    footerHtml += ' &bull; <a href="/terms' + langSuffix + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('termsOfService')) + '</a>';
+    footerHtml += ' &bull; <a href="/privacy' + langSuffix + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('privacyStatement')) + '</a>';
     footer.innerHTML = footerHtml;
   }
 
@@ -13356,41 +13357,234 @@ $script:TosPageHtml = @'
 </style>
 </head>
 <body>
-<a class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
-<h1>Terms of Service</h1>
-<p><strong>Last updated:</strong> June 2025</p>
+<a id="backLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<h1 id="tosTitle">Terms of Service</h1>
+<p><strong id="updatedLabel">Last updated:</strong> <span id="updatedValue">March 2026</span></p>
 
-<h2>1. Acceptance of Terms</h2>
-<p>By accessing or using the ACS Email Domain Checker (&ldquo;the Tool&rdquo;), you agree to be bound by these Terms of Service. If you do not agree, do not use the Tool.</p>
+<h2 id="tosSection1Title">1. Acceptance of Terms</h2>
+<p id="tosSection1Body">By accessing or using the ACS Email Domain Checker (&ldquo;the Tool&rdquo;), you agree to be bound by these Terms of Service. If you do not agree, do not use the Tool.</p>
 
-<h2>2. Description of the Tool</h2>
-<p>The Tool performs DNS lookups and provides guidance related to Azure Communication Services email domain verification. It is intended for informational and troubleshooting purposes only.</p>
+<h2 id="tosSection2Title">2. Description of the Tool</h2>
+<p id="tosSection2Body">The Tool performs DNS lookups and provides guidance related to Azure Communication Services email domain verification. It is intended for informational and troubleshooting purposes only.</p>
 
-<h2>3. No Warranty</h2>
-<p>The Tool is provided <strong>&ldquo;as is&rdquo;</strong> and <strong>&ldquo;as available&rdquo;</strong> without warranties of any kind, either express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. DNS results may be cached, incomplete, or affected by network conditions.</p>
+<h2 id="tosSection3Title">3. No Warranty</h2>
+<p id="tosSection3Body">The Tool is provided <strong>&ldquo;as is&rdquo;</strong> and <strong>&ldquo;as available&rdquo;</strong> without warranties of any kind, either express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. DNS results may be cached, incomplete, or affected by network conditions.</p>
 
-<h2>4. Limitation of Liability</h2>
-<p>In no event shall the authors or contributors be liable for any direct, indirect, incidental, special, or consequential damages arising out of or in connection with your use of the Tool.</p>
+<h2 id="tosSection4Title">4. Limitation of Liability</h2>
+<p id="tosSection4Body">In no event shall the authors or contributors be liable for any direct, indirect, incidental, special, or consequential damages arising out of or in connection with your use of the Tool.</p>
 
-<h2>5. Acceptable Use</h2>
-<p>You agree not to use the Tool to:</p>
+<h2 id="tosSection5Title">5. Acceptable Use</h2>
+<p id="tosSection5Intro">You agree not to use the Tool to:</p>
 <ul>
-  <li>Perform unauthorized or abusive DNS queries.</li>
-  <li>Attempt to disrupt or overload the service.</li>
-  <li>Violate any applicable laws or regulations.</li>
+  <li id="tosSection5Item1">Perform unauthorized or abusive DNS queries.</li>
+  <li id="tosSection5Item2">Attempt to disrupt or overload the service.</li>
+  <li id="tosSection5Item3">Violate any applicable laws or regulations.</li>
 </ul>
 
-<h2>6. Data &amp; Privacy</h2>
-<p>The Tool does not collect personally identifiable information. Optional anonymous usage metrics (when enabled) contain only HMAC-hashed domain names and aggregate counters. See the <a href="/privacy">Privacy Statement</a> for details.</p>
+<h2 id="tosSection6Title">6. Data &amp; Privacy</h2>
+<p id="tosSection6Body">The Tool does not collect personally identifiable information. Optional anonymous usage metrics (when enabled) contain only HMAC-hashed domain names and aggregate counters. See the <a id="privacyLink" href="/privacy">Privacy Statement</a> for details.</p>
 
-<h2>7. Third-Party Services</h2>
-<p>The Tool may interact with third-party DNS resolvers, WHOIS providers, and Azure APIs. Your use of those services is subject to their respective terms.</p>
+<h2 id="tosSection7Title">7. Third-Party Services</h2>
+<p id="tosSection7Body">The Tool may interact with third-party DNS resolvers, WHOIS providers, and Azure APIs. Your use of those services is subject to their respective terms.</p>
 
-<h2>8. Changes to These Terms</h2>
-<p>These terms may be updated from time to time. Continued use of the Tool after changes constitutes acceptance of the revised terms.</p>
+<h2 id="tosSection8Title">8. Changes to These Terms</h2>
+<p id="tosSection8Body">These terms may be updated from time to time. Continued use of the Tool after changes constitutes acceptance of the revised terms.</p>
 
-<h2>9. Contact</h2>
-<p>For questions about these terms, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+<h2 id="tosSection9Title">9. Contact</h2>
+<p id="tosSection9Body">For questions about these terms, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+<script nonce="__CSP_NONCE__">
+(() => {
+  const TRANSLATIONS = {
+    en: {
+      pageTitle: 'Terms of Service - ACS Email Domain Checker',
+      back: '← Back to ACS Email Domain Checker',
+      title: 'Terms of Service',
+      updatedLabel: 'Last updated:',
+      updatedValue: 'March 2026',
+      privacyStatement: 'Privacy Statement',
+      s1t: '1. Acceptance of Terms',
+      s1b: 'By accessing or using the ACS Email Domain Checker (“the Tool”), you agree to be bound by these Terms of Service. If you do not agree, do not use the Tool.',
+      s2t: '2. Description of the Tool',
+      s2b: 'The Tool performs DNS lookups and provides guidance related to Azure Communication Services email domain verification. It is intended for informational and troubleshooting purposes only.',
+      s3t: '3. No Warranty',
+      s3b: 'The Tool is provided <strong>“as is”</strong> and <strong>“as available”</strong> without warranties of any kind, either express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. DNS results may be cached, incomplete, or affected by network conditions.',
+      s4t: '4. Limitation of Liability',
+      s4b: 'In no event shall the authors or contributors be liable for any direct, indirect, incidental, special, or consequential damages arising out of or in connection with your use of the Tool.',
+      s5t: '5. Acceptable Use',
+      s5i: 'You agree not to use the Tool to:',
+      s5l1: 'Perform unauthorized or abusive DNS queries.',
+      s5l2: 'Attempt to disrupt or overload the service.',
+      s5l3: 'Violate any applicable laws or regulations.',
+      s6t: '6. Data & Privacy',
+      s6b: 'The Tool does not collect personally identifiable information. Optional anonymous usage metrics (when enabled) contain only HMAC-hashed domain names and aggregate counters. See the <a id="privacyLink" href="/privacy">Privacy Statement</a> for details.',
+      s7t: '7. Third-Party Services',
+      s7b: 'The Tool may interact with third-party DNS resolvers, WHOIS providers, and Azure APIs. Your use of those services is subject to their respective terms.',
+      s8t: '8. Changes to These Terms',
+      s8b: 'These terms may be updated from time to time. Continued use of the Tool after changes constitutes acceptance of the revised terms.',
+      s9t: '9. Contact',
+      s9b: 'For questions about these terms, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    },
+    es: {
+      pageTitle: 'Términos de servicio - ACS Email Domain Checker', back: '← Volver a ACS Email Domain Checker', title: 'Términos de servicio', updatedLabel: 'Última actualización:', updatedValue: 'Marzo de 2026', privacyStatement: 'Declaración de privacidad',
+      s1t: '1. Aceptación de los términos', s1b: 'Al acceder o usar ACS Email Domain Checker (“la Herramienta”), acepta quedar sujeto a estos Términos de servicio. Si no está de acuerdo, no use la Herramienta.',
+      s2t: '2. Descripción de la herramienta', s2b: 'La Herramienta realiza búsquedas DNS y proporciona orientación relacionada con la verificación de dominios de correo de Azure Communication Services. Está destinada únicamente a fines informativos y de solución de problemas.',
+      s3t: '3. Sin garantía', s3b: 'La Herramienta se proporciona <strong>“tal cual”</strong> y <strong>“según disponibilidad”</strong>, sin garantías de ningún tipo, expresas o implícitas, incluidas, entre otras, las garantías de comerciabilidad, idoneidad para un propósito determinado o no infracción. Los resultados DNS pueden estar almacenados en caché, incompletos o verse afectados por las condiciones de red.',
+      s4t: '4. Limitación de responsabilidad', s4b: 'En ningún caso los autores o colaboradores serán responsables de daños directos, indirectos, incidentales, especiales o consecuentes derivados de o relacionados con el uso de la Herramienta.',
+      s5t: '5. Uso aceptable', s5i: 'Acepta no usar la Herramienta para:', s5l1: 'Realizar consultas DNS no autorizadas o abusivas.', s5l2: 'Intentar interrumpir o sobrecargar el servicio.', s5l3: 'Infringir cualquier ley o normativa aplicable.',
+      s6t: '6. Datos y privacidad', s6b: 'La Herramienta no recopila información personal identificable. Las métricas opcionales de uso anónimo (cuando están habilitadas) contienen solo nombres de dominio con hash HMAC y contadores agregados. Consulte la <a id="privacyLink" href="/privacy">Declaración de privacidad</a> para obtener más información.',
+      s7t: '7. Servicios de terceros', s7b: 'La Herramienta puede interactuar con solucionadores DNS de terceros, proveedores de WHOIS y API de Azure. El uso de esos servicios está sujeto a sus respectivos términos.',
+      s8t: '8. Cambios en estos términos', s8b: 'Estos términos pueden actualizarse periódicamente. El uso continuado de la Herramienta después de los cambios constituye la aceptación de los términos revisados.',
+      s9t: '9. Contacto', s9b: 'Si tiene preguntas sobre estos términos, visite <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    },
+    fr: {
+      pageTitle: 'Conditions d’utilisation - ACS Email Domain Checker', back: '← Retour à ACS Email Domain Checker', title: 'Conditions d’utilisation', updatedLabel: 'Dernière mise à jour :', updatedValue: 'Mars 2026', privacyStatement: 'Déclaration de confidentialité',
+      s1t: '1. Acceptation des conditions', s1b: 'En accédant à ACS Email Domain Checker (« l’Outil ») ou en l’utilisant, vous acceptez d’être lié par les présentes Conditions d’utilisation. Si vous n’êtes pas d’accord, n’utilisez pas l’Outil.',
+      s2t: '2. Description de l’outil', s2b: 'L’Outil effectue des recherches DNS et fournit des conseils liés à la vérification de domaines de messagerie Azure Communication Services. Il est destiné uniquement à des fins d’information et de dépannage.',
+      s3t: '3. Absence de garantie', s3b: 'L’Outil est fourni <strong>« tel quel »</strong> et <strong>« selon disponibilité »</strong>, sans garantie d’aucune sorte, expresse ou implicite, y compris notamment les garanties de qualité marchande, d’adéquation à un usage particulier ou d’absence de contrefaçon. Les résultats DNS peuvent être mis en cache, incomplets ou affectés par les conditions réseau.',
+      s4t: '4. Limitation de responsabilité', s4b: 'En aucun cas les auteurs ou contributeurs ne pourront être tenus responsables de dommages directs, indirects, accessoires, spéciaux ou consécutifs résultant de l’utilisation de l’Outil ou en lien avec celle-ci.',
+      s5t: '5. Utilisation acceptable', s5i: 'Vous acceptez de ne pas utiliser l’Outil pour :', s5l1: 'Effectuer des requêtes DNS non autorisées ou abusives.', s5l2: 'Tenter de perturber ou de surcharger le service.', s5l3: 'Enfreindre toute loi ou réglementation applicable.',
+      s6t: '6. Données et confidentialité', s6b: 'L’Outil ne collecte aucune information personnelle identifiable. Les métriques facultatives d’utilisation anonyme (lorsqu’elles sont activées) contiennent uniquement des noms de domaine hachés par HMAC et des compteurs agrégés. Consultez la <a id="privacyLink" href="/privacy">Déclaration de confidentialité</a> pour plus de détails.',
+      s7t: '7. Services tiers', s7b: 'L’Outil peut interagir avec des résolveurs DNS tiers, des fournisseurs WHOIS et des API Azure. Votre utilisation de ces services est soumise à leurs conditions respectives.',
+      s8t: '8. Modifications de ces conditions', s8b: 'Ces conditions peuvent être mises à jour de temps à autre. L’utilisation continue de l’Outil après les modifications constitue l’acceptation des conditions révisées.',
+      s9t: '9. Contact', s9b: 'Pour toute question concernant ces conditions, consultez <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    },
+    de: {
+      pageTitle: 'Nutzungsbedingungen - ACS Email Domain Checker', back: '← Zurück zu ACS Email Domain Checker', title: 'Nutzungsbedingungen', updatedLabel: 'Zuletzt aktualisiert:', updatedValue: 'März 2026', privacyStatement: 'Datenschutzerklärung',
+      s1t: '1. Annahme der Bedingungen', s1b: 'Durch den Zugriff auf oder die Nutzung von ACS Email Domain Checker („das Tool“) erklären Sie sich mit diesen Nutzungsbedingungen einverstanden. Wenn Sie nicht einverstanden sind, verwenden Sie das Tool nicht.',
+      s2t: '2. Beschreibung des Tools', s2b: 'Das Tool führt DNS-Abfragen durch und bietet Hinweise zur E-Mail-Domänenüberprüfung für Azure Communication Services. Es ist ausschließlich für Informations- und Fehlerbehebungszwecke bestimmt.',
+      s3t: '3. Keine Gewährleistung', s3b: 'Das Tool wird <strong>„wie besehen“</strong> und <strong>„wie verfügbar“</strong> ohne jegliche ausdrückliche oder stillschweigende Gewährleistung bereitgestellt, einschließlich, aber nicht beschränkt auf Marktgängigkeit, Eignung für einen bestimmten Zweck oder Nichtverletzung von Rechten. DNS-Ergebnisse können zwischengespeichert, unvollständig oder durch Netzwerkbedingungen beeinflusst sein.',
+      s4t: '4. Haftungsbeschränkung', s4b: 'In keinem Fall haften die Autoren oder Mitwirkenden für direkte, indirekte, zufällige, besondere oder Folgeschäden, die aus der Nutzung des Tools entstehen oder damit zusammenhängen.',
+      s5t: '5. Zulässige Nutzung', s5i: 'Sie erklären sich damit einverstanden, das Tool nicht zu verwenden, um:', s5l1: 'Nicht autorisierte oder missbräuchliche DNS-Abfragen durchzuführen.', s5l2: 'Zu versuchen, den Dienst zu stören oder zu überlasten.', s5l3: 'Geltende Gesetze oder Vorschriften zu verletzen.',
+      s6t: '6. Daten und Datenschutz', s6b: 'Das Tool erfasst keine personenbezogenen Daten. Optionale anonyme Nutzungsmetriken (falls aktiviert) enthalten nur HMAC-gehashte Domänennamen und aggregierte Zähler. Weitere Informationen finden Sie in der <a id="privacyLink" href="/privacy">Datenschutzerklärung</a>.',
+      s7t: '7. Dienste von Drittanbietern', s7b: 'Das Tool kann mit DNS-Resolvern von Drittanbietern, WHOIS-Anbietern und Azure-APIs interagieren. Ihre Nutzung dieser Dienste unterliegt deren jeweiligen Bedingungen.',
+      s8t: '8. Änderungen dieser Bedingungen', s8b: 'Diese Bedingungen können von Zeit zu Zeit aktualisiert werden. Die fortgesetzte Nutzung des Tools nach Änderungen gilt als Zustimmung zu den überarbeiteten Bedingungen.',
+      s9t: '9. Kontakt', s9b: 'Bei Fragen zu diesen Bedingungen besuchen Sie <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    },
+    'pt-BR': {
+      pageTitle: 'Termos de Serviço - ACS Email Domain Checker', back: '← Voltar para ACS Email Domain Checker', title: 'Termos de Serviço', updatedLabel: 'Última atualização:', updatedValue: 'Março de 2026', privacyStatement: 'Declaração de Privacidade',
+      s1t: '1. Aceitação dos Termos', s1b: 'Ao acessar ou usar o ACS Email Domain Checker (“a Ferramenta”), você concorda em estar vinculado a estes Termos de Serviço. Se não concordar, não use a Ferramenta.',
+      s2t: '2. Descrição da Ferramenta', s2b: 'A Ferramenta realiza pesquisas de DNS e fornece orientações relacionadas à verificação de domínios de e-mail do Azure Communication Services. Ela se destina apenas a fins informativos e de solução de problemas.',
+      s3t: '3. Sem Garantia', s3b: 'A Ferramenta é fornecida <strong>“no estado em que se encontra”</strong> e <strong>“conforme disponível”</strong>, sem garantias de qualquer tipo, expressas ou implícitas, incluindo, entre outras, garantias de comercialização, adequação a uma finalidade específica ou não violação. Os resultados de DNS podem estar em cache, incompletos ou ser afetados pelas condições da rede.',
+      s4t: '4. Limitação de Responsabilidade', s4b: 'Em nenhuma hipótese os autores ou colaboradores serão responsáveis por quaisquer danos diretos, indiretos, incidentais, especiais ou consequenciais decorrentes do uso da Ferramenta ou relacionados a ele.',
+      s5t: '5. Uso Aceitável', s5i: 'Você concorda em não usar a Ferramenta para:', s5l1: 'Executar consultas de DNS não autorizadas ou abusivas.', s5l2: 'Tentar interromper ou sobrecarregar o serviço.', s5l3: 'Violar quaisquer leis ou regulamentos aplicáveis.',
+      s6t: '6. Dados e Privacidade', s6b: 'A Ferramenta não coleta informações pessoalmente identificáveis. As métricas opcionais de uso anônimo (quando habilitadas) contêm apenas nomes de domínio com hash HMAC e contadores agregados. Consulte a <a id="privacyLink" href="/privacy">Declaração de Privacidade</a> para obter detalhes.',
+      s7t: '7. Serviços de Terceiros', s7b: 'A Ferramenta pode interagir com resolvedores DNS de terceiros, provedores de WHOIS e APIs do Azure. Seu uso desses serviços está sujeito aos respectivos termos.',
+      s8t: '8. Alterações Nestes Termos', s8b: 'Estes termos podem ser atualizados periodicamente. O uso continuado da Ferramenta após as alterações constitui aceitação dos termos revisados.',
+      s9t: '9. Contato', s9b: 'Para dúvidas sobre estes termos, visite <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    },
+    ar: {
+      pageTitle: 'شروط الخدمة - ACS Email Domain Checker', back: '← العودة إلى ACS Email Domain Checker', title: 'شروط الخدمة', updatedLabel: 'آخر تحديث:', updatedValue: 'مارس 2026', privacyStatement: 'بيان الخصوصية',
+      s1t: '1. قبول الشروط', s1b: 'من خلال الوصول إلى ACS Email Domain Checker («الأداة») أو استخدامه، فإنك توافق على الالتزام بشروط الخدمة هذه. إذا كنت لا توافق، فلا تستخدم الأداة.',
+      s2t: '2. وصف الأداة', s2b: 'تُجري الأداة عمليات بحث DNS وتوفر إرشادات تتعلق بالتحقق من نطاقات البريد الإلكتروني في Azure Communication Services. وهي مخصصة للأغراض المعلوماتية واستكشاف الأخطاء فقط.',
+      s3t: '3. عدم وجود ضمان', s3b: 'يتم توفير الأداة <strong>«كما هي»</strong> و<strong>«حسب التوفر»</strong> من دون أي ضمانات من أي نوع، سواء كانت صريحة أو ضمنية، بما في ذلك على سبيل المثال لا الحصر ضمانات القابلية للتسويق أو الملاءمة لغرض معين أو عدم الانتهاك. قد تكون نتائج DNS مخزنة مؤقتًا أو غير مكتملة أو متأثرة بظروف الشبكة.',
+      s4t: '4. تحديد المسؤولية', s4b: 'لا يتحمل المؤلفون أو المساهمون بأي حال من الأحوال المسؤولية عن أي أضرار مباشرة أو غير مباشرة أو عرضية أو خاصة أو تبعية تنشأ عن استخدامك للأداة أو فيما يتعلق به.',
+      s5t: '5. الاستخدام المقبول', s5i: 'أنت توافق على عدم استخدام الأداة من أجل:', s5l1: 'إجراء استعلامات DNS غير مصرح بها أو مسيئة.', s5l2: 'محاولة تعطيل الخدمة أو تحميلها فوق طاقتها.', s5l3: 'انتهاك أي قوانين أو لوائح معمول بها.',
+      s6t: '6. البيانات والخصوصية', s6b: 'لا تجمع الأداة معلومات تعريف شخصية. تحتوي مقاييس الاستخدام المجهولة الاختيارية (عند تمكينها) فقط على أسماء نطاقات مجزأة باستخدام HMAC وعدادات مجمعة. راجع <a id="privacyLink" href="/privacy">بيان الخصوصية</a> للحصول على التفاصيل.',
+      s7t: '7. خدمات الجهات الخارجية', s7b: 'قد تتفاعل الأداة مع محللات DNS تابعة لجهات خارجية، ومزودي WHOIS، وواجهات Azure البرمجية. يخضع استخدامك لهذه الخدمات لشروطها الخاصة.',
+      s8t: '8. التغييرات على هذه الشروط', s8b: 'قد يتم تحديث هذه الشروط من وقت لآخر. ويُعد استمرار استخدام الأداة بعد التغييرات قبولًا للشروط المعدلة.',
+      s9t: '9. الاتصال', s9b: 'إذا كانت لديك أسئلة حول هذه الشروط، فزر <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    },
+    'zh-CN': {
+      pageTitle: '服务条款 - ACS Email Domain Checker', back: '← 返回 ACS Email Domain Checker', title: '服务条款', updatedLabel: '上次更新：', updatedValue: '2026年3月', privacyStatement: '隐私声明',
+      s1t: '1. 条款接受', s1b: '访问或使用 ACS Email Domain Checker（“本工具”）即表示您同意受这些服务条款的约束。如果您不同意，请不要使用本工具。',
+      s2t: '2. 工具说明', s2b: '本工具执行 DNS 查询，并提供与 Azure Communication Services 电子邮件域验证相关的指导。其仅用于信息参考和故障排查。',
+      s3t: '3. 无担保', s3b: '本工具按<strong>“原样”</strong>和<strong>“现状”</strong>提供，不附带任何明示或暗示保证，包括但不限于适销性、特定用途适用性或不侵权保证。DNS 结果可能被缓存、不完整或受网络状况影响。',
+      s4t: '4. 责任限制', s4b: '在任何情况下，作者或贡献者均不对因您使用本工具而产生的或与之相关的任何直接、间接、附带、特殊或后果性损害承担责任。',
+      s5t: '5. 可接受的使用', s5i: '您同意不将本工具用于：', s5l1: '执行未经授权或滥用的 DNS 查询。', s5l2: '尝试中断或使服务过载。', s5l3: '违反任何适用法律或法规。',
+      s6t: '6. 数据和隐私', s6b: '本工具不收集可识别个人身份的信息。可选的匿名使用指标（启用时）仅包含经过 HMAC 哈希的域名和聚合计数器。有关详细信息，请参阅<a id="privacyLink" href="/privacy">隐私声明</a>。',
+      s7t: '7. 第三方服务', s7b: '本工具可能会与第三方 DNS 解析器、WHOIS 提供商和 Azure API 交互。您对这些服务的使用受其各自条款约束。',
+      s8t: '8. 条款变更', s8b: '这些条款可能会不时更新。您在更改后继续使用本工具即表示接受修订后的条款。',
+      s9t: '9. 联系方式', s9b: '如对这些条款有疑问，请访问 <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>。'
+    },
+    'hi-IN': {
+      pageTitle: 'सेवा की शर्तें - ACS Email Domain Checker', back: '← ACS Email Domain Checker पर वापस जाएँ', title: 'सेवा की शर्तें', updatedLabel: 'अंतिम अपडेट:', updatedValue: 'मार्च 2026', privacyStatement: 'गोपनीयता वक्तव्य',
+      s1t: '1. शर्तों की स्वीकृति', s1b: 'ACS Email Domain Checker (“टूल”) का उपयोग या उस तक पहुँच करके, आप इन सेवा की शर्तों से बंधे रहने के लिए सहमत होते हैं। यदि आप सहमत नहीं हैं, तो टूल का उपयोग न करें।',
+      s2t: '2. टूल का विवरण', s2b: 'टूल DNS लुकअप करता है और Azure Communication Services ईमेल डोमेन सत्यापन से संबंधित मार्गदर्शन प्रदान करता है। यह केवल सूचनात्मक और समस्या निवारण उद्देश्यों के लिए है।',
+      s3t: '3. कोई वारंटी नहीं', s3b: 'टूल <strong>“जैसा है”</strong> और <strong>“जैसा उपलब्ध है”</strong> आधार पर प्रदान किया जाता है, बिना किसी प्रकार की वारंटी के, चाहे वह स्पष्ट हो या निहित, जिसमें व्यापारीकरण, किसी विशेष उद्देश्य के लिए उपयुक्तता, या उल्लंघन न होने की वारंटी शामिल है लेकिन इन्हीं तक सीमित नहीं है। DNS परिणाम कैश किए जा सकते हैं, अपूर्ण हो सकते हैं, या नेटवर्क स्थितियों से प्रभावित हो सकते हैं।',
+      s4t: '4. दायित्व की सीमा', s4b: 'किसी भी स्थिति में लेखक या योगदानकर्ता टूल के आपके उपयोग से उत्पन्न या उससे संबंधित किसी भी प्रत्यक्ष, अप्रत्यक्ष, आकस्मिक, विशेष या परिणामी क्षति के लिए उत्तरदायी नहीं होंगे।',
+      s5t: '5. स्वीकार्य उपयोग', s5i: 'आप सहमत हैं कि टूल का उपयोग इन उद्देश्यों के लिए नहीं करेंगे:', s5l1: 'अनधिकृत या दुरुपयोगपूर्ण DNS क्वेरी करना।', s5l2: 'सेवा को बाधित करने या उस पर अत्यधिक भार डालने का प्रयास करना।', s5l3: 'किसी लागू कानून या विनियम का उल्लंघन करना।',
+      s6t: '6. डेटा और गोपनीयता', s6b: 'टूल व्यक्तिगत पहचान योग्य जानकारी एकत्र नहीं करता। वैकल्पिक अनाम उपयोग मीट्रिक (सक्षम होने पर) केवल HMAC-हैश किए गए डोमेन नाम और समग्र काउंटर रखते हैं। विवरण के लिए <a id="privacyLink" href="/privacy">गोपनीयता वक्तव्य</a> देखें।',
+      s7t: '7. तृतीय-पक्ष सेवाएँ', s7b: 'टूल तृतीय-पक्ष DNS resolvers, WHOIS providers और Azure APIs के साथ इंटरैक्ट कर सकता है। उन सेवाओं का आपका उपयोग उनके संबंधित नियमों के अधीन है।',
+      s8t: '8. इन शर्तों में परिवर्तन', s8b: 'इन शर्तों को समय-समय पर अद्यतन किया जा सकता है। परिवर्तनों के बाद टूल का निरंतर उपयोग संशोधित शर्तों की स्वीकृति माना जाएगा।',
+      s9t: '9. संपर्क', s9b: 'इन शर्तों के बारे में प्रश्नों के लिए <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a> पर जाएँ।'
+    },
+    'ja-JP': {
+      pageTitle: '利用規約 - ACS Email Domain Checker', back: '← ACS Email Domain Checker に戻る', title: '利用規約', updatedLabel: '最終更新:', updatedValue: '2026年3月', privacyStatement: 'プライバシー ステートメント',
+      s1t: '1. 規約への同意', s1b: 'ACS Email Domain Checker（「本ツール」）にアクセスまたは使用することにより、これらの利用規約に拘束されることに同意したものとみなされます。同意しない場合は、本ツールを使用しないでください。',
+      s2t: '2. ツールの説明', s2b: '本ツールは DNS 参照を実行し、Azure Communication Services のメール ドメイン検証に関するガイダンスを提供します。これは情報提供およびトラブルシューティングのみを目的としています。',
+      s3t: '3. 無保証', s3b: '本ツールは <strong>「現状有姿」</strong> かつ <strong>「提供可能な範囲」</strong> で提供され、明示または黙示を問わず、商品性、特定目的適合性、非侵害性を含むがこれらに限定されない、いかなる保証も行いません。DNS の結果はキャッシュされている場合や不完全な場合があり、ネットワーク状況の影響を受けることがあります。',
+      s4t: '4. 責任の制限', s4b: '著者または貢献者は、いかなる場合も、本ツールの使用に起因または関連して生じる直接的、間接的、偶発的、特別、結果的損害について責任を負いません。',
+      s5t: '5. 許容される使用', s5i: 'お客様は、本ツールを次の目的に使用しないことに同意します。', s5l1: '許可されていない、または濫用的な DNS クエリの実行。', s5l2: 'サービスの妨害や過負荷の試み。', s5l3: '適用される法令または規制への違反。',
+      s6t: '6. データとプライバシー', s6b: '本ツールは個人を特定できる情報を収集しません。オプションの匿名利用メトリック（有効時）には、HMAC ハッシュ化されたドメイン名と集計カウンターのみが含まれます。詳細については <a id="privacyLink" href="/privacy">プライバシー ステートメント</a> を参照してください。',
+      s7t: '7. サードパーティ サービス', s7b: '本ツールは、サードパーティの DNS リゾルバー、WHOIS プロバイダー、および Azure API とやり取りする場合があります。これらのサービスの使用には、それぞれの規約が適用されます。',
+      s8t: '8. 本規約の変更', s8b: 'これらの規約は随時更新される場合があります。変更後も本ツールの使用を継続した場合、改訂後の規約に同意したものとみなされます。',
+      s9t: '9. お問い合わせ', s9b: '本規約に関するご質問は、<a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a> をご覧ください。'
+    },
+    'ru-RU': {
+      pageTitle: 'Условия использования - ACS Email Domain Checker', back: '← Назад к ACS Email Domain Checker', title: 'Условия использования', updatedLabel: 'Последнее обновление:', updatedValue: 'Март 2026', privacyStatement: 'Заявление о конфиденциальности',
+      s1t: '1. Принятие условий', s1b: 'Получая доступ к ACS Email Domain Checker («Инструмент») или используя его, вы соглашаетесь соблюдать настоящие Условия использования. Если вы не согласны, не используйте Инструмент.',
+      s2t: '2. Описание инструмента', s2b: 'Инструмент выполняет DNS-запросы и предоставляет рекомендации, связанные с проверкой почтовых доменов Azure Communication Services. Он предназначен только для информационных целей и устранения неполадок.',
+      s3t: '3. Отсутствие гарантий', s3b: 'Инструмент предоставляется <strong>«как есть»</strong> и <strong>«по мере доступности»</strong> без каких-либо гарантий, явных или подразумеваемых, включая, помимо прочего, гарантии товарной пригодности, пригодности для определенной цели или ненарушения прав. Результаты DNS могут кэшироваться, быть неполными или зависеть от состояния сети.',
+      s4t: '4. Ограничение ответственности', s4b: 'Ни при каких обстоятельствах авторы или участники не несут ответственности за любые прямые, косвенные, случайные, специальные или последующие убытки, возникающие в связи с использованием Инструмента.',
+      s5t: '5. Допустимое использование', s5i: 'Вы соглашаетесь не использовать Инструмент для следующего:', s5l1: 'Выполнения несанкционированных или злоупотребительных DNS-запросов.', s5l2: 'Попыток нарушить работу или перегрузить сервис.', s5l3: 'Нарушения применимых законов или нормативных требований.',
+      s6t: '6. Данные и конфиденциальность', s6b: 'Инструмент не собирает персонально идентифицируемую информацию. Необязательные анонимные метрики использования (если включены) содержат только HMAC-хэшированные доменные имена и агрегированные счетчики. Подробности см. в <a id="privacyLink" href="/privacy">Заявлении о конфиденциальности</a>.',
+      s7t: '7. Сторонние сервисы', s7b: 'Инструмент может взаимодействовать со сторонними DNS-резолверами, поставщиками WHOIS и API Azure. Использование этих сервисов регулируется их собственными условиями.',
+      s8t: '8. Изменения этих условий', s8b: 'Эти условия могут время от времени обновляться. Продолжение использования Инструмента после изменений означает принятие обновленных условий.',
+      s9t: '9. Контакты', s9b: 'Если у вас есть вопросы по этим условиям, посетите <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    }
+  };
+
+  function normalizeLanguageCode(lang) {
+    const value = String(lang || '').trim().toLowerCase();
+    if (!value) return 'en';
+    if (value === 'ptbr' || value.startsWith('pt-br') || value.startsWith('pt_br') || value.startsWith('pt')) return 'pt-BR';
+    if (value.startsWith('es')) return 'es';
+    if (value.startsWith('fr')) return 'fr';
+    if (value.startsWith('de')) return 'de';
+    if (value.startsWith('ar')) return 'ar';
+    if (value === 'zh' || value.startsWith('zh-cn') || value.startsWith('zh_cn') || value.startsWith('zh-hans')) return 'zh-CN';
+    if (value === 'hi' || value.startsWith('hi-in') || value.startsWith('hi_in')) return 'hi-IN';
+    if (value === 'ja' || value.startsWith('ja-jp') || value.startsWith('ja_jp')) return 'ja-JP';
+    if (value === 'ru' || value.startsWith('ru-ru') || value.startsWith('ru_ru')) return 'ru-RU';
+    return 'en';
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const lang = normalizeLanguageCode(params.get('lang') || navigator.language || 'en');
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  document.title = t.pageTitle;
+
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+  const setHtml = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = value;
+  };
+
+  setText('backLink', t.back);
+  document.getElementById('backLink').href = '/?lang=' + encodeURIComponent(lang);
+  setText('tosTitle', t.title);
+  setText('updatedLabel', t.updatedLabel);
+  setText('updatedValue', t.updatedValue);
+  setText('tosSection1Title', t.s1t); setText('tosSection1Body', t.s1b);
+  setText('tosSection2Title', t.s2t); setText('tosSection2Body', t.s2b);
+  setText('tosSection3Title', t.s3t); setHtml('tosSection3Body', t.s3b);
+  setText('tosSection4Title', t.s4t); setText('tosSection4Body', t.s4b);
+  setText('tosSection5Title', t.s5t); setText('tosSection5Intro', t.s5i);
+  setText('tosSection5Item1', t.s5l1); setText('tosSection5Item2', t.s5l2); setText('tosSection5Item3', t.s5l3);
+  setText('tosSection6Title', t.s6t); setHtml('tosSection6Body', t.s6b);
+  setText('tosSection7Title', t.s7t); setText('tosSection7Body', t.s7b);
+  setText('tosSection8Title', t.s8t); setText('tosSection8Body', t.s8b);
+  setText('tosSection9Title', t.s9t); setHtml('tosSection9Body', t.s9b);
+
+  const privacyLink = document.getElementById('privacyLink');
+  if (privacyLink) privacyLink.href = '/privacy?lang=' + encodeURIComponent(lang);
+})();
+</script>
 </body>
 </html>
 '@
@@ -13416,49 +13610,118 @@ $script:PrivacyPageHtml = @'
 </style>
 </head>
 <body>
-<a class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
-<h1>Privacy Statement</h1>
-<p><strong>Last updated:</strong> June 2025</p>
+<a id="privacyBackLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<h1 id="privacyTitle">Privacy Statement</h1>
+<p><strong id="privacyUpdatedLabel">Last updated:</strong> <span id="privacyUpdatedValue">March 2026</span></p>
 
-<h2>1. Overview</h2>
-<p>The ACS Email Domain Checker (&ldquo;the Tool&rdquo;) is designed with privacy in mind. This statement explains what data the Tool does and does not collect.</p>
+<h2 id="privacySection1Title">1. Overview</h2>
+<p id="privacySection1Body">The ACS Email Domain Checker (&ldquo;the Tool&rdquo;) is designed with privacy in mind. This statement explains what data the Tool does and does not collect.</p>
 
-<h2>2. Data We Do Not Collect</h2>
+<h2 id="privacySection2Title">2. Data We Do Not Collect</h2>
 <ul>
-  <li><strong>No personal information</strong> &mdash; the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.</li>
-  <li><strong>No tracking cookies</strong> &mdash; the Tool does not use advertising or analytics tracking cookies.</li>
-  <li><strong>No query logging</strong> &mdash; domain names you look up are not stored on the server.</li>
+  <li id="privacySection2Item1"><strong>No personal information</strong> &mdash; the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.</li>
+  <li id="privacySection2Item2"><strong>No tracking cookies</strong> &mdash; the Tool does not use advertising or analytics tracking cookies.</li>
+  <li id="privacySection2Item3"><strong>No query logging</strong> &mdash; domain names you look up are not stored on the server.</li>
 </ul>
 
-<h2>3. Anonymous Usage Metrics (Optional)</h2>
-<p>When anonymous metrics are enabled, the Tool collects:</p>
+<h2 id="privacySection3Title">3. Anonymous Usage Metrics (Optional)</h2>
+<p id="privacySection3Intro">When anonymous metrics are enabled, the Tool collects:</p>
 <ul>
-  <li>HMAC-hashed domain names (irreversible; the original domain cannot be recovered).</li>
-  <li>Aggregate lookup counters and first-seen timestamps.</li>
-  <li>A random session identifier (not persisted across restarts).</li>
+  <li id="privacySection3Item1">HMAC-hashed domain names (irreversible; the original domain cannot be recovered).</li>
+  <li id="privacySection3Item2">Aggregate lookup counters and first-seen timestamps.</li>
+  <li id="privacySection3Item3">A random session identifier (not persisted across restarts).</li>
 </ul>
-<p>Anonymous metrics can be disabled entirely with the <code>-DisableAnonymousMetrics</code> flag.</p>
+<p id="privacySection3Body">Anonymous metrics can be disabled entirely with the <code>-DisableAnonymousMetrics</code> flag.</p>
 
-<h2>4. Microsoft Entra ID Authentication</h2>
-<p>If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser&rsquo;s session storage and are never sent to the Tool&rsquo;s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.</p>
+<h2 id="privacySection4Title">4. Microsoft Entra ID Authentication</h2>
+<p id="privacySection4Body">If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser&rsquo;s session storage and are never sent to the Tool&rsquo;s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.</p>
 
-<h2>5. Azure Resource Queries</h2>
-<p>When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool&rsquo;s server does not proxy, log, or store any Azure data.</p>
+<h2 id="privacySection5Title">5. Azure Resource Queries</h2>
+<p id="privacySection5Body">When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool&rsquo;s server does not proxy, log, or store any Azure data.</p>
 
-<h2>6. DNS Lookups</h2>
-<p>DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.</p>
+<h2 id="privacySection6Title">6. DNS Lookups</h2>
+<p id="privacySection6Body">DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.</p>
 
-<h2>7. Local Storage</h2>
-<p>The Tool uses your browser&rsquo;s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.</p>
+<h2 id="privacySection7Title">7. Local Storage</h2>
+<p id="privacySection7Body">The Tool uses your browser&rsquo;s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.</p>
 
-<h2>8. Third-Party Services</h2>
-<p>The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.</p>
+<h2 id="privacySection8Title">8. Third-Party Services</h2>
+<p id="privacySection8Body">The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.</p>
 
-<h2>9. Changes to This Statement</h2>
-<p>This privacy statement may be updated from time to time. Changes take effect when published in the Tool.</p>
+<h2 id="privacySection9Title">9. Changes to This Statement</h2>
+<p id="privacySection9Body">This privacy statement may be updated from time to time. Changes take effect when published in the Tool.</p>
 
-<h2>10. Contact</h2>
-<p>For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+<h2 id="privacySection10Title">10. Contact</h2>
+<p id="privacySection10Body">For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+<script nonce="__CSP_NONCE__">
+(() => {
+  const TRANSLATIONS = {
+    en: {
+      pageTitle: 'Privacy Statement - ACS Email Domain Checker', back: '← Back to ACS Email Domain Checker', title: 'Privacy Statement', updatedLabel: 'Last updated:', updatedValue: 'March 2026',
+      s1t: '1. Overview', s1b: 'The ACS Email Domain Checker (“the Tool”) is designed with privacy in mind. This statement explains what data the Tool does and does not collect.',
+      s2t: '2. Data We Do Not Collect', s2l1: '<strong>No personal information</strong> — the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.', s2l2: '<strong>No tracking cookies</strong> — the Tool does not use advertising or analytics tracking cookies.', s2l3: '<strong>No query logging</strong> — domain names you look up are not stored on the server.',
+      s3t: '3. Anonymous Usage Metrics (Optional)', s3i: 'When anonymous metrics are enabled, the Tool collects:', s3l1: 'HMAC-hashed domain names (irreversible; the original domain cannot be recovered).', s3l2: 'Aggregate lookup counters and first-seen timestamps.', s3l3: 'A random session identifier (not persisted across restarts).', s3b: 'Anonymous metrics can be disabled entirely with the <code>-DisableAnonymousMetrics</code> flag.',
+      s4t: '4. Microsoft Entra ID Authentication', s4b: 'If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser’s session storage and are never sent to the Tool’s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.',
+      s5t: '5. Azure Resource Queries', s5b: 'When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool’s server does not proxy, log, or store any Azure data.',
+      s6t: '6. DNS Lookups', s6b: 'DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.',
+      s7t: '7. Local Storage', s7b: 'The Tool uses your browser’s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.',
+      s8t: '8. Third-Party Services', s8b: 'The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.',
+      s9t: '9. Changes to This Statement', s9b: 'This privacy statement may be updated from time to time. Changes take effect when published in the Tool.',
+      s10t: '10. Contact', s10b: 'For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
+    },
+    es: { pageTitle: 'Declaración de privacidad - ACS Email Domain Checker', back: '← Volver a ACS Email Domain Checker', title: 'Declaración de privacidad', updatedLabel: 'Última actualización:', updatedValue: 'Marzo de 2026', s1t: '1. Información general', s1b: 'ACS Email Domain Checker (“la Herramienta”) está diseñado teniendo en cuenta la privacidad. Esta declaración explica qué datos recopila y no recopila la Herramienta.', s2t: '2. Datos que no recopilamos', s2l1: '<strong>Sin información personal</strong> — la Herramienta no recopila nombres, direcciones de correo electrónico, direcciones IP ni identificadores de hardware.', s2l2: '<strong>Sin cookies de seguimiento</strong> — la Herramienta no usa cookies de seguimiento publicitario ni analítico.', s2l3: '<strong>Sin registro de consultas</strong> — los nombres de dominio que consulta no se almacenan en el servidor.', s3t: '3. Métricas de uso anónimo (opcional)', s3i: 'Cuando las métricas anónimas están habilitadas, la Herramienta recopila:', s3l1: 'Nombres de dominio con hash HMAC (irreversibles; no se puede recuperar el dominio original).', s3l2: 'Contadores agregados de búsqueda y marcas de tiempo de primer uso.', s3l3: 'Un identificador de sesión aleatorio (no se conserva tras reinicios).', s3b: 'Las métricas anónimas pueden deshabilitarse por completo con la marca <code>-DisableAnonymousMetrics</code>.', s4t: '4. Autenticación de Microsoft Entra ID', s4b: 'Si elige iniciar sesión con Microsoft, la Herramienta usa MSAL.js con el flujo Authorization Code + PKCE. Los tokens se almacenan en el almacenamiento de sesión del navegador y nunca se envían al servidor de la Herramienta. La Herramienta solo lee su nombre para mostrar y su dirección de correo desde Microsoft Graph para mostrar su identidad en la interfaz.', s5t: '5. Consultas de recursos de Azure', s5b: 'Al usar Azure Workspace Diagnostics, todas las llamadas API van directamente desde el navegador a Azure Resource Manager y Log Analytics con su propio token de acceso. El servidor de la Herramienta no actúa como proxy, ni registra ni almacena datos de Azure.', s6t: '6. Búsquedas DNS', s6b: 'Las consultas DNS se realizan en el servidor usando el resolvedor configurado (DNS del sistema o DNS sobre HTTPS). Los resultados se devuelven al navegador y no se almacenan.', s7t: '7. Almacenamiento local', s7b: 'La Herramienta usa <code>localStorage</code> del navegador para conservar la preferencia de tema y el historial reciente de dominios. Estos datos nunca salen del navegador.', s8t: '8. Servicios de terceros', s8b: 'La Herramienta puede usar servicios de terceros para la resolución DNS (por ejemplo, proveedores de DNS sobre HTTPS), búsquedas WHOIS y comprobaciones de reputación DNSBL. Estos servicios tienen sus propias políticas de privacidad.', s9t: '9. Cambios en esta declaración', s9b: 'Esta declaración de privacidad puede actualizarse periódicamente. Los cambios entran en vigor cuando se publican en la Herramienta.', s10t: '10. Contacto', s10b: 'Para preguntas relacionadas con la privacidad, visite <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' },
+    fr: { pageTitle: 'Déclaration de confidentialité - ACS Email Domain Checker', back: '← Retour à ACS Email Domain Checker', title: 'Déclaration de confidentialité', updatedLabel: 'Dernière mise à jour :', updatedValue: 'Mars 2026', s1t: '1. Présentation', s1b: 'ACS Email Domain Checker (« l’Outil ») est conçu dans le respect de la confidentialité. Cette déclaration explique quelles données l’Outil collecte et ne collecte pas.', s2t: '2. Données que nous ne collectons pas', s2l1: '<strong>Aucune information personnelle</strong> — l’Outil ne collecte ni noms, ni adresses e-mail, ni adresses IP, ni identifiants matériels.', s2l2: '<strong>Aucun cookie de suivi</strong> — l’Outil n’utilise pas de cookies publicitaires ou analytiques de suivi.', s2l3: '<strong>Aucune journalisation des requêtes</strong> — les noms de domaine que vous recherchez ne sont pas stockés sur le serveur.', s3t: '3. Métriques d’utilisation anonymes (facultatif)', s3i: 'Lorsque les métriques anonymes sont activées, l’Outil collecte :', s3l1: 'Des noms de domaine hachés par HMAC (irréversibles ; le domaine d’origine ne peut pas être récupéré).', s3l2: 'Des compteurs agrégés de recherche et des horodatages de première apparition.', s3l3: 'Un identifiant de session aléatoire (non conservé après redémarrage).', s3b: 'Les métriques anonymes peuvent être entièrement désactivées avec l’option <code>-DisableAnonymousMetrics</code>.', s4t: '4. Authentification Microsoft Entra ID', s4b: 'Si vous choisissez de vous connecter avec Microsoft, l’Outil utilise MSAL.js avec le flux Authorization Code + PKCE. Les jetons sont stockés dans le stockage de session du navigateur et ne sont jamais envoyés au serveur de l’Outil. L’Outil lit uniquement votre nom d’affichage et votre adresse e-mail via Microsoft Graph pour afficher votre identité dans l’interface.', s5t: '5. Requêtes sur les ressources Azure', s5b: 'Lors de l’utilisation d’Azure Workspace Diagnostics, tous les appels API vont directement de votre navigateur vers Azure Resource Manager et Log Analytics à l’aide de votre propre jeton d’accès. Le serveur de l’Outil ne sert pas de proxy et n’enregistre ni ne stocke aucune donnée Azure.', s6t: '6. Recherches DNS', s6b: 'Les requêtes DNS sont effectuées côté serveur à l’aide du résolveur configuré (DNS système ou DNS-over-HTTPS). Les résultats sont renvoyés à votre navigateur et ne sont pas stockés.', s7t: '7. Stockage local', s7b: 'L’Outil utilise le <code>localStorage</code> de votre navigateur pour conserver votre préférence de thème et l’historique récent des domaines. Ces données ne quittent jamais votre navigateur.', s8t: '8. Services tiers', s8b: 'L’Outil peut utiliser des services tiers pour la résolution DNS (par exemple des fournisseurs DNS-over-HTTPS), les recherches WHOIS et les vérifications de réputation DNSBL. Ces services ont leurs propres politiques de confidentialité.', s9t: '9. Modifications de cette déclaration', s9b: 'Cette déclaration de confidentialité peut être mise à jour de temps à autre. Les modifications prennent effet dès leur publication dans l’Outil.', s10t: '10. Contact', s10b: 'Pour toute question relative à la confidentialité, consultez <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' },
+    de: { pageTitle: 'Datenschutzerklärung - ACS Email Domain Checker', back: '← Zurück zu ACS Email Domain Checker', title: 'Datenschutzerklärung', updatedLabel: 'Zuletzt aktualisiert:', updatedValue: 'März 2026', s1t: '1. Überblick', s1b: 'ACS Email Domain Checker („das Tool“) wurde unter Berücksichtigung des Datenschutzes entwickelt. Diese Erklärung erläutert, welche Daten das Tool erfasst und nicht erfasst.', s2t: '2. Daten, die wir nicht erfassen', s2l1: '<strong>Keine personenbezogenen Informationen</strong> — das Tool erfasst keine Namen, E-Mail-Adressen, IP-Adressen oder Hardwarekennungen.', s2l2: '<strong>Keine Tracking-Cookies</strong> — das Tool verwendet keine Werbe- oder Analyse-Tracking-Cookies.', s2l3: '<strong>Keine Protokollierung von Abfragen</strong> — die von Ihnen abgefragten Domänennamen werden nicht auf dem Server gespeichert.', s3t: '3. Anonyme Nutzungsmetriken (optional)', s3i: 'Wenn anonyme Metriken aktiviert sind, erfasst das Tool:', s3l1: 'HMAC-gehashte Domänennamen (irreversibel; die ursprüngliche Domäne kann nicht wiederhergestellt werden).', s3l2: 'Aggregierte Lookup-Zähler und Zeitstempel des ersten Auftretens.', s3l3: 'Eine zufällige Sitzungskennung (wird nicht über Neustarts hinweg gespeichert).', s3b: 'Anonyme Metriken können mit dem Schalter <code>-DisableAnonymousMetrics</code> vollständig deaktiviert werden.', s4t: '4. Microsoft Entra ID-Authentifizierung', s4b: 'Wenn Sie sich mit Microsoft anmelden, verwendet das Tool MSAL.js mit dem Authorization Code + PKCE-Flow. Token werden im Sitzungsspeicher Ihres Browsers gespeichert und niemals an den Server des Tools gesendet. Das Tool liest nur Ihren Anzeigenamen und Ihre E-Mail-Adresse aus Microsoft Graph, um Ihre Identität in der Benutzeroberfläche anzuzeigen.', s5t: '5. Azure-Ressourcenabfragen', s5b: 'Bei Verwendung von Azure Workspace Diagnostics gehen alle API-Aufrufe direkt von Ihrem Browser an Azure Resource Manager und Log Analytics unter Verwendung Ihres eigenen Zugriffstokens. Der Server des Tools fungiert nicht als Proxy und protokolliert oder speichert keine Azure-Daten.', s6t: '6. DNS-Abfragen', s6b: 'DNS-Abfragen werden serverseitig mit dem konfigurierten Resolver durchgeführt (System-DNS oder DNS-over-HTTPS). Die Ergebnisse werden an Ihren Browser zurückgegeben und nicht gespeichert.', s7t: '7. Lokaler Speicher', s7b: 'Das Tool verwendet den <code>localStorage</code> Ihres Browsers, um Ihre Designpräferenz und den zuletzt verwendeten Domänenverlauf zu speichern. Diese Daten verlassen Ihren Browser nie.', s8t: '8. Dienste von Drittanbietern', s8b: 'Das Tool kann Drittanbieterdienste für DNS-Auflösung (z. B. DNS-over-HTTPS-Anbieter), WHOIS-Abfragen und DNSBL-Reputationsprüfungen verwenden. Diese Dienste haben eigene Datenschutzrichtlinien.', s9t: '9. Änderungen dieser Erklärung', s9b: 'Diese Datenschutzerklärung kann von Zeit zu Zeit aktualisiert werden. Änderungen treten mit ihrer Veröffentlichung im Tool in Kraft.', s10t: '10. Kontakt', s10b: 'Bei datenschutzbezogenen Fragen besuchen Sie <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' },
+    'pt-BR': { pageTitle: 'Declaração de Privacidade - ACS Email Domain Checker', back: '← Voltar para ACS Email Domain Checker', title: 'Declaração de Privacidade', updatedLabel: 'Última atualização:', updatedValue: 'Março de 2026', s1t: '1. Visão geral', s1b: 'O ACS Email Domain Checker (“a Ferramenta”) foi desenvolvido com foco em privacidade. Esta declaração explica quais dados a Ferramenta coleta e quais não coleta.', s2t: '2. Dados que não coletamos', s2l1: '<strong>Nenhuma informação pessoal</strong> — a Ferramenta não coleta nomes, endereços de e-mail, endereços IP ou identificadores de hardware.', s2l2: '<strong>Nenhum cookie de rastreamento</strong> — a Ferramenta não usa cookies de rastreamento de publicidade ou análise.', s2l3: '<strong>Nenhum registro de consulta</strong> — os nomes de domínio que você pesquisa não são armazenados no servidor.', s3t: '3. Métricas de uso anônimas (opcional)', s3i: 'Quando as métricas anônimas estão habilitadas, a Ferramenta coleta:', s3l1: 'Nomes de domínio com hash HMAC (irreversíveis; o domínio original não pode ser recuperado).', s3l2: 'Contadores agregados de consultas e carimbos de data/hora do primeiro uso.', s3l3: 'Um identificador de sessão aleatório (não persistido entre reinicializações).', s3b: 'As métricas anônimas podem ser totalmente desabilitadas com a opção <code>-DisableAnonymousMetrics</code>.', s4t: '4. Autenticação do Microsoft Entra ID', s4b: 'Se você optar por entrar com a Microsoft, a Ferramenta usará o MSAL.js com o fluxo Authorization Code + PKCE. Os tokens são armazenados no armazenamento de sessão do navegador e nunca são enviados ao servidor da Ferramenta. A Ferramenta lê apenas seu nome de exibição e endereço de e-mail do Microsoft Graph para mostrar sua identidade na interface.', s5t: '5. Consultas de recursos do Azure', s5b: 'Ao usar o Azure Workspace Diagnostics, todas as chamadas de API vão diretamente do navegador para o Azure Resource Manager e o Log Analytics usando seu próprio token de acesso. O servidor da Ferramenta não atua como proxy, não registra e não armazena dados do Azure.', s6t: '6. Consultas DNS', s6b: 'As consultas DNS são realizadas no servidor usando o resolvedor configurado (DNS do sistema ou DNS sobre HTTPS). Os resultados são retornados ao seu navegador e não são armazenados.', s7t: '7. Armazenamento local', s7b: 'A Ferramenta usa o <code>localStorage</code> do navegador para persistir sua preferência de tema e o histórico recente de domínios. Esses dados nunca saem do seu navegador.', s8t: '8. Serviços de terceiros', s8b: 'A Ferramenta pode usar serviços de terceiros para resolução DNS (por exemplo, provedores de DNS sobre HTTPS), consultas WHOIS e verificações de reputação DNSBL. Esses serviços têm suas próprias políticas de privacidade.', s9t: '9. Alterações nesta declaração', s9b: 'Esta declaração de privacidade pode ser atualizada periodicamente. As alterações entram em vigor quando são publicadas na Ferramenta.', s10t: '10. Contato', s10b: 'Para questões relacionadas à privacidade, visite <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' },
+    ar: { pageTitle: 'بيان الخصوصية - ACS Email Domain Checker', back: '← العودة إلى ACS Email Domain Checker', title: 'بيان الخصوصية', updatedLabel: 'آخر تحديث:', updatedValue: 'مارس 2026', s1t: '1. نظرة عامة', s1b: 'تم تصميم ACS Email Domain Checker («الأداة») مع مراعاة الخصوصية. يوضح هذا البيان البيانات التي تجمعها الأداة والتي لا تجمعها.', s2t: '2. البيانات التي لا نجمعها', s2l1: '<strong>لا توجد معلومات شخصية</strong> — لا تجمع الأداة الأسماء أو عناوين البريد الإلكتروني أو عناوين IP أو معرفات الأجهزة.', s2l2: '<strong>لا توجد ملفات تعريف ارتباط للتتبع</strong> — لا تستخدم الأداة ملفات تعريف ارتباط تتعلق بالإعلانات أو التحليلات.', s2l3: '<strong>لا يوجد تسجيل للاستعلامات</strong> — لا يتم تخزين أسماء النطاقات التي تبحث عنها على الخادم.', s3t: '3. مقاييس الاستخدام المجهولة (اختياري)', s3i: 'عند تمكين المقاييس المجهولة، تجمع الأداة:', s3l1: 'أسماء نطاقات مجزأة باستخدام HMAC (غير قابلة للعكس؛ لا يمكن استعادة النطاق الأصلي).', s3l2: 'عدادات بحث مجمعة وطوابع زمنية لأول ظهور.', s3l3: 'معرف جلسة عشوائي (لا يتم الاحتفاظ به عبر عمليات إعادة التشغيل).', s3b: 'يمكن تعطيل المقاييس المجهولة بالكامل باستخدام الوسيط <code>-DisableAnonymousMetrics</code>.', s4t: '4. مصادقة Microsoft Entra ID', s4b: 'إذا اخترت تسجيل الدخول باستخدام Microsoft، تستخدم الأداة MSAL.js مع تدفق Authorization Code + PKCE. يتم تخزين الرموز في تخزين الجلسة بالمتصفح ولا يتم إرسالها مطلقًا إلى خادم الأداة. تقرأ الأداة فقط اسم العرض وعنوان البريد الإلكتروني من Microsoft Graph لإظهار هويتك في الواجهة.', s5t: '5. استعلامات موارد Azure', s5b: 'عند استخدام Azure Workspace Diagnostics، تنتقل جميع استدعاءات API مباشرةً من متصفحك إلى Azure Resource Manager وLog Analytics باستخدام رمز الوصول الخاص بك. لا يعمل خادم الأداة كوكيل ولا يسجل أو يخزن أي بيانات Azure.', s6t: '6. عمليات بحث DNS', s6b: 'يتم تنفيذ استعلامات DNS على جانب الخادم باستخدام المحلل المكوَّن (DNS النظام أو DNS-over-HTTPS). يتم إرجاع النتائج إلى متصفحك ولا يتم تخزينها.', s7t: '7. التخزين المحلي', s7b: 'تستخدم الأداة <code>localStorage</code> في متصفحك للاحتفاظ بتفضيل النسق وسجل النطاقات الحديث. هذه البيانات لا تغادر متصفحك مطلقًا.', s8t: '8. خدمات الجهات الخارجية', s8b: 'قد تستخدم الأداة خدمات تابعة لجهات خارجية لحل DNS (مثل موفري DNS-over-HTTPS) وعمليات بحث WHOIS وفحوصات سمعة DNSBL. لهذه الخدمات سياسات خصوصية خاصة بها.', s9t: '9. التغييرات على هذا البيان', s9b: 'قد يتم تحديث بيان الخصوصية هذا من وقت لآخر. تسري التغييرات عند نشرها في الأداة.', s10t: '10. الاتصال', s10b: 'للأسئلة المتعلقة بالخصوصية، تفضل بزيارة <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' },
+    'zh-CN': { pageTitle: '隐私声明 - ACS Email Domain Checker', back: '← 返回 ACS Email Domain Checker', title: '隐私声明', updatedLabel: '上次更新：', updatedValue: '2026年3月', s1t: '1. 概述', s1b: 'ACS Email Domain Checker（“本工具”）在设计时已考虑隐私保护。本声明说明本工具会收集和不会收集哪些数据。', s2t: '2. 我们不会收集的数据', s2l1: '<strong>无个人信息</strong> — 本工具不会收集姓名、电子邮件地址、IP 地址或硬件标识符。', s2l2: '<strong>无跟踪 Cookie</strong> — 本工具不使用广告或分析跟踪 Cookie。', s2l3: '<strong>无查询日志</strong> — 您查询的域名不会存储在服务器上。', s3t: '3. 匿名使用指标（可选）', s3i: '启用匿名指标时，本工具会收集：', s3l1: '经过 HMAC 哈希处理的域名（不可逆；无法恢复原始域名）。', s3l2: '聚合查询计数器和首次出现时间戳。', s3l3: '随机会话标识符（不会在重启后保留）。', s3b: '可使用 <code>-DisableAnonymousMetrics</code> 参数完全禁用匿名指标。', s4t: '4. Microsoft Entra ID 身份验证', s4b: '如果您选择使用 Microsoft 登录，本工具将使用带 Authorization Code + PKCE 流程的 MSAL.js。令牌存储在浏览器会话存储中，绝不会发送到本工具服务器。本工具仅从 Microsoft Graph 读取您的显示名称和电子邮件地址，以在 UI 中显示您的身份。', s5t: '5. Azure 资源查询', s5b: '使用 Azure Workspace Diagnostics 时，所有 API 调用都会使用您自己的访问令牌，直接从浏览器发送到 Azure Resource Manager 和 Log Analytics。本工具服务器不会代理、记录或存储任何 Azure 数据。', s6t: '6. DNS 查询', s6b: 'DNS 查询在服务器端使用配置的解析器执行（系统 DNS 或 DNS-over-HTTPS）。查询结果将返回到您的浏览器且不会被存储。', s7t: '7. 本地存储', s7b: '本工具使用浏览器的 <code>localStorage</code> 保存您的主题偏好和最近域历史记录。这些数据不会离开您的浏览器。', s8t: '8. 第三方服务', s8b: '本工具可能使用第三方服务进行 DNS 解析（例如 DNS-over-HTTPS 提供商）、WHOIS 查询和 DNSBL 信誉检查。这些服务有其自己的隐私政策。', s9t: '9. 本声明的变更', s9b: '本隐私声明可能会不时更新。更改在本工具中发布时生效。', s10t: '10. 联系方式', s10b: '如有隐私相关问题，请访问 <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>。' },
+    'hi-IN': { pageTitle: 'गोपनीयता वक्तव्य - ACS Email Domain Checker', back: '← ACS Email Domain Checker पर वापस जाएँ', title: 'गोपनीयता वक्तव्य', updatedLabel: 'अंतिम अपडेट:', updatedValue: 'मार्च 2026', s1t: '1. अवलोकन', s1b: 'ACS Email Domain Checker (“टूल”) को गोपनीयता को ध्यान में रखकर डिज़ाइन किया गया है। यह वक्तव्य बताता है कि टूल कौन-सा डेटा एकत्र करता है और कौन-सा नहीं।', s2t: '2. वह डेटा जिसे हम एकत्र नहीं करते', s2l1: '<strong>कोई व्यक्तिगत जानकारी नहीं</strong> — टूल नाम, ईमेल पते, IP पते या हार्डवेयर पहचानकर्ता एकत्र नहीं करता।', s2l2: '<strong>कोई ट्रैकिंग कुकी नहीं</strong> — टूल विज्ञापन या विश्लेषण ट्रैकिंग कुकी का उपयोग नहीं करता।', s2l3: '<strong>कोई क्वेरी लॉगिंग नहीं</strong> — जिन डोमेन नामों को आप खोजते हैं वे सर्वर पर संग्रहीत नहीं किए जाते।', s3t: '3. अनाम उपयोग मीट्रिक्स (वैकल्पिक)', s3i: 'जब अनाम मीट्रिक्स सक्षम होते हैं, तो टूल यह एकत्र करता है:', s3l1: 'HMAC-हैश किए गए डोमेन नाम (अपरिवर्तनीय; मूल डोमेन पुनर्प्राप्त नहीं किया जा सकता)।', s3l2: 'समग्र लुकअप काउंटर और पहली बार देखे जाने के टाइमस्टैम्प।', s3l3: 'एक यादृच्छिक सत्र पहचानकर्ता (रीस्टार्ट के बाद संरक्षित नहीं रहता)।', s3b: 'अनाम मीट्रिक्स को <code>-DisableAnonymousMetrics</code> फ़्लैग से पूरी तरह अक्षम किया जा सकता है।', s4t: '4. Microsoft Entra ID प्रमाणीकरण', s4b: 'यदि आप Microsoft के साथ साइन इन करना चुनते हैं, तो टूल Authorization Code + PKCE फ्लो के साथ MSAL.js का उपयोग करता है। टोकन आपके ब्राउज़र के सत्र संग्रहण में संग्रहीत होते हैं और कभी भी टूल के सर्वर पर नहीं भेजे जाते। UI में आपकी पहचान दिखाने के लिए टूल Microsoft Graph से केवल आपका display name और email address पढ़ता है।', s5t: '5. Azure संसाधन क्वेरी', s5b: 'Azure Workspace Diagnostics का उपयोग करते समय, सभी API कॉल आपके अपने access token का उपयोग करके सीधे आपके ब्राउज़र से Azure Resource Manager और Log Analytics तक जाती हैं। टूल का सर्वर किसी Azure डेटा का proxy, log या store नहीं करता।', s6t: '6. DNS लुकअप', s6b: 'DNS क्वेरी server-side configured resolver (system DNS या DNS-over-HTTPS) का उपयोग करके की जाती हैं। परिणाम आपके ब्राउज़र को लौटाए जाते हैं और संग्रहीत नहीं किए जाते।', s7t: '7. स्थानीय संग्रहण', s7b: 'टूल आपके ब्राउज़र के <code>localStorage</code> का उपयोग आपकी theme preference और recent domain history को बनाए रखने के लिए करता है। यह डेटा कभी आपके ब्राउज़र से बाहर नहीं जाता।', s8t: '8. तृतीय-पक्ष सेवाएँ', s8b: 'टूल DNS resolution (जैसे DNS-over-HTTPS providers), WHOIS lookups, और DNSBL reputation checks के लिए third-party services का उपयोग कर सकता है। इन सेवाओं की अपनी privacy policies होती हैं।', s9t: '9. इस वक्तव्य में परिवर्तन', s9b: 'इस गोपनीयता वक्तव्य को समय-समय पर अपडेट किया जा सकता है। परिवर्तन टूल में प्रकाशित होने पर प्रभावी हो जाते हैं।', s10t: '10. संपर्क', s10b: 'गोपनीयता से संबंधित प्रश्नों के लिए <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a> पर जाएँ।' },
+    'ja-JP': { pageTitle: 'プライバシー ステートメント - ACS Email Domain Checker', back: '← ACS Email Domain Checker に戻る', title: 'プライバシー ステートメント', updatedLabel: '最終更新:', updatedValue: '2026年3月', s1t: '1. 概要', s1b: 'ACS Email Domain Checker（「本ツール」）はプライバシーを考慮して設計されています。このステートメントでは、本ツールが収集するデータと収集しないデータについて説明します。', s2t: '2. 収集しないデータ', s2l1: '<strong>個人情報なし</strong> — 本ツールは、氏名、メール アドレス、IP アドレス、ハードウェア識別子を収集しません。', s2l2: '<strong>トラッキング Cookie なし</strong> — 本ツールは広告または分析用のトラッキング Cookie を使用しません。', s2l3: '<strong>クエリ ログなし</strong> — 検索したドメイン名はサーバーに保存されません。', s3t: '3. 匿名利用メトリック（任意）', s3i: '匿名メトリックが有効な場合、本ツールは次を収集します。', s3l1: 'HMAC ハッシュ化されたドメイン名（不可逆であり、元のドメインは復元できません）。', s3l2: '集計された参照カウンターと初回検出タイムスタンプ。', s3l3: 'ランダムなセッション識別子（再起動後に保持されません）。', s3b: '匿名メトリックは <code>-DisableAnonymousMetrics</code> フラグで完全に無効にできます。', s4t: '4. Microsoft Entra ID 認証', s4b: 'Microsoft でサインインする場合、本ツールは Authorization Code + PKCE フローで MSAL.js を使用します。トークンはブラウザーのセッション ストレージに保存され、本ツールのサーバーに送信されることはありません。本ツールは UI に本人確認情報を表示するために、Microsoft Graph から表示名とメール アドレスのみを読み取ります。', s5t: '5. Azure リソース クエリ', s5b: 'Azure Workspace Diagnostics を使用する場合、すべての API 呼び出しはお客様自身のアクセス トークンを使用してブラウザーから Azure Resource Manager と Log Analytics に直接送信されます。本ツールのサーバーは Azure データをプロキシ、記録、保存しません。', s6t: '6. DNS 参照', s6b: 'DNS クエリは、構成されたリゾルバー（システム DNS または DNS-over-HTTPS）を使用してサーバー側で実行されます。結果はブラウザーに返され、保存されません。', s7t: '7. ローカル ストレージ', s7b: '本ツールは、テーマ設定と最近のドメイン履歴を保持するために、ブラウザーの <code>localStorage</code> を使用します。このデータがブラウザー外に送信されることはありません。', s8t: '8. サードパーティ サービス', s8b: '本ツールは DNS 解決（DNS-over-HTTPS プロバイダーなど）、WHOIS 参照、および DNSBL 評判チェックにサードパーティ サービスを使用する場合があります。これらのサービスには独自のプライバシー ポリシーがあります。', s9t: '9. 本ステートメントの変更', s9b: 'このプライバシー ステートメントは随時更新される場合があります。変更は本ツールで公開された時点で有効になります。', s10t: '10. お問い合わせ', s10b: 'プライバシーに関するご質問は、<a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a> をご覧ください。' },
+    'ru-RU': { pageTitle: 'Заявление о конфиденциальности - ACS Email Domain Checker', back: '← Назад к ACS Email Domain Checker', title: 'Заявление о конфиденциальности', updatedLabel: 'Последнее обновление:', updatedValue: 'Март 2026', s1t: '1. Обзор', s1b: 'ACS Email Domain Checker («Инструмент») разработан с учетом конфиденциальности. В этом заявлении объясняется, какие данные Инструмент собирает, а какие — нет.', s2t: '2. Данные, которые мы не собираем', s2l1: '<strong>Нет личной информации</strong> — Инструмент не собирает имена, адреса электронной почты, IP-адреса или аппаратные идентификаторы.', s2l2: '<strong>Нет файлов cookie отслеживания</strong> — Инструмент не использует рекламные или аналитические cookie отслеживания.', s2l3: '<strong>Нет журналирования запросов</strong> — доменные имена, которые вы ищете, не сохраняются на сервере.', s3t: '3. Анонимные метрики использования (необязательно)', s3i: 'Если включены анонимные метрики, Инструмент собирает:', s3l1: 'Доменные имена, хэшированные с помощью HMAC (необратимо; исходный домен невозможно восстановить).', s3l2: 'Агрегированные счетчики запросов и отметки времени первого появления.', s3l3: 'Случайный идентификатор сеанса (не сохраняется после перезапуска).', s3b: 'Анонимные метрики можно полностью отключить с помощью параметра <code>-DisableAnonymousMetrics</code>.', s4t: '4. Аутентификация Microsoft Entra ID', s4b: 'Если вы решите войти с помощью Microsoft, Инструмент использует MSAL.js с потоком Authorization Code + PKCE. Токены хранятся в хранилище сеанса вашего браузера и никогда не отправляются на сервер Инструмента. Инструмент считывает только ваше отображаемое имя и адрес электронной почты из Microsoft Graph, чтобы показать вашу личность в интерфейсе.', s5t: '5. Запросы ресурсов Azure', s5b: 'При использовании Azure Workspace Diagnostics все вызовы API выполняются напрямую из браузера в Azure Resource Manager и Log Analytics с использованием вашего собственного токена доступа. Сервер Инструмента не выступает в роли прокси, не журналирует и не хранит данные Azure.', s6t: '6. DNS-запросы', s6b: 'DNS-запросы выполняются на стороне сервера с использованием настроенного резолвера (системный DNS или DNS-over-HTTPS). Результаты возвращаются в ваш браузер и не сохраняются.', s7t: '7. Локальное хранилище', s7b: 'Инструмент использует <code>localStorage</code> вашего браузера для сохранения настроек темы и истории последних доменов. Эти данные никогда не покидают ваш браузер.', s8t: '8. Сторонние сервисы', s8b: 'Инструмент может использовать сторонние сервисы для разрешения DNS (например, поставщиков DNS-over-HTTPS), WHOIS-запросов и проверок репутации DNSBL. У этих сервисов есть собственные политики конфиденциальности.', s9t: '9. Изменения в этом заявлении', s9b: 'Это заявление о конфиденциальности может время от времени обновляться. Изменения вступают в силу после публикации в Инструменте.', s10t: '10. Контакты', s10b: 'По вопросам, связанным с конфиденциальностью, посетите <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' }
+  };
+
+  function normalizeLanguageCode(lang) {
+    const value = String(lang || '').trim().toLowerCase();
+    if (!value) return 'en';
+    if (value === 'ptbr' || value.startsWith('pt-br') || value.startsWith('pt_br') || value.startsWith('pt')) return 'pt-BR';
+    if (value.startsWith('es')) return 'es';
+    if (value.startsWith('fr')) return 'fr';
+    if (value.startsWith('de')) return 'de';
+    if (value.startsWith('ar')) return 'ar';
+    if (value === 'zh' || value.startsWith('zh-cn') || value.startsWith('zh_cn') || value.startsWith('zh-hans')) return 'zh-CN';
+    if (value === 'hi' || value.startsWith('hi-in') || value.startsWith('hi_in')) return 'hi-IN';
+    if (value === 'ja' || value.startsWith('ja-jp') || value.startsWith('ja_jp')) return 'ja-JP';
+    if (value === 'ru' || value.startsWith('ru-ru') || value.startsWith('ru_ru')) return 'ru-RU';
+    return 'en';
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const lang = normalizeLanguageCode(params.get('lang') || navigator.language || 'en');
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  document.title = t.pageTitle;
+
+  const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  const setHtml = (id, value) => { const el = document.getElementById(id); if (el) el.innerHTML = value; };
+
+  setText('privacyBackLink', t.back);
+  document.getElementById('privacyBackLink').href = '/?lang=' + encodeURIComponent(lang);
+  setText('privacyTitle', t.title);
+  setText('privacyUpdatedLabel', t.updatedLabel);
+  setText('privacyUpdatedValue', t.updatedValue);
+  setText('privacySection1Title', t.s1t); setText('privacySection1Body', t.s1b);
+  setText('privacySection2Title', t.s2t); setHtml('privacySection2Item1', t.s2l1); setHtml('privacySection2Item2', t.s2l2); setHtml('privacySection2Item3', t.s2l3);
+  setText('privacySection3Title', t.s3t); setText('privacySection3Intro', t.s3i); setText('privacySection3Item1', t.s3l1); setText('privacySection3Item2', t.s3l2); setText('privacySection3Item3', t.s3l3); setHtml('privacySection3Body', t.s3b);
+  setText('privacySection4Title', t.s4t); setText('privacySection4Body', t.s4b);
+  setText('privacySection5Title', t.s5t); setText('privacySection5Body', t.s5b);
+  setText('privacySection6Title', t.s6t); setText('privacySection6Body', t.s6b);
+  setText('privacySection7Title', t.s7t); setHtml('privacySection7Body', t.s7b);
+  setText('privacySection8Title', t.s8t); setText('privacySection8Body', t.s8b);
+  setText('privacySection9Title', t.s9t); setText('privacySection9Body', t.s9b);
+  setText('privacySection10Title', t.s10t); setHtml('privacySection10Body', t.s10b);
+})();
+</script>
 </body>
 </html>
 '@
