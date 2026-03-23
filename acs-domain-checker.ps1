@@ -834,7 +834,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.4.2'
+$script:AppVersion = '1.4.3'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -5329,6 +5329,14 @@ h1 {
   background: var(--button-bg-secondary);
   color: var(--button-fg-secondary);
   cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.top-bar button:hover:not(:disabled) {
+  background: var(--border);
+  border-color: var(--input-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
 .language-dropdown {
@@ -5349,6 +5357,14 @@ h1 {
   cursor: pointer;
   min-width: 150px;
   max-width: 100%;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.language-trigger:hover {
+  background: var(--border);
+  border-color: var(--input-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
 .language-trigger .caret {
@@ -5432,6 +5448,12 @@ html[dir="rtl"] .language-trigger {
   background: var(--button-bg-secondary);
   color: var(--button-fg-secondary);
   cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.top-bar select:hover {
+  border-color: var(--input-border);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
 .top-bar button:disabled {
@@ -5492,6 +5514,13 @@ button.primary {
   border: none;
   cursor: pointer;
   font-size: 16px;
+  transition: background-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(47,128,237,0.3);
 }
 
 button.primary:disabled {
@@ -5787,6 +5816,14 @@ ul.guidance li {
   background: var(--button-bg-secondary);
   color: var(--button-fg-secondary);
   cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.copy-btn:hover {
+  background: var(--border);
+  border-color: var(--input-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
 }
 
 /* --- New UI Polish --- */
@@ -5848,6 +5885,12 @@ ul.guidance li {
   border-radius: 999px;
   background: var(--button-bg-secondary);
   will-change: transform;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.history-chip:hover {
+  border-color: var(--input-border);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }
 
 .history-item {
@@ -6038,12 +6081,44 @@ ul.guidance li {
   background: var(--button-bg-secondary);
   color: var(--button-fg-secondary);
   cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.azure-panel-actions button:hover:not(:disabled) {
+  background: var(--border);
+  border-color: var(--input-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
 .azure-panel-actions button.primary {
   background: var(--button-bg);
   color: var(--button-fg);
   border-color: var(--button-bg);
+}
+
+.azure-panel-actions button.primary:hover:not(:disabled) {
+  background: var(--button-bg);
+  filter: brightness(1.12);
+  box-shadow: 0 3px 8px rgba(47,128,237,0.3);
+}
+
+#azureSwitchDirectoryBtn {
+  padding: 7px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--button-border-secondary);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+#azureSwitchDirectoryBtn:hover {
+  background: var(--border);
+  border-color: var(--input-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
 .azure-note {
@@ -6135,6 +6210,20 @@ ul.guidance li {
 
 .icon-info {
   filter: invert(31%) sepia(94%) saturate(1436%) hue-rotate(189deg) brightness(92%) contrast(101%);
+}
+
+/* Respect reduced-motion preferences: disable transform-based hover animations */
+@media (prefers-reduced-motion: reduce) {
+  .top-bar button:hover:not(:disabled),
+  .language-trigger:hover,
+  button.primary:hover:not(:disabled),
+  .copy-btn:hover,
+  .azure-panel-actions button:hover:not(:disabled),
+  .azure-panel-actions button.primary:hover:not(:disabled),
+  #azureSwitchDirectoryBtn:hover {
+    transform: none;
+    box-shadow: none;
+  }
 }
 </style>
 
@@ -6543,7 +6632,13 @@ const TRANSLATIONS = {
     azureConsentRequired: 'Additional Azure permissions are required. Approve the consent prompt to continue.',
     azureQueryTextLabel: 'Executed query',
     azureSwitchDirectory: 'Switch directory (tenant ID or domain)',
-    azureSwitchBtn: 'Switch'
+    azureSwitchBtn: 'Switch',
+    guidanceIconInformational: 'Informational',
+    guidanceIconError: 'Error',
+    guidanceIconAttention: 'Needs Attention',
+    guidanceIconSuccess: 'Success',
+    guidanceLegendAttention: 'Attention',
+    guidanceLegendInformational: 'Informational'
   },
   es: {
     languageName: 'Español',
@@ -9235,6 +9330,436 @@ Object.keys(RUNTIME_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, RUNTIME_TRANSLATION_OVERRIDES[code]);
 });
 
+const GUIDANCE_AND_AZURE_OVERRIDES = {
+  es: {
+    guidanceIconInformational: 'Informativo',
+    guidanceIconError: 'Error',
+    guidanceIconAttention: 'Requiere atención',
+    guidanceIconSuccess: 'Correcto',
+    guidanceLegendAttention: 'Atención',
+    guidanceLegendInformational: 'Informativo',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Diagnósticos del área de trabajo de Azure',
+    azureDiagnosticsHint: 'Inicie sesión para consultar suscripciones de Azure y áreas de trabajo de Log Analytics directamente desde su sesión del navegador. No se envían datos de consulta del cliente al servidor local.',
+    azureSubscription: 'Suscripción',
+    azureAcsResource: 'Recurso de ACS',
+    azureWorkspace: 'Área de trabajo',
+    azureLoadSubscriptions: 'Cargar suscripciones',
+    azureDiscoverResources: 'Detectar recursos de ACS',
+    azureDiscoverWorkspaces: 'Detectar áreas de trabajo',
+    azureRunInventory: 'Ejecutar inventario del área de trabajo',
+    azureRunDomainSearch: 'Ejecutar búsqueda de dominio',
+    azureRunAcsSearch: 'Ejecutar búsqueda de ACS',
+    azureSignInRequired: 'Inicie sesión con Microsoft para consultar suscripciones de Azure y Log Analytics desde el navegador.',
+    azureLoadingSubscriptions: 'Cargando suscripciones...',
+    azureLoadingTenants: 'Detectando inquilinos...',
+    azureLoadingTenantSubscriptions: 'Cargando suscripciones del inquilino {tenant} ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'Comprobando {current}/{total} suscripciones en busca de recursos de ACS...',
+    azureLoadingResources: 'Detectando recursos de ACS...',
+    azureLoadingWorkspaces: 'Detectando áreas de trabajo conectadas...',
+    azureRunningQuery: 'Ejecutando consulta: {name}',
+    azureNoSubscriptions: 'No se devolvieron suscripciones de Azure para este usuario.',
+    azureNoResources: 'No se encontraron recursos de ACS en la suscripción seleccionada.',
+    azureSubscriptionNotEnabled: 'La suscripción seleccionada está {state}. La detección de recursos requiere una suscripción habilitada.',
+    azureNoWorkspaces: 'No se encontraron áreas de trabajo de Log Analytics conectadas. Compruebe la configuración de diagnóstico en los recursos de ACS seleccionados.',
+    azureSelectSubscriptionFirst: 'Seleccione primero una suscripción.',
+    azureSelectWorkspaceFirst: 'Seleccione primero un área de trabajo.',
+    azureDomainRequired: 'Escriba un dominio antes de ejecutar la consulta de búsqueda de dominio.',
+    azureWorkspaceInventory: 'Inventario del área de trabajo',
+    azureDomainSearch: 'Búsqueda de dominio',
+    azureAcsSearch: 'Búsqueda de ACS',
+    azureResultsSummary: 'Inquilino: {tenant} • Suscripción: {subscription} • Área de trabajo: {workspace}',
+    azureQueryReturnedNoTables: 'La consulta se completó pero no devolvió tablas.',
+    azureQueryFailed: 'Error en la consulta de Azure: {reason}',
+    azureDiscoverSuccess: 'Detección completada. Seleccione un área de trabajo y ejecute una consulta.',
+    azureSignedInAs: 'Sesión iniciada como {user}',
+    azureConsentRequired: 'Se requieren permisos adicionales de Azure. Apruebe la solicitud de consentimiento para continuar.',
+    azureQueryTextLabel: 'Consulta ejecutada',
+    azureSwitchDirectory: 'Cambiar directorio (id. de inquilino o dominio)',
+    azureSwitchBtn: 'Cambiar'
+  },
+  fr: {
+    guidanceIconInformational: 'Informatif',
+    guidanceIconError: 'Erreur',
+    guidanceIconAttention: 'Attention requise',
+    guidanceIconSuccess: 'Réussite',
+    guidanceLegendAttention: 'Attention',
+    guidanceLegendInformational: 'Informatif',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Diagnostics de l\u2019espace de travail Azure',
+    azureDiagnosticsHint: 'Connectez-vous pour interroger les abonnements Azure et les espaces de travail Log Analytics directement depuis votre session de navigateur. Aucune donnée de requête client n\u2019est envoyée au serveur local.',
+    azureSubscription: 'Abonnement',
+    azureAcsResource: 'Ressource ACS',
+    azureWorkspace: 'Espace de travail',
+    azureLoadSubscriptions: 'Charger les abonnements',
+    azureDiscoverResources: 'Découvrir les ressources ACS',
+    azureDiscoverWorkspaces: 'Découvrir les espaces de travail',
+    azureRunInventory: 'Exécuter l\u2019inventaire de l\u2019espace de travail',
+    azureRunDomainSearch: 'Exécuter la recherche de domaine',
+    azureRunAcsSearch: 'Exécuter la recherche ACS',
+    azureSignInRequired: 'Connectez-vous avec Microsoft pour interroger les abonnements Azure et Log Analytics depuis le navigateur.',
+    azureLoadingSubscriptions: 'Chargement des abonnements...',
+    azureLoadingTenants: 'Découverte des locataires...',
+    azureLoadingTenantSubscriptions: 'Chargement des abonnements du locataire {tenant} ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'Vérification de {current}/{total} abonnements pour les ressources ACS...',
+    azureLoadingResources: 'Découverte des ressources ACS...',
+    azureLoadingWorkspaces: 'Découverte des espaces de travail connectés...',
+    azureRunningQuery: 'Exécution de la requête : {name}',
+    azureNoSubscriptions: 'Aucun abonnement Azure n\u2019a été retourné pour cet utilisateur.',
+    azureNoResources: 'Aucune ressource ACS n\u2019a été trouvée dans l\u2019abonnement sélectionné.',
+    azureSubscriptionNotEnabled: 'L\u2019abonnement sélectionné est {state}. La découverte de ressources nécessite un abonnement activé.',
+    azureNoWorkspaces: 'Aucun espace de travail Log Analytics connecté n\u2019a été trouvé. Vérifiez les paramètres de diagnostic sur les ressources ACS sélectionnées.',
+    azureSelectSubscriptionFirst: 'Sélectionnez d\u2019abord un abonnement.',
+    azureSelectWorkspaceFirst: 'Sélectionnez d\u2019abord un espace de travail.',
+    azureDomainRequired: 'Saisissez un domaine avant d\u2019exécuter la requête de recherche de domaine.',
+    azureWorkspaceInventory: 'Inventaire de l\u2019espace de travail',
+    azureDomainSearch: 'Recherche de domaine',
+    azureAcsSearch: 'Recherche ACS',
+    azureResultsSummary: 'Locataire : {tenant} • Abonnement : {subscription} • Espace de travail : {workspace}',
+    azureQueryReturnedNoTables: 'La requête s\u2019est terminée mais n\u2019a retourné aucune table.',
+    azureQueryFailed: 'Échec de la requête Azure : {reason}',
+    azureDiscoverSuccess: 'Découverte terminée. Sélectionnez un espace de travail et exécutez une requête.',
+    azureSignedInAs: 'Connecté en tant que {user}',
+    azureConsentRequired: 'Des autorisations Azure supplémentaires sont requises. Approuvez l\u2019invite de consentement pour continuer.',
+    azureQueryTextLabel: 'Requête exécutée',
+    azureSwitchDirectory: 'Changer d\u2019annuaire (ID de locataire ou domaine)',
+    azureSwitchBtn: 'Changer'
+  },
+  de: {
+    guidanceIconInformational: 'Informativ',
+    guidanceIconError: 'Fehler',
+    guidanceIconAttention: 'Beachten',
+    guidanceIconSuccess: 'Erfolg',
+    guidanceLegendAttention: 'Beachten',
+    guidanceLegendInformational: 'Informativ',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Azure-Arbeitsbereichsdiagnose',
+    azureDiagnosticsHint: 'Melden Sie sich an, um Azure-Abonnements und Log Analytics-Arbeitsbereiche direkt von Ihrer Browsersitzung abzufragen. Es werden keine Kundenabfragedaten an den lokalen Server gesendet.',
+    azureSubscription: 'Abonnement',
+    azureAcsResource: 'ACS-Ressource',
+    azureWorkspace: 'Arbeitsbereich',
+    azureLoadSubscriptions: 'Abonnements laden',
+    azureDiscoverResources: 'ACS-Ressourcen ermitteln',
+    azureDiscoverWorkspaces: 'Arbeitsbereiche ermitteln',
+    azureRunInventory: 'Arbeitsbereichsinventar ausführen',
+    azureRunDomainSearch: 'Domainsuche ausführen',
+    azureRunAcsSearch: 'ACS-Suche ausführen',
+    azureSignInRequired: 'Melden Sie sich mit Microsoft an, um Azure-Abonnements und Log Analytics vom Browser aus abzufragen.',
+    azureLoadingSubscriptions: 'Abonnements werden geladen...',
+    azureLoadingTenants: 'Mandanten werden ermittelt...',
+    azureLoadingTenantSubscriptions: 'Abonnements für Mandant {tenant} werden geladen ({current}/{total})...',
+    azureFilteringAcsSubscriptions: '{current}/{total} Abonnements werden auf ACS-Ressourcen geprüft...',
+    azureLoadingResources: 'ACS-Ressourcen werden ermittelt...',
+    azureLoadingWorkspaces: 'Verbundene Arbeitsbereiche werden ermittelt...',
+    azureRunningQuery: 'Abfrage wird ausgeführt: {name}',
+    azureNoSubscriptions: 'Es wurden keine Azure-Abonnements für diesen Benutzer zurückgegeben.',
+    azureNoResources: 'Im ausgewählten Abonnement wurden keine ACS-Ressourcen gefunden.',
+    azureSubscriptionNotEnabled: 'Das ausgewählte Abonnement ist {state}. Die Ressourcenermittlung erfordert ein aktiviertes Abonnement.',
+    azureNoWorkspaces: 'Es wurden keine verbundenen Log Analytics-Arbeitsbereiche gefunden. Prüfen Sie die Diagnoseeinstellungen der ausgewählten ACS-Ressourcen.',
+    azureSelectSubscriptionFirst: 'Wählen Sie zuerst ein Abonnement aus.',
+    azureSelectWorkspaceFirst: 'Wählen Sie zuerst einen Arbeitsbereich aus.',
+    azureDomainRequired: 'Geben Sie eine Domain ein, bevor Sie die Domainsuche ausführen.',
+    azureWorkspaceInventory: 'Arbeitsbereichsinventar',
+    azureDomainSearch: 'Domainsuche',
+    azureAcsSearch: 'ACS-Suche',
+    azureResultsSummary: 'Mandant: {tenant} • Abonnement: {subscription} • Arbeitsbereich: {workspace}',
+    azureQueryReturnedNoTables: 'Die Abfrage wurde abgeschlossen, hat aber keine Tabellen zurückgegeben.',
+    azureQueryFailed: 'Azure-Abfrage fehlgeschlagen: {reason}',
+    azureDiscoverSuccess: 'Ermittlung abgeschlossen. Wählen Sie einen Arbeitsbereich und führen Sie eine Abfrage aus.',
+    azureSignedInAs: 'Angemeldet als {user}',
+    azureConsentRequired: 'Zusätzliche Azure-Berechtigungen sind erforderlich. Genehmigen Sie die Zustimmungsaufforderung, um fortzufahren.',
+    azureQueryTextLabel: 'Ausgeführte Abfrage',
+    azureSwitchDirectory: 'Verzeichnis wechseln (Mandanten-ID oder Domäne)',
+    azureSwitchBtn: 'Wechseln'
+  },
+  'pt-BR': {
+    guidanceIconInformational: 'Informativo',
+    guidanceIconError: 'Erro',
+    guidanceIconAttention: 'Requer atenção',
+    guidanceIconSuccess: 'Sucesso',
+    guidanceLegendAttention: 'Atenção',
+    guidanceLegendInformational: 'Informativo',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Diagnóstico do workspace do Azure',
+    azureDiagnosticsHint: 'Entre para consultar assinaturas do Azure e workspaces do Log Analytics diretamente do navegador. Nenhum dado de consulta do cliente é enviado ao servidor local.',
+    azureSubscription: 'Assinatura',
+    azureAcsResource: 'Recurso do ACS',
+    azureWorkspace: 'Workspace',
+    azureLoadSubscriptions: 'Carregar assinaturas',
+    azureDiscoverResources: 'Descobrir recursos do ACS',
+    azureDiscoverWorkspaces: 'Descobrir workspaces',
+    azureRunInventory: 'Executar inventário do workspace',
+    azureRunDomainSearch: 'Executar pesquisa de domínio',
+    azureRunAcsSearch: 'Executar pesquisa do ACS',
+    azureSignInRequired: 'Entre com a Microsoft para consultar assinaturas do Azure e Log Analytics pelo navegador.',
+    azureLoadingSubscriptions: 'Carregando assinaturas...',
+    azureLoadingTenants: 'Descobrindo locatários...',
+    azureLoadingTenantSubscriptions: 'Carregando assinaturas do locatário {tenant} ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'Verificando {current}/{total} assinaturas em busca de recursos do ACS...',
+    azureLoadingResources: 'Descobrindo recursos do ACS...',
+    azureLoadingWorkspaces: 'Descobrindo workspaces conectados...',
+    azureRunningQuery: 'Executando consulta: {name}',
+    azureNoSubscriptions: 'Nenhuma assinatura do Azure foi retornada para este usuário.',
+    azureNoResources: 'Nenhum recurso do ACS foi encontrado na assinatura selecionada.',
+    azureSubscriptionNotEnabled: 'A assinatura selecionada está {state}. A descoberta de recursos requer uma assinatura habilitada.',
+    azureNoWorkspaces: 'Nenhum workspace do Log Analytics conectado foi encontrado. Verifique as configurações de diagnóstico nos recursos do ACS selecionados.',
+    azureSelectSubscriptionFirst: 'Selecione uma assinatura primeiro.',
+    azureSelectWorkspaceFirst: 'Selecione um workspace primeiro.',
+    azureDomainRequired: 'Insira um domínio antes de executar a consulta de pesquisa de domínio.',
+    azureWorkspaceInventory: 'Inventário do workspace',
+    azureDomainSearch: 'Pesquisa de domínio',
+    azureAcsSearch: 'Pesquisa do ACS',
+    azureResultsSummary: 'Locatário: {tenant} • Assinatura: {subscription} • Workspace: {workspace}',
+    azureQueryReturnedNoTables: 'A consulta foi concluída, mas não retornou tabelas.',
+    azureQueryFailed: 'Falha na consulta do Azure: {reason}',
+    azureDiscoverSuccess: 'Descoberta concluída. Selecione um workspace e execute uma consulta.',
+    azureSignedInAs: 'Conectado como {user}',
+    azureConsentRequired: 'São necessárias permissões adicionais do Azure. Aprove a solicitação de consentimento para continuar.',
+    azureQueryTextLabel: 'Consulta executada',
+    azureSwitchDirectory: 'Alternar diretório (ID do locatário ou domínio)',
+    azureSwitchBtn: 'Alternar'
+  },
+  ar: {
+    guidanceIconInformational: 'معلوماتي',
+    guidanceIconError: 'خطأ',
+    guidanceIconAttention: 'يتطلب انتباهًا',
+    guidanceIconSuccess: 'نجاح',
+    guidanceLegendAttention: 'انتباه',
+    guidanceLegendInformational: 'معلوماتي',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'تشخيصات مساحة عمل Azure',
+    azureDiagnosticsHint: 'سجّل الدخول للاستعلام عن اشتراكات Azure ومساحات عمل Log Analytics مباشرة من جلسة المتصفح. لا يتم إرسال أي بيانات استعلام عميل إلى الخادم المحلي.',
+    azureSubscription: 'الاشتراك',
+    azureAcsResource: 'مورد ACS',
+    azureWorkspace: 'مساحة العمل',
+    azureLoadSubscriptions: 'تحميل الاشتراكات',
+    azureDiscoverResources: 'اكتشاف موارد ACS',
+    azureDiscoverWorkspaces: 'اكتشاف مساحات العمل',
+    azureRunInventory: 'تشغيل جرد مساحة العمل',
+    azureRunDomainSearch: 'تشغيل بحث النطاق',
+    azureRunAcsSearch: 'تشغيل بحث ACS',
+    azureSignInRequired: 'سجّل الدخول باستخدام Microsoft للاستعلام عن اشتراكات Azure وLog Analytics من المتصفح.',
+    azureLoadingSubscriptions: 'جارٍ تحميل الاشتراكات...',
+    azureLoadingTenants: 'جارٍ اكتشاف المستأجرين...',
+    azureLoadingTenantSubscriptions: 'جارٍ تحميل اشتراكات المستأجر {tenant} ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'جارٍ فحص {current}/{total} اشتراكًا بحثًا عن موارد ACS...',
+    azureLoadingResources: 'جارٍ اكتشاف موارد ACS...',
+    azureLoadingWorkspaces: 'جارٍ اكتشاف مساحات العمل المتصلة...',
+    azureRunningQuery: 'جارٍ تنفيذ الاستعلام: {name}',
+    azureNoSubscriptions: 'لم يتم إرجاع أي اشتراكات Azure لهذا المستخدم.',
+    azureNoResources: 'لم يتم العثور على موارد ACS في الاشتراك المحدد.',
+    azureSubscriptionNotEnabled: 'الاشتراك المحدد في حالة {state}. يتطلب اكتشاف الموارد اشتراكًا مُمكّنًا.',
+    azureNoWorkspaces: 'لم يتم العثور على مساحات عمل Log Analytics متصلة. تحقّق من إعدادات التشخيص على موارد ACS المحددة.',
+    azureSelectSubscriptionFirst: 'حدد اشتراكًا أولاً.',
+    azureSelectWorkspaceFirst: 'حدد مساحة عمل أولاً.',
+    azureDomainRequired: 'أدخل نطاقًا قبل تشغيل استعلام بحث النطاق.',
+    azureWorkspaceInventory: 'جرد مساحة العمل',
+    azureDomainSearch: 'بحث النطاق',
+    azureAcsSearch: 'بحث ACS',
+    azureResultsSummary: 'المستأجر: {tenant} • الاشتراك: {subscription} • مساحة العمل: {workspace}',
+    azureQueryReturnedNoTables: 'اكتمل الاستعلام ولكنه لم يُرجع أي جداول.',
+    azureQueryFailed: 'فشل استعلام Azure: {reason}',
+    azureDiscoverSuccess: 'اكتمل الاكتشاف. حدد مساحة عمل وشغّل استعلامًا.',
+    azureSignedInAs: 'مسجّل الدخول باسم {user}',
+    azureConsentRequired: 'مطلوب أذونات Azure إضافية. وافق على طلب الموافقة للمتابعة.',
+    azureQueryTextLabel: 'الاستعلام المنفذ',
+    azureSwitchDirectory: 'تبديل الدليل (معرف المستأجر أو النطاق)',
+    azureSwitchBtn: 'تبديل'
+  },
+  'zh-CN': {
+    guidanceIconInformational: '参考信息',
+    guidanceIconError: '错误',
+    guidanceIconAttention: '需要注意',
+    guidanceIconSuccess: '成功',
+    guidanceLegendAttention: '注意',
+    guidanceLegendInformational: '参考信息',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Azure 工作区诊断',
+    azureDiagnosticsHint: '登录以直接从浏览器会话查询客户 Azure 订阅和 Log Analytics 工作区。不会将任何客户查询数据发送到本地服务器。',
+    azureSubscription: '订阅',
+    azureAcsResource: 'ACS 资源',
+    azureWorkspace: '工作区',
+    azureLoadSubscriptions: '加载订阅',
+    azureDiscoverResources: '发现 ACS 资源',
+    azureDiscoverWorkspaces: '发现工作区',
+    azureRunInventory: '运行工作区清单',
+    azureRunDomainSearch: '运行域搜索',
+    azureRunAcsSearch: '运行 ACS 搜索',
+    azureSignInRequired: '使用 Microsoft 登录以从浏览器查询 Azure 订阅和 Log Analytics。',
+    azureLoadingSubscriptions: '正在加载订阅...',
+    azureLoadingTenants: '正在发现租户...',
+    azureLoadingTenantSubscriptions: '正在加载租户 {tenant} 的订阅 ({current}/{total})...',
+    azureFilteringAcsSubscriptions: '正在检查 {current}/{total} 个订阅的 ACS 资源...',
+    azureLoadingResources: '正在发现 ACS 资源...',
+    azureLoadingWorkspaces: '正在发现已连接的工作区...',
+    azureRunningQuery: '正在运行查询：{name}',
+    azureNoSubscriptions: '未返回此用户的任何 Azure 订阅。',
+    azureNoResources: '在所选订阅中未找到 ACS 资源。',
+    azureSubscriptionNotEnabled: '所选订阅处于 {state} 状态。资源发现需要已启用的订阅。',
+    azureNoWorkspaces: '未找到已连接的 Log Analytics 工作区。请检查所选 ACS 资源上的诊断设置。',
+    azureSelectSubscriptionFirst: '请先选择一个订阅。',
+    azureSelectWorkspaceFirst: '请先选择一个工作区。',
+    azureDomainRequired: '在运行域搜索查询之前，请输入域名。',
+    azureWorkspaceInventory: '工作区清单',
+    azureDomainSearch: '域搜索',
+    azureAcsSearch: 'ACS 搜索',
+    azureResultsSummary: '租户：{tenant} • 订阅：{subscription} • 工作区：{workspace}',
+    azureQueryReturnedNoTables: '查询已完成，但未返回任何表。',
+    azureQueryFailed: 'Azure 查询失败：{reason}',
+    azureDiscoverSuccess: '发现完成。请选择一个工作区并运行查询。',
+    azureSignedInAs: '已以 {user} 身份登录',
+    azureConsentRequired: '需要额外的 Azure 权限。请批准同意提示以继续。',
+    azureQueryTextLabel: '已执行的查询',
+    azureSwitchDirectory: '切换目录（租户 ID 或域）',
+    azureSwitchBtn: '切换'
+  },
+  'hi-IN': {
+    guidanceIconInformational: 'सूचनात्मक',
+    guidanceIconError: 'त्रुटि',
+    guidanceIconAttention: 'ध्यान आवश्यक',
+    guidanceIconSuccess: 'सफल',
+    guidanceLegendAttention: 'ध्यान दें',
+    guidanceLegendInformational: 'सूचनात्मक',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Azure कार्यक्षेत्र निदान',
+    azureDiagnosticsHint: 'ब्राउज़र सत्र से सीधे ग्राहक Azure सदस्यताएँ और Log Analytics कार्यक्षेत्र क्वेरी करने के लिए साइन इन करें। स्थानीय सर्वर को कोई ग्राहक क्वेरी डेटा नहीं भेजा जाता है।',
+    azureSubscription: 'सदस्यता',
+    azureAcsResource: 'ACS संसाधन',
+    azureWorkspace: 'कार्यक्षेत्र',
+    azureLoadSubscriptions: 'सदस्यताएँ लोड करें',
+    azureDiscoverResources: 'ACS संसाधन खोजें',
+    azureDiscoverWorkspaces: 'कार्यक्षेत्र खोजें',
+    azureRunInventory: 'कार्यक्षेत्र सूची चलाएँ',
+    azureRunDomainSearch: 'डोमेन खोज चलाएँ',
+    azureRunAcsSearch: 'ACS खोज चलाएँ',
+    azureSignInRequired: 'ब्राउज़र से Azure सदस्यताएँ और Log Analytics क्वेरी करने के लिए Microsoft से साइन इन करें।',
+    azureLoadingSubscriptions: 'सदस्यताएँ लोड हो रही हैं...',
+    azureLoadingTenants: 'टैनेंट खोजे जा रहे हैं...',
+    azureLoadingTenantSubscriptions: 'टैनेंट {tenant} की सदस्यताएँ लोड हो रही हैं ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'ACS संसाधनों के लिए {current}/{total} सदस्यताएँ जाँची जा रही हैं...',
+    azureLoadingResources: 'ACS संसाधन खोजे जा रहे हैं...',
+    azureLoadingWorkspaces: 'कनेक्टेड कार्यक्षेत्र खोजे जा रहे हैं...',
+    azureRunningQuery: 'क्वेरी चल रही है: {name}',
+    azureNoSubscriptions: 'इस उपयोगकर्ता के लिए कोई Azure सदस्यता नहीं लौटी।',
+    azureNoResources: 'चयनित सदस्यता में कोई ACS संसाधन नहीं मिला।',
+    azureSubscriptionNotEnabled: 'चयनित सदस्यता {state} है। संसाधन खोज के लिए एक सक्षम सदस्यता आवश्यक है।',
+    azureNoWorkspaces: 'कोई कनेक्टेड Log Analytics कार्यक्षेत्र नहीं मिला। चयनित ACS संसाधनों पर नैदानिक सेटिंग्स जाँचें।',
+    azureSelectSubscriptionFirst: 'पहले एक सदस्यता चुनें।',
+    azureSelectWorkspaceFirst: 'पहले एक कार्यक्षेत्र चुनें।',
+    azureDomainRequired: 'डोमेन खोज क्वेरी चलाने से पहले डोमेन दर्ज करें।',
+    azureWorkspaceInventory: 'कार्यक्षेत्र सूची',
+    azureDomainSearch: 'डोमेन खोज',
+    azureAcsSearch: 'ACS खोज',
+    azureResultsSummary: 'टैनेंट: {tenant} • सदस्यता: {subscription} • कार्यक्षेत्र: {workspace}',
+    azureQueryReturnedNoTables: 'क्वेरी पूर्ण हुई लेकिन कोई तालिका नहीं लौटी।',
+    azureQueryFailed: 'Azure क्वेरी विफल: {reason}',
+    azureDiscoverSuccess: 'खोज पूर्ण। एक कार्यक्षेत्र चुनें और क्वेरी चलाएँ।',
+    azureSignedInAs: '{user} के रूप में साइन इन किया',
+    azureConsentRequired: 'अतिरिक्त Azure अनुमतियाँ आवश्यक हैं। जारी रखने के लिए सहमति प्रॉम्प्ट स्वीकार करें।',
+    azureQueryTextLabel: 'निष्पादित क्वेरी',
+    azureSwitchDirectory: 'निर्देशिका बदलें (टैनेंट ID या डोमेन)',
+    azureSwitchBtn: 'बदलें'
+  },
+  'ja-JP': {
+    guidanceIconInformational: '情報',
+    guidanceIconError: 'エラー',
+    guidanceIconAttention: '対応が必要',
+    guidanceIconSuccess: '成功',
+    guidanceLegendAttention: '注意',
+    guidanceLegendInformational: '情報',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Azure ワークスペース診断',
+    azureDiagnosticsHint: 'ブラウザー セッションから直接 Azure サブスクリプションと Log Analytics ワークスペースを照会するには、サインインしてください。顧客のクエリ データはローカル サーバーに送信されません。',
+    azureSubscription: 'サブスクリプション',
+    azureAcsResource: 'ACS リソース',
+    azureWorkspace: 'ワークスペース',
+    azureLoadSubscriptions: 'サブスクリプションを読み込む',
+    azureDiscoverResources: 'ACS リソースを検出',
+    azureDiscoverWorkspaces: 'ワークスペースを検出',
+    azureRunInventory: 'ワークスペース インベントリを実行',
+    azureRunDomainSearch: 'ドメイン検索を実行',
+    azureRunAcsSearch: 'ACS 検索を実行',
+    azureSignInRequired: 'ブラウザーから Azure サブスクリプションと Log Analytics を照会するには、Microsoft でサインインしてください。',
+    azureLoadingSubscriptions: 'サブスクリプションを読み込んでいます...',
+    azureLoadingTenants: 'テナントを検出しています...',
+    azureLoadingTenantSubscriptions: 'テナント {tenant} のサブスクリプションを読み込んでいます ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'ACS リソースの {current}/{total} サブスクリプションを確認しています...',
+    azureLoadingResources: 'ACS リソースを検出しています...',
+    azureLoadingWorkspaces: '接続されたワークスペースを検出しています...',
+    azureRunningQuery: 'クエリを実行しています: {name}',
+    azureNoSubscriptions: 'このユーザーの Azure サブスクリプションは返されませんでした。',
+    azureNoResources: '選択したサブスクリプションに ACS リソースが見つかりません。',
+    azureSubscriptionNotEnabled: '選択したサブスクリプションは {state} です。リソースの検出には有効なサブスクリプションが必要です。',
+    azureNoWorkspaces: '接続された Log Analytics ワークスペースが見つかりません。選択した ACS リソースの診断設定を確認してください。',
+    azureSelectSubscriptionFirst: '最初にサブスクリプションを選択してください。',
+    azureSelectWorkspaceFirst: '最初にワークスペースを選択してください。',
+    azureDomainRequired: 'ドメイン検索クエリを実行する前にドメインを入力してください。',
+    azureWorkspaceInventory: 'ワークスペース インベントリ',
+    azureDomainSearch: 'ドメイン検索',
+    azureAcsSearch: 'ACS 検索',
+    azureResultsSummary: 'テナント: {tenant} • サブスクリプション: {subscription} • ワークスペース: {workspace}',
+    azureQueryReturnedNoTables: 'クエリは完了しましたが、テーブルは返されませんでした。',
+    azureQueryFailed: 'Azure クエリが失敗しました: {reason}',
+    azureDiscoverSuccess: '検出が完了しました。ワークスペースを選択してクエリを実行してください。',
+    azureSignedInAs: '{user} としてサインイン中',
+    azureConsentRequired: '追加の Azure アクセス許可が必要です。続行するには同意プロンプトを承認してください。',
+    azureQueryTextLabel: '実行されたクエリ',
+    azureSwitchDirectory: 'ディレクトリの切り替え (テナント ID またはドメイン)',
+    azureSwitchBtn: '切り替え'
+  },
+  'ru-RU': {
+    guidanceIconInformational: 'Информация',
+    guidanceIconError: 'Ошибка',
+    guidanceIconAttention: 'Требует внимания',
+    guidanceIconSuccess: 'Успех',
+    guidanceLegendAttention: 'Внимание',
+    guidanceLegendInformational: 'Информация',
+    azureTag: 'AZURE',
+    azureDiagnosticsTitle: 'Диагностика рабочей области Azure',
+    azureDiagnosticsHint: 'Войдите, чтобы запрашивать подписки Azure и рабочие области Log Analytics прямо из сеанса браузера. Данные клиентских запросов не отправляются на локальный сервер.',
+    azureSubscription: 'Подписка',
+    azureAcsResource: 'Ресурс ACS',
+    azureWorkspace: 'Рабочая область',
+    azureLoadSubscriptions: 'Загрузить подписки',
+    azureDiscoverResources: 'Обнаружить ресурсы ACS',
+    azureDiscoverWorkspaces: 'Обнаружить рабочие области',
+    azureRunInventory: 'Запустить инвентаризацию рабочей области',
+    azureRunDomainSearch: 'Запустить поиск домена',
+    azureRunAcsSearch: 'Запустить поиск ACS',
+    azureSignInRequired: 'Войдите через Microsoft, чтобы запрашивать подписки Azure и Log Analytics из браузера.',
+    azureLoadingSubscriptions: 'Загрузка подписок...',
+    azureLoadingTenants: 'Обнаружение арендаторов...',
+    azureLoadingTenantSubscriptions: 'Загрузка подписок арендатора {tenant} ({current}/{total})...',
+    azureFilteringAcsSubscriptions: 'Проверка {current}/{total} подписок на наличие ресурсов ACS...',
+    azureLoadingResources: 'Обнаружение ресурсов ACS...',
+    azureLoadingWorkspaces: 'Обнаружение подключённых рабочих областей...',
+    azureRunningQuery: 'Выполнение запроса: {name}',
+    azureNoSubscriptions: 'Подписки Azure для этого пользователя не найдены.',
+    azureNoResources: 'Ресурсы ACS не найдены в выбранной подписке.',
+    azureSubscriptionNotEnabled: 'Выбранная подписка находится в состоянии {state}. Для обнаружения ресурсов требуется активная подписка.',
+    azureNoWorkspaces: 'Подключённые рабочие области Log Analytics не найдены. Проверьте параметры диагностики выбранных ресурсов ACS.',
+    azureSelectSubscriptionFirst: 'Сначала выберите подписку.',
+    azureSelectWorkspaceFirst: 'Сначала выберите рабочую область.',
+    azureDomainRequired: 'Введите домен перед выполнением запроса поиска домена.',
+    azureWorkspaceInventory: 'Инвентаризация рабочей области',
+    azureDomainSearch: 'Поиск домена',
+    azureAcsSearch: 'Поиск ACS',
+    azureResultsSummary: 'Арендатор: {tenant} • Подписка: {subscription} • Рабочая область: {workspace}',
+    azureQueryReturnedNoTables: 'Запрос выполнен, но не вернул таблиц.',
+    azureQueryFailed: 'Ошибка запроса Azure: {reason}',
+    azureDiscoverSuccess: 'Обнаружение завершено. Выберите рабочую область и выполните запрос.',
+    azureSignedInAs: 'Вход выполнен как {user}',
+    azureConsentRequired: 'Требуются дополнительные разрешения Azure. Одобрите запрос согласия для продолжения.',
+    azureQueryTextLabel: 'Выполненный запрос',
+    azureSwitchDirectory: 'Сменить каталог (идентификатор арендатора или домен)',
+    azureSwitchBtn: 'Сменить'
+  }
+};
+
+Object.keys(GUIDANCE_AND_AZURE_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, GUIDANCE_AND_AZURE_OVERRIDES[code]);
+});
+
 const LANG_PARAM = 'lang';
 const LANGUAGE_OPTIONS = ['en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'];
 const RTL_LANGUAGES = new Set(['ar']);
@@ -11709,20 +12234,20 @@ function render(r) {
 
     let iconClass = 'icon-info';
     let iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg';
-    let iconTitle = 'Informational';
+    let iconTitle = t('guidanceIconInformational');
 
     if (type === 'error') {
       iconClass = 'icon-error';
       iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/alert-circle.svg';
-      iconTitle = 'Error';
+      iconTitle = t('guidanceIconError');
     } else if (type === 'attention') {
       iconClass = 'icon-warning';
       iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg';
-      iconTitle = 'Needs Attention';
+      iconTitle = t('guidanceIconAttention');
     } else if (type === 'success') {
       iconClass = 'icon-success';
       iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/check-circle.svg';
-      iconTitle = 'Success';
+      iconTitle = t('guidanceIconSuccess');
     }
 
     iconHtml = `<img src="${iconSrc}" class="status-icon ${iconClass}" alt="${iconTitle}" title="${iconTitle}" />`;
@@ -11736,8 +12261,8 @@ function render(r) {
         <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
         <strong>${renderLabelWithIcon('guidance')}</strong>
         <div class="card-icons" style="margin-left: auto; font-size: 0.8em; display: flex; align-items: center; gap: 6px;">
-           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg" class="status-icon icon-warning" style="width: 14px; height: 14px; margin-right: 0;" alt="Attention"/> <span style="margin-right: 8px;">Attention</span>
-           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg" class="status-icon icon-info" style="width: 14px; height: 14px; margin-right: 0;" alt="Informational"/> <span>Informational</span>
+           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg" class="status-icon icon-warning" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendAttention'))}"/> <span style="margin-right: 8px;">${escapeHtml(t('guidanceLegendAttention'))}</span>
+           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg" class="status-icon icon-info" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendInformational'))}"/> <span>${escapeHtml(t('guidanceLegendInformational'))}</span>
         </div>
       </div>
       <div id="field-guidance" class="card-content">
@@ -12818,7 +13343,7 @@ $script:TosPageHtml = @'
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Terms of Service - ACS Email Domain Checker</title>
-<style>
+<style nonce="__CSP_NONCE__">
   :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
@@ -12878,7 +13403,7 @@ $script:PrivacyPageHtml = @'
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Privacy Statement - ACS Email Domain Checker</title>
-<style>
+<style nonce="__CSP_NONCE__">
   :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
@@ -13165,13 +13690,17 @@ if ($metricsEnabled) {
 
   # 1-tos) Serve Terms of Service page
   if ($path -eq "/terms" -and -not [string]::IsNullOrWhiteSpace($tosPageHtml)) {
-    Write-Html -Context $ctx -Html $tosPageHtml -Nonce $null
+    $tosNonceBytes = [byte[]]::new(16); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($tosNonceBytes)
+    $tosNonce = [Convert]::ToBase64String($tosNonceBytes)
+    Write-Html -Context $ctx -Html $tosPageHtml -Nonce $tosNonce
     return
   }
 
   # 1-privacy) Serve Privacy Statement page
   if ($path -eq "/privacy" -and -not [string]::IsNullOrWhiteSpace($privacyPageHtml)) {
-    Write-Html -Context $ctx -Html $privacyPageHtml -Nonce $null
+    $privNonceBytes = [byte[]]::new(16); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($privNonceBytes)
+    $privNonce = [Convert]::ToBase64String($privNonceBytes)
+    Write-Html -Context $ctx -Html $privacyPageHtml -Nonce $privNonce
     return
   }
 
