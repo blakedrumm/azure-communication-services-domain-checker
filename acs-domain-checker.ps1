@@ -6091,6 +6091,15 @@ ul.guidance li {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.loading-dots .loading-dot {
+  display: inline-block;
+  opacity: 0.25;
+  transition: opacity 0.3s ease;
+}
+.loading-dots .loading-dot.active {
+  opacity: 1;
+}
+
 .input-wrapper {
   position: relative;
   flex: 1;
@@ -6474,6 +6483,10 @@ ul.guidance li {
   #azureSwitchDirectoryBtn:hover {
     transform: none;
     box-shadow: none;
+  }
+  .loading-dots .loading-dot {
+    transition: none;
+    transform: none !important;
   }
 }
 </style>
@@ -12565,6 +12578,39 @@ function render(r) {
   `);
 
   document.getElementById("results").innerHTML = cards.join("");
+  startLoadingDotAnimations();
+}
+
+let _loadingDotsTimer = null;
+function startLoadingDotAnimations() {
+  if (_loadingDotsTimer) { clearInterval(_loadingDotsTimer); _loadingDotsTimer = null; }
+  const codeEls = document.querySelectorAll('#results .code');
+  const targets = [];
+  codeEls.forEach(el => {
+    const txt = el.textContent || '';
+    if (txt.length > 3 && txt.endsWith('...') && !el.querySelector('.loading-dot')) {
+      const base = txt.slice(0, -3);
+      el.innerHTML = escapeHtml(base)
+        + '<span class="loading-dot">.</span>'
+        + '<span class="loading-dot">.</span>'
+        + '<span class="loading-dot">.</span>';
+      el.classList.add('loading-dots');
+      targets.push(el);
+    }
+  });
+  if (targets.length === 0) return;
+  let step = 0;
+  _loadingDotsTimer = setInterval(() => {
+    const active = document.querySelectorAll('#results .loading-dots');
+    if (active.length === 0) { clearInterval(_loadingDotsTimer); _loadingDotsTimer = null; return; }
+    active.forEach(el => {
+      const dots = el.querySelectorAll('.loading-dot');
+      dots.forEach((d, i) => {
+        d.classList.toggle('active', i === step % 3);
+      });
+    });
+    step++;
+  }, 400);
 }
 
 document.getElementById("domainInput").addEventListener("keyup", function (e) {
