@@ -2052,8 +2052,6 @@ function Load-AnonymousMetricsPersisted {
     $tud = [int64]0
     $ttu = [int64]0
     $tma = [int64]0
-    $tme = [int64]0
-    $tmx = [int64]0
     try {
       if ($data.PSObject.Properties.Match('lifetimeTotalDomains').Count -gt 0) {
         $td = [int64]$data.lifetimeTotalDomains
@@ -2078,18 +2076,10 @@ function Load-AnonymousMetricsPersisted {
       if ($data.PSObject.Properties.Match('lifetimeMsAuthVerifications').Count -gt 0) {
         $tma = [int64]$data.lifetimeMsAuthVerifications
       }
-      if ($data.PSObject.Properties.Match('lifetimeMsEmployeeVerifications').Count -gt 0) {
-        $tme = [int64]$data.lifetimeMsEmployeeVerifications
-      }
-      if ($data.PSObject.Properties.Match('lifetimeMsExternalVerifications').Count -gt 0) {
-        $tmx = [int64]$data.lifetimeMsExternalVerifications
-      }
     } catch { $td = 0; $tud = 0 }
     $script:AcsMetrics['lifetimeTotalDomains'].Value = $td
     $script:AcsMetrics['lifetimeTotalUptimeBase'] = $ttu
     $script:AcsMetrics['lifetimeMsAuthVerifications'].Value = $tma
-    $script:AcsMetrics['lifetimeMsEmployeeVerifications'].Value = $tme
-    $script:AcsMetrics['lifetimeMsExternalVerifications'].Value = $tmx
 
     # Restore lifetime unique hash set (hashed domains only; no plaintext stored).
     try {
@@ -2111,6 +2101,17 @@ function Load-AnonymousMetricsPersisted {
     } catch {
       $script:AcsMetrics['lifetimeUniqueDomains'].Value = $tud
     }
+
+    # Restore lifetime Microsoft employee verification hash set.
+    try {
+      if ($data.PSObject.Properties.Match('lifetimeMsEmployeeIdHashes').Count -gt 0 -and $data.lifetimeMsEmployeeIdHashes) {
+        foreach ($h in @($data.lifetimeMsEmployeeIdHashes)) {
+          $s = [string]$h
+          if ([string]::IsNullOrWhiteSpace($s)) { continue }
+          $null = $script:AcsMetrics['lifetimeMsEmployeeIdHashes'].TryAdd($s, 0)
+        }
+      }
+    } catch { }
   }
   catch {
     # If the file is corrupt/unreadable, start fresh (still no PII persisted).
@@ -2163,6 +2164,7 @@ function Save-AnonymousMetricsPersisted {
     $existingLifetimeTotalDomains = [int64]0
     $existingLifetimeUniqueDomains = [int64]0
     $existingLifetimeTotalUptimeSeconds = [int64]0
+    $existingLifetimeUniqueHashCount = [int64]0
     try {
       if (Test-Path -LiteralPath $path) {
         $existingRaw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
@@ -2185,6 +2187,7 @@ function Save-AnonymousMetricsPersisted {
               if ([string]::IsNullOrWhiteSpace($s)) { continue }
               $null = $script:AcsMetrics['lifetimeUniqueHashes'].TryAdd($s, 0)
             }
+            $existingLifetimeUniqueHashCount = [int64]$script:AcsMetrics['lifetimeUniqueHashes'].Count
           }
         }
       }
@@ -2196,7 +2199,9 @@ function Save-AnonymousMetricsPersisted {
     } catch { $currentUptime = 0 }
 
     $mergedLifetimeTotalDomains = [int64]([Math]::Max($script:AcsMetrics['lifetimeTotalDomains'].Value, $existingLifetimeTotalDomains))
-    $mergedLifetimeUniqueDomains = [int64]([Math]::Max($script:AcsMetrics['lifetimeUniqueDomains'].Value, $existingLifetimeUniqueDomains))
+    $mergedLifetimeUniqueDomains = [int64]([Math]::Max(
+      [Math]::Max($script:AcsMetrics['lifetimeUniqueDomains'].Value, $existingLifetimeUniqueDomains),
+      $existingLifetimeUniqueHashCount))
     $currentLifetimeUptime = [int64]($script:AcsMetrics['lifetimeTotalUptimeBase'] + $currentUptime)
     $mergedLifetimeTotalUptimeSeconds = [int64]([Math]::Max($currentLifetimeUptime, $existingLifetimeTotalUptimeSeconds))
 
@@ -2348,6 +2353,17 @@ function Update-AnonymousMetrics {
 
   try {
     if ($Started) {
+      # If a metrics file was moved from another server and contains lifetime hash history,
+      # ensure the in-memory lifetime unique counter is synchronized from the restored set
+      # before evaluating the current domain. This prevents undercounting when the counter
+      # value is stale relative to the persisted hash collection.
+      try {
+        $lifetimeHashCount = [int64]$script:AcsMetrics['lifetimeUniqueHashes'].Count
+        if ($lifetimeHashCount -gt $script:AcsMetrics['lifetimeUniqueDomains'].Value) {
+          $script:AcsMetrics['lifetimeUniqueDomains'].Value = $lifetimeHashCount
+        }
+      } catch { }
+
       [System.Threading.Interlocked]::Increment($script:AcsMetrics['totalDomains']) | Out-Null
       [System.Threading.Interlocked]::Increment($script:AcsMetrics['activeLookups']) | Out-Null
       [System.Threading.Interlocked]::Increment($script:AcsMetrics['lifetimeTotalDomains']) | Out-Null
@@ -2431,7 +2447,11 @@ function Get-AnonymousMetricsSnapshot {
 
   $lifetimeTotalUptimeSeconds = [int64]($script:AcsMetrics['lifetimeTotalUptimeBase'] + $uptimeSeconds)
   $lifetimeTotalDomains = [int64]$script:AcsMetrics['lifetimeTotalDomains'].Value
-  $lifetimeUniqueDomains = [int64]$script:AcsMetrics['lifetimeUniqueDomains'].Value
+  # The hash set is the authoritative source for lifetime unique domains; the counter
+  # may lag behind after a metrics file is moved from another server.
+  $lifetimeUniqueHashCount = [int64]0
+  try { $lifetimeUniqueHashCount = [int64]$script:AcsMetrics['lifetimeUniqueHashes'].Count } catch { }
+  $lifetimeUniqueDomains = [int64]([Math]::Max($script:AcsMetrics['lifetimeUniqueDomains'].Value, $lifetimeUniqueHashCount))
   $persistedTotals = $null
   try {
     $path = Get-AnonymousMetricsPersistPath
@@ -14252,8 +14272,10 @@ if ($metricsEnabled) {
     $sem = Get-DomainSemaphore -domain $domain
     $null = $sem.Wait()
     try {
+      if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Started }
       $result = Get-AcsDnsStatus -Domain $domain
       Write-Json -Context $ctx -Object $result
+      if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Completed }
     }
     finally {
       try { $null = $sem.Release() } catch {}
