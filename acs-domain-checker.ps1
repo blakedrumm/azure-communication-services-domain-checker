@@ -280,6 +280,8 @@ function Invoke-SysinternalsWhoisLookup {
     $canConvertDates = $false
   }
 
+  $p = $null
+
   try {
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $exe
@@ -383,6 +385,9 @@ function Invoke-SysinternalsWhoisLookup {
   catch {
     $msg = "Sysinternals whois failed: $($_.Exception.Message)"
     if ($ThrowOnError) { throw $msg } else { return $null }
+  }
+  finally {
+    try { if ($p) { $p.Dispose() } } catch { }
   }
 }
 
@@ -868,7 +873,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.4.3'
+$script:AppVersion = '1.4.4'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -4996,6 +5001,47 @@ function Set-RblCacheEntry {
   }
 }
 
+function Clear-ExpiredRblCacheEntries {
+  param(
+    [int]$TtlSec = 180,
+    [int]$MaxRemovalsPerPass = 256
+  )
+
+  if (-not $script:RblCache -or $script:RblCache.Count -eq 0) { return 0 }
+  if ($TtlSec -le 0) { $TtlSec = 180 }
+  if ($MaxRemovalsPerPass -le 0) { $MaxRemovalsPerPass = 1 }
+
+  $cutoff = [DateTime]::UtcNow.AddSeconds(-1 * $TtlSec)
+  $removed = 0
+
+  foreach ($entry in @($script:RblCache.GetEnumerator())) {
+    if ($removed -ge $MaxRemovalsPerPass) { break }
+
+    $shouldRemove = $false
+    if ($null -eq $entry.Value) {
+      $shouldRemove = $true
+    } else {
+      try {
+        $cachedAt = $entry.Value.cachedAt
+        if ($null -eq $cachedAt -or $cachedAt -lt $cutoff) {
+          $shouldRemove = $true
+        }
+      } catch {
+        $shouldRemove = $true
+      }
+    }
+
+    if ($shouldRemove) {
+      $removedEntry = $null
+      if ($script:RblCache.TryRemove($entry.Key, [ref]$removedEntry)) {
+        $removed++
+      }
+    }
+  }
+
+  return $removed
+}
+
 # Query a single IPv4 address against a single DNSBL zone.
 # Returns a result object indicating whether the IP is listed, along with the response address.
 function Invoke-RblLookup {
@@ -5144,6 +5190,7 @@ function Get-DnsReputationStatus {
   if (-not $script:RblCache) {
     $script:RblCache = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
   }
+  $null = Clear-ExpiredRblCacheEntries -TtlSec $script:RblCacheTtlSec
 
   $targets = @()
   $ipSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -14133,7 +14180,7 @@ $functionNames = @(
   'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
-  'Get-RblCacheEntry','Set-RblCacheEntry',
+  'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Get-RdapBootstrapData','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
@@ -14174,18 +14221,65 @@ foreach ($name in $functionNames) {
 $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $maxConcurrentRequests, $iss, $Host)
 $pool.Open()
 
-# Track in-flight async invocations so we can dispose them when they complete.
-$inflight = New-Object System.Collections.Generic.List[object]
+# Track in-flight async invocations so we can dispose them promptly from the main runspace.
+$inflight = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-# Reap completed async PowerShell invocations to avoid unbounded memory growth.
-function Invoke-InflightCleanup {
-  for ($i = $inflight.Count - 1; $i -ge 0; $i--) {
-    $item = $inflight[$i]
-    if ($item.Async.IsCompleted) {
+function Complete-InflightInvocation {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$InvocationId,
+
+    [switch]$Force
+  )
+
+  $item = $null
+  if (-not $inflight.TryGetValue($InvocationId, [ref]$item)) { return }
+  if (-not $Force -and -not $item.Async.IsCompleted) { return }
+
+  if ($inflight.TryRemove($InvocationId, [ref]$item)) {
+    $completed = $false
+    try { $completed = ($item.Async -and $item.Async.IsCompleted) } catch { $completed = $false }
+
+    if ($completed) {
       try { $item.Ps.EndInvoke($item.Async) } catch { $null = $_ }
-      $item.Ps.Dispose()
-      $inflight.RemoveAt($i)
     }
+    elseif ($Force) {
+      try { $item.Ps.Stop() } catch { $null = $_ }
+    }
+
+    try {
+      if ($item.Async -and $item.Async.AsyncWaitHandle) {
+        $item.Async.AsyncWaitHandle.Close()
+      }
+    } catch { $null = $_ }
+    try { $item.Ps.Dispose() } catch { $null = $_ }
+  }
+}
+
+function Register-InflightInvocation {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.Management.Automation.PowerShell]$PowerShellInstance,
+
+    [Parameter(Mandatory = $true)]
+    [object]$AsyncResult
+  )
+
+  $invocationId = [Guid]::NewGuid().ToString('N')
+  $item = [pscustomobject]@{
+    Ps = $PowerShellInstance
+    Async = $AsyncResult
+  }
+
+  $null = $inflight.TryAdd($invocationId, $item)
+
+  return $invocationId
+}
+
+# Reap any completed async PowerShell invocations from the main runspace.
+function Invoke-InflightCleanup {
+  foreach ($invocationId in @($inflight.Keys)) {
+    Complete-InflightInvocation -InvocationId $invocationId
   }
 }
 
@@ -14761,7 +14855,7 @@ try {
         $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
 
         $async = $ps.BeginInvoke()
-        $inflight.Add([pscustomobject]@{ Ps = $ps; Async = $async })
+        $null = Register-InflightInvocation -PowerShellInstance $ps -AsyncResult $async
 
         Invoke-InflightCleanup
       }
@@ -14814,7 +14908,7 @@ try {
         $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
 
         $async = $ps.BeginInvoke()
-        $inflight.Add([pscustomobject]@{ Ps = $ps; Async = $async })
+        $null = Register-InflightInvocation -PowerShellInstance $ps -AsyncResult $async
 
         Invoke-InflightCleanup
       }
@@ -14845,10 +14939,8 @@ try { if ($tcpListener) { $tcpListener.Stop() } } catch { $null = $_ }
   try { Save-AnonymousMetricsPersisted -Force } catch { $null = $_ }
 
   Invoke-InflightCleanup
-  foreach ($item in @($inflight)) {
-    if ($item -and $item.PSObject.Properties['Ps']) {
-      try { $item.Ps.Dispose() } catch { $null = $_ }
-    }
+  foreach ($invocationId in @($inflight.Keys)) {
+    Complete-InflightInvocation -InvocationId $invocationId -Force
   }
   try { $pool.Close(); $pool.Dispose() } catch { $null = $_ }
   Write-Information -InformationAction Continue -MessageData "Server stopped."
