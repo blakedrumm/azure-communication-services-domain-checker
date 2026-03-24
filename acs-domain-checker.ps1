@@ -2246,11 +2246,15 @@ function Save-AnonymousMetricsPersisted {
     $existingLifetimeUniqueDomains = [int64]0
     $existingLifetimeTotalUptimeSeconds = [int64]0
     $existingLifetimeUniqueHashCount = [int64]0
+    $existingFirstSeenUtc = $null
     try {
       if (Test-Path -LiteralPath $path) {
         $existingRaw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
         if (-not [string]::IsNullOrWhiteSpace($existingRaw)) {
           $existingData = $existingRaw | ConvertFrom-Json -ErrorAction Stop
+          if ($existingData.PSObject.Properties.Match('firstSeenUtc').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$existingData.firstSeenUtc)) {
+            $existingFirstSeenUtc = [string]$existingData.firstSeenUtc
+          }
           if ($existingData.PSObject.Properties.Match('lifetimeTotalDomains').Count -gt 0) {
             $existingLifetimeTotalDomains = [int64]$existingData.lifetimeTotalDomains
           }
@@ -2273,6 +2277,22 @@ function Save-AnonymousMetricsPersisted {
         }
       }
     } catch { }
+
+    # Preserve the earliest firstSeenUtc: keep whichever is older between in-memory and on-disk.
+    if ($existingFirstSeenUtc) {
+      try {
+        $existingDt = [DateTimeOffset]::Parse($existingFirstSeenUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal)
+        $memoryFirstSeen = $script:AcsMetrics['lifetimeFirstSeenUtc']
+        if ([string]::IsNullOrWhiteSpace($memoryFirstSeen)) {
+          $script:AcsMetrics['lifetimeFirstSeenUtc'] = $existingFirstSeenUtc
+        } else {
+          $memoryDt = [DateTimeOffset]::Parse($memoryFirstSeen, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal)
+          if ($existingDt -lt $memoryDt) {
+            $script:AcsMetrics['lifetimeFirstSeenUtc'] = $existingFirstSeenUtc
+          }
+        }
+      } catch { }
+    }
 
     $currentUptime = 0
     try {
