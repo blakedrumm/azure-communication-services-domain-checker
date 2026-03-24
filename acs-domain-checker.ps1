@@ -2081,6 +2081,22 @@ function Get-AnonymousMetricsPersistPath {
   return $p
 }
 
+# Normalize a value (possibly [DateTime] from ConvertFrom-Json) to ISO 8601 round-trip string.
+function ConvertTo-Iso8601Utc {
+  param($Value)
+  if ($null -eq $Value) { return $null }
+  if ($Value -is [DateTime]) {
+    return $Value.ToUniversalTime().ToString('o')
+  }
+  $s = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+  $dt = [DateTime]::MinValue
+  if ([DateTime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$dt)) {
+    return $dt.ToUniversalTime().ToString('o')
+  }
+  return $s
+}
+
 # Load previously persisted anonymous metrics from the JSON file on disk.
 # Restores lifetime counters, the hash key, and unique domain hash sets so that
 # metrics survive process restarts.
@@ -2110,7 +2126,7 @@ function Load-AnonymousMetricsPersisted {
 
     $data = $raw | ConvertFrom-Json -ErrorAction Stop
 
-    $script:AcsMetrics['lifetimeFirstSeenUtc'] = [string]$data.firstSeenUtc
+    $script:AcsMetrics['lifetimeFirstSeenUtc'] = ConvertTo-Iso8601Utc $data.firstSeenUtc
     if ([string]::IsNullOrWhiteSpace($script:AcsMetrics['lifetimeFirstSeenUtc'])) {
       $script:AcsMetrics['lifetimeFirstSeenUtc'] = $nowUtc
     }
@@ -2252,8 +2268,8 @@ function Save-AnonymousMetricsPersisted {
         $existingRaw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
         if (-not [string]::IsNullOrWhiteSpace($existingRaw)) {
           $existingData = $existingRaw | ConvertFrom-Json -ErrorAction Stop
-          if ($existingData.PSObject.Properties.Match('firstSeenUtc').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$existingData.firstSeenUtc)) {
-            $existingFirstSeenUtc = [string]$existingData.firstSeenUtc
+          if ($existingData.PSObject.Properties.Match('firstSeenUtc').Count -gt 0 -and $null -ne $existingData.firstSeenUtc) {
+            $existingFirstSeenUtc = ConvertTo-Iso8601Utc $existingData.firstSeenUtc
           }
           if ($existingData.PSObject.Properties.Match('lifetimeTotalDomains').Count -gt 0) {
             $existingLifetimeTotalDomains = [int64]$existingData.lifetimeTotalDomains
