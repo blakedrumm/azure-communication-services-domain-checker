@@ -97,9 +97,12 @@ param(
   [string]$AnonymousMetricsFile
 )
 
+# Load the System.Net assembly so we can use HttpListener, IPAddress, and other networking types.
 Add-Type -AssemblyName System.Net
 
 # Heuristic: when running in Container Apps / Kubernetes on non-Windows, we generally must bind to all interfaces.
+# Detect container environments by checking for well-known environment variables that Azure Container Apps
+# and Kubernetes inject into running pods/containers.
 $script:IsContainer = (
   -not [string]::IsNullOrWhiteSpace($env:CONTAINER_APP_NAME) -or
   -not [string]::IsNullOrWhiteSpace($env:CONTAINER_APP_REVISION) -or
@@ -117,12 +120,14 @@ $script:IsContainer = (
 # - System : force `Resolve-DnsName` (Windows/PowerShell with DnsClient module).
 # - DoH    : force DNS-over-HTTPS via `Invoke-RestMethod`.
 
+# Store the chosen DNS resolver mode (Auto/System/DoH) in script scope for use throughout the script.
 $script:DnsResolverMode = $DnsResolver
 
 # RunspacePool copies function *definitions* but not script-scoped variables.
 # Use env vars for settings that must be visible inside request handler runspaces.
 $env:ACS_DNS_RESOLVER = $DnsResolver
 
+# Configure per-client rate limiting (default: 60 requests/minute). A value of 0 disables rate limiting.
 $rateLimitPerMinute = 60
 if ($env:ACS_RATE_LIMIT_PER_MIN -and $env:ACS_RATE_LIMIT_PER_MIN -match '^\d+$') {
   $rateLimitPerMinute = [int]$env:ACS_RATE_LIMIT_PER_MIN
@@ -131,6 +136,7 @@ if ($rateLimitPerMinute -lt 0) { $rateLimitPerMinute = 0 }
 $env:ACS_RATE_LIMIT_PER_MIN = $rateLimitPerMinute.ToString()
 
 # Telemetry flag must be visible in request handler runspaces (RunspacePool doesn't keep script scope).
+# Anonymous metrics are enabled by default. The -DisableAnonymousMetrics switch takes precedence.
 $anonMetricsEnabled = $true
 if ($DisableAnonymousMetrics) { $anonMetricsEnabled = $false }
 elseif ($EnableAnonymousMetrics) { $anonMetricsEnabled = $true }
@@ -145,7 +151,10 @@ if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
   $AnonymousMetricsFile = $env:ACS_ANON_METRICS_FILE
 }
 
-# Heuristic: derive a registrable domain (very small PSL subset)
+# ------------------- DOMAIN PARSING UTILITIES -------------------
+# Heuristic: derive a registrable ("pay-level") domain from an arbitrary subdomain.
+# Uses a small hardcoded subset of the Public Suffix List (PSL) to handle common
+# two-level TLDs like co.uk, com.au, etc.  Falls back to the last two labels.
 function Get-RegistrableDomain {
   param([string]$Domain)
 
@@ -181,6 +190,9 @@ function Get-RegistrableDomain {
   return ($labels[($labels.Count - 2)..($labels.Count - 1)] -join '.').ToLowerInvariant()
 }
 
+# Walk up the label hierarchy of a domain and return all parent domains.
+# For example, "sub.example.co.uk" returns @("example.co.uk", "co.uk").
+# Used for fallback DNS lookups when the exact subdomain has no records.
 function Get-ParentDomains {
   param([string]$Domain)
 
@@ -203,6 +215,18 @@ function Get-ParentDomains {
   return @($parents | Select-Object -Unique)
 }
 
+# ------------------- WHOIS / RDAP LOOKUP PROVIDERS -------------------
+# These functions attempt to retrieve domain registration data (creation date, expiry,
+# registrar, registrant) from multiple sources. The fallback chain is:
+#   1. RDAP (IANA bootstrap) - preferred, structured JSON
+#   2. GoDaddy API           - if credentials are configured
+#   3. Linux whois CLI       - on Linux platforms
+#   4. Sysinternals whois    - on Windows platforms
+#   5. Pure TCP whois        - cross-platform fallback (bypasses CLI issues in containers)
+#   6. WhoisXML API          - if API key is configured
+
+# Quick check: does the raw whois text contain actual registration data,
+# or is it an error/"not found" response from the whois server?
 function Test-WhoisRawTextHasUsableData {
   param([string]$Text)
 
@@ -219,6 +243,9 @@ function Test-WhoisRawTextHasUsableData {
   return $true
 }
 
+# Windows-only WHOIS lookup using the Sysinternals whois.exe tool.
+# Launches whois.exe as a child process, captures stdout/stderr, and parses
+# registration fields (creation date, expiry, registrar, registrant) from the raw output.
 function Invoke-SysinternalsWhoisLookup {
   [CmdletBinding()]
   param(
@@ -359,6 +386,9 @@ function Invoke-SysinternalsWhoisLookup {
   }
 }
 
+# Linux WHOIS lookup using the system `whois` CLI binary.
+# Tries the default whois server first, then cycles through TLD-specific fallback servers
+# (e.g., whois.verisign-grs.com for .com/.net) if the initial query returns no useful data.
 function Invoke-LinuxWhoisLookup {
   [CmdletBinding()]
   param(
@@ -372,6 +402,7 @@ function Invoke-LinuxWhoisLookup {
     [switch]$ThrowOnError
   )
 
+  # Inner helper: execute a single whois query against a specific server.
   function Invoke-LinuxWhoisQuery {
     param(
       [Parameter(Mandatory = $true)]
@@ -804,7 +835,10 @@ if ([string]::IsNullOrWhiteSpace($DohEndpoint)) {
   }
 }
 
-# Anonymous metrics: choose a stable hash key (reuse from env or persisted metrics file).
+# ------------------- ANONYMOUS METRICS HASH KEY -------------------
+# The hash key is used to HMAC-SHA256 domain names before storing them in metrics.
+# This ensures no plaintext domain names are ever persisted, only irreversible hashes.
+# The key is reused across restarts to keep unique-domain counts consistent.
 function Get-PersistedMetricsHashKey {
   param([string]$Path)
   try {
@@ -839,8 +873,9 @@ if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
 
-# Single-instance only; multi-replica metrics are not supported.
-# Cross-process file lock for metrics persistence (prevents concurrent writers from clobbering uptime counters).
+# Acquire a cross-process mutex to protect the metrics JSON file from concurrent writes.
+# Tries multiple mutex naming strategies for compatibility across Windows, Linux, and containers.
+# Returns the held mutex (caller must release), or $null if acquisition timed out.
 function Acquire-MetricsFileMutex {
   param([int]$TimeoutMs = 5000)
 
@@ -863,6 +898,8 @@ function Acquire-MetricsFileMutex {
 $script:GoDaddyApiKey = $env:GODADDY_API_KEY
 $script:GoDaddyApiSecret = $env:GODADDY_API_SECRET
 
+# Compute an HMAC-SHA256 hash of a domain name using the metrics hash key.
+# Returns a Base64 string. This is a one-way hash so the original domain cannot be recovered.
 function Get-HashedDomain {
   param([string]$Domain)
 
@@ -886,6 +923,7 @@ function Get-HashedDomain {
   }
 }
 
+# Handle an incoming HTTP request to /api/metrics. Returns the current anonymous metrics snapshot.
 function Handle-MetricsRequest {
   param($Context, [bool]$MetricsEnabled)
 
@@ -1004,6 +1042,11 @@ function Get-RdapBaseUrlForDomain {
   return $null
 }
 
+# Perform an RDAP (Registration Data Access Protocol) lookup for a domain.
+# RDAP is the modern replacement for WHOIS and returns structured JSON data.
+# Strategy:
+#   1. Look up the authoritative RDAP server for the domain's TLD using the IANA bootstrap file.
+#   2. If the authoritative lookup fails, fall back to rdap.org (a public RDAP proxy).
 function Invoke-RdapLookup {
   [CmdletBinding()]
   param(
@@ -1050,6 +1093,8 @@ function Invoke-RdapLookup {
 }
 
 
+# Query the WhoisXML API (a paid/freemium web service) for domain registration data.
+# Requires the ACS_WHOISXML_API_KEY environment variable to be set.
 function Invoke-WhoisXmlLookup {
   param(
     [Parameter(Mandatory = $true)]
@@ -1070,6 +1115,8 @@ function Invoke-WhoisXmlLookup {
   return $resp
 }
 
+# Query the GoDaddy domain API for registration data.
+# Requires both GODADDY_API_KEY and GODADDY_API_SECRET environment variables.
 function Invoke-GoDaddyWhoisLookup {
   param(
     [Parameter(Mandatory = $true)]
@@ -1124,6 +1171,10 @@ function Invoke-GoDaddyWhoisLookup {
   }
 }
 
+# ------------------- DATE / AGE UTILITIES -------------------
+# Try to parse a date string (from WHOIS/RDAP output) into a normalized UTC ISO 8601 format.
+# Handles common timezone abbreviations (e.g., CLST, CLT) that .NET's parser often rejects.
+# Returns $null if parsing fails entirely.
 function ConvertTo-NullableUtcIso8601 {
   param([object]$Value)
 
@@ -1173,6 +1224,7 @@ function ConvertTo-NullableUtcIso8601 {
   return $null
 }
 
+# Calculate the age of a domain in whole days from its creation date to now.
 function Get-DomainAgeDays {
   param([string]$CreationDateUtc)
 
@@ -1184,6 +1236,9 @@ function Get-DomainAgeDays {
   return [int][Math]::Floor($age.TotalDays)
 }
 
+# ------------------- SERVER STARTUP HELPERS -------------------
+# Probe a local URL to check if something is already listening (used during startup
+# to give a more helpful error message if the port is occupied).
 function Test-LocalHttpEndpoint {
   param(
     [Parameter(Mandatory = $true)]
@@ -1246,6 +1301,9 @@ function Test-LocalHttpEndpoint {
   }
 }
 
+# Build a user-friendly error message when the HTTP listener fails to start.
+# Probes the port to determine whether another ACS instance, a different service,
+# or a permission issue is the cause.
 function Get-ListenerStartupErrorMessage {
   param(
     [Parameter(Mandatory = $true)]
@@ -1290,6 +1348,7 @@ function Get-ListenerStartupErrorMessage {
   return "Could not start the local web server on $attemptTarget. $reason Try a different -Port or adjust -Bind ($BindMode)."
 }
 
+# Break domain age into years, months, and days for human-friendly display.
 function Get-DomainAgeParts {
   param([string]$CreationDateUtc)
 
@@ -1315,6 +1374,7 @@ function Get-DomainAgeParts {
   [pscustomobject]@{ years = $years; months = $months; days = $days }
 }
 
+# Format domain age as a human-readable string like "2 years, 3 months, 15 days".
 function Format-DomainAge {
   param([string]$CreationDateUtc)
 
@@ -1329,6 +1389,7 @@ function Format-DomainAge {
   return ($segments -join ', ')
 }
 
+# Break time until domain expiry into years, months, and days.
 function Get-TimeUntilParts {
   param([string]$ExpiryDateUtc)
 
@@ -1354,6 +1415,7 @@ function Get-TimeUntilParts {
   [pscustomobject]@{ years = $years; months = $months; days = $days }
 }
 
+# Format time until expiry as a human-readable string, or return "Expired" if past due.
 function Format-ExpiryRemaining {
   param([string]$ExpiryDateUtc)
 
@@ -1370,6 +1432,10 @@ function Format-ExpiryRemaining {
   return ($segments -join ', ')
 }
 
+# ------------------- DMARC / SPF SECURITY GUIDANCE -------------------
+# Analyze a DMARC record and produce human-readable security recommendations.
+# Checks for weak policies (p=none), low pct values, relaxed alignment, missing
+# aggregate/forensic reporting, and missing subdomain policies.
 function Get-DmarcSecurityGuidance {
   param(
     [string]$DmarcRecord,
@@ -1449,6 +1515,11 @@ function Get-DmarcSecurityGuidance {
   return @($messages)
 }
 
+# ------------------- DOMAIN REGISTRATION STATUS -------------------
+# Orchestrate domain registration lookups across all available providers (RDAP, GoDaddy,
+# Sysinternals whois, Linux whois, TCP whois, WhoisXML). Returns a unified object with
+# creation/expiry dates, registrar, domain age assessment, and any errors.
+# If the exact domain fails, walks up parent domains as a last resort.
 function Get-DomainRegistrationStatus {
   param(
     [Parameter(Mandatory = $true)]
@@ -1852,6 +1923,10 @@ if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
   $env:ACS_DNS_DOH_ENDPOINT = $DohEndpoint
 }
 
+# ------------------- WEB SERVER STARTUP -------------------
+# Attempt to start a local HTTP listener. The script tries HttpListener first (native .NET HTTP server).
+# If that fails (e.g., on Linux without root, or URL ACL issues on Windows), it falls back to a
+# raw TcpListener-based server that manually parses HTTP/1.1 requests.
 $serverMode = 'HttpListener'
 $listener = $null
 $tcpListener = $null
@@ -2006,6 +2081,9 @@ function Get-AnonymousMetricsPersistPath {
   return $p
 }
 
+# Load previously persisted anonymous metrics from the JSON file on disk.
+# Restores lifetime counters, the hash key, and unique domain hash sets so that
+# metrics survive process restarts.
 function Load-AnonymousMetricsPersisted {
   $enabled = ($env:ACS_ENABLE_ANON_METRICS -eq '1') -or ($true -eq $AcsAnonMetricsEnabled) -or ($script:EnableAnonymousMetrics -eq $true)
   if (-not $enabled) { return }
@@ -2123,7 +2201,10 @@ function Load-AnonymousMetricsPersisted {
 
 }
 
-# Refresh in-memory instance heartbeat and prune stale entries (no file write).
+# Persist the current anonymous metrics to the JSON file on disk.
+# Uses a cross-process mutex to prevent concurrent writers from clobbering data.
+# Merges in-memory counters with any values already in the file (max-wins strategy)
+# to handle race conditions across restarts or multiple saves.
 function Save-AnonymousMetricsPersisted {
   param(
     [switch]$Force
@@ -2266,11 +2347,14 @@ function Save-AnonymousMetricsPersisted {
   }
 }
 
+# ------------------- SESSION & COOKIE HANDLING -------------------
+# Generate a random 32-character hex session ID. Used only for metrics counting;
+# not derived from any PII.
 function New-AnonSessionId {
-  # Anonymous, random session id (no derivation from PII).
   [Guid]::NewGuid().ToString('N')
 }
 
+# Parse a Cookie header string into a name-value dictionary.
 function Get-RequestCookies {
   param([string]$CookieHeader)
 
@@ -2292,6 +2376,8 @@ function Get-RequestCookies {
   return $dict
 }
 
+# Read the acs_session cookie from the request, or create a new one and set it on the response.
+# Also registers the session in the in-memory metrics session tracker.
 function Get-OrCreate-AnonymousSessionId {
   param($Context)
 
@@ -2340,6 +2426,9 @@ function Get-OrCreate-AnonymousSessionId {
   }
 }
 
+# Increment anonymous metrics counters when a domain lookup starts or completes.
+# -Started: increments total/active/lifetime counters and tracks unique domain hashes.
+# -Completed: decrements the active counter and triggers a metrics file persist.
 function Update-AnonymousMetrics {
   param(
     [Parameter(Mandatory = $false)]
@@ -2390,6 +2479,8 @@ function Update-AnonymousMetrics {
   }
 }
 
+# Build a point-in-time snapshot of all anonymous metrics for the /api/metrics endpoint.
+# Merges in-memory counters with persisted lifetime data from the metrics file.
 function Get-AnonymousMetricsSnapshot {
   $uptimeSeconds = 0
   $uptimeFormatted = $null
@@ -2543,6 +2634,9 @@ if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
   } catch { $null = $_ }
 }
 
+# ------------------- HTTP RESPONSE HELPERS -------------------
+# Set security-related HTTP headers on every response:
+# CORS, Content Security Policy, X-Frame-Options, etc.
 function Set-SecurityHeaders {
   param(
     $Context,
@@ -2585,6 +2679,8 @@ function Set-SecurityHeaders {
   } catch { }
 }
 
+# Serialize an object to JSON and write it as the HTTP response body.
+# Works with both HttpListener (native) and TcpListener (shim) server modes.
 function Write-Json {
     param(
     $Context,
@@ -2617,6 +2713,7 @@ function Write-Json {
   $Context.Response.SendBody($bytes)
 }
 
+# Serve a static file from disk as the HTTP response (used for favicon, etc.).
 function Write-FileResponse {
     param(
         $Context,
@@ -2657,6 +2754,8 @@ function Write-FileResponse {
     $Context.Response.SendBody($bytes)
 }
 
+# Serve the embedded single-page HTML UI.
+# Replaces the CSP nonce placeholder in the HTML template before sending.
 function Write-Html {
     param(
         $Context,
@@ -2696,6 +2795,15 @@ function Write-Html {
     $Context.Response.SendBody($bytes)
 }
 
+# ------------------- DNS RESOLUTION LAYER -------------------
+# Two DNS backends are supported:
+#   1. Resolve-DnsName (Windows DnsClient module) - fast, uses the OS resolver.
+#   2. DNS-over-HTTPS (DoH) via Cloudflare (or custom endpoint) - cross-platform fallback.
+# The "Auto" mode tries Resolve-DnsName first and falls back to DoH.
+
+# Perform a DNS query using DNS-over-HTTPS (DoH).
+# Sends a JSON-format query (RFC 8484) to the configured DoH endpoint (default: Cloudflare).
+# Returns objects shaped like Resolve-DnsName output for downstream compatibility.
 function Resolve-DohName {
   param(
     [Parameter(Mandatory = $true)]
@@ -2775,6 +2883,9 @@ function Resolve-DohName {
   }
 }
 
+# Unified DNS lookup wrapper: selects the appropriate resolver (System vs DoH vs Auto)
+# based on the ACS_DNS_RESOLVER env var, and optionally throws on failure.
+# All DNS lookups in the script go through this function.
 function ResolveSafely {
     param(
         [string]$Name,
@@ -2814,6 +2925,9 @@ function ResolveSafely {
     }
 }
 
+# Extract IP address strings from DNS resolution result objects.
+# Handles the different property names used by Resolve-DnsName (IP4Address, IP6Address, IPAddress)
+# and the DoH shim objects. Returns deduplicated, normalized IP strings.
 function Get-DnsIpString {
   param(
     [Parameter(ValueFromPipeline = $true)]
@@ -2855,6 +2969,7 @@ function Get-DnsIpString {
   }
 }
 
+# Filter DNS result objects to only those that are actual MX records (have Preference + NameExchange).
 function Get-MxRecordObjects {
   param([object[]]$Records)
 
@@ -2878,6 +2993,10 @@ function Get-MxRecordObjects {
   return $filtered.ToArray()
 }
 
+# ------------------- INPUT NORMALIZATION -------------------
+# Normalize raw user input into a clean domain name.
+# Accepts: plain domain, email address (takes part after @), or URL (extracts hostname).
+# Strips wildcard prefixes (*.) and surrounding dots, then lowercases the result.
 function ConvertTo-NormalizedDomain {
   param([string]$Raw)
 
@@ -2912,6 +3031,8 @@ function ConvertTo-NormalizedDomain {
   return $domain.ToLowerInvariant()
 }
 
+# Validate that a string looks like a legitimate domain name.
+# Rejects obviously invalid input, prevents path/query injection, and enforces RFC label rules.
 function Test-DomainName {
   param([string]$Domain)
 
@@ -2937,6 +3058,13 @@ function Test-DomainName {
   return $true
 }
 
+# ------------------- SPF ANALYSIS ENGINE -------------------
+# Functions to parse, walk, and analyze SPF (Sender Policy Framework) records.
+# The engine resolves nested includes and redirects up to 8 levels deep,
+# detects SPF macros, counts DNS lookup terms, and checks for the ACS-required
+# "include:spf.protection.outlook.com".
+
+# Split an SPF record string into individual whitespace-delimited tokens.
 function Get-SpfTokens {
   param([string]$SpfRecord)
 
@@ -2948,6 +3076,8 @@ function Get-SpfTokens {
   return @($text -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
+# Check whether a string contains SPF macro syntax (e.g., %{s}, %{d}, %%)
+# which requires sender-specific context to expand.
 function Test-SpfMacroText {
   param([string]$Text)
 
@@ -2955,6 +3085,8 @@ function Test-SpfMacroText {
   return (([string]$Text) -match '%\{' -or ([string]$Text) -match '%%|%_|%-')
 }
 
+# Extract the target domain from an SPF mechanism's domain-spec (e.g., "a:mail.example.com/24").
+# Strips CIDR notation and returns the domain portion, or falls back to the queried domain.
 function Get-SpfDomainSpecTarget {
   param(
     [string]$Spec,
@@ -2978,6 +3110,8 @@ function Get-SpfDomainSpecTarget {
   return $candidate.ToLowerInvariant()
 }
 
+# Classify an SPF token into its mechanism type (include, redirect, exists, a, mx, ptr).
+# Returns $null for tokens that are not DNS-lookup mechanisms (e.g., ip4, ip6, all).
 function Get-SpfMechanismType {
   param([string]$Token)
 
@@ -2997,6 +3131,7 @@ function Get-SpfMechanismType {
   return $null
 }
 
+# Check whether an SPF record string contains a direct "include:spf.protection.outlook.com" token.
 function Test-SpfOutlookIncludeToken {
   param([string]$Text)
 
@@ -3023,6 +3158,9 @@ function Test-SpfOutlookIncludeToken {
   return $false
 }
 
+# Recursively search the entire expanded SPF analysis tree for any reference to
+# spf.protection.outlook.com — whether via direct include, nested include, redirect, exists,
+# a/mx mechanism, or macro. Returns the first match found with its match type.
 function Find-SpfOutlookRequirementMatch {
   param([object]$Analysis)
 
@@ -3135,6 +3273,9 @@ function Find-SpfOutlookRequirementMatch {
   return $null
 }
 
+# Determine whether the ACS-required "include:spf.protection.outlook.com" is present
+# in the domain's SPF record (directly or through nested includes/redirects).
+# Returns an object with isPresent, matchType, detail, and error.
 function Get-SpfOutlookRequirementStatus {
   param(
     [string]$Domain,
@@ -3206,6 +3347,10 @@ function Get-SpfOutlookRequirementStatus {
   }
 }
 
+# Recursively parse an SPF record, resolving includes and redirects up to MaxDepth levels.
+# For each mechanism (include, redirect, a, mx, exists, ptr), performs live DNS lookups
+# and builds a tree of results. Tracks visited domains to detect include loops.
+# Also counts total DNS-lookup-style terms to warn about the SPF 10-lookup limit.
 function Get-SpfNestedAnalysis {
   param(
     [string]$SpfRecord,
@@ -3558,6 +3703,8 @@ function Get-SpfNestedAnalysis {
   }
 }
 
+# Render the SPF analysis tree as indented plain-text lines for display in the UI's
+# "expanded SPF" section. Each level of nesting adds two spaces of indentation.
 function Format-SpfNestedAnalysisText {
   param(
     [object]$Analysis,
@@ -3670,6 +3817,9 @@ function Format-SpfNestedAnalysisText {
   return @($lines)
 }
 
+# Generate human-readable SPF security recommendations based on the record content
+# and the analysis results. Warns about +all, ?all, ~all, macros, many lookup terms,
+# and the ACS Outlook include requirement.
 function Get-SpfGuidance {
   param(
     [string]$SpfRecord,
@@ -3736,6 +3886,8 @@ function Get-SpfGuidance {
   return @($messages | Select-Object -Unique)
 }
 
+# ------------------- REQUEST HANDLING UTILITIES -------------------
+# Log a request to the console. Intentionally omits IP addresses and user agents (PII).
 function Write-RequestLog {
   param(
     $Context,
@@ -3747,6 +3899,8 @@ function Write-RequestLog {
   Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Action for '$Domain'"
 }
 
+# Extract the client's IP address from the request, preferring X-Forwarded-For when present
+# (for reverse-proxy/container scenarios). Used only for rate limiting, never logged.
 function Get-ClientIp {
   param($Context)
 
@@ -3786,6 +3940,8 @@ function Get-ClientIp {
   return $null
 }
 
+# Extract the API key from the request. Checks headers (X-Api-Key, X-ACS-API-Key, Authorization: ApiKey ...)
+# and query string (?apiKey=...) as a less-secure fallback.
 function Get-ApiKeyFromRequest {
   param($Context)
 
@@ -3828,6 +3984,8 @@ function Get-ApiKeyFromRequest {
   return $null
 }
 
+# Validate the API key from the request against ACS_API_KEY env var.
+# Returns $true if no API key is configured (open access) or if the provided key matches.
 function Test-ApiKey {
   param($Context)
 
@@ -3840,6 +3998,8 @@ function Test-ApiKey {
   return [string]::Equals($provided, $expected, [System.StringComparison]::Ordinal)
 }
 
+# Enforce per-client-IP rate limiting using a sliding 60-second window.
+# Returns an object with allowed (bool), remaining count, and retry-after seconds.
 function Test-RateLimit {
   param($Context)
 
@@ -3890,6 +4050,13 @@ function Test-RateLimit {
   }
 }
 
+# ------------------- DNS CHECK FUNCTIONS -------------------
+# Each Get-Dns*Status function performs a specific DNS check for a domain and returns
+# a structured result object. These are called individually by the /api/* endpoints
+# and collectively by Get-AcsDnsStatus for the aggregated /dns endpoint.
+
+# Check root TXT records for SPF (v=spf1...) and ACS verification (ms-domain-verification...).
+# Also resolves A/AAAA for the domain and falls back to parent domains if needed.
 function Get-DnsBaseStatus {
   param([string]$Domain)
 
@@ -4638,6 +4805,9 @@ function Get-DnsDmarcStatus {
   }
 }
 
+# Check for the two ACS-specific DKIM selector CNAME/TXT records:
+#   selector1-azurecomm-prod-net._domainkey.<domain>
+#   selector2-azurecomm-prod-net._domainkey.<domain>
 function Get-DnsDkimStatus {
   param([string]$Domain)
 
@@ -4656,6 +4826,9 @@ function Get-DnsDkimStatus {
   [pscustomobject]@{ domain = $Domain; dkim1 = $dkim1; dkim2 = $dkim2 }
 }
 
+# Extract the CNAME target from DNS resolution result objects.
+# Handles multiple property-name variants (CanonicalName, NameHost, NameTarget, Target)
+# and filters out non-CNAME record types (e.g., SOA in authority section).
 function Get-CnameTargetFromRecords {
   param(
     [Parameter(ValueFromPipeline = $true)]
@@ -4725,6 +4898,12 @@ function Get-DnsCnameStatus {
   }
 }
 
+# ------------------- DNSBL / REPUTATION CHECK -------------------
+# Check whether the mail-server IPs for a domain are listed on DNS-based blocklists (DNSBLs).
+# DNSBL queries work by reversing the IPv4 octets and appending the blocklist zone
+# (e.g., 2.1.168.192.bl.spamcop.net). An A record response means the IP is listed.
+
+# Reverse the octets of an IPv4 address for DNSBL queries.
 function ConvertTo-ReversedIpv4 {
   param(
     [Parameter(Mandatory = $true)]
@@ -4781,6 +4960,8 @@ function Set-RblCacheEntry {
   }
 }
 
+# Query a single IPv4 address against a single DNSBL zone.
+# Returns a result object indicating whether the IP is listed, along with the response address.
 function Invoke-RblLookup {
   param(
     [Parameter(Mandatory = $true)]
@@ -4861,6 +5042,11 @@ function Invoke-RblLookup {
   }
 }
 
+# Perform DNSBL reputation checks for a domain by:
+#   1. Resolving MX hosts (or A records as fallback) to get IPv4 addresses.
+#   2. Querying each IP against each DNSBL zone (parallelized where possible).
+#   3. Caching results with a short TTL to avoid repeated queries.
+# Returns a summary with listed/clean/error counts and a risk assessment.
 function Get-DnsReputationStatus {
   param(
     [Parameter(Mandatory = $true)]
@@ -5047,6 +5233,10 @@ function Get-DnsReputationStatus {
   }
 }
 
+# ------------------- AGGREGATED DNS READINESS -------------------
+# The main "check everything" function called by /dns and the CLI -TestDomain mode.
+# Runs all individual checks (TXT/SPF, MX, DMARC, DKIM, CNAME, WHOIS) and assembles
+# a single result object with guidance strings for the UI.
 function Get-AcsDnsStatus {
     param([string]$Domain)
 
@@ -5213,6 +5403,9 @@ function Get-AcsDnsStatus {
     }
 }
 
+# ------------------- CLI ONE-SHOT MODE -------------------
+# When -TestDomain is provided, run a full check, print JSON to stdout, and exit
+# without starting the web server.
 if (-not [string]::IsNullOrWhiteSpace($TestDomain)) {
   $cliDomain = ConvertTo-NormalizedDomain -Raw $TestDomain
   if ([string]::IsNullOrWhiteSpace($cliDomain) -or -not (Test-DomainName -Domain $cliDomain)) {
@@ -5238,8 +5431,10 @@ if (-not [string]::IsNullOrWhiteSpace($TestDomain)) {
 }
 
 # ------------------- HTML / UI -------------------
-# The UI is embedded as a here-string for easy, single-file distribution.
-# It calls the JSON endpoints in this script and renders results client-side.
+# The entire web UI is embedded as a PowerShell here-string below.
+# This makes the script a single-file distribution — no external HTML, CSS, or JS files needed.
+# The SPA (Single Page Application) calls the JSON endpoints served by this same script
+# (/api/base, /api/mx, /api/dmarc, /api/dkim, /api/cname, /dns) and renders results client-side.
 #
 # Note: The UI references a CDN script (`html2canvas`) only for screenshot/export.
 
@@ -13831,7 +14026,11 @@ if ([string]::IsNullOrWhiteSpace($entraTenantId)) {
 # ------------------- MAIN LOOP -------------------
 # Request handling uses a RunspacePool to process multiple HTTP requests concurrently.
 # This keeps the UI responsive while DNS lookups are in flight.
+# Each incoming request is dispatched to a PowerShell runspace from the pool, which
+# executes the $handlerScript (defined below). The main thread only accepts connections
+# and dispatches; all DNS work happens in runspace workers.
 
+# Maximum number of concurrent request-handling runspaces.
 $maxConcurrentRequests = 64
 
 # Per-domain throttling: only one lookup per domain at a time.
@@ -13839,6 +14038,8 @@ $maxConcurrentRequests = 64
 
 $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Threading.SemaphoreSlim]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
+# List all functions that need to be available inside the runspace workers.
+# These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
   'Set-SecurityHeaders','Write-Json','Write-Html','Write-FileResponse',
   'New-AnonSessionId','Get-RequestCookies','Get-OrCreate-AnonymousSessionId',
@@ -13857,6 +14058,8 @@ $functionNames = @(
   'Get-AcsDnsStatus'
 )
 
+# Create an InitialSessionState that will be shared by all runspace workers.
+# This seeds each runspace with the function definitions, shared variables, and config.
 $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
 
 # Provide a stable flag inside handler runspaces.
@@ -13885,13 +14088,15 @@ foreach ($name in $functionNames) {
   $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $def))
 }
 
+# Create and open the RunspacePool. Workers will be allocated from this pool on demand.
 $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $maxConcurrentRequests, $iss, $Host)
 $pool.Open()
 
+# Track in-flight async invocations so we can dispose them when they complete.
 $inflight = New-Object System.Collections.Generic.List[object]
 
+# Reap completed async PowerShell invocations to avoid unbounded memory growth.
 function Invoke-InflightCleanup {
-  # Reap completed async PowerShell invocations to avoid unbounded memory growth.
   for ($i = $inflight.Count - 1; $i -ge 0; $i--) {
     $item = $inflight[$i]
     if ($item.Async.IsCompleted) {
@@ -13902,6 +14107,10 @@ function Invoke-InflightCleanup {
   }
 }
 
+# ------------------- PER-REQUEST HANDLER SCRIPT -------------------
+# This here-string is the script block that runs inside each RunspacePool worker
+# for every incoming HTTP request. It receives the request context, routes by URL path,
+# and dispatches to the appropriate DNS check function or serves the HTML UI.
 $handlerScript = @'
 param($ctx, $htmlPage, $domainLocks, $msalLocalPath, $tosPageHtml, $privacyPageHtml)
 
@@ -14319,6 +14528,10 @@ try {
     return $nvc
   }
 
+  # ------------------- TcpListener HTTP Shim -------------------
+  # When HttpListener is unavailable, these helper functions provide a minimal HTTP/1.1
+  # implementation over raw TCP sockets. They parse request lines + headers and build
+  # response objects that mimic the HttpListenerResponse API surface.
   function New-TcpContext {
     param(
       [Parameter(Mandatory = $true)]
@@ -14399,6 +14612,8 @@ try {
     return [pscustomobject]@{ Request = $req; Response = $resp }
   }
 
+  # Read and parse an HTTP/1.1 request from a raw TCP stream (request line + headers).
+  # Only GET and POST are supported by the TcpListener server mode.
   function Read-TcpHttpRequest {
     param(
       [Parameter(Mandatory = $true)]
@@ -14539,9 +14754,10 @@ catch {
   Write-Error -ErrorRecord $_
 }
 finally {
-  # Graceful shutdown: stop listeners and dispose runspaces.
-  try { if ($listener -and $listener.IsListening) { $listener.Stop() } } catch { $null = $_ }
-  try { if ($tcpListener) { $tcpListener.Stop() } } catch { $null = $_ }
+# ------------------- GRACEFUL SHUTDOWN -------------------
+# Stop listeners, persist final metrics, drain in-flight requests, and dispose the pool.
+try { if ($listener -and $listener.IsListening) { $listener.Stop() } } catch { $null = $_ }
+try { if ($tcpListener) { $tcpListener.Stop() } } catch { $null = $_ }
 
   # Persist metrics one last time.
   try { Save-AnonymousMetricsPersisted -Force } catch { $null = $_ }

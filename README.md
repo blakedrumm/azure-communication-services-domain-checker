@@ -12,6 +12,7 @@
 - [Quick Start (Docker)](#-quick-start-docker)
 - [Command-Line Test Mode](#-command-line-test-mode)
 - [Web UI Features](#-web-ui-features)
+- [Localization / Multi-Language Support](#-localization--multi-language-support)
 - [DNS Checks & Guidance](#-dns-checks--guidance)
 - [DNSBL Reputation Checks](#-dnsbl-reputation-checks)
 - [WHOIS / RDAP Diagnostics](#-whois--rdap-diagnostics)
@@ -21,6 +22,7 @@
 - [Issue Reporting](#-issue-reporting)
 - [MSAL Browser Library Updates](#-msal-browser-library-updates)
 - [Docker Hub Deployment](#-docker-hub-deployment)
+- [Terms of Service & Privacy Pages](#-terms-of-service--privacy-pages)
 - [Security Notes](#-security-notes)
 - [Troubleshooting](#-troubleshooting)
 - [Contributing](#-contributing)
@@ -52,6 +54,7 @@
 - 🐳 **Container-ready** with Linux and Windows Dockerfiles
 - ⚡ **Fast and lightweight** - minimal resource footprint
 - 🎨 **Modern, responsive UI** - dark/light theme toggle, search history chips, shareable links, screenshot export, and JSON download
+- 🌍 **Multi-language support** - 10 languages with RTL support, language picker dropdown, and `?lang=` URL parameter
 - 💻 **Command-line test mode** (`-TestDomain`) for one-shot headless domain validation
 
 ## 📦 Prerequisites
@@ -177,6 +180,39 @@ The embedded single-page application includes a rich set of interactive features
 | 📋 **Email Quota checklist** | Summary card showing MX, Reputation, Registration, and SPF pass/fail status |
 | ✅ **Domain Verification checklist** | Shows whether the ACS verification TXT record and ACS readiness criteria are met |
 | 🔑 **Microsoft sign-in** | Optional Entra ID sign-in for employee verification via MSAL |
+| 🌍 **Multi-language UI** | 10 languages with a flag-icon dropdown; preference saved in `localStorage` and shareable via `?lang=` |
+| 📄 **Terms of Service & Privacy** | Embedded `/terms` and `/privacy` pages, localized into all supported languages |
+
+## 🌍 Localization / Multi-Language Support
+
+The web UI is fully translated into **10 languages**. Users can switch languages at any time using the dropdown in the top bar. The selected language is persisted in `localStorage` and can also be set via the `?lang=` query parameter for shareable links.
+
+### Supported Languages
+
+| Code | Language | Direction |
+|------|----------|-----------|
+| `en` | English | LTR |
+| `es` | Español | LTR |
+| `fr` | Français | LTR |
+| `de` | Deutsch | LTR |
+| `pt-BR` | Português (Brasil) | LTR |
+| `ar` | العربية | **RTL** |
+| `zh-CN` | 中文（简体） | LTR |
+| `hi-IN` | हिन्दी (भारत) | LTR |
+| `ja-JP` | 日本語（日本） | LTR |
+| `ru-RU` | Русский (Россия) | LTR |
+
+### Setting the Language
+
+```
+# Via URL query parameter
+http://localhost:8080/?lang=es
+
+# The language picker in the top bar also sets this automatically.
+# Arabic (ar) activates right-to-left layout automatically.
+```
+
+The `/terms` and `/privacy` pages also respect the `?lang=` parameter and render in the selected language.
 
 ## 🔍 DNS Checks & Guidance
 
@@ -206,7 +242,8 @@ The `/api/reputation` endpoint queries multiple DNS-based Block Lists (DNSBLs) t
 | `b.barracudacentral.org` | Barracuda Reputation Block List |
 | `psbl.surriel.com` | Passive Spam Block List (PSBL) |
 | `dnsbl.dronebl.org` | DroneBL |
-| `0spam.fusionzero.com` | 0spam |
+| `bl.0spam.org` | 0spam (block list) |
+| `rbl.0spam.org` | 0spam (reputation block list) |
 
 ### Custom DNSBL Zones
 
@@ -233,12 +270,12 @@ The tool enriches results with domain registration metadata (creation date, expi
 
 | Priority | Provider | Requires |
 |----------|----------|---------|
-| 1 | **Sysinternals whois.exe** | `SYSINTERNALS_WHOIS_PATH` (Windows) |
-| 2 | **Linux whois CLI** | `LINUX_WHOIS_PATH` (Linux/macOS) |
-| 3 | **TCP whois** | None (pure PowerShell TCP client, port 43) |
-| 4 | **GoDaddy API** | `GODADDY_API_KEY` + `GODADDY_API_SECRET` |
-| 5 | **WhoisXML API** | `ACS_WHOISXML_API_KEY` |
-| 6 | **RDAP** | None (uses IANA bootstrap + rdap.org fallback) |
+| 1 | **RDAP** _(preferred)_ | None (uses IANA bootstrap + rdap.org fallback) |
+| 2 | **GoDaddy API** | `GODADDY_API_KEY` + `GODADDY_API_SECRET` |
+| 3 | **Linux whois CLI** | `LINUX_WHOIS_PATH` (Linux/macOS only) |
+| 4 | **Sysinternals whois.exe** | `SYSINTERNALS_WHOIS_PATH` (Windows only) |
+| 5 | **TCP whois** | None (pure PowerShell TCP client, port 43) |
+| 6 | **WhoisXML API** | `ACS_WHOISXML_API_KEY` |
 
 WHOIS data is used to populate the **Email Quota** checklist and to surface warnings for expired or newly-registered domains.
 
@@ -252,11 +289,15 @@ The application exposes the following RESTful API endpoints:
 | `/dns` | Aggregated readiness JSON | Complete DNS readiness report for a domain |
 | `/api/base` | Root TXT/SPF/ACS TXT | Validates SPF and ACS verification TXT records |
 | `/api/mx` | MX + A/AAAA resolution | Checks mail exchange records and IP resolution |
+| `/api/whois` | WHOIS / RDAP registration | Returns domain registration data (creation, expiry, registrar) |
 | `/api/dmarc` | DMARC records | Validates DMARC email authentication policy |
 | `/api/dkim` | DKIM selectors | Checks DomainKeys Identified Mail signatures |
 | `/api/cname` | CNAME records | Validates canonical name records |
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
+| `/api/auth/verify` | Entra ID token verification | Validates a Microsoft Entra ID Bearer token via Microsoft Graph |
+| `/terms` | Terms of Service | Embedded, localized Terms of Service page |
+| `/privacy` | Privacy Statement | Embedded, localized Privacy Statement page |
 
 ### 📖 Example API Usage
 ```bash
@@ -329,6 +370,7 @@ Customize the application behavior using these environment variables:
 |----------|---------|-------------|
 | `SYSINTERNALS_WHOIS_PATH` | _(none)_ | Path to Sysinternals `whois.exe` (Windows WHOIS fallback) |
 | `LINUX_WHOIS_PATH` | _(none)_ | Path to the Linux `whois` binary (Linux/macOS WHOIS fallback) |
+| `ACS_LINUX_WHOIS_SERVERS` | _(none)_ | Comma/semicolon/newline-delimited fallback WHOIS server hostnames for Linux CLI (e.g., `whois.nic.us;us.whois-servers.net`) |
 | `GODADDY_API_KEY` | _(none)_ | GoDaddy API key for WHOIS fallback |
 | `GODADDY_API_SECRET` | _(none)_ | GoDaddy API secret for WHOIS fallback |
 | `ACS_WHOISXML_API_KEY` | _(none)_ | WhoisXML API key for WHOIS fallback |
@@ -556,6 +598,17 @@ For local multi-platform builds and testing, use the included PowerShell script:
 - Docker Desktop with Windows containers support
 - Authenticated to Docker Hub (`docker login`)
 - PowerShell 5.1 or later
+
+## 📄 Terms of Service & Privacy Pages
+
+The application serves embedded **Terms of Service** (`/terms`) and **Privacy Statement** (`/privacy`) pages directly from the web server. Both pages are:
+
+- 🌍 Fully localized into all [10 supported languages](#-localization--multi-language-support)
+- 🔗 Accessible via the footer links in the web UI
+- 📖 Rendered server-side with CSP nonce support
+- 🔄 Language-aware via the `?lang=` query parameter (e.g., `/terms?lang=de`)
+
+The Privacy Statement explains the tool's data handling practices, including the optional anonymous metrics system. The Terms of Service describe usage conditions for the tool.
 
 ## 🔒 Security Notes
 
