@@ -20,3 +20,5 @@ Thumbs.db
 
 # Runtime metrics
 acs-anon-metrics.json
+/copilot-server.err.log
+/copilot-server.out.log
