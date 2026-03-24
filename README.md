@@ -520,7 +520,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v1.3.8`)
+- ✅ Automatically when a version tag is pushed (e.g., `v1.4.3`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -543,8 +543,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v1.3.8
-git push origin v1.3.8
+git tag v1.4.3
+git push origin v1.4.3
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -555,7 +555,7 @@ git push origin v1.3.8
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `1.3.8`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `1.4.3`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -572,11 +572,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:1.3.8
+docker pull limitlessworlds/acs-domain-checker:1.4.3
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-1.3.8
-docker pull limitlessworlds/acs-domain-checker:windows-1.3.8
+docker pull limitlessworlds/acs-domain-checker:linux-1.4.3
+docker pull limitlessworlds/acs-domain-checker:windows-1.4.3
 ```
 
 ### 🛠️ Manual Build Script
@@ -591,7 +591,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 1.3.8
+./acs-domain-checker-dockerhub.ps1 -Version 1.4.3
 ```
 
 **📋 Requirements for manual script:**
