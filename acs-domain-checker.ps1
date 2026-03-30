@@ -97,6 +97,14 @@ param(
   [string]$AnonymousMetricsFile
 )
 
+# ------------------- UTF-8 ENCODING FIX -------------------
+# Ensure the PowerShell process uses UTF-8 for all output and string operations.
+# Without this, non-ASCII characters in embedded HTML translations (e.g., Portuguese,
+# French, German, Arabic, Chinese, Japanese, Russian, Hindi) may be corrupted when
+# served over HTTP — especially in Linux containers where the default locale is C/POSIX.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+try { $OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
 # Load the System.Net assembly so we can use HttpListener, IPAddress, and other networking types.
 Add-Type -AssemblyName System.Net
 

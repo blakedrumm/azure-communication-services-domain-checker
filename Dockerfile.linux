@@ -1,5 +1,12 @@
 FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04
 
+FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04
+
+# Ensure the container uses UTF-8 locale so PowerShell correctly handles non-ASCII
+# characters in embedded translations (Portuguese, French, German, Arabic, etc.).
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
 WORKDIR /app
 COPY acs-domain-checker.ps1 /app/acs-domain-checker.ps1
 
