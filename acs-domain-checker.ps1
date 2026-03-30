@@ -2748,6 +2748,7 @@ function Write-Json {
 
   if ($Context.Response -is [System.Net.HttpListenerResponse]) {
     $Context.Response.ContentType = "application/json; charset=utf-8"
+    try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
     $Context.Response.StatusCode  = $StatusCode
     $Context.Response.ContentLength64 = $bytes.Length
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -2790,6 +2791,11 @@ function Write-FileResponse {
 
     if ($Context.Response -is [System.Net.HttpListenerResponse]) {
         $Context.Response.ContentType = $ContentType
+        try {
+          if ($ContentType -match '(?i)charset\s*=\s*utf-8') {
+            $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8
+          }
+        } catch { }
         $Context.Response.StatusCode  = 200
         $Context.Response.ContentLength64 = $bytes.Length
         $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -2830,6 +2836,7 @@ function Write-Html {
         $Context.Response.Headers['Expires'] = '0'
       } catch { }
       $Context.Response.ContentType = "text/html; charset=utf-8"
+      try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
       $Context.Response.StatusCode  = 200
       $Context.Response.ContentLength64 = $bytes.Length
       $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -10189,7 +10196,21 @@ function repairMojibake(text) {
   if (!looksLikeMojibake(value)) return value;
 
   try {
-    const bytes = new Uint8Array(Array.from(value, ch => ch.charCodeAt(0) & 0xFF));
+    const bytes = new Uint8Array(Array.fro
+function repairObjectStrings(value) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return repairMojibake(value);
+  if (Array.isArray(value)) return value.map(repairObjectStrings);
+  if (typeof value === 'object') {
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+      result[key] = repairObjectStrings(entry);
+    }
+    return result;
+  }
+  return value;
+}
+m(value, ch => ch.charCodeAt(0) & 0xFF));
     const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
     if (decoded && !looksLikeMojibake(decoded)) return decoded;
   } catch {}
@@ -11402,7 +11423,9 @@ function lookup() {
   btn.disabled = false;
   if (screenshotBtn) screenshotBtn.disabled = true;
   btn.innerHTML = `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`;
-  // setStatus("Checking " + escapeHtml(domain) + " &#x23F3;");
+  // setStatus("Checking " + escapeHtml(do      const raw = await r.arrayBuffer();
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(raw);
+      return repairObjectStrings(JSON.parse(text));
 
   function parseHttpError(r, bodyText) {
     const details = (bodyText || "").trim();
