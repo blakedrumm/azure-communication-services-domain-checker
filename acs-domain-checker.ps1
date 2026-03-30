@@ -10196,7 +10196,19 @@ function repairMojibake(text) {
   if (!looksLikeMojibake(value)) return value;
 
   try {
-    const bytes = new Uint8Array(Array.fro
+    const bytes = new Uint8Array(Array.from(value, ch => ch.charCodeAt(0) & 0xFF));
+    const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    if (decoded && !looksLikeMojibake(decoded)) return decoded;
+  } catch {}
+
+  try {
+    const decoded = decodeURIComponent(escape(value));
+    if (decoded && !looksLikeMojibake(decoded)) return decoded;
+  } catch {}
+
+  return value;
+}
+
 function repairObjectStrings(value) {
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return repairMojibake(value);
@@ -10208,18 +10220,6 @@ function repairObjectStrings(value) {
     }
     return result;
   }
-  return value;
-}
-m(value, ch => ch.charCodeAt(0) & 0xFF));
-    const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    if (decoded && !looksLikeMojibake(decoded)) return decoded;
-  } catch {}
-
-  try {
-    const decoded = decodeURIComponent(escape(value));
-    if (decoded && !looksLikeMojibake(decoded)) return decoded;
-  } catch {}
-
   return value;
 }
 
