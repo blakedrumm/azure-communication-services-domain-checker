@@ -11423,9 +11423,7 @@ function lookup() {
   btn.disabled = false;
   if (screenshotBtn) screenshotBtn.disabled = true;
   btn.innerHTML = `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`;
-  // setStatus("Checking " + escapeHtml(do      const raw = await r.arrayBuffer();
-      const text = new TextDecoder('utf-8', { fatal: false }).decode(raw);
-      return repairObjectStrings(JSON.parse(text));
+  // setStatus("Checking " + escapeHtml(domain) + " &#x23F3;");
 
   function parseHttpError(r, bodyText) {
     const details = (bodyText || "").trim();
@@ -11447,7 +11445,9 @@ function lookup() {
         try { body = await r.text(); } catch {}
         throw new Error(parseHttpError(r, body));
       }
-      return r.json();
+      const raw = await r.arrayBuffer();
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(raw);
+      return repairObjectStrings(JSON.parse(text));
     } finally {
       // Remove controller to avoid leaks
       activeLookup.controllers = (activeLookup.controllers || []).filter(c => c !== controller);
@@ -11459,7 +11459,7 @@ function lookup() {
       lastResult = {};
     }
     if (!lastResult._loaded) {
-      lastResult._loaded = { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false };
+      lastResult._loaded = { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false };
     }
     if (!lastResult._errors) {
       lastResult._errors = {};
@@ -11469,7 +11469,7 @@ function lookup() {
   ensureResultObject();
   lastResult = {
     domain,
-    _loaded: { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false },
+    _loaded: { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false },
     _errors: {},
     guidance: [],
     acsReady: false
