@@ -10188,7 +10188,11 @@ function t(key, params = {}) {
 }
 
 function looksLikeMojibake(text) {
-  return /(?:\u00C3.|\u00C2.|\u00E2.|\u00F0\u0178|\u00D0.|\u00D1.|\u00D8.|\u00D9.|\u00E3.|\u00E0.|\u00EF.)/.test(String(text || ''));
+  // Detect double-encoded UTF-8 misinterpreted as Latin-1/Windows-1252.
+  // Lead-byte chars must be followed by continuation-byte chars (\u0080-\u00BF),
+  // NOT arbitrary characters, to avoid false-positives on valid Portuguese/French
+  // text like \u00E3o (\u00E3 + o) or \u00C3O (\u00C3 + O).
+  return /(?:[\u00C2-\u00DF][\u0080-\u00BF]|[\u00E0-\u00EF][\u0080-\u00BF]{2}|[\u00F0-\u00F4][\u0080-\u00BF]{3})/.test(String(text || ''));
 }
 
 function repairMojibake(text) {
