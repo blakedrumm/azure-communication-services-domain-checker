@@ -157,13 +157,13 @@ jobs:
           draft: false
 
       - name: Enable Pull Request Auto-Merge
-        if: steps.check-update.outputs.needs_update == 'true' && steps.create-pull-request.outputs.pull-request-operation != 'none'
+        if: steps.check-update.outputs.needs_update == 'true' && contains(fromJSON('["created","updated"]'), steps.create-pull-request.outputs.pull-request-operation)
         id: enable-auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_URL="${{ steps.create-pull-request.outputs.pull-request-url }}"
-          AUTO_MERGE_ENABLED=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json autoMergeRequest --jq '.autoMergeRequest != null')
+          AUTO_MERGE_ENABLED=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json autoMergeRequest --jq '.autoMergeRequest != null' || echo "false")
 
           if [ "$AUTO_MERGE_ENABLED" = "true" ]; then
             echo "Auto-merge is already enabled for $PR_URL"
