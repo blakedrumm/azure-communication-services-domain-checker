@@ -158,18 +158,22 @@ jobs:
 
       - name: Merge Pull Request
         if: steps.check-update.outputs.needs_update == 'true' && steps.create-pull-request.outputs.pull-request-number != ''
+        id: merge-pull-request
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr merge "${{ steps.create-pull-request.outputs.pull-request-number }}" \
             --repo "${{ github.repository }}" \
             --squash \
+            --auto \
             --delete-branch
 
       - name: Summary
         run: |
-          if [ "${{ steps.check-update.outputs.needs_update }}" = "true" ]; then
-            echo "✅ Pull request created and merged for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
-          else
+          if [ "${{ steps.check-update.outputs.needs_update }}" != "true" ]; then
             echo "ℹ️ No update needed. Current version is already the latest."
+          elif [ -n "${{ steps.create-pull-request.outputs.pull-request-number }}" ] && [ "${{ steps.merge-pull-request.outcome }}" = "success" ]; then
+            echo "✅ Pull request created and auto-merge enabled for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
+          else
+            echo "ℹ️ Pull request state updated for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
           fi
