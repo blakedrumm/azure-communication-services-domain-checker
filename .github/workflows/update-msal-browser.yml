@@ -157,7 +157,7 @@ jobs:
           draft: false
 
       - name: Enable Pull Request Auto-Merge
-        if: steps.check-update.outputs.needs_update == 'true' && steps.create-pull-request.outputs.pull-request-operation != 'none' && steps.create-pull-request.outputs.pull-request-url != ''
+        if: steps.check-update.outputs.needs_update == 'true' && steps.create-pull-request.outputs.pull-request-operation != 'none'
         id: enable-auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
