@@ -167,20 +167,24 @@ jobs:
 
           if [ "$AUTO_MERGE_ENABLED" = "true" ]; then
             echo "Auto-merge is already enabled for $PR_URL"
+            echo "auto-merge-status=already-enabled" >> "$GITHUB_OUTPUT"
           else
             gh pr merge "$PR_URL" \
               --repo "${{ github.repository }}" \
               --squash \
               --auto \
               --delete-branch
+            echo "auto-merge-status=enabled" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Summary
         run: |
           if [ "${{ steps.check-update.outputs.needs_update }}" != "true" ]; then
             echo "ℹ️ No update needed. Current version is already the latest."
-          elif [ "${{ steps.create-pull-request.outputs.pull-request-operation }}" != "none" ] && [ "${{ steps.enable-auto-merge.outcome }}" = "success" ]; then
+          elif [ "${{ steps.enable-auto-merge.outputs.auto-merge-status }}" = "enabled" ]; then
             echo "✅ Auto-merge enabled for ${{ steps.create-pull-request.outputs.pull-request-url }} (MSAL Browser update to v${{ steps.get-version.outputs.version }})"
+          elif [ "${{ steps.enable-auto-merge.outputs.auto-merge-status }}" = "already-enabled" ]; then
+            echo "ℹ️ Auto-merge was already enabled for ${{ steps.create-pull-request.outputs.pull-request-url }} (MSAL Browser update to v${{ steps.get-version.outputs.version }})"
           else
             echo "ℹ️ Pull request state updated for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
           fi
