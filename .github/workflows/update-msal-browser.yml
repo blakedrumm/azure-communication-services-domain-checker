@@ -172,7 +172,9 @@ jobs:
         run: |
           if [ "${{ steps.check-update.outputs.needs_update }}" != "true" ]; then
             echo "ℹ️ No update needed. Current version is already the latest."
-          elif [ -n "${{ steps.create-pull-request.outputs.pull-request-number }}" ] && [ "${{ steps.merge-pull-request.outcome }}" = "success" ]; then
+          elif [ -z "${{ steps.create-pull-request.outputs.pull-request-number }}" ]; then
+            echo "ℹ️ Update prepared, but no pull request was created or updated."
+          elif [ "${{ steps.merge-pull-request.outcome }}" = "success" ]; then
             echo "✅ Auto-merge enabled for pull request #${{ steps.create-pull-request.outputs.pull-request-number }} (MSAL Browser update to v${{ steps.get-version.outputs.version }})"
           else
             echo "ℹ️ Pull request state updated for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
