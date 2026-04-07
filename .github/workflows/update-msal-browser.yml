@@ -162,11 +162,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr merge "${{ steps.create-pull-request.outputs.pull-request-url }}" \
-            --repo "${{ github.repository }}" \
-            --squash \
-            --auto \
-            --delete-branch
+          PR_URL="${{ steps.create-pull-request.outputs.pull-request-url }}"
+          AUTO_MERGE_ENABLED=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json autoMergeRequest --jq '.autoMergeRequest != null')
+
+          if [ "$AUTO_MERGE_ENABLED" = "true" ]; then
+            echo "Auto-merge is already enabled for $PR_URL"
+          else
+            gh pr merge "$PR_URL" \
+              --repo "${{ github.repository }}" \
+              --squash \
+              --auto \
+              --delete-branch
+          fi
 
       - name: Summary
         run: |
