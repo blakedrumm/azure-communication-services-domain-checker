@@ -158,7 +158,7 @@ jobs:
 
       - name: Enable Pull Request Auto-Merge
         if: steps.check-update.outputs.needs_update == 'true' && steps.create-pull-request.outputs.pull-request-number != ''
-        id: merge-pull-request
+        id: enable-auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -174,7 +174,7 @@ jobs:
             echo "ℹ️ No update needed. Current version is already the latest."
           elif [ -z "${{ steps.create-pull-request.outputs.pull-request-number }}" ]; then
             echo "ℹ️ Update prepared, but no pull request was created or updated."
-          elif [ "${{ steps.merge-pull-request.outcome }}" = "success" ]; then
+          elif [ "${{ steps.enable-auto-merge.outcome }}" = "success" ]; then
             echo "✅ Auto-merge enabled for pull request #${{ steps.create-pull-request.outputs.pull-request-number }} (MSAL Browser update to v${{ steps.get-version.outputs.version }})"
           else
             echo "ℹ️ Pull request state updated for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
