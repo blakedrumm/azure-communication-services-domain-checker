@@ -15,6 +15,14 @@ function Test-WhoisRawTextHasUsableData {
   return $true
 }
 
+function Get-WhoisCreationDateLabelRegex {
+  '(?i)^(Creation Date|Created On|Registered On|Registered on|Registration Date|Registered|Domain Create Date|Creation date):\s*(.+)$'
+}
+
+function Get-WhoisExpiryDateLabelRegex {
+  '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$'
+}
+
 # Windows-only WHOIS lookup using the Sysinternals whois.exe tool.
 # Launches whois.exe as a child process, captures stdout/stderr, and parses
 # registration fields (creation date, expiry, registrar, registrant) from the raw output.
@@ -109,11 +117,14 @@ function Invoke-SysinternalsWhoisLookup {
     $registrar  = $null
     $registrant = $null
 
+    $creationPattern = Get-WhoisCreationDateLabelRegex
+    $expiryPattern = Get-WhoisExpiryDateLabelRegex
+
     foreach ($line in ($text -split "`r?`n")) {
       $l = $line.Trim()
       if (-not $l) { continue }
 
-      if (-not $creation -and $l -match '(?i)^(Creation Date|Created On|Registered On|Domain Create Date):\s*(.+)$') {
+      if (-not $creation -and $l -match $creationPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
@@ -123,7 +134,7 @@ function Invoke-SysinternalsWhoisLookup {
         continue
       }
 
-      if (-not $expiry -and $l -match '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date):\s*(.+)$') {
+      if (-not $expiry -and $l -match $expiryPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
@@ -296,6 +307,7 @@ function Invoke-LinuxWhoisLookup {
     '(?i)\.io$'          { $defaultFallbackServers = @('whois.nic.io'); break }
     '(?i)\.ai$'          { $defaultFallbackServers = @('whois.nic.ai'); break }
     '(?i)\.app$|\.dev$' { $defaultFallbackServers = @('whois.nic.google'); break }
+    '(?i)\.eu$'          { $defaultFallbackServers = @('whois.eu'); break }
     '(?i)\.uk$|\.co\.uk$|\.org\.uk$|\.gov\.uk$|\.ac\.uk$' { $defaultFallbackServers = @('whois.nic.uk'); break }
     '(?i)\.de$'          { $defaultFallbackServers = @('whois.denic.de'); break }
     '(?i)\.fr$'          { $defaultFallbackServers = @('whois.nic.fr'); break }
@@ -368,11 +380,14 @@ function Invoke-LinuxWhoisLookup {
     $registrar  = $null
     $registrant = $null
 
+    $creationPattern = Get-WhoisCreationDateLabelRegex
+    $expiryPattern = Get-WhoisExpiryDateLabelRegex
+
     foreach ($line in ($text -split "`r?`n")) {
       $l = $line.Trim()
       if (-not $l) { continue }
 
-      if (-not $creation -and $l -match '(?i)^(Creation Date|Created On|Registered On|Domain Create Date|Creation date):\s*(.+)$') {
+      if (-not $creation -and $l -match $creationPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
@@ -382,7 +397,7 @@ function Invoke-LinuxWhoisLookup {
         continue
       }
 
-      if (-not $expiry -and $l -match '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$') {
+      if (-not $expiry -and $l -match $expiryPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
@@ -453,6 +468,7 @@ function Invoke-TcpWhoisLookup {
     '(?i)\.io$'                                             { $servers.Add('whois.nic.io'); break }
     '(?i)\.ai$'                                             { $servers.Add('whois.nic.ai'); break }
     '(?i)\.app$|\.dev$'                                     { $servers.Add('whois.nic.google'); break }
+    '(?i)\.eu$'                                             { $servers.Add('whois.eu'); break }
     '(?i)\.uk$|\.co\.uk$|\.org\.uk$|\.gov\.uk$|\.ac\.uk$'  { $servers.Add('whois.nic.uk'); break }
     '(?i)\.de$'                                             { $servers.Add('whois.denic.de'); break }
     '(?i)\.fr$'                                             { $servers.Add('whois.nic.fr'); break }
@@ -545,11 +561,14 @@ function Invoke-TcpWhoisLookup {
       $registrar  = $null
       $registrant = $null
 
+      $creationPattern = Get-WhoisCreationDateLabelRegex
+      $expiryPattern = Get-WhoisExpiryDateLabelRegex
+
       foreach ($line in ($text -split "`r?`n")) {
         $l = $line.Trim()
         if (-not $l) { continue }
 
-        if (-not $creation -and $l -match '(?i)^(Creation Date|Created On|Registered On|Domain Create Date|Creation date):\s*(.+)$') {
+        if (-not $creation -and $l -match $creationPattern) {
           $val = $Matches[2].Trim()
           if ($canConvertDates) {
             try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
@@ -557,7 +576,7 @@ function Invoke-TcpWhoisLookup {
           continue
         }
 
-        if (-not $expiry -and $l -match '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$') {
+        if (-not $expiry -and $l -match $expiryPattern) {
           $val = $Matches[2].Trim()
           if ($canConvertDates) {
             try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }

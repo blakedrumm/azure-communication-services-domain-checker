@@ -101,7 +101,7 @@ if ($metricsEnabled) {
   }
 
   # 2) Serve individual API endpoints (/api/*)
-  if ($path -in @("/api/base","/api/mx","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation")) {
+  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation")) {
     if (-not (Test-ApiKey -Context $ctx)) {
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
       return
@@ -144,6 +144,7 @@ if ($metricsEnabled) {
           if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Completed }
         }
         "/api/mx"    { Write-Json -Context $ctx -Object (Get-DnsMxStatus    -Domain $domain) }
+        "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain) }
         "/api/whois" { Write-Json -Context $ctx -Object (Get-DomainRegistrationStatus -Domain $domain) }
         "/api/dmarc" { Write-Json -Context $ctx -Object (Get-DnsDmarcStatus -Domain $domain) }
         "/api/dkim"  { Write-Json -Context $ctx -Object (Get-DnsDkimStatus  -Domain $domain) }

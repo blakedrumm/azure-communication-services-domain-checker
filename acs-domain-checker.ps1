@@ -253,6 +253,14 @@ function Test-WhoisRawTextHasUsableData {
   return $true
 }
 
+function Get-WhoisCreationDateLabelRegex {
+  '(?i)^(Creation Date|Created On|Registered On|Registered on|Registration Date|Registered|Domain Create Date|Creation date):\s*(.+)$'
+}
+
+function Get-WhoisExpiryDateLabelRegex {
+  '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$'
+}
+
 # Windows-only WHOIS lookup using the Sysinternals whois.exe tool.
 # Launches whois.exe as a child process, captures stdout/stderr, and parses
 # registration fields (creation date, expiry, registrar, registrant) from the raw output.
@@ -347,11 +355,14 @@ function Invoke-SysinternalsWhoisLookup {
     $registrar  = $null
     $registrant = $null
 
+    $creationPattern = Get-WhoisCreationDateLabelRegex
+    $expiryPattern = Get-WhoisExpiryDateLabelRegex
+
     foreach ($line in ($text -split "`r?`n")) {
       $l = $line.Trim()
       if (-not $l) { continue }
 
-      if (-not $creation -and $l -match '(?i)^(Creation Date|Created On|Registered On|Domain Create Date):\s*(.+)$') {
+      if (-not $creation -and $l -match $creationPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
@@ -361,7 +372,7 @@ function Invoke-SysinternalsWhoisLookup {
         continue
       }
 
-      if (-not $expiry -and $l -match '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date):\s*(.+)$') {
+      if (-not $expiry -and $l -match $expiryPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
@@ -534,6 +545,7 @@ function Invoke-LinuxWhoisLookup {
     '(?i)\.io$'          { $defaultFallbackServers = @('whois.nic.io'); break }
     '(?i)\.ai$'          { $defaultFallbackServers = @('whois.nic.ai'); break }
     '(?i)\.app$|\.dev$' { $defaultFallbackServers = @('whois.nic.google'); break }
+    '(?i)\.eu$'          { $defaultFallbackServers = @('whois.eu'); break }
     '(?i)\.uk$|\.co\.uk$|\.org\.uk$|\.gov\.uk$|\.ac\.uk$' { $defaultFallbackServers = @('whois.nic.uk'); break }
     '(?i)\.de$'          { $defaultFallbackServers = @('whois.denic.de'); break }
     '(?i)\.fr$'          { $defaultFallbackServers = @('whois.nic.fr'); break }
@@ -606,11 +618,14 @@ function Invoke-LinuxWhoisLookup {
     $registrar  = $null
     $registrant = $null
 
+    $creationPattern = Get-WhoisCreationDateLabelRegex
+    $expiryPattern = Get-WhoisExpiryDateLabelRegex
+
     foreach ($line in ($text -split "`r?`n")) {
       $l = $line.Trim()
       if (-not $l) { continue }
 
-      if (-not $creation -and $l -match '(?i)^(Creation Date|Created On|Registered On|Domain Create Date|Creation date):\s*(.+)$') {
+      if (-not $creation -and $l -match $creationPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
@@ -620,7 +635,7 @@ function Invoke-LinuxWhoisLookup {
         continue
       }
 
-      if (-not $expiry -and $l -match '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$') {
+      if (-not $expiry -and $l -match $expiryPattern) {
         $val = $Matches[2].Trim()
         if ($canConvertDates) {
           try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
@@ -691,6 +706,7 @@ function Invoke-TcpWhoisLookup {
     '(?i)\.io$'                                             { $servers.Add('whois.nic.io'); break }
     '(?i)\.ai$'                                             { $servers.Add('whois.nic.ai'); break }
     '(?i)\.app$|\.dev$'                                     { $servers.Add('whois.nic.google'); break }
+    '(?i)\.eu$'                                             { $servers.Add('whois.eu'); break }
     '(?i)\.uk$|\.co\.uk$|\.org\.uk$|\.gov\.uk$|\.ac\.uk$'  { $servers.Add('whois.nic.uk'); break }
     '(?i)\.de$'                                             { $servers.Add('whois.denic.de'); break }
     '(?i)\.fr$'                                             { $servers.Add('whois.nic.fr'); break }
@@ -783,11 +799,14 @@ function Invoke-TcpWhoisLookup {
       $registrar  = $null
       $registrant = $null
 
+      $creationPattern = Get-WhoisCreationDateLabelRegex
+      $expiryPattern = Get-WhoisExpiryDateLabelRegex
+
       foreach ($line in ($text -split "`r?`n")) {
         $l = $line.Trim()
         if (-not $l) { continue }
 
-        if (-not $creation -and $l -match '(?i)^(Creation Date|Created On|Registered On|Domain Create Date|Creation date):\s*(.+)$') {
+        if (-not $creation -and $l -match $creationPattern) {
           $val = $Matches[2].Trim()
           if ($canConvertDates) {
             try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
@@ -795,7 +814,7 @@ function Invoke-TcpWhoisLookup {
           continue
         }
 
-        if (-not $expiry -and $l -match '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$') {
+        if (-not $expiry -and $l -match $expiryPattern) {
           $val = $Matches[2].Trim()
           if ($canConvertDates) {
             try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
@@ -884,7 +903,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.0'
+$script:AppVersion = '2.0.12'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1423,6 +1442,29 @@ function Get-DmarcSecurityGuidance {
 # creation/expiry dates, registrar, domain age assessment, and any errors.
 # If the exact domain fails, walks up parent domains as a last resort.
 # ===== Domain Registration Status =====
+function Get-FirstNonEmptyPropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]
+    [object]$Object,
+    [Parameter(Mandatory = $true)]
+    [string[]]$PropertyNames
+  )
+
+  if ($null -eq $Object) { return $null }
+
+  foreach ($propertyName in $PropertyNames) {
+    $property = $Object.PSObject.Properties[$propertyName]
+    if ($property -and $null -ne $property.Value) {
+      $value = [string]$property.Value
+      if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value
+      }
+    }
+  }
+
+  return $null
+}
+
 function Get-DomainRegistrationStatus {
   param(
     [Parameter(Mandatory = $true)]
@@ -1465,20 +1507,46 @@ function Get-DomainRegistrationStatus {
   $rawWhoisText = $null
 
   $rdapError = $null
+  $goDaddyError = $null
+  $sysWhoisError = $null
+  $linuxWhoisError = $null
+  $tcpWhoisError = $null
+  $whoisXmlError = $null
+  $apiKey = $null
+  $gdKey = $null
+  $gdSecret = $null
+  $needsFallback = $false
+
   try {
-    # Throw on RDAP failures so fallback providers can be invoked.
+    # Throw on transport failures so fallback providers can be invoked.
     $raw = Invoke-RdapLookup -Domain $whoisDomain -ThrowOnError
     $source = 'RDAP'
 
     if ($raw -and $raw.events) {
       foreach ($ev in @($raw.events)) {
-        $action = [string]$ev.eventAction
-        if (-not $creation -and $action -eq 'registration') {
+        $action = (([string]$ev.eventAction).Trim().ToLowerInvariant() -replace '[^a-z]', '')
+        if (-not $creation -and @('registration', 'registered', 'created', 'creation') -contains $action) {
           $creation = ConvertTo-NullableUtcIso8601 $ev.eventDate
         }
-        elseif (-not $expiry -and $action -eq 'expiration') {
+        elseif (-not $expiry -and @('expiration', 'expiry', 'expires') -contains $action) {
           $expiry = ConvertTo-NullableUtcIso8601 $ev.eventDate
         }
+      }
+    }
+
+    if (-not $creation) {
+      $rdapCreationValue = Get-FirstNonEmptyPropertyValue -Object $raw -PropertyNames @('registrationDate', 'registeredDate', 'createdDate', 'creationDate', 'created', 'registered')
+      if (-not [string]::IsNullOrWhiteSpace($rdapCreationValue)) {
+        $creation = ConvertTo-NullableUtcIso8601 $rdapCreationValue
+        if (-not $creation) { $creation = $rdapCreationValue }
+      }
+    }
+
+    if (-not $expiry) {
+      $rdapExpiryValue = Get-FirstNonEmptyPropertyValue -Object $raw -PropertyNames @('expirationDate', 'expiryDate', 'expiresDate', 'expires', 'expiration', 'expiry')
+      if (-not [string]::IsNullOrWhiteSpace($rdapExpiryValue)) {
+        $expiry = ConvertTo-NullableUtcIso8601 $rdapExpiryValue
+        if (-not $expiry) { $expiry = $rdapExpiryValue }
       }
     }
 
@@ -1503,15 +1571,32 @@ function Get-DomainRegistrationStatus {
         }
       }
     }
+
+    $rdapHasUsableData =
+      -not [string]::IsNullOrWhiteSpace([string]$creation) -or
+      -not [string]::IsNullOrWhiteSpace([string]$expiry) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrar) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrant)
+
+    if (-not $rdapHasUsableData) {
+      $source = $null
+      $needsFallback = $true
+    }
+    elseif (-not $creation) {
+      # Continue to WHOIS-style fallbacks when RDAP succeeded but did not provide a creation date.
+      $needsFallback = $true
+    }
   }
   catch {
     $rdapError = $_.Exception.Message
+    $source = $null
+    $needsFallback = $true
+  }
+
+  if ($needsFallback) {
     $usedFallback = $false
-    $goDaddyError = $null
-    $sysWhoisError = $null
-    $linuxWhoisError = $null
-    $tcpWhoisError = $null
-    $whoisXmlError = $null
+    $creationPattern = Get-WhoisCreationDateLabelRegex
+    $expiryPattern = Get-WhoisExpiryDateLabelRegex
 
     # Prefer GoDaddy fallback when API key/secret are available.
     $gdKey = $env:GODADDY_API_KEY
@@ -1523,8 +1608,8 @@ function Get-DomainRegistrationStatus {
         $raw = Invoke-GoDaddyWhoisLookup -Domain $whoisDomain
         $source = 'GoDaddy'
         # GoDaddy domain API returns createdAt / expires fields (ISO8601).
-        $creation = ConvertTo-NullableUtcIso8601 $raw.createdAt
-        $expiry   = ConvertTo-NullableUtcIso8601 $raw.expires
+        if (-not $creation) { $creation = ConvertTo-NullableUtcIso8601 $raw.createdAt }
+        if (-not $expiry)   { $expiry   = ConvertTo-NullableUtcIso8601 $raw.expires }
         if (-not $registrar) { $registrar = 'GoDaddy' }
         $usedFallback = $true
       }
@@ -1563,20 +1648,19 @@ function Get-DomainRegistrationStatus {
           if (-not $registrant -and $raw.registrant) { $registrant = [string]$raw.registrant }
           if (-not [string]::IsNullOrWhiteSpace($raw.rawText)) { $rawWhoisText = $raw.rawText }
 
-          # Best-effort: if creation/expiry still null, re-parse from raw text.
-          if (-not $creation -and $rawWhoisText -match '(?im)^Creation date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $creation -and $rawWhoisText -match $creationPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $creation = if ($parsed) { $parsed } else { $val }
           }
-          if (-not $expiry -and $rawWhoisText -match '(?im)^Expiration date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $expiry -and $rawWhoisText -match $expiryPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $expiry = if ($parsed) { $parsed } else { $val }
           }
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
-          $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
@@ -1614,20 +1698,19 @@ function Get-DomainRegistrationStatus {
           if (-not $registrant -and $raw.registrant) { $registrant = [string]$raw.registrant }
           if (-not [string]::IsNullOrWhiteSpace($raw.rawText)) { $rawWhoisText = $raw.rawText }
 
-          # Best-effort: if creation/expiry still null, re-parse from raw text (Sysinternals label casing varies).
-          if (-not $creation -and $rawWhoisText -match '(?im)^Creation date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $creation -and $rawWhoisText -match $creationPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $creation = if ($parsed) { $parsed } else { $val }
           }
-          if (-not $expiry -and $rawWhoisText -match '(?im)^Expiration date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $expiry -and $rawWhoisText -match $expiryPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $expiry = if ($parsed) { $parsed } else { $val }
           }
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
-          $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
@@ -1635,7 +1718,6 @@ function Get-DomainRegistrationStatus {
             $usedFallback = $true
           }
           elseif ($rawHasUsableData) {
-            # Treat raw output as success when it contains registration output even if not fully parsed.
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
@@ -1666,8 +1748,19 @@ function Get-DomainRegistrationStatus {
           if (-not $registrant -and $raw.registrant) { $registrant = [string]$raw.registrant }
           if (-not [string]::IsNullOrWhiteSpace($raw.rawText)) { $rawWhoisText = $raw.rawText }
 
+          if (-not $creation -and $rawWhoisText -match $creationPattern) {
+            $val = $Matches[2].Trim()
+            $parsed = ConvertTo-NullableUtcIso8601 $val
+            $creation = if ($parsed) { $parsed } else { $val }
+          }
+          if (-not $expiry -and $rawWhoisText -match $expiryPattern) {
+            $val = $Matches[2].Trim()
+            $parsed = ConvertTo-NullableUtcIso8601 $val
+            $expiry = if ($parsed) { $parsed } else { $val }
+          }
+
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
-          $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
@@ -1698,18 +1791,26 @@ function Get-DomainRegistrationStatus {
           $w = $raw.WhoisRecord
 
           if ($w) {
-            $creation = ConvertTo-NullableUtcIso8601 $w.createdDate
-            if (-not $creation) { $creation = ConvertTo-NullableUtcIso8601 $w.registryData.createdDate }
+            if (-not $creation) {
+              $creation = ConvertTo-NullableUtcIso8601 $w.createdDate
+              if (-not $creation) { $creation = ConvertTo-NullableUtcIso8601 $w.registryData.createdDate }
+            }
 
-            $expiry = ConvertTo-NullableUtcIso8601 $w.expiresDate
-            if (-not $expiry) { $expiry = ConvertTo-NullableUtcIso8601 $w.registryData.expiresDate }
+            if (-not $expiry) {
+              $expiry = ConvertTo-NullableUtcIso8601 $w.expiresDate
+              if (-not $expiry) { $expiry = ConvertTo-NullableUtcIso8601 $w.registryData.expiresDate }
+            }
 
-            if ($w.registrarName) { $registrar = [string]$w.registrarName }
-            elseif ($w.registrar) { $registrar = [string]$w.registrar }
-            elseif ($w.registryData.registrarName) { $registrar = [string]$w.registryData.registrarName }
+            if (-not $registrar) {
+              if ($w.registrarName) { $registrar = [string]$w.registrarName }
+              elseif ($w.registrar) { $registrar = [string]$w.registrar }
+              elseif ($w.registryData.registrarName) { $registrar = [string]$w.registryData.registrarName }
+            }
 
-            if ($w.registrant -and $w.registrant.name) { $registrant = [string]$w.registrant.name }
-            elseif ($w.registryData.registrant -and $w.registryData.registrant.name) { $registrant = [string]$w.registryData.registrant.name }
+            if (-not $registrant) {
+              if ($w.registrant -and $w.registrant.name) { $registrant = [string]$w.registrant.name }
+              elseif ($w.registryData.registrant -and $w.registryData.registrant.name) { $registrant = [string]$w.registryData.registrant.name }
+            }
           }
           $usedFallback = $true
         }
@@ -1719,16 +1820,24 @@ function Get-DomainRegistrationStatus {
       }
     }
 
-    if (-not $usedFallback) {
-      $err = "RDAP lookup failed."
+    $hasExistingData =
+      -not [string]::IsNullOrWhiteSpace([string]$source) -or
+      -not [string]::IsNullOrWhiteSpace([string]$creation) -or
+      -not [string]::IsNullOrWhiteSpace([string]$expiry) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrar) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrant) -or
+      -not [string]::IsNullOrWhiteSpace([string]$rawWhoisText)
+
+    if (-not $usedFallback -and -not $hasExistingData) {
+      $err = 'RDAP lookup failed.'
       if ($rdapError) { $err += " RDAP error: $rdapError." }
       if ($goDaddyError) { $err += " GoDaddy error: $goDaddyError." }
-      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += " GoDaddy not configured." }
+      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += ' GoDaddy not configured.' }
       if ($sysWhoisError) { $err += " Sysinternals whois error: $sysWhoisError." }
       if ($linuxWhoisError) { $err += " Linux whois error: $linuxWhoisError." }
       if ($tcpWhoisError) { $err += " TCP whois error: $tcpWhoisError." }
       if ($whoisXmlError) { $err += " WhoisXML error: $whoisXmlError." }
-      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += " WhoisXML not configured." }
+      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += ' WhoisXML not configured.' }
 
       $parentDomains = @(Get-ParentDomains -Domain $d)
       foreach ($parentDomain in $parentDomains) {
@@ -3054,6 +3163,862 @@ function Get-MxRecordObjects {
   }
 
   return $filtered.ToArray()
+}
+
+function Get-DnsRecordTypeCode {
+  param([string]$Type)
+
+  switch (([string]$Type).Trim().ToUpperInvariant()) {
+    'A'     { return 1 }
+    'NS'    { return 2 }
+    'CNAME' { return 5 }
+    'SOA'   { return 6 }
+    'PTR'   { return 12 }
+    'HINFO' { return 13 }
+    'MX'    { return 15 }
+    'TXT'   { return 16 }
+    'AAAA'  { return 28 }
+    'SRV'   { return 33 }
+    'RRSIG' { return 46 }
+    'NSEC'  { return 47 }
+    'DNSKEY' { return 48 }
+    'CAA'   { return 257 }
+    default { return $null }
+  }
+}
+
+function Get-DnsRecordTypeName {
+  param([object]$Type)
+
+  $typeInt = 0
+  if ([int]::TryParse([string]$Type, [ref]$typeInt)) {
+    switch ($typeInt) {
+      1 { return 'A' }
+      2 { return 'NS' }
+      5 { return 'CNAME' }
+      6 { return 'SOA' }
+      12 { return 'PTR' }
+      13 { return 'HINFO' }
+      15 { return 'MX' }
+      16 { return 'TXT' }
+      28 { return 'AAAA' }
+      33 { return 'SRV' }
+      46 { return 'RRSIG' }
+      47 { return 'NSEC' }
+      48 { return 'DNSKEY' }
+      257 { return 'CAA' }
+      default { return [string]$typeInt }
+    }
+  }
+
+  return ([string]$Type).Trim().ToUpperInvariant()
+}
+
+function New-DnsRecordDetail {
+  param(
+    [string]$LabelKey,
+    [object]$Value
+  )
+
+  if ([string]::IsNullOrWhiteSpace($LabelKey) -or $null -eq $Value) { return $null }
+  $text = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+  [pscustomobject]@{
+    labelKey = $LabelKey
+    value = $text.Trim()
+  }
+}
+
+function Format-DnsRecordDetailTtl {
+  param([object]$Seconds)
+
+  $ttl = 0
+  if (-not [int]::TryParse([string]$Seconds, [ref]$ttl)) { return [string]$Seconds }
+  $ttl = [Math]::Max(0, $ttl)
+  $secondsPerMinute = 60
+  $secondsPerHour = 60 * $secondsPerMinute
+  $secondsPerDay = 24 * $secondsPerHour
+  $secondsPerMonth = 30 * $secondsPerDay
+
+  $months = [int][Math]::Floor($ttl / $secondsPerMonth)
+  $remaining = $ttl % $secondsPerMonth
+  $days = [int][Math]::Floor($remaining / $secondsPerDay)
+  $remaining = $remaining % $secondsPerDay
+  $hours = [int][Math]::Floor($remaining / $secondsPerHour)
+  $minutes = [int][Math]::Floor(($remaining % $secondsPerHour) / $secondsPerMinute)
+  $seconds = [int]($remaining % $secondsPerMinute)
+  $parts = New-Object System.Collections.Generic.List[string]
+  if ($months -gt 0) {
+    $parts.Add("${months}mo")
+  }
+  if ($days -gt 0) {
+    $parts.Add("${days}d")
+  }
+
+  if ($hours -gt 0) {
+    $parts.Add("${hours}h")
+  }
+  if ($minutes -gt 0) {
+    $parts.Add("${minutes}m")
+  }
+  if ($seconds -gt 0 -or $parts.Count -eq 0) {
+    $parts.Add("${seconds}s")
+  }
+
+  return "$ttl ($($parts -join ', '))"
+}
+
+function Convert-DnssecTimestampToDisplay {
+  param([object]$Value)
+
+  if ($null -eq $Value) { return $null }
+  $text = ([string]$Value).Trim()
+  if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+  if ($text -match '^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$') {
+    return ('{0}-{1}-{2} {3}:{4}:{5}Z' -f $Matches[1], $Matches[2], $Matches[3], $Matches[4], $Matches[5], $Matches[6])
+  }
+
+  $dto = [DateTimeOffset]::MinValue
+  if ([DateTimeOffset]::TryParse($text, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$dto)) {
+    return $dto.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ssZ')
+  }
+
+  return $text
+}
+
+function Get-DnsEscapedByteDisplay {
+  param([int]$Value)
+
+  switch ($Value) {
+    0 { return 'NUL' }
+    9 { return 'TAB' }
+    10 { return 'LF' }
+    13 { return 'CR' }
+    32 { return 'SPACE' }
+    default {
+      if ($Value -ge 33 -and $Value -le 126) {
+        return [string][char]$Value
+      }
+      return ('0x{0:X2}' -f $Value)
+    }
+  }
+}
+
+function Convert-DnsEscapedLabelToDisplay {
+  param([string]$Label)
+
+  if ([string]::IsNullOrEmpty($Label)) { return $Label }
+
+  $builder = New-Object System.Text.StringBuilder
+  $index = 0
+  while ($index -lt $Label.Length) {
+    $char = $Label[$index]
+    if ($char -ne '\') {
+      [void]$builder.Append($char)
+      $index++
+      continue
+    }
+
+    if (($index + 3) -lt $Label.Length) {
+      $octetText = $Label.Substring($index + 1, 3)
+      $octetValue = 0
+      if ([int]::TryParse($octetText, [ref]$octetValue)) {
+        [void]$builder.Append('[')
+        [void]$builder.Append((Get-DnsEscapedByteDisplay -Value $octetValue))
+        [void]$builder.Append(']')
+        $index += 4
+        continue
+      }
+    }
+
+    if (($index + 1) -lt $Label.Length) {
+      [void]$builder.Append('[')
+      [void]$builder.Append([string]$Label[$index + 1])
+      [void]$builder.Append(']')
+      $index += 2
+      continue
+    }
+
+    [void]$builder.Append($char)
+    $index++
+  }
+
+  return $builder.ToString()
+}
+
+function Convert-DnsNameToDisplay {
+  param([object]$Name)
+
+  if ($null -eq $Name) { return $null }
+  $text = ([string]$Name).Trim().TrimEnd('.')
+  if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+  $labels = @($text -split '\.')
+  if ($labels.Count -eq 0) { return $text }
+
+  return ((@($labels | ForEach-Object { Convert-DnsEscapedLabelToDisplay -Label $_ })) -join '.')
+}
+
+function Convert-DnsBinaryDataToDisplay {
+  param([object]$Value)
+
+  if ($null -eq $Value) { return $null }
+  if ($Value -is [byte[]]) {
+    return ((@($Value | ForEach-Object { $_.ToString('X2') })) -join '')
+  }
+
+  $text = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+  return $text.Trim()
+}
+
+function Get-DnssecAlgorithmDisplay {
+  param([object]$Algorithm)
+
+  $code = 0
+  if ([int]::TryParse([string]$Algorithm, [ref]$code)) {
+    switch ($code) {
+      5 { return 'RSA/SHA-1 (5)' }
+      7 { return 'RSASHA1-NSEC3-SHA1 (7)' }
+      8 { return 'RSA/SHA-256 (8)' }
+      10 { return 'RSA/SHA-512 (10)' }
+      13 { return 'ECDSA Curve P-256 with SHA-256 (13)' }
+      14 { return 'ECDSA Curve P-384 with SHA-384 (14)' }
+      15 { return 'Ed25519 (15)' }
+      16 { return 'Ed448 (16)' }
+      default { return [string]$code }
+    }
+  }
+
+  return ([string]$Algorithm).Trim()
+}
+
+function Get-DnsRecordTypeDisplay {
+  param([object]$Type)
+
+  $name = Get-DnsRecordTypeName -Type $Type
+  $code = Get-DnsRecordTypeCode -Type $name
+  if ($null -ne $code) { return "$name ($code)" }
+  return $name
+}
+
+function Get-DnsRecordDetails {
+  param(
+    [object]$Record,
+    [string]$Type,
+    [string]$RawData
+  )
+
+  $normalizedType = ([string]$Type).Trim().ToUpperInvariant()
+  $props = $null
+  if ($Record) { $props = $Record.PSObject.Properties }
+  $details = New-Object System.Collections.Generic.List[object]
+
+  switch ($normalizedType) {
+    'HINFO' {
+      $cpu = $null
+      $os = $null
+      if ($props) {
+        if ($props.Match('CPU').Count -gt 0 -and $Record.CPU) { $cpu = [string]$Record.CPU }
+        elseif ($props.Match('Cpu').Count -gt 0 -and $Record.Cpu) { $cpu = [string]$Record.Cpu }
+        if ($props.Match('OS').Count -gt 0 -and $null -ne $Record.OS) { $os = [string]$Record.OS }
+        elseif ($props.Match('Os').Count -gt 0 -and $null -ne $Record.Os) { $os = [string]$Record.Os }
+        elseif ($props.Match('Strings').Count -gt 0 -and $Record.Strings) {
+          $parts = @($Record.Strings | ForEach-Object { [string]$_ })
+          if (-not $cpu -and $parts.Count -ge 1) { $cpu = $parts[0] }
+          if ($null -eq $os -and $parts.Count -ge 2) { $os = $parts[1] }
+        }
+        elseif ($props.Match('Text').Count -gt 0 -and $Record.Text) {
+          $parts = @($Record.Text | ForEach-Object { [string]$_ })
+          if (-not $cpu -and $parts.Count -ge 1) { $cpu = $parts[0] }
+          if ($null -eq $os -and $parts.Count -ge 2) { $os = $parts[1] }
+        }
+      }
+      if (($null -eq $cpu) -and ($null -eq $os) -and -not [string]::IsNullOrWhiteSpace($RawData)) {
+        if ($RawData -match '^\s*"([^"]*)"\s+"([^"]*)"\s*$') {
+          $cpu = $Matches[1]
+          $os = $Matches[2]
+        }
+        elseif ($RawData -match '^\s*(\S+)\s+(.*)$') {
+          $cpu = $Matches[1]
+          $os = $Matches[2].Trim('"')
+        }
+      }
+      foreach ($item in @(
+        (New-DnsRecordDetail -LabelKey 'dnsRecordCpu' -Value $cpu),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordOs' -Value $os)
+      )) { if ($item) { $details.Add($item) } }
+    }
+    'RRSIG' {
+      $typeCovered = $null; $algorithm = $null; $labels = $null; $originalTtl = $null
+      $signatureExpiration = $null; $signatureInception = $null; $keyTag = $null; $signerName = $null; $signature = $null
+      if ($props) {
+        if ($props.Match('TypeCovered').Count -gt 0) { $typeCovered = Get-DnsRecordTypeDisplay -Type $Record.TypeCovered }
+        if ($props.Match('Algorithm').Count -gt 0) { $algorithm = Get-DnssecAlgorithmDisplay -Algorithm $Record.Algorithm }
+        if ($props.Match('Labels').Count -gt 0) { $labels = [string]$Record.Labels }
+        elseif ($props.Match('LabelCount').Count -gt 0) { $labels = [string]$Record.LabelCount }
+        if ($props.Match('OriginalTTL').Count -gt 0) { $originalTtl = Format-DnsRecordDetailTtl -Seconds $Record.OriginalTTL }
+        elseif ($props.Match('OriginalTtl').Count -gt 0) { $originalTtl = Format-DnsRecordDetailTtl -Seconds $Record.OriginalTtl }
+        if ($props.Match('SignatureExpiration').Count -gt 0) { $signatureExpiration = Convert-DnssecTimestampToDisplay -Value $Record.SignatureExpiration }
+        elseif ($props.Match('Expiration').Count -gt 0) { $signatureExpiration = Convert-DnssecTimestampToDisplay -Value $Record.Expiration }
+        if ($props.Match('SignatureInception').Count -gt 0) { $signatureInception = Convert-DnssecTimestampToDisplay -Value $Record.SignatureInception }
+        elseif ($props.Match('Signed').Count -gt 0) { $signatureInception = Convert-DnssecTimestampToDisplay -Value $Record.Signed }
+        if ($props.Match('KeyTag').Count -gt 0) { $keyTag = [string]$Record.KeyTag }
+        elseif ($props.Match('Key').Count -gt 0) { $keyTag = [string]$Record.Key }
+        if ($props.Match('SignersName').Count -gt 0) { $signerName = Convert-DnsNameToDisplay -Name $Record.SignersName }
+        elseif ($props.Match('Signer').Count -gt 0) { $signerName = Convert-DnsNameToDisplay -Name $Record.Signer }
+        if ($props.Match('Signature').Count -gt 0) { $signature = Convert-DnsBinaryDataToDisplay -Value $Record.Signature }
+      }
+      if ([string]::IsNullOrWhiteSpace($signature) -and -not [string]::IsNullOrWhiteSpace($RawData)) {
+        $parts = @($RawData.Trim() -split '\s+', 9)
+        if ($parts.Count -ge 9) {
+          if (-not $typeCovered) { $typeCovered = Get-DnsRecordTypeDisplay -Type $parts[0] }
+          if (-not $algorithm) { $algorithm = Get-DnssecAlgorithmDisplay -Algorithm $parts[1] }
+          if (-not $labels) { $labels = $parts[2] }
+          if (-not $originalTtl) { $originalTtl = Format-DnsRecordDetailTtl -Seconds $parts[3] }
+          if (-not $signatureExpiration) { $signatureExpiration = Convert-DnssecTimestampToDisplay -Value $parts[4] }
+          if (-not $signatureInception) { $signatureInception = Convert-DnssecTimestampToDisplay -Value $parts[5] }
+          if (-not $keyTag) { $keyTag = $parts[6] }
+          if (-not $signerName) { $signerName = Convert-DnsNameToDisplay -Name $parts[7] }
+          if (-not $signature) { $signature = $parts[8] }
+        }
+      }
+      foreach ($item in @(
+        (New-DnsRecordDetail -LabelKey 'dnsRecordTypeCovered' -Value $typeCovered),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordAlgorithm' -Value $algorithm),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordLabels' -Value $labels),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordOriginalTtl' -Value $originalTtl),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordSignatureExpiration' -Value $signatureExpiration),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordSignatureInception' -Value $signatureInception),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordKeyTag' -Value $keyTag),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordSignerName' -Value $signerName),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordSignature' -Value $signature)
+      )) { if ($item) { $details.Add($item) } }
+    }
+    'DNSKEY' {
+      $flags = $null; $protocol = $null; $algorithm = $null; $publicKey = $null
+      if ($props) {
+        if ($props.Match('Flags').Count -gt 0) { $flags = [string]$Record.Flags }
+        if ($props.Match('Protocol').Count -gt 0) { $protocol = [string]$Record.Protocol }
+        if ($props.Match('Algorithm').Count -gt 0) { $algorithm = Get-DnssecAlgorithmDisplay -Algorithm $Record.Algorithm }
+        if ($props.Match('PublicKey').Count -gt 0) { $publicKey = [string]$Record.PublicKey }
+      }
+      if ([string]::IsNullOrWhiteSpace($publicKey) -and -not [string]::IsNullOrWhiteSpace($RawData)) {
+        $parts = @($RawData.Trim() -split '\s+', 4)
+        if ($parts.Count -ge 4) {
+          if (-not $flags) { $flags = $parts[0] }
+          if (-not $protocol) { $protocol = $parts[1] }
+          if (-not $algorithm) { $algorithm = Get-DnssecAlgorithmDisplay -Algorithm $parts[2] }
+          if (-not $publicKey) { $publicKey = $parts[3] }
+        }
+      }
+      foreach ($item in @(
+        (New-DnsRecordDetail -LabelKey 'dnsRecordFlags' -Value $flags),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordProtocol' -Value $protocol),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordAlgorithm' -Value $algorithm),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordPublicKey' -Value $publicKey)
+      )) { if ($item) { $details.Add($item) } }
+    }
+    'NSEC' {
+      $nextDomain = $null; $types = $null
+      if ($props) {
+        if ($props.Match('NextDomainName').Count -gt 0) { $nextDomain = Convert-DnsNameToDisplay -Name $Record.NextDomainName }
+        elseif ($props.Match('NextDomain').Count -gt 0) { $nextDomain = Convert-DnsNameToDisplay -Name $Record.NextDomain }
+        if ($props.Match('TypeBitMaps').Count -gt 0 -and $Record.TypeBitMaps) { $types = (@($Record.TypeBitMaps) -join ' ') }
+        elseif ($props.Match('Types').Count -gt 0 -and $Record.Types) { $types = (@($Record.Types) -join ' ') }
+      }
+      if ((-not $nextDomain -or -not $types) -and -not [string]::IsNullOrWhiteSpace($RawData)) {
+        $parts = @($RawData.Trim() -split '\s+', 2)
+        if ($parts.Count -ge 2) {
+          if (-not $nextDomain) { $nextDomain = Convert-DnsNameToDisplay -Name $parts[0] }
+          if (-not $types) { $types = $parts[1] }
+        }
+      }
+      foreach ($item in @(
+        (New-DnsRecordDetail -LabelKey 'dnsRecordNextDomain' -Value $nextDomain),
+        (New-DnsRecordDetail -LabelKey 'dnsRecordTypes' -Value $types)
+      )) { if ($item) { $details.Add($item) } }
+    }
+  }
+
+  return $details.ToArray()
+}
+
+function Get-ReverseLookupSupplementTargets {
+  param([string]$ReverseName)
+
+  $targets = New-Object System.Collections.Generic.List[object]
+  $reverse = ([string]$ReverseName).Trim().TrimEnd('.')
+  if ([string]::IsNullOrWhiteSpace($reverse)) { return @() }
+
+  $parts = @($reverse -split '\.')
+  if ($parts.Count -lt 3) { return @() }
+
+  $targets.Add([pscustomobject]@{ Name = $reverse; Types = @('PTR', 'HINFO') })
+
+  if ($reverse -match '(?i)\.in-addr\.arpa$' -and $parts.Count -ge 6) {
+    $delegationZone = ($parts[2..($parts.Count - 1)] -join '.')
+    $targets.Add([pscustomobject]@{ Name = $delegationZone; Types = @('NS') })
+  }
+  elseif ($reverse -match '(?i)\.ip6\.arpa$' -and $parts.Count -ge 12) {
+    $delegationZone = ($parts[($parts.Count - 10)..($parts.Count - 1)] -join '.')
+    $targets.Add([pscustomobject]@{ Name = $delegationZone; Types = @('NS') })
+  }
+
+  return @($targets | Sort-Object Name -Unique)
+}
+
+function Get-DnsRecordDataString {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Record,
+    [string]$Type
+  )
+
+  if ($null -eq $Record) { return $null }
+
+  $normalizedType = ([string]$Type).Trim().ToUpperInvariant()
+  $props = $null
+  if ($Record) { $props = $Record.PSObject.Properties }
+
+  switch ($normalizedType) {
+    'A' {
+      if ($props.Match('IPAddress').Count -gt 0 -and $Record.IPAddress) { return ([string]$Record.IPAddress).Trim() }
+      if ($props.Match('IP4Address').Count -gt 0 -and $Record.IP4Address) { return ([string]$Record.IP4Address).Trim() }
+    }
+    'AAAA' {
+      if ($props.Match('IPAddress').Count -gt 0 -and $Record.IPAddress) { return ([string]$Record.IPAddress).Trim() }
+      if ($props.Match('IP6Address').Count -gt 0 -and $Record.IP6Address) { return ([string]$Record.IP6Address).Trim() }
+    }
+    'CNAME' {
+      if ($props.Match('CanonicalName').Count -gt 0 -and $Record.CanonicalName) { return (Convert-DnsNameToDisplay -Name $Record.CanonicalName) }
+      if ($props.Match('NameHost').Count -gt 0 -and $Record.NameHost) { return (Convert-DnsNameToDisplay -Name $Record.NameHost) }
+    }
+    'NS' {
+      if ($props.Match('NameHost').Count -gt 0 -and $Record.NameHost) { return (Convert-DnsNameToDisplay -Name $Record.NameHost) }
+      if ($props.Match('NSDName').Count -gt 0 -and $Record.NSDName) { return (Convert-DnsNameToDisplay -Name $Record.NSDName) }
+    }
+    'PTR' {
+      if ($props.Match('NameHost').Count -gt 0 -and $Record.NameHost) { return (Convert-DnsNameToDisplay -Name $Record.NameHost) }
+      if ($props.Match('PtrDomainName').Count -gt 0 -and $Record.PtrDomainName) { return (Convert-DnsNameToDisplay -Name $Record.PtrDomainName) }
+    }
+    'HINFO' {
+      $cpu = $null
+      $os = $null
+      if ($props.Match('CPU').Count -gt 0) { $cpu = [string]$Record.CPU }
+      elseif ($props.Match('Cpu').Count -gt 0) { $cpu = [string]$Record.Cpu }
+      if ($props.Match('OS').Count -gt 0) { $os = [string]$Record.OS }
+      elseif ($props.Match('Os').Count -gt 0) { $os = [string]$Record.Os }
+      elseif ($props.Match('Strings').Count -gt 0 -and $Record.Strings) {
+        $parts = @($Record.Strings | ForEach-Object { [string]$_ })
+        if ($parts.Count -ge 1) { $cpu = $parts[0] }
+        if ($parts.Count -ge 2) { $os = $parts[1] }
+      }
+      elseif ($props.Match('Text').Count -gt 0 -and $Record.Text) {
+        $parts = @($Record.Text | ForEach-Object { [string]$_ })
+        if ($parts.Count -ge 1) { $cpu = $parts[0] }
+        if ($parts.Count -ge 2) { $os = $parts[1] }
+      }
+      if (-not [string]::IsNullOrWhiteSpace($cpu) -or $null -ne $os) {
+        return ("CPU: {0}; OS: {1}" -f $cpu, $os).Trim()
+      }
+    }
+    'MX' {
+      if ($props.Match('NameExchange').Count -gt 0 -and $props.Match('Preference').Count -gt 0) {
+        return ("{0} {1}" -f ([string]$Record.Preference).Trim(), (Convert-DnsNameToDisplay -Name $Record.NameExchange)).Trim()
+      }
+    }
+    'TXT' {
+      if ($props.Match('Strings').Count -gt 0 -and $Record.Strings) {
+        $strings = @($Record.Strings | ForEach-Object {
+          $text = [string]$_
+          if ($text.StartsWith('"') -and $text.EndsWith('"') -and $text.Length -ge 2) {
+            $text = $text.Substring(1, $text.Length - 2)
+          }
+          $text -replace '\\"','"'
+        })
+        if ($strings.Count -gt 0) { return ($strings -join '') }
+      }
+    }
+    'SOA' {
+      $segments = @()
+      if ($props.Match('PrimaryServer').Count -gt 0 -and $Record.PrimaryServer) { $segments += "PrimaryServer=$(Convert-DnsNameToDisplay -Name $Record.PrimaryServer)" }
+      if ($props.Match('NameAdministrator').Count -gt 0 -and $Record.NameAdministrator) { $segments += "ResponsiblePerson=$([string]$Record.NameAdministrator)" }
+      elseif ($props.Match('ResponsiblePerson').Count -gt 0 -and $Record.ResponsiblePerson) { $segments += "ResponsiblePerson=$([string]$Record.ResponsiblePerson)" }
+      if ($props.Match('SerialNumber').Count -gt 0 -and $null -ne $Record.SerialNumber) { $segments += "Serial=$([string]$Record.SerialNumber)" }
+      if ($segments.Count -gt 0) { return ($segments -join '; ') }
+    }
+    'CAA' {
+      $segments = @()
+      if ($props.Match('Flags').Count -gt 0 -and $null -ne $Record.Flags) { $segments += [string]$Record.Flags }
+      elseif ($props.Match('Flag').Count -gt 0 -and $null -ne $Record.Flag) { $segments += [string]$Record.Flag }
+      if ($props.Match('Tag').Count -gt 0 -and $Record.Tag) { $segments += [string]$Record.Tag }
+      if ($props.Match('Value').Count -gt 0 -and $Record.Value) { $segments += [string]$Record.Value }
+      if ($segments.Count -gt 0) { return ($segments -join ' ') }
+    }
+    'RRSIG' {
+      $signature = if ($props.Match('Signature').Count -gt 0) { Convert-DnsBinaryDataToDisplay -Value $Record.Signature } else { $null }
+      if (-not [string]::IsNullOrWhiteSpace($signature)) { return $signature.Trim() }
+    }
+    'DNSKEY' {
+      if ($props.Match('PublicKey').Count -gt 0 -and $Record.PublicKey) { return ([string]$Record.PublicKey).Trim() }
+    }
+    'NSEC' {
+      if ($props.Match('NextDomainName').Count -gt 0 -and $Record.NextDomainName) {
+        return (Convert-DnsNameToDisplay -Name $Record.NextDomainName)
+      }
+    }
+  }
+
+  foreach ($candidate in @('Data', 'Text', 'Target', 'DomainName', 'HostName', 'NameHost', 'CanonicalName', 'Exchange', 'MailExchange')) {
+    if ($props.Match($candidate).Count -gt 0) {
+      $value = [string]$props[$candidate].Value
+      if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return (Convert-DnsNameToDisplay -Name $value)
+      }
+    }
+  }
+
+  return $null
+}
+
+function ConvertTo-ReverseLookupName {
+  param([string]$IpAddress)
+
+  $ip = $null
+  if (-not [System.Net.IPAddress]::TryParse([string]$IpAddress, [ref]$ip)) { return $null }
+
+  if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+    $bytes = $ip.GetAddressBytes()
+    [Array]::Reverse($bytes)
+    return (($bytes | ForEach-Object { [string]$_ }) -join '.') + '.in-addr.arpa'
+  }
+
+  if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+    $hex = ($ip.GetAddressBytes() | ForEach-Object { $_.ToString('x2') }) -join ''
+    $nibbles = @()
+    foreach ($char in $hex.ToCharArray()) { $nibbles += [string]$char }
+    [Array]::Reverse($nibbles)
+    return (($nibbles -join '.') + '.ip6.arpa')
+  }
+
+  return $null
+}
+
+function Resolve-DohRecordsDetailed {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [Parameter(Mandatory = $true)]
+    [string]$Type
+  )
+
+  $endpoint = $env:ACS_DNS_DOH_ENDPOINT
+  if ([string]::IsNullOrWhiteSpace($endpoint)) {
+    $endpoint = 'https://cloudflare-dns.com/dns-query'
+    $env:ACS_DNS_DOH_ENDPOINT = $endpoint
+  }
+
+  $typeCode = Get-DnsRecordTypeCode -Type $Type
+  $uri = "{0}?name={1}&type={2}&do=true" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
+  $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -ErrorAction Stop
+  if ($null -eq $resp -or $null -eq $resp.Answer) { return @() }
+
+  $results = New-Object System.Collections.Generic.List[object]
+  foreach ($answer in @($resp.Answer)) {
+    if ($null -ne $typeCode -and [int]$answer.type -ne $typeCode) { continue }
+
+    $recordType = Get-DnsRecordTypeName -Type $answer.type
+    $rawData = [string]$answer.data
+    $data = $rawData
+    if ($recordType -eq 'TXT') {
+      if ($data.StartsWith('"') -and $data.EndsWith('"') -and $data.Length -ge 2) {
+        $data = $data.Substring(1, $data.Length - 2)
+      }
+      $data = $data -replace '\\"','"'
+    }
+    elseif ($recordType -eq 'MX') {
+      $parts = $data.Trim() -split '\s+', 2
+      if ($parts.Count -eq 2) {
+        $data = ("{0} {1}" -f $parts[0], (Convert-DnsNameToDisplay -Name $parts[1])).Trim()
+      }
+    }
+    elseif ($recordType -in @('CNAME', 'NS', 'PTR')) {
+      $data = Convert-DnsNameToDisplay -Name $data
+    }
+    else {
+      $data = $data.Trim().TrimEnd('.')
+    }
+
+    if ([string]::IsNullOrWhiteSpace($data)) { continue }
+
+    $results.Add([pscustomobject]@{
+      name = Convert-DnsNameToDisplay -Name $answer.name
+      class = 'IN'
+      type = $recordType
+      data = $data
+      ttlSeconds = [int]$answer.TTL
+      details = @(Get-DnsRecordDetails -Type $recordType -RawData $rawData)
+    })
+  }
+
+  return $results.ToArray()
+}
+
+function Resolve-DnsRecordsDetailed {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [Parameter(Mandatory = $true)]
+    [string[]]$Types
+  )
+
+  $mode = $env:ACS_DNS_RESOLVER
+  if ([string]::IsNullOrWhiteSpace($mode)) { $mode = 'Auto' }
+
+  $cmd = $null
+  try { $cmd = Get-Command -Name Resolve-DnsName -ErrorAction SilentlyContinue } catch { $cmd = $null }
+  $useSystem = (($mode -eq 'System') -or ($mode -eq 'Auto' -and $cmd)) -and $cmd
+
+  $results = New-Object System.Collections.Generic.List[object]
+
+  function Get-AuthoritativeNameServer {
+    param([string]$LookupName)
+
+    $trimmed = ([string]$LookupName).Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($trimmed)) { return $null }
+
+    $labels = @($trimmed -split '\.')
+    for ($i = 0; $i -lt ($labels.Count - 1); $i++) {
+      $candidate = ($labels[$i..($labels.Count - 1)] -join '.')
+      if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+
+      try {
+        $nsRecords = @(Resolve-DnsName -Name $candidate -Type NS -DnssecOk -ErrorAction Stop)
+        foreach ($nsRecord in $nsRecords) {
+          if ($null -eq $nsRecord) { continue }
+          if ($nsRecord.PSObject.Properties.Match('NameHost').Count -gt 0 -and $nsRecord.NameHost) {
+            return ([string]$nsRecord.NameHost).Trim().TrimEnd('.')
+          }
+          if ($nsRecord.PSObject.Properties.Match('NSDName').Count -gt 0 -and $nsRecord.NSDName) {
+            return ([string]$nsRecord.NSDName).Trim().TrimEnd('.')
+          }
+        }
+      }
+      catch { }
+    }
+
+    return $null
+  }
+
+  function Resolve-AuthoritativeAnySupplementRecords {
+    param(
+      [string]$LookupName,
+      [string[]]$DesiredTypes
+    )
+
+    $server = Get-AuthoritativeNameServer -LookupName $LookupName
+    if ([string]::IsNullOrWhiteSpace($server)) { return @() }
+
+    $supplemental = New-Object System.Collections.Generic.List[object]
+    try {
+      $records = @(Resolve-DnsName -Name $LookupName -Type ANY -Server $server -DnssecOk -ErrorAction Stop)
+      foreach ($record in $records) {
+        if ($null -eq $record) { continue }
+
+        $props = $record.PSObject.Properties
+        $recordType = $null
+        if ($props.Match('Type').Count -gt 0 -and $record.Type) { $recordType = [string]$record.Type }
+        elseif ($props.Match('QueryType').Count -gt 0 -and $record.QueryType) { $recordType = [string]$record.QueryType }
+        if ([string]::IsNullOrWhiteSpace($recordType)) { continue }
+        $recordType = Get-DnsRecordTypeName -Type $recordType
+
+        if ($recordType -notin @($DesiredTypes | ForEach-Object { Get-DnsRecordTypeName -Type $_ })) { continue }
+
+        $data = Get-DnsRecordDataString -Record $record -Type $recordType
+        $details = @(Get-DnsRecordDetails -Record $record -Type $recordType -RawData $data)
+        if ([string]::IsNullOrWhiteSpace($data) -and $details.Count -eq 0) { continue }
+        if ([string]::IsNullOrWhiteSpace($data)) { $data = $recordType }
+
+        $ttl = $null
+        if ($props.Match('TTL').Count -gt 0 -and $null -ne $record.TTL) {
+          try { $ttl = [int]$record.TTL } catch { $ttl = $null }
+        }
+
+        $recordName = $LookupName
+        if ($props.Match('Name').Count -gt 0 -and $record.Name) { $recordName = [string]$record.Name }
+
+        $supplemental.Add([pscustomobject]@{
+          name = Convert-DnsNameToDisplay -Name $recordName
+          class = 'IN'
+          type = $recordType
+          data = $data
+          ttlSeconds = $ttl
+          details = $details
+        })
+      }
+    }
+    catch { }
+
+    return $supplemental.ToArray()
+  }
+
+  foreach ($type in @($Types)) {
+    if ([string]::IsNullOrWhiteSpace($type)) { continue }
+
+    $typeResultsAdded = $false
+    $systemLookupFailed = $false
+
+    if ($useSystem) {
+      try {
+        $queryParams = @{ Name = $Name; Type = $type; ErrorAction = 'Stop' }
+        if ($type -in @('RRSIG', 'NSEC', 'DNSKEY')) { $queryParams['DnssecOk'] = $true }
+        $records = @(Resolve-DnsName @queryParams)
+        foreach ($record in $records) {
+          if ($null -eq $record) { continue }
+
+          $props = $record.PSObject.Properties
+          $recordType = $type
+          if ($props.Match('Type').Count -gt 0 -and $record.Type) { $recordType = [string]$record.Type }
+          elseif ($props.Match('QueryType').Count -gt 0 -and $record.QueryType) { $recordType = [string]$record.QueryType }
+          if ((Get-DnsRecordTypeName -Type $recordType) -ne (Get-DnsRecordTypeName -Type $type)) { continue }
+
+          $data = Get-DnsRecordDataString -Record $record -Type $recordType
+          if ([string]::IsNullOrWhiteSpace($data)) { continue }
+
+          $recordName = $Name
+          if ($props.Match('Name').Count -gt 0 -and $record.Name) { $recordName = [string]$record.Name }
+          elseif ($props.Match('NameHost').Count -gt 0 -and $recordType -eq 'PTR' -and $record.NameHost) { $recordName = [string]$record.NameHost }
+
+          $ttl = $null
+          if ($props.Match('TTL').Count -gt 0 -and $null -ne $record.TTL) {
+            try { $ttl = [int]$record.TTL } catch { $ttl = $null }
+          }
+
+          $results.Add([pscustomobject]@{
+            name = Convert-DnsNameToDisplay -Name $recordName
+            class = 'IN'
+            type = Get-DnsRecordTypeName -Type $recordType
+            data = $data
+            ttlSeconds = $ttl
+            details = @(Get-DnsRecordDetails -Record $record -Type $recordType -RawData $data)
+          })
+          $typeResultsAdded = $true
+        }
+      }
+      catch {
+        $systemLookupFailed = $true
+      }
+
+      if (-not $typeResultsAdded -and $mode -eq 'Auto') {
+        try {
+          foreach ($row in @(Resolve-DohRecordsDetailed -Name $Name -Type $type)) {
+            if ($row) {
+              $results.Add($row)
+              $typeResultsAdded = $true
+            }
+          }
+        }
+        catch { }
+      }
+
+      if (-not $typeResultsAdded -and $type -in @('HINFO', 'RRSIG')) {
+        foreach ($row in @(Resolve-AuthoritativeAnySupplementRecords -LookupName $Name -DesiredTypes @($type))) {
+          if ($row) {
+            $results.Add($row)
+            $typeResultsAdded = $true
+          }
+        }
+      }
+
+      if (-not $typeResultsAdded -and $systemLookupFailed -and $mode -eq 'System') {
+        continue
+      }
+    }
+    else {
+      try {
+        foreach ($row in @(Resolve-DohRecordsDetailed -Name $Name -Type $type)) {
+          if ($row) {
+            $results.Add($row)
+            $typeResultsAdded = $true
+          }
+        }
+      }
+      catch { }
+    }
+  }
+
+  return $results.ToArray()
+}
+
+function Get-DnsRecordsStatus {
+  param([string]$Domain)
+
+  $records = New-Object System.Collections.Generic.List[object]
+  $errors = New-Object System.Collections.Generic.List[string]
+  $types = @('A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA', 'RRSIG', 'DNSKEY', 'NSEC', 'HINFO')
+
+  try {
+    foreach ($row in @(Resolve-DnsRecordsDetailed -Name $Domain -Types $types)) {
+      if ($row) { $records.Add($row) }
+    }
+  }
+  catch {
+    $errors.Add($_.Exception.Message)
+  }
+
+  $ipAddresses = @($records | Where-Object { $_.type -in @('A', 'AAAA') } | ForEach-Object { [string]$_.data } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+  foreach ($ipAddress in $ipAddresses) {
+    $reverseName = ConvertTo-ReverseLookupName -IpAddress $ipAddress
+    if ([string]::IsNullOrWhiteSpace($reverseName)) { continue }
+
+    foreach ($target in @(Get-ReverseLookupSupplementTargets -ReverseName $reverseName)) {
+      try {
+        foreach ($row in @(Resolve-DnsRecordsDetailed -Name $target.Name -Types $target.Types)) {
+          if ($row) { $records.Add($row) }
+        }
+      }
+      catch {
+        $errors.Add($_.Exception.Message)
+      }
+    }
+  }
+
+  $uniqueRecords = @(
+    $records |
+      Where-Object { $_ } |
+      Group-Object -Property name, type, data |
+      ForEach-Object {
+        $groupRecords = @($_.Group)
+        $selected = $groupRecords |
+          Sort-Object @{ Expression = { if ($null -ne $_.ttlSeconds) { [int]$_.ttlSeconds } else { -1 } }; Descending = $true } |
+          Select-Object -First 1
+
+        if ($null -eq $selected) { return }
+
+        [pscustomobject]@{
+          name = $selected.name
+          class = $selected.class
+          type = $selected.type
+          data = $selected.data
+          ttlSeconds = $selected.ttlSeconds
+          details = @($selected.details)
+        }
+      } |
+      Sort-Object name, type, data, ttlSeconds
+  )
+  $errorText = $null
+  if ($uniqueRecords.Count -eq 0 -and $errors.Count -gt 0) {
+    $errorText = ($errors | Select-Object -Unique) -join ' '
+  }
+
+  [pscustomobject]@{
+    domain = $Domain
+    records = $uniqueRecords
+    error = $errorText
+  }
 }
 
 # ------------------- INPUT NORMALIZATION -------------------
@@ -5356,6 +6321,7 @@ function Get-AcsDnsStatus {
 
   $base  = Get-DnsBaseStatus  -Domain $Domain
   $mx    = Get-DnsMxStatus    -Domain $Domain
+  $records = Get-DnsRecordsStatus -Domain $Domain
   $whois = Get-DomainRegistrationStatus -Domain $Domain
   $dmarc = Get-DnsDmarcStatus -Domain $Domain
   $dkim  = Get-DnsDkimStatus  -Domain $Domain
@@ -5483,6 +6449,9 @@ function Get-AcsDnsStatus {
         mxLookupDomain          = $mx.mxLookupDomain
         mxFallbackDomainChecked = $mx.mxFallbackDomainChecked
         mxFallbackUsed          = $mx.mxFallbackUsed
+
+        dnsRecords      = $records.records
+        dnsRecordsError = $records.error
 
         whoisSource       = $whois.source
         whoisLookupDomain = $whois.lookupDomain
@@ -5647,6 +6616,9 @@ h1 {
   margin-bottom: 12px;
   flex-wrap: wrap;
   width: 100%;
+  position: relative;
+  z-index: 200;
+  isolation: isolate;
 }
 
 .top-bar button {
@@ -5667,9 +6639,17 @@ h1 {
   box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
+.top-bar button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .language-dropdown {
   position: relative;
   min-width: 0;
+  z-index: 210;
 }
 
 .language-trigger {
@@ -5710,7 +6690,7 @@ h1 {
   border-radius: 8px;
   background: var(--card-bg);
   box-shadow: 0 10px 24px rgba(0,0,0,0.18);
-  z-index: 50;
+  z-index: 220;
   display: none;
 }
 
@@ -5944,6 +6924,7 @@ button.primary:disabled {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  transition: opacity 280ms ease;
 }
 
 .card {
@@ -6126,6 +7107,52 @@ button.primary:disabled {
   border-top: none;
 }
 
+.dns-records-table td.dns-record-data {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dns-records-table th {
+  white-space: nowrap;
+}
+
+.dns-records-table th:first-child,
+.dns-records-table td:first-child {
+  white-space: nowrap;
+}
+
+.dns-records-table th:nth-child(3),
+.dns-records-table td:nth-child(3) {
+  white-space: nowrap;
+}
+
+.dns-records-table td.dns-record-ttl {
+  white-space: nowrap;
+}
+
+.dns-record-detail-list {
+  display: grid;
+  gap: 4px;
+}
+
+.dns-record-detail-row {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.dns-record-detail-label {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dns-record-detail-value {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 ul.guidance {
   margin: 0;
   padding-left: 18px;
@@ -6285,7 +7312,7 @@ ul.guidance li {
   .input-row { flex-direction: column; }
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
-  .mx-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  .mx-table, .dns-records-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
   .top-bar { align-items: stretch; }
   .top-bar button, .language-dropdown, .language-trigger { width: 100%; height: 43px; }
   .language-trigger { min-width: 0; }
@@ -6299,8 +7326,8 @@ ul.guidance li {
   .top-bar, .history, .hide-on-screenshot, #clearBtn { display: none !important; }
   .search-box { max-width: 100%; margin: 0 0 12px 0; }
   .card { break-inside: avoid; }
-  .code, .mx-table { background: #ffffff; color: #000000; border: 1px solid #d1d5db; }
-  .mx-table th { background: #f3f4f6; color: #000000; }
+  .code, .mx-table, .dns-records-table { background: #ffffff; color: #000000; border: 1px solid #d1d5db; }
+  .mx-table th, .dns-records-table th { background: #f3f4f6; color: #000000; }
 }
 
 @keyframes flashHighlight {
@@ -6311,6 +7338,80 @@ ul.guidance li {
 
 .card.flash-active {
   animation: flashHighlight 2.4s ease-out;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  body.section-fade-enabled .engage-top-item {
+    opacity: 0;
+    transform: translateY(14px);
+    will-change: opacity, transform;
+  }
+
+  body.section-fade-enabled .engage-top-item.engage-top-in {
+    animation: topButtonFadeIn 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  body.section-fade-enabled .engage-section {
+    opacity: 0;
+    transform: translateY(20px);
+    will-change: opacity, transform;
+  }
+
+  body.section-fade-enabled .engage-section.engage-in {
+    animation: topSectionFadeIn 880ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes topButtonFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes topSectionFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cards.results-fade-out {
+    opacity: 0;
+  }
+
+  .cards > .card.result-card-prep {
+    opacity: 0;
+    transform: translateY(24px);
+    will-change: opacity, transform;
+  }
+
+  .cards > .card.result-card-prep.result-card-in {
+    animation: resultSectionFadeIn 980ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes resultSectionFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Microsoft Auth UI */
@@ -6635,21 +7736,21 @@ async function ensureMsalLoaded() {
 <div class="container">
 
 <div class="top-bar">
-  <div id="languageDropdown" class="language-dropdown hide-on-screenshot">
+  <div id="languageDropdown" class="language-dropdown hide-on-screenshot engage-top-item">
     <button id="languageSelectBtn" type="button" class="language-trigger" onclick="toggleLanguageMenu()" aria-haspopup="listbox" aria-expanded="false"></button>
     <div id="languageSelectMenu" class="language-menu" role="listbox"></div>
   </div>
-  <button id="themeToggleBtn" type="button" class="hide-on-screenshot" onclick="toggleTheme()">Dark mode</button>
-  <button id="copyLinkBtn" type="button" class="hide-on-screenshot" onclick="copyShareLink()">Copy link</button>
-  <button id="screenshotBtn" type="button" class="hide-on-screenshot" onclick="screenshotPage()">Copy page screenshot</button>
-  <button id="downloadBtn" type="button" class="hide-on-screenshot" onclick="downloadReport()" style="display:none;">Download JSON</button>
-  <button id="reportIssueBtn" type="button" class="hide-on-screenshot" onclick="reportIssue()" style="display:none;" title="Report an issue (includes the domain name)">Report issue</button>
-  <button id="msSignInBtn" type="button" class="hide-on-screenshot ms-sign-in-btn" onclick="msSignIn()">Sign in with Microsoft</button>
-  <span id="msAuthStatus" class="ms-auth-status hide-on-screenshot" style="display:none;"></span>
-  <button id="msSignOutBtn" type="button" class="hide-on-screenshot" onclick="msSignOut()" style="display:none;">Sign out</button>
+  <button id="themeToggleBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="toggleTheme()">Dark mode</button>
+  <button id="copyLinkBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="copyShareLink()">Copy link</button>
+  <button id="screenshotBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="screenshotPage()">Copy page screenshot</button>
+  <button id="downloadBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="downloadReport()" disabled>Download JSON</button>
+  <button id="reportIssueBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="reportIssue()" style="display:none;" title="Report an issue (includes the domain name)">Report issue</button>
+  <button id="msSignInBtn" type="button" class="hide-on-screenshot ms-sign-in-btn engage-top-item" onclick="msSignIn()">Sign in with Microsoft</button>
+  <span id="msAuthStatus" class="ms-auth-status hide-on-screenshot engage-top-item" style="display:none;"></span>
+  <button id="msSignOutBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="msSignOut()" style="display:none;">Sign out</button>
 </div>
 
-<div class="search-box">
+<div class="search-box engage-section">
   <img src="data:image/png;base64,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" alt="ACS Logo" style="height: 64px; display: block; margin: 0 auto 12px auto;">
   <h1 id="appHeading">Azure Communication Services<br/>Email Domain Checker</h1>
   <div class="input-row">
@@ -6661,8 +7762,8 @@ async function ensureMsalLoaded() {
   </div>
   <div id="history" class="history hide-on-screenshot"></div>
 </div>
-<div id="status"></div>
-<div id="azureDiagnosticsCard" class="card hide-on-screenshot" style="display:none; margin-bottom: 12px;">
+<div id="status" class="engage-section"></div>
+<div id="azureDiagnosticsCard" class="card hide-on-screenshot engage-section" style="display:none; margin-bottom: 12px;">
   <div class="card-header" onclick="toggleCard(this)">
     <span class="chevron">&#x25BC;</span>
     <span class="tag tag-info" id="azureDiagnosticsTag">AZURE</span>
@@ -10107,6 +11208,243 @@ Object.keys(GUIDANCE_AND_AZURE_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, GUIDANCE_AND_AZURE_OVERRIDES[code]);
 });
 
+const DNS_RECORD_TRANSLATION_OVERRIDES = {
+  en: {
+    dnsRecords: 'DNS records',
+    dnsRecordName: 'Name',
+    dnsRecordClass: 'Class',
+    dnsRecordData: 'Data',
+    dnsRecordTtl: 'Time to live',
+    dnsRecordTypeCovered: 'Type covered',
+    dnsRecordAlgorithm: 'Algorithm',
+    dnsRecordLabels: 'Labels',
+    dnsRecordOriginalTtl: 'Original TTL',
+    dnsRecordSignatureExpiration: 'Signature expiration',
+    dnsRecordSignatureInception: 'Signature inception',
+    dnsRecordKeyTag: 'Key tag',
+    dnsRecordSignerName: 'Signer\'s name',
+    dnsRecordSignature: 'Signature',
+    dnsRecordFlags: 'Flags',
+    dnsRecordProtocol: 'Protocol',
+    dnsRecordPublicKey: 'Public key',
+    dnsRecordNextDomain: 'Next domain',
+    dnsRecordTypes: 'Types',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  },
+  es: {
+    dnsRecords: 'Registros DNS',
+    dnsRecordName: 'Nombre',
+    dnsRecordClass: 'Clase',
+    dnsRecordData: 'Datos',
+    dnsRecordTtl: 'Tiempo de vida',
+    dnsRecordTypeCovered: 'Tipo cubierto',
+    dnsRecordAlgorithm: 'Algoritmo',
+    dnsRecordLabels: 'Etiquetas',
+    dnsRecordOriginalTtl: 'TTL original',
+    dnsRecordSignatureExpiration: 'Expiraci\u00F3n de la firma',
+    dnsRecordSignatureInception: 'Inicio de la firma',
+    dnsRecordKeyTag: 'Etiqueta de clave',
+    dnsRecordSignerName: 'Nombre del firmante',
+    dnsRecordSignature: 'Firma',
+    dnsRecordFlags: 'Indicadores',
+    dnsRecordProtocol: 'Protocolo',
+    dnsRecordPublicKey: 'Clave p\u00FAblica',
+    dnsRecordNextDomain: 'Siguiente dominio',
+    dnsRecordTypes: 'Tipos',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'SO'
+  },
+  fr: {
+    dnsRecords: 'Enregistrements DNS',
+    dnsRecordName: 'Nom',
+    dnsRecordClass: 'Classe',
+    dnsRecordData: 'Donn\u00E9es',
+    dnsRecordTtl: 'Dur\u00E9e de vie',
+    dnsRecordTypeCovered: 'Type couvert',
+    dnsRecordAlgorithm: 'Algorithme',
+    dnsRecordLabels: '\u00C9tiquettes',
+    dnsRecordOriginalTtl: 'TTL d\'origine',
+    dnsRecordSignatureExpiration: 'Expiration de la signature',
+    dnsRecordSignatureInception: 'D\u00E9but de la signature',
+    dnsRecordKeyTag: 'Balise de cl\u00E9',
+    dnsRecordSignerName: 'Nom du signataire',
+    dnsRecordSignature: 'Signature',
+    dnsRecordFlags: 'Drapeaux',
+    dnsRecordProtocol: 'Protocole',
+    dnsRecordPublicKey: 'Cl\u00E9 publique',
+    dnsRecordNextDomain: 'Domaine suivant',
+    dnsRecordTypes: 'Types',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  },
+  de: {
+    dnsRecords: 'DNS-Eintr\u00E4ge',
+    dnsRecordName: 'Name',
+    dnsRecordClass: 'Klasse',
+    dnsRecordData: 'Daten',
+    dnsRecordTtl: 'TTL',
+    dnsRecordTypeCovered: 'Abgedeckter Typ',
+    dnsRecordAlgorithm: 'Algorithmus',
+    dnsRecordLabels: 'Labels',
+    dnsRecordOriginalTtl: 'Urspr\u00FCngliche TTL',
+    dnsRecordSignatureExpiration: 'Ablauf der Signatur',
+    dnsRecordSignatureInception: 'Beginn der Signatur',
+    dnsRecordKeyTag: 'Schl\u00FCssel-Tag',
+    dnsRecordSignerName: 'Name des Signierers',
+    dnsRecordSignature: 'Signatur',
+    dnsRecordFlags: 'Flags',
+    dnsRecordProtocol: 'Protokoll',
+    dnsRecordPublicKey: '\u00D6ffentlicher Schl\u00FCssel',
+    dnsRecordNextDomain: 'N\u00E4chste Dom\u00E4ne',
+    dnsRecordTypes: 'Typen',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  },
+  'pt-BR': {
+    dnsRecords: 'Registros DNS',
+    dnsRecordName: 'Nome',
+    dnsRecordClass: 'Classe',
+    dnsRecordData: 'Dados',
+    dnsRecordTtl: 'Tempo de vida',
+    dnsRecordTypeCovered: 'Tipo coberto',
+    dnsRecordAlgorithm: 'Algoritmo',
+    dnsRecordLabels: 'R\u00F3tulos',
+    dnsRecordOriginalTtl: 'TTL original',
+    dnsRecordSignatureExpiration: 'Expira\u00E7\u00E3o da assinatura',
+    dnsRecordSignatureInception: 'In\u00EDcio da assinatura',
+    dnsRecordKeyTag: 'Tag da chave',
+    dnsRecordSignerName: 'Nome do signat\u00E1rio',
+    dnsRecordSignature: 'Assinatura',
+    dnsRecordFlags: 'Sinalizadores',
+    dnsRecordProtocol: 'Protocolo',
+    dnsRecordPublicKey: 'Chave p\u00FAblica',
+    dnsRecordNextDomain: 'Pr\u00F3ximo dom\u00EDnio',
+    dnsRecordTypes: 'Tipos',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'SO'
+  },
+  ar: {
+    dnsRecords: '\u0633\u062C\u0644\u0627\u062A DNS',
+    dnsRecordName: '\u0627\u0644\u0627\u0633\u0645',
+    dnsRecordClass: '\u0627\u0644\u0641\u0626\u0629',
+    dnsRecordData: '\u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A',
+    dnsRecordTtl: '\u0645\u062F\u0629 \u0627\u0644\u0628\u0642\u0627\u0621',
+    dnsRecordTypeCovered: '\u0627\u0644\u0646\u0648\u0639 \u0627\u0644\u0645\u0634\u0645\u0648\u0644',
+    dnsRecordAlgorithm: '\u0627\u0644\u062E\u0648\u0627\u0631\u0632\u0645\u064A\u0629',
+    dnsRecordLabels: '\u0627\u0644\u062A\u0633\u0645\u064A\u0627\u062A',
+    dnsRecordOriginalTtl: 'TTL \u0627\u0644\u0623\u0635\u0644\u064A',
+    dnsRecordSignatureExpiration: '\u0627\u0646\u062A\u0647\u0627\u0621 \u0627\u0644\u062A\u0648\u0642\u064A\u0639',
+    dnsRecordSignatureInception: '\u0628\u062F\u0627\u064A\u0629 \u0627\u0644\u062A\u0648\u0642\u064A\u0639',
+    dnsRecordKeyTag: '\u0648\u0633\u0645 \u0627\u0644\u0645\u0641\u062A\u0627\u062D',
+    dnsRecordSignerName: '\u0627\u0633\u0645 \u0627\u0644\u0645\u0648\u0642\u0651\u0639',
+    dnsRecordSignature: '\u0627\u0644\u062A\u0648\u0642\u064A\u0639',
+    dnsRecordFlags: '\u0627\u0644\u0639\u0644\u0627\u0645\u0627\u062A',
+    dnsRecordProtocol: '\u0627\u0644\u0628\u0631\u0648\u062A\u0648\u0643\u0648\u0644',
+    dnsRecordPublicKey: '\u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0627\u0644\u0639\u0627\u0645',
+    dnsRecordNextDomain: '\u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u062A\u0627\u0644\u064A',
+    dnsRecordTypes: '\u0627\u0644\u0623\u0646\u0648\u0627\u0639',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  },
+  'zh-CN': {
+    dnsRecords: 'DNS \u8BB0\u5F55',
+    dnsRecordName: '\u540D\u79F0',
+    dnsRecordClass: '\u7C7B\u522B',
+    dnsRecordData: '\u6570\u636E',
+    dnsRecordTtl: '\u751F\u5B58\u65F6\u95F4',
+    dnsRecordTypeCovered: '\u8986\u76D6\u7C7B\u578B',
+    dnsRecordAlgorithm: '\u7B97\u6CD5',
+    dnsRecordLabels: '\u6807\u7B7E',
+    dnsRecordOriginalTtl: '\u539F\u59CB TTL',
+    dnsRecordSignatureExpiration: '\u7B7E\u540D\u8FC7\u671F\u65F6\u95F4',
+    dnsRecordSignatureInception: '\u7B7E\u540D\u751F\u6548\u65F6\u95F4',
+    dnsRecordKeyTag: '\u5BC6\u94A5\u6807\u8BB0',
+    dnsRecordSignerName: '\u7B7E\u540D\u8005\u540D\u79F0',
+    dnsRecordSignature: '\u7B7E\u540D',
+    dnsRecordFlags: '\u6807\u5FD7',
+    dnsRecordProtocol: '\u534F\u8BAE',
+    dnsRecordPublicKey: '\u516C\u94A5',
+    dnsRecordNextDomain: '\u4E0B\u4E00\u4E2A\u57DF\u540D',
+    dnsRecordTypes: '\u7C7B\u578B',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  },
+  'hi-IN': {
+    dnsRecords: 'DNS \u0930\u093F\u0915\u0949\u0930\u094D\u0921',
+    dnsRecordName: '\u0928\u093E\u092E',
+    dnsRecordClass: '\u0915\u094D\u0932\u093E\u0938',
+    dnsRecordData: '\u0921\u0947\u091F\u093E',
+    dnsRecordTtl: 'TTL',
+    dnsRecordTypeCovered: '\u0915\u0935\u0930 \u0915\u093F\u092F\u093E \u0917\u092F\u093E \u091F\u093E\u0907\u092A',
+    dnsRecordAlgorithm: '\u090F\u0932\u094D\u0917\u094B\u0930\u093F\u0925\u092E',
+    dnsRecordLabels: '\u0932\u0947\u092C\u0932',
+    dnsRecordOriginalTtl: '\u092E\u0942\u0932 TTL',
+    dnsRecordSignatureExpiration: '\u0939\u0938\u094D\u0924\u093E\u0915\u094D\u0937\u0930 \u0938\u092E\u093E\u092A\u094D\u0924\u093F',
+    dnsRecordSignatureInception: '\u0939\u0938\u094D\u0924\u093E\u0915\u094D\u0937\u0930 \u0936\u0941\u0930\u0942',
+    dnsRecordKeyTag: '\u0915\u0941\u0902\u091C\u0940 \u091F\u0948\u0917',
+    dnsRecordSignerName: '\u0938\u093E\u0907\u0928\u0930 \u0915\u093E \u0928\u093E\u092E',
+    dnsRecordSignature: '\u0939\u0938\u094D\u0924\u093E\u0915\u094D\u0937\u0930',
+    dnsRecordFlags: '\u092B\u094D\u0932\u0948\u0917',
+    dnsRecordProtocol: '\u092A\u094D\u0930\u094B\u091F\u094B\u0915\u0949\u0932',
+    dnsRecordPublicKey: '\u0938\u093E\u0930\u094D\u0935\u091C\u0928\u093F\u0915 \u0915\u0941\u0902\u091C\u0940',
+    dnsRecordNextDomain: '\u0905\u0917\u0932\u093E \u0921\u094B\u092E\u0947\u0928',
+    dnsRecordTypes: '\u091F\u093E\u0907\u092A',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  },
+  'ja-JP': {
+    dnsRecords: 'DNS \u30EC\u30B3\u30FC\u30C9',
+    dnsRecordName: '\u540D\u524D',
+    dnsRecordClass: '\u30AF\u30E9\u30B9',
+    dnsRecordData: '\u30C7\u30FC\u30BF',
+    dnsRecordTtl: 'TTL',
+    dnsRecordTypeCovered: '\u5BFE\u8C61\u30BF\u30A4\u30D7',
+    dnsRecordAlgorithm: '\u30A2\u30EB\u30B4\u30EA\u30BA\u30E0',
+    dnsRecordLabels: '\u30E9\u30D9\u30EB',
+    dnsRecordOriginalTtl: '\u5143\u306E TTL',
+    dnsRecordSignatureExpiration: '\u7F72\u540D\u306E\u6709\u52B9\u671F\u9650',
+    dnsRecordSignatureInception: '\u7F72\u540D\u958B\u59CB',
+    dnsRecordKeyTag: '\u30AD\u30FC\u30BF\u30B0',
+    dnsRecordSignerName: '\u7F72\u540D\u8005\u540D',
+    dnsRecordSignature: '\u7F72\u540D',
+    dnsRecordFlags: '\u30D5\u30E9\u30B0',
+    dnsRecordProtocol: '\u30D7\u30ED\u30C8\u30B3\u30EB',
+    dnsRecordPublicKey: '\u516C\u958B\u9375',
+    dnsRecordNextDomain: '\u6B21\u306E\u30C9\u30E1\u30A4\u30F3',
+    dnsRecordTypes: '\u30BF\u30A4\u30D7',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  },
+  'ru-RU': {
+    dnsRecords: 'DNS-\u0437\u0430\u043F\u0438\u0441\u0438',
+    dnsRecordName: '\u0418\u043C\u044F',
+    dnsRecordClass: '\u041A\u043B\u0430\u0441\u0441',
+    dnsRecordData: '\u0414\u0430\u043D\u043D\u044B\u0435',
+    dnsRecordTtl: '\u0412\u0440\u0435\u043C\u044F \u0436\u0438\u0437\u043D\u0438',
+    dnsRecordTypeCovered: '\u041F\u043E\u043A\u0440\u044B\u0432\u0430\u0435\u043C\u044B\u0439 \u0442\u0438\u043F',
+    dnsRecordAlgorithm: '\u0410\u043B\u0433\u043E\u0440\u0438\u0442\u043C',
+    dnsRecordLabels: '\u041C\u0435\u0442\u043A\u0438',
+    dnsRecordOriginalTtl: '\u0418\u0441\u0445\u043E\u0434\u043D\u044B\u0439 TTL',
+    dnsRecordSignatureExpiration: '\u0418\u0441\u0442\u0435\u0447\u0435\u043D\u0438\u0435 \u043F\u043E\u0434\u043F\u0438\u0441\u0438',
+    dnsRecordSignatureInception: '\u041D\u0430\u0447\u0430\u043B\u043E \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F \u043F\u043E\u0434\u043F\u0438\u0441\u0438',
+    dnsRecordKeyTag: '\u041C\u0435\u0442\u043A\u0430 \u043A\u043B\u044E\u0447\u0430',
+    dnsRecordSignerName: '\u0418\u043C\u044F \u043F\u043E\u0434\u043F\u0438\u0441\u0430\u0432\u0448\u0435\u0433\u043E',
+    dnsRecordSignature: '\u041F\u043E\u0434\u043F\u0438\u0441\u044C',
+    dnsRecordFlags: '\u0424\u043B\u0430\u0433\u0438',
+    dnsRecordProtocol: '\u041F\u0440\u043E\u0442\u043E\u043A\u043E\u043B',
+    dnsRecordPublicKey: '\u041E\u0442\u043A\u0440\u044B\u0442\u044B\u0439 \u043A\u043B\u044E\u0447',
+    dnsRecordNextDomain: '\u0421\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0434\u043E\u043C\u0435\u043D',
+    dnsRecordTypes: '\u0422\u0438\u043F\u044B',
+    dnsRecordCpu: 'CPU',
+    dnsRecordOs: 'OS'
+  }
+};
+
+Object.keys(DNS_RECORD_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, DNS_RECORD_TRANSLATION_OVERRIDES[code]);
+});
+
 const LANG_PARAM = 'lang';
 const LANGUAGE_OPTIONS = ['en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'];
 const RTL_LANGUAGES = new Set(['ar']);
@@ -11416,11 +12754,13 @@ function reportIssue() {
 '@
 # ===== JavaScript Core UI (Lookup, Render, Events) =====
 $htmlPage += @'
-function lookup() {
+function lookup(options = {}) {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
   const screenshotBtn = document.getElementById("screenshotBtn");
   const dlBtn = document.getElementById("downloadBtn");
+  const resultsEl = document.getElementById("results");
+  const animateTopIntro = !!options.animateTopIntro;
   const domain = normalizeDomain(input.value);
   input.value = domain;
   toggleClearBtn();
@@ -11439,10 +12779,17 @@ function lookup() {
   const runId = ++activeLookup.runId;
   cancelInflightLookup();
 
-  // Clear previous results and hide download button
-  document.getElementById("results").innerHTML = "";
+  beginSectionAnimationCycle({ includeTopIntro: animateTopIntro });
+
+  // Clear previous results while preserving the current top-bar actions
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches && resultsEl) {
+    resultsEl.innerHTML = "";
+  }
   setStatus("");
-  if (dlBtn) dlBtn.style.display = "none";
+  if (dlBtn) {
+    dlBtn.style.display = "";
+    dlBtn.disabled = true;
+  }
   lookupInProgress = true;
 
   const url = new URL(window.location.href);
@@ -11490,7 +12837,7 @@ function lookup() {
       lastResult = {};
     }
     if (!lastResult._loaded) {
-      lastResult._loaded = { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false };
+      lastResult._loaded = { base: false, mx: false, records: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false };
     }
     if (!lastResult._errors) {
       lastResult._errors = {};
@@ -11500,7 +12847,7 @@ function lookup() {
   ensureResultObject();
   lastResult = {
     domain,
-    _loaded: { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false },
+    _loaded: { base: false, mx: false, records: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false },
     _errors: {},
     guidance: [],
     acsReady: false
@@ -11511,6 +12858,7 @@ function lookup() {
   const requests = [
     { key: "base",  path: "/api/base"  },
     { key: "mx",    path: "/api/mx"    },
+    { key: "records", path: "/api/records" },
     { key: "whois", path: "/api/whois" },
     { key: "dmarc", path: "/api/dmarc" },
     { key: "dkim",  path: "/api/dkim"  },
@@ -11551,6 +12899,9 @@ function lookup() {
         lastResult.whoisRawText = data.rawWhoisText;
       } else if (key === 'reputation') {
         lastResult.reputation = data;
+      } else if (key === 'records') {
+        lastResult.dnsRecords = Array.isArray(data.records) ? data.records : [];
+        lastResult.dnsRecordsError = data.error || null;
       } else {
         Object.assign(lastResult, data);
       }
@@ -11559,7 +12910,10 @@ function lookup() {
 
       if (!downloadShown) {
         const dlBtn2 = document.getElementById("downloadBtn");
-        if (dlBtn2) dlBtn2.style.display = "inline-block";
+        if (dlBtn2) {
+          dlBtn2.style.display = "";
+          dlBtn2.disabled = false;
+        }
         downloadShown = true;
       }
 
@@ -11590,6 +12944,7 @@ function lookup() {
       lookupInProgress = false;
       btn.disabled = false;
       if (screenshotBtn) screenshotBtn.disabled = false;
+      if (dlBtn) dlBtn.disabled = false;
       btn.innerHTML = t('lookup');
     });
 }
@@ -11615,6 +12970,190 @@ function scrollToSection(key) {
       el.classList.remove('flash-active');
     }, 2400);
   }
+}
+
+let topSectionAnimationTimers = [];
+let resultSectionAnimationTimers = [];
+let resultSectionRevealTimer = null;
+let pendingResultsMarkup = null;
+let resultSectionsRevealAtMs = 0;
+let resultSectionsAnimationPending = false;
+const TOP_BUTTON_ANIMATION_START_MS = 80;
+const TOP_BUTTON_STAGGER_MS = 110;
+const TOP_BUTTON_FADE_DURATION_MS = 620;
+const TOP_SECTION_ANIMATION_START_MS = 120;
+const TOP_SECTION_ANIMATION_STAGGER_MS = 180;
+const TOP_SECTION_FADE_DURATION_MS = 880;
+const RESULT_SECTION_REVEAL_DELAY_MS = 180;
+const RESULT_SECTION_STAGGER_MS = 140;
+
+function getVisibleTopAnimationItems() {
+  return Array.from(document.querySelectorAll('.engage-top-item')).filter(el => {
+    if (!el) return false;
+    const computed = window.getComputedStyle(el);
+    return computed.display !== 'none';
+  });
+}
+
+function getVisibleEngageSections() {
+  return Array.from(document.querySelectorAll('.engage-section')).filter(el => {
+    if (!el) return false;
+    const computed = window.getComputedStyle(el);
+    return computed.display !== 'none';
+  });
+}
+
+function getTopSectionAnimationDurationMs() {
+  const topItemCount = getVisibleTopAnimationItems().length;
+  const sectionCount = getVisibleEngageSections().length;
+  const topItemsDuration = topItemCount > 0
+    ? TOP_BUTTON_ANIMATION_START_MS + ((topItemCount - 1) * TOP_BUTTON_STAGGER_MS) + TOP_BUTTON_FADE_DURATION_MS
+    : 0;
+  const sectionsDuration = sectionCount > 0
+    ? topItemsDuration + TOP_SECTION_ANIMATION_START_MS + ((sectionCount - 1) * TOP_SECTION_ANIMATION_STAGGER_MS) + TOP_SECTION_FADE_DURATION_MS
+    : topItemsDuration;
+  return Math.max(topItemsDuration, sectionsDuration);
+}
+
+function clearResultSectionAnimationTimers() {
+  resultSectionAnimationTimers.forEach(timer => clearTimeout(timer));
+  resultSectionAnimationTimers = [];
+  if (resultSectionRevealTimer) {
+    clearTimeout(resultSectionRevealTimer);
+    resultSectionRevealTimer = null;
+  }
+}
+
+function beginSectionAnimationCycle(options = {}) {
+  const includeTopIntro = !!options.includeTopIntro;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  const results = document.getElementById('results');
+  if (!results) return;
+
+  if (includeTopIntro) {
+    animateTopSections();
+  }
+
+  clearResultSectionAnimationTimers();
+  pendingResultsMarkup = null;
+  resultSectionsRevealAtMs = performance.now() + (includeTopIntro ? getTopSectionAnimationDurationMs() : 0) + RESULT_SECTION_REVEAL_DELAY_MS;
+  resultSectionsAnimationPending = true;
+  results.classList.add('results-fade-out');
+}
+
+function animateResultSectionsIn() {
+  const results = document.getElementById('results');
+  if (!results) return;
+
+  clearResultSectionAnimationTimers();
+  results.classList.remove('results-fade-out');
+
+  const cards = Array.from(results.children).filter(el => el && el.classList && el.classList.contains('card'));
+  if (cards.length === 0) return;
+
+  cards.forEach(card => {
+    card.classList.remove('result-card-in');
+    card.classList.add('result-card-prep');
+  });
+
+  void results.offsetWidth;
+
+  cards.forEach((card, index) => {
+    const timer = window.setTimeout(() => {
+      card.classList.add('result-card-in');
+    }, index * RESULT_SECTION_STAGGER_MS);
+    resultSectionAnimationTimers.push(timer);
+  });
+}
+
+function renderResultsMarkup(markup) {
+  const results = document.getElementById('results');
+  if (!results) return;
+
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  pendingResultsMarkup = markup;
+
+  const applyMarkup = (animateCards) => {
+    if (pendingResultsMarkup === null) return;
+
+    clearResultSectionAnimationTimers();
+    results.innerHTML = pendingResultsMarkup;
+    pendingResultsMarkup = null;
+
+    if (animateCards) {
+      animateResultSectionsIn();
+    } else {
+      results.classList.remove('results-fade-out');
+    }
+
+    startLoadingDotAnimations();
+  };
+
+  if (reducedMotion) {
+    resultSectionsAnimationPending = false;
+    applyMarkup(false);
+    return;
+  }
+
+  if (resultSectionsAnimationPending) {
+    if (resultSectionRevealTimer) {
+      clearTimeout(resultSectionRevealTimer);
+    }
+
+    const delay = Math.max(0, resultSectionsRevealAtMs - performance.now());
+    resultSectionRevealTimer = window.setTimeout(() => {
+      resultSectionRevealTimer = null;
+      resultSectionsAnimationPending = false;
+      applyMarkup(true);
+    }, delay);
+    return;
+  }
+
+  applyMarkup(false);
+}
+
+function animateTopSections() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  const body = document.body;
+  if (!body) return;
+
+  const topItems = getVisibleTopAnimationItems();
+  const sections = getVisibleEngageSections();
+
+  if (topItems.length === 0 && sections.length === 0) return;
+
+  topSectionAnimationTimers.forEach(timer => clearTimeout(timer));
+  topSectionAnimationTimers = [];
+
+  body.classList.add('section-fade-enabled');
+  topItems.forEach(el => {
+    el.classList.remove('engage-top-in');
+  });
+  sections.forEach(el => {
+    el.classList.remove('engage-in');
+  });
+
+  void body.offsetWidth;
+
+  topItems.forEach((el, index) => {
+    const timer = window.setTimeout(() => {
+      el.classList.add('engage-top-in');
+    }, TOP_BUTTON_ANIMATION_START_MS + (index * TOP_BUTTON_STAGGER_MS));
+    topSectionAnimationTimers.push(timer);
+  });
+
+  const topItemsDuration = topItems.length > 0
+    ? TOP_BUTTON_ANIMATION_START_MS + ((topItems.length - 1) * TOP_BUTTON_STAGGER_MS) + TOP_BUTTON_FADE_DURATION_MS
+    : 0;
+
+  sections.forEach((el, index) => {
+    const timer = window.setTimeout(() => {
+      el.classList.add('engage-in');
+    }, topItemsDuration + TOP_SECTION_ANIMATION_START_MS + (index * TOP_SECTION_ANIMATION_STAGGER_MS));
+    topSectionAnimationTimers.push(timer);
+  });
 }
 
 function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = '') {
@@ -11664,13 +13203,91 @@ function toggleMxDetails(element) {
   el.style.display = isOpen ? "block" : "none";
 }
 
+function formatTtlClock(totalSeconds) {
+  const total = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const secondsPerMinute = 60;
+  const secondsPerHour = 60 * secondsPerMinute;
+  const secondsPerDay = 24 * secondsPerHour;
+  const secondsPerMonth = 30 * secondsPerDay;
+
+  const months = Math.floor(total / secondsPerMonth);
+  let remaining = total % secondsPerMonth;
+  const days = Math.floor(remaining / secondsPerDay);
+  remaining = remaining % secondsPerDay;
+  const hours = Math.floor(remaining / secondsPerHour);
+  const minutes = Math.floor((remaining % secondsPerHour) / secondsPerMinute);
+  const seconds = remaining % secondsPerMinute;
+
+  const segments = [];
+  if (months > 0) {
+    segments.push(`${months}mo`);
+  }
+  if (days > 0) {
+    segments.push(`${days}d`);
+  }
+  if (hours > 0) {
+    segments.push(`${hours}h`);
+  }
+  if (minutes > 0) {
+    segments.push(`${minutes}m`);
+  }
+  if (seconds > 0 || segments.length === 0) {
+    segments.push(`${seconds}s`);
+  }
+  return segments.join(' ');
+}
+
+function formatDnsRecordTtl(ttlSeconds) {
+  if (ttlSeconds === null || ttlSeconds === undefined || ttlSeconds === '') {
+    return escapeHtml(t('unknown'));
+  }
+
+  const total = Math.max(0, Math.floor(Number(ttlSeconds) || 0));
+  return `${escapeHtml(String(total))}s (${escapeHtml(formatTtlClock(total))})`;
+}
+
+function renderDnsRecordsTable(records) {
+  const rows = Array.isArray(records) ? records.filter(Boolean) : [];
+  if (!rows.length) {
+    return `<div class="code">${escapeHtml(t('noRecordsAvailable'))}</div>`;
+  }
+
+  const body = rows.map(record => {
+    const name = escapeHtml(record.name || '');
+    const dnsClass = escapeHtml(record.class || 'IN');
+    const type = escapeHtml(record.type || '');
+    const details = Array.isArray(record.details) ? record.details.filter(Boolean) : [];
+    const data = details.length
+      ? `<div class="dns-record-detail-list">${details.map(item => `<div class="dns-record-detail-row"><span class="dns-record-detail-label">${escapeHtml(t(item.labelKey || ''))}:</span><span class="dns-record-detail-value">${escapeHtml(item.value || '')}</span></div>`).join('')}</div>`
+      : escapeHtml(record.data || '');
+    const ttl = formatDnsRecordTtl(record.ttlSeconds);
+    return `<tr><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+  }).join('');
+
+  return `
+    <div class="code code-lite" style="margin-top:6px;">
+      <table class="mx-table dns-records-table">
+        <thead>
+          <tr>
+            <th>${escapeHtml(t('dnsRecordName'))}</th>
+            <th>${escapeHtml(t('dnsRecordClass'))}</th>
+            <th>${escapeHtml(t('type'))}</th>
+            <th>${escapeHtml(t('dnsRecordData'))}</th>
+            <th>${escapeHtml(t('dnsRecordTtl'))}</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
 function render(r) {
   const loaded = (r && r._loaded) ? r._loaded : {};
   const errors = (r && r._errors) ? r._errors : {};
   const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
   const mxFallbackUsed = !!(r && r.mxFallbackUsed);
   const mxFallbackChecked = r && r.mxFallbackDomainChecked ? r.mxFallbackDomainChecked : null;
-  const allLoaded = !!(loaded.base && loaded.mx && loaded.whois && loaded.dmarc && loaded.dkim && loaded.cname && loaded.reputation);
+  const allLoaded = !!(loaded.base && loaded.mx && loaded.records && loaded.whois && loaded.dmarc && loaded.dkim && loaded.cname && loaded.reputation);
   const anyError = !!(errors && Object.keys(errors).length > 0);
   let gatheredAtLocal = r.collectedAt ? formatLocalDateTime(r.collectedAt) : null;
 
@@ -12306,6 +13923,46 @@ function render(r) {
     `);
   }
 
+  if (!loaded.records && !errors.records) {
+    cards.push(card(
+      t('dnsRecords'),
+      t('loadingValue'),
+      'LOADING',
+      'tag-info',
+      'records',
+      true
+    ));
+  } else if (errors.records) {
+    cards.push(card(
+      t('dnsRecords'),
+      errors.records,
+      'ERROR',
+      'tag-fail',
+      'records',
+      true
+    ));
+  } else {
+    const recordsBody = renderDnsRecordsTable(r.dnsRecords);
+    const recordsErrorHtml = r.dnsRecordsError
+      ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('error'))}: ${escapeHtml(r.dnsRecordsError)}</div>`
+      : '';
+
+    cards.push(`
+      <div class="card" id="card-records">
+        <div class="card-header" onclick="toggleCard(this)">
+          <span class="chevron">&#x25BC;</span>
+          <span class="tag tag-info">${escapeHtml(t('info'))}</span>
+          <strong>${escapeHtml(t('dnsRecords'))}</strong>
+          <button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, 'records')">${escapeHtml(t('copy'))}</button>
+        </div>
+        <div id="field-records" class="card-content">
+          ${recordsBody}
+          ${recordsErrorHtml}
+        </div>
+      </div>
+    `);
+  }
+
   // MX (placed directly below Domain per UI request)
   if (!loaded.mx && !errors.mx) {
     cards.push(card(
@@ -12686,8 +14343,7 @@ function render(r) {
     </div>
   `);
 
-  document.getElementById("results").innerHTML = cards.join("");
-  startLoadingDotAnimations();
+  renderResultsMarkup(cards.join(""));
 }
 
 let _loadingDotsTimer = null;
@@ -12762,7 +14418,9 @@ window.addEventListener("load", function () {
   if (d) {
     document.getElementById("domainInput").value = d;
     toggleClearBtn();
-    lookup();
+    lookup({ animateTopIntro: true });
+  } else {
+    animateTopSections();
   }
 
   const reportBtn = document.getElementById("reportIssueBtn");
@@ -14242,8 +15900,8 @@ $functionNames = @(
   'Get-HashedDomain',
   'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData',
-  'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
+  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-FirstNonEmptyPropertyValue',
+  'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
   'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
@@ -14453,7 +16111,7 @@ if ($metricsEnabled) {
   }
 
   # 2) Serve individual API endpoints (/api/*)
-  if ($path -in @("/api/base","/api/mx","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation")) {
+  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation")) {
     if (-not (Test-ApiKey -Context $ctx)) {
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
       return
@@ -14496,6 +16154,7 @@ if ($metricsEnabled) {
           if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Completed }
         }
         "/api/mx"    { Write-Json -Context $ctx -Object (Get-DnsMxStatus    -Domain $domain) }
+        "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain) }
         "/api/whois" { Write-Json -Context $ctx -Object (Get-DomainRegistrationStatus -Domain $domain) }
         "/api/dmarc" { Write-Json -Context $ctx -Object (Get-DnsDmarcStatus -Domain $domain) }
         "/api/dkim"  { Write-Json -Context $ctx -Object (Get-DnsDkimStatus  -Domain $domain) }

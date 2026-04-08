@@ -54,6 +54,12 @@
 - 🐳 **Container-ready** with Linux and Windows Dockerfiles
 - ⚡ **Fast and lightweight** - minimal resource footprint
 - 🎨 **Modern, responsive UI** - dark/light theme toggle, search history chips, shareable links, screenshot export, and JSON download
+  - Top-bar controls and header sections use staged fade-in animations on page load, while lookup refreshes animate only the lower result sections
+- 🧾 **Detailed DNS records table** - DomainDossier-style dataset with reverse-lookup supplements, DNSSEC record details, and expanded TTL formatting (`seconds (5d 2h 33s)` style when applicable)
+  - DNS record `Name`, `Type`, and column headers stay single-line, with horizontal scrolling used on narrow layouts
+  - Escaped DNS labels in display-oriented values (for example DNSSEC `NSEC` next-domain names like `\000`) are decoded into readable markers such as `[NUL]`
+  - Includes richer `HINFO` and `RRSIG` coverage by using DNSSEC-aware lookups and authoritative fallback queries when direct recursive lookups omit those records
+  - Consolidates duplicate DNS rows from mixed resolver sources and keeps the strongest TTL for each unique record/value pair
 - 🌍 **Multi-language support** - 10 languages with RTL support, language picker dropdown, and `?lang=` URL parameter
 - 💻 **Command-line test mode** (`-TestDomain`) for one-shot headless domain validation
 
@@ -289,6 +295,7 @@ The application exposes the following RESTful API endpoints:
 | `/dns` | Aggregated readiness JSON | Complete DNS readiness report for a domain |
 | `/api/base` | Root TXT/SPF/ACS TXT | Validates SPF and ACS verification TXT records |
 | `/api/mx` | MX + A/AAAA resolution | Checks mail exchange records and IP resolution |
+| `/api/records` | Raw DNS records table payload | Returns the detailed DNS records dataset used by the UI table, including reverse-lookup supplements and TTL seconds for expanded display formatting |
 | `/api/whois` | WHOIS / RDAP registration | Returns domain registration data (creation, expiry, registrar) |
 | `/api/dmarc` | DMARC records | Validates DMARC email authentication policy |
 | `/api/dkim` | DKIM selectors | Checks DomainKeys Identified Mail signatures |
@@ -520,7 +527,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v1.4.3`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.0.12`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -543,8 +550,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v1.4.3
-git push origin v1.4.3
+git tag v2.0.12
+git push origin v2.0.12
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -555,7 +562,7 @@ git push origin v1.4.3
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `1.4.3`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.0.12`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -572,11 +579,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:1.4.3
+docker pull limitlessworlds/acs-domain-checker:2.0.12
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-1.4.3
-docker pull limitlessworlds/acs-domain-checker:windows-1.4.3
+docker pull limitlessworlds/acs-domain-checker:linux-2.0.12
+docker pull limitlessworlds/acs-domain-checker:windows-2.0.12
 ```
 
 ### 🛠️ Manual Build Script
@@ -591,7 +598,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 1.4.3
+./acs-domain-checker-dockerhub.ps1 -Version 2.0.12
 ```
 
 **📋 Requirements for manual script:**

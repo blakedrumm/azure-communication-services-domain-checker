@@ -103,6 +103,9 @@ h1 {
   margin-bottom: 12px;
   flex-wrap: wrap;
   width: 100%;
+  position: relative;
+  z-index: 200;
+  isolation: isolate;
 }
 
 .top-bar button {
@@ -123,9 +126,17 @@ h1 {
   box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
+.top-bar button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .language-dropdown {
   position: relative;
   min-width: 0;
+  z-index: 210;
 }
 
 .language-trigger {
@@ -166,7 +177,7 @@ h1 {
   border-radius: 8px;
   background: var(--card-bg);
   box-shadow: 0 10px 24px rgba(0,0,0,0.18);
-  z-index: 50;
+  z-index: 220;
   display: none;
 }
 
@@ -400,6 +411,7 @@ button.primary:disabled {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  transition: opacity 280ms ease;
 }
 
 .card {
@@ -582,6 +594,52 @@ button.primary:disabled {
   border-top: none;
 }
 
+.dns-records-table td.dns-record-data {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dns-records-table th {
+  white-space: nowrap;
+}
+
+.dns-records-table th:first-child,
+.dns-records-table td:first-child {
+  white-space: nowrap;
+}
+
+.dns-records-table th:nth-child(3),
+.dns-records-table td:nth-child(3) {
+  white-space: nowrap;
+}
+
+.dns-records-table td.dns-record-ttl {
+  white-space: nowrap;
+}
+
+.dns-record-detail-list {
+  display: grid;
+  gap: 4px;
+}
+
+.dns-record-detail-row {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.dns-record-detail-label {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dns-record-detail-value {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 ul.guidance {
   margin: 0;
   padding-left: 18px;
@@ -741,7 +799,7 @@ ul.guidance li {
   .input-row { flex-direction: column; }
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
-  .mx-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  .mx-table, .dns-records-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
   .top-bar { align-items: stretch; }
   .top-bar button, .language-dropdown, .language-trigger { width: 100%; height: 43px; }
   .language-trigger { min-width: 0; }
@@ -755,8 +813,8 @@ ul.guidance li {
   .top-bar, .history, .hide-on-screenshot, #clearBtn { display: none !important; }
   .search-box { max-width: 100%; margin: 0 0 12px 0; }
   .card { break-inside: avoid; }
-  .code, .mx-table { background: #ffffff; color: #000000; border: 1px solid #d1d5db; }
-  .mx-table th { background: #f3f4f6; color: #000000; }
+  .code, .mx-table, .dns-records-table { background: #ffffff; color: #000000; border: 1px solid #d1d5db; }
+  .mx-table th, .dns-records-table th { background: #f3f4f6; color: #000000; }
 }
 
 @keyframes flashHighlight {
@@ -767,6 +825,80 @@ ul.guidance li {
 
 .card.flash-active {
   animation: flashHighlight 2.4s ease-out;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  body.section-fade-enabled .engage-top-item {
+    opacity: 0;
+    transform: translateY(14px);
+    will-change: opacity, transform;
+  }
+
+  body.section-fade-enabled .engage-top-item.engage-top-in {
+    animation: topButtonFadeIn 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  body.section-fade-enabled .engage-section {
+    opacity: 0;
+    transform: translateY(20px);
+    will-change: opacity, transform;
+  }
+
+  body.section-fade-enabled .engage-section.engage-in {
+    animation: topSectionFadeIn 880ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes topButtonFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes topSectionFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cards.results-fade-out {
+    opacity: 0;
+  }
+
+  .cards > .card.result-card-prep {
+    opacity: 0;
+    transform: translateY(24px);
+    will-change: opacity, transform;
+  }
+
+  .cards > .card.result-card-prep.result-card-in {
+    animation: resultSectionFadeIn 980ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes resultSectionFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Microsoft Auth UI */

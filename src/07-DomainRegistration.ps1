@@ -1,4 +1,27 @@
 # ===== Domain Registration Status =====
+function Get-FirstNonEmptyPropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]
+    [object]$Object,
+    [Parameter(Mandatory = $true)]
+    [string[]]$PropertyNames
+  )
+
+  if ($null -eq $Object) { return $null }
+
+  foreach ($propertyName in $PropertyNames) {
+    $property = $Object.PSObject.Properties[$propertyName]
+    if ($property -and $null -ne $property.Value) {
+      $value = [string]$property.Value
+      if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value
+      }
+    }
+  }
+
+  return $null
+}
+
 function Get-DomainRegistrationStatus {
   param(
     [Parameter(Mandatory = $true)]
@@ -41,20 +64,46 @@ function Get-DomainRegistrationStatus {
   $rawWhoisText = $null
 
   $rdapError = $null
+  $goDaddyError = $null
+  $sysWhoisError = $null
+  $linuxWhoisError = $null
+  $tcpWhoisError = $null
+  $whoisXmlError = $null
+  $apiKey = $null
+  $gdKey = $null
+  $gdSecret = $null
+  $needsFallback = $false
+
   try {
-    # Throw on RDAP failures so fallback providers can be invoked.
+    # Throw on transport failures so fallback providers can be invoked.
     $raw = Invoke-RdapLookup -Domain $whoisDomain -ThrowOnError
     $source = 'RDAP'
 
     if ($raw -and $raw.events) {
       foreach ($ev in @($raw.events)) {
-        $action = [string]$ev.eventAction
-        if (-not $creation -and $action -eq 'registration') {
+        $action = (([string]$ev.eventAction).Trim().ToLowerInvariant() -replace '[^a-z]', '')
+        if (-not $creation -and @('registration', 'registered', 'created', 'creation') -contains $action) {
           $creation = ConvertTo-NullableUtcIso8601 $ev.eventDate
         }
-        elseif (-not $expiry -and $action -eq 'expiration') {
+        elseif (-not $expiry -and @('expiration', 'expiry', 'expires') -contains $action) {
           $expiry = ConvertTo-NullableUtcIso8601 $ev.eventDate
         }
+      }
+    }
+
+    if (-not $creation) {
+      $rdapCreationValue = Get-FirstNonEmptyPropertyValue -Object $raw -PropertyNames @('registrationDate', 'registeredDate', 'createdDate', 'creationDate', 'created', 'registered')
+      if (-not [string]::IsNullOrWhiteSpace($rdapCreationValue)) {
+        $creation = ConvertTo-NullableUtcIso8601 $rdapCreationValue
+        if (-not $creation) { $creation = $rdapCreationValue }
+      }
+    }
+
+    if (-not $expiry) {
+      $rdapExpiryValue = Get-FirstNonEmptyPropertyValue -Object $raw -PropertyNames @('expirationDate', 'expiryDate', 'expiresDate', 'expires', 'expiration', 'expiry')
+      if (-not [string]::IsNullOrWhiteSpace($rdapExpiryValue)) {
+        $expiry = ConvertTo-NullableUtcIso8601 $rdapExpiryValue
+        if (-not $expiry) { $expiry = $rdapExpiryValue }
       }
     }
 
@@ -79,15 +128,32 @@ function Get-DomainRegistrationStatus {
         }
       }
     }
+
+    $rdapHasUsableData =
+      -not [string]::IsNullOrWhiteSpace([string]$creation) -or
+      -not [string]::IsNullOrWhiteSpace([string]$expiry) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrar) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrant)
+
+    if (-not $rdapHasUsableData) {
+      $source = $null
+      $needsFallback = $true
+    }
+    elseif (-not $creation) {
+      # Continue to WHOIS-style fallbacks when RDAP succeeded but did not provide a creation date.
+      $needsFallback = $true
+    }
   }
   catch {
     $rdapError = $_.Exception.Message
+    $source = $null
+    $needsFallback = $true
+  }
+
+  if ($needsFallback) {
     $usedFallback = $false
-    $goDaddyError = $null
-    $sysWhoisError = $null
-    $linuxWhoisError = $null
-    $tcpWhoisError = $null
-    $whoisXmlError = $null
+    $creationPattern = Get-WhoisCreationDateLabelRegex
+    $expiryPattern = Get-WhoisExpiryDateLabelRegex
 
     # Prefer GoDaddy fallback when API key/secret are available.
     $gdKey = $env:GODADDY_API_KEY
@@ -99,8 +165,8 @@ function Get-DomainRegistrationStatus {
         $raw = Invoke-GoDaddyWhoisLookup -Domain $whoisDomain
         $source = 'GoDaddy'
         # GoDaddy domain API returns createdAt / expires fields (ISO8601).
-        $creation = ConvertTo-NullableUtcIso8601 $raw.createdAt
-        $expiry   = ConvertTo-NullableUtcIso8601 $raw.expires
+        if (-not $creation) { $creation = ConvertTo-NullableUtcIso8601 $raw.createdAt }
+        if (-not $expiry)   { $expiry   = ConvertTo-NullableUtcIso8601 $raw.expires }
         if (-not $registrar) { $registrar = 'GoDaddy' }
         $usedFallback = $true
       }
@@ -139,20 +205,19 @@ function Get-DomainRegistrationStatus {
           if (-not $registrant -and $raw.registrant) { $registrant = [string]$raw.registrant }
           if (-not [string]::IsNullOrWhiteSpace($raw.rawText)) { $rawWhoisText = $raw.rawText }
 
-          # Best-effort: if creation/expiry still null, re-parse from raw text.
-          if (-not $creation -and $rawWhoisText -match '(?im)^Creation date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $creation -and $rawWhoisText -match $creationPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $creation = if ($parsed) { $parsed } else { $val }
           }
-          if (-not $expiry -and $rawWhoisText -match '(?im)^Expiration date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $expiry -and $rawWhoisText -match $expiryPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $expiry = if ($parsed) { $parsed } else { $val }
           }
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
-          $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
@@ -190,20 +255,19 @@ function Get-DomainRegistrationStatus {
           if (-not $registrant -and $raw.registrant) { $registrant = [string]$raw.registrant }
           if (-not [string]::IsNullOrWhiteSpace($raw.rawText)) { $rawWhoisText = $raw.rawText }
 
-          # Best-effort: if creation/expiry still null, re-parse from raw text (Sysinternals label casing varies).
-          if (-not $creation -and $rawWhoisText -match '(?im)^Creation date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $creation -and $rawWhoisText -match $creationPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $creation = if ($parsed) { $parsed } else { $val }
           }
-          if (-not $expiry -and $rawWhoisText -match '(?im)^Expiration date:\s*(.+)$') {
-            $val = $Matches[1].Trim()
+          if (-not $expiry -and $rawWhoisText -match $expiryPattern) {
+            $val = $Matches[2].Trim()
             $parsed = ConvertTo-NullableUtcIso8601 $val
             $expiry = if ($parsed) { $parsed } else { $val }
           }
 
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
-          $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
@@ -211,7 +275,6 @@ function Get-DomainRegistrationStatus {
             $usedFallback = $true
           }
           elseif ($rawHasUsableData) {
-            # Treat raw output as success when it contains registration output even if not fully parsed.
             $source = 'SysinternalsWhois'
             $usedFallback = $true
           }
@@ -242,8 +305,19 @@ function Get-DomainRegistrationStatus {
           if (-not $registrant -and $raw.registrant) { $registrant = [string]$raw.registrant }
           if (-not [string]::IsNullOrWhiteSpace($raw.rawText)) { $rawWhoisText = $raw.rawText }
 
+          if (-not $creation -and $rawWhoisText -match $creationPattern) {
+            $val = $Matches[2].Trim()
+            $parsed = ConvertTo-NullableUtcIso8601 $val
+            $creation = if ($parsed) { $parsed } else { $val }
+          }
+          if (-not $expiry -and $rawWhoisText -match $expiryPattern) {
+            $val = $Matches[2].Trim()
+            $parsed = ConvertTo-NullableUtcIso8601 $val
+            $expiry = if ($parsed) { $parsed } else { $val }
+          }
+
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
-          $hasRawText      = -not [string]::IsNullOrWhiteSpace($raw.rawText)
+          $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
           if ($hasParsedFields) {
@@ -274,18 +348,26 @@ function Get-DomainRegistrationStatus {
           $w = $raw.WhoisRecord
 
           if ($w) {
-            $creation = ConvertTo-NullableUtcIso8601 $w.createdDate
-            if (-not $creation) { $creation = ConvertTo-NullableUtcIso8601 $w.registryData.createdDate }
+            if (-not $creation) {
+              $creation = ConvertTo-NullableUtcIso8601 $w.createdDate
+              if (-not $creation) { $creation = ConvertTo-NullableUtcIso8601 $w.registryData.createdDate }
+            }
 
-            $expiry = ConvertTo-NullableUtcIso8601 $w.expiresDate
-            if (-not $expiry) { $expiry = ConvertTo-NullableUtcIso8601 $w.registryData.expiresDate }
+            if (-not $expiry) {
+              $expiry = ConvertTo-NullableUtcIso8601 $w.expiresDate
+              if (-not $expiry) { $expiry = ConvertTo-NullableUtcIso8601 $w.registryData.expiresDate }
+            }
 
-            if ($w.registrarName) { $registrar = [string]$w.registrarName }
-            elseif ($w.registrar) { $registrar = [string]$w.registrar }
-            elseif ($w.registryData.registrarName) { $registrar = [string]$w.registryData.registrarName }
+            if (-not $registrar) {
+              if ($w.registrarName) { $registrar = [string]$w.registrarName }
+              elseif ($w.registrar) { $registrar = [string]$w.registrar }
+              elseif ($w.registryData.registrarName) { $registrar = [string]$w.registryData.registrarName }
+            }
 
-            if ($w.registrant -and $w.registrant.name) { $registrant = [string]$w.registrant.name }
-            elseif ($w.registryData.registrant -and $w.registryData.registrant.name) { $registrant = [string]$w.registryData.registrant.name }
+            if (-not $registrant) {
+              if ($w.registrant -and $w.registrant.name) { $registrant = [string]$w.registrant.name }
+              elseif ($w.registryData.registrant -and $w.registryData.registrant.name) { $registrant = [string]$w.registryData.registrant.name }
+            }
           }
           $usedFallback = $true
         }
@@ -295,16 +377,24 @@ function Get-DomainRegistrationStatus {
       }
     }
 
-    if (-not $usedFallback) {
-      $err = "RDAP lookup failed."
+    $hasExistingData =
+      -not [string]::IsNullOrWhiteSpace([string]$source) -or
+      -not [string]::IsNullOrWhiteSpace([string]$creation) -or
+      -not [string]::IsNullOrWhiteSpace([string]$expiry) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrar) -or
+      -not [string]::IsNullOrWhiteSpace([string]$registrant) -or
+      -not [string]::IsNullOrWhiteSpace([string]$rawWhoisText)
+
+    if (-not $usedFallback -and -not $hasExistingData) {
+      $err = 'RDAP lookup failed.'
       if ($rdapError) { $err += " RDAP error: $rdapError." }
       if ($goDaddyError) { $err += " GoDaddy error: $goDaddyError." }
-      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += " GoDaddy not configured." }
+      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += ' GoDaddy not configured.' }
       if ($sysWhoisError) { $err += " Sysinternals whois error: $sysWhoisError." }
       if ($linuxWhoisError) { $err += " Linux whois error: $linuxWhoisError." }
       if ($tcpWhoisError) { $err += " TCP whois error: $tcpWhoisError." }
       if ($whoisXmlError) { $err += " WhoisXML error: $whoisXmlError." }
-      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += " WhoisXML not configured." }
+      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += ' WhoisXML not configured.' }
 
       $parentDomains = @(Get-ParentDomains -Domain $d)
       foreach ($parentDomain in $parentDomains) {

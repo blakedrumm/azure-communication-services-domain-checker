@@ -1,10 +1,12 @@
 # ===== JavaScript Core UI (Lookup, Render, Events) =====
 $htmlPage += @'
-function lookup() {
+function lookup(options = {}) {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
   const screenshotBtn = document.getElementById("screenshotBtn");
   const dlBtn = document.getElementById("downloadBtn");
+  const resultsEl = document.getElementById("results");
+  const animateTopIntro = !!options.animateTopIntro;
   const domain = normalizeDomain(input.value);
   input.value = domain;
   toggleClearBtn();
@@ -23,10 +25,17 @@ function lookup() {
   const runId = ++activeLookup.runId;
   cancelInflightLookup();
 
-  // Clear previous results and hide download button
-  document.getElementById("results").innerHTML = "";
+  beginSectionAnimationCycle({ includeTopIntro: animateTopIntro });
+
+  // Clear previous results while preserving the current top-bar actions
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches && resultsEl) {
+    resultsEl.innerHTML = "";
+  }
   setStatus("");
-  if (dlBtn) dlBtn.style.display = "none";
+  if (dlBtn) {
+    dlBtn.style.display = "";
+    dlBtn.disabled = true;
+  }
   lookupInProgress = true;
 
   const url = new URL(window.location.href);
@@ -74,7 +83,7 @@ function lookup() {
       lastResult = {};
     }
     if (!lastResult._loaded) {
-      lastResult._loaded = { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false };
+      lastResult._loaded = { base: false, mx: false, records: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false };
     }
     if (!lastResult._errors) {
       lastResult._errors = {};
@@ -84,7 +93,7 @@ function lookup() {
   ensureResultObject();
   lastResult = {
     domain,
-    _loaded: { base: false, mx: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false },
+    _loaded: { base: false, mx: false, records: false, whois: false, dmarc: false, dkim: false, cname: false, reputation: false },
     _errors: {},
     guidance: [],
     acsReady: false
@@ -95,6 +104,7 @@ function lookup() {
   const requests = [
     { key: "base",  path: "/api/base"  },
     { key: "mx",    path: "/api/mx"    },
+    { key: "records", path: "/api/records" },
     { key: "whois", path: "/api/whois" },
     { key: "dmarc", path: "/api/dmarc" },
     { key: "dkim",  path: "/api/dkim"  },
@@ -135,6 +145,9 @@ function lookup() {
         lastResult.whoisRawText = data.rawWhoisText;
       } else if (key === 'reputation') {
         lastResult.reputation = data;
+      } else if (key === 'records') {
+        lastResult.dnsRecords = Array.isArray(data.records) ? data.records : [];
+        lastResult.dnsRecordsError = data.error || null;
       } else {
         Object.assign(lastResult, data);
       }
@@ -143,7 +156,10 @@ function lookup() {
 
       if (!downloadShown) {
         const dlBtn2 = document.getElementById("downloadBtn");
-        if (dlBtn2) dlBtn2.style.display = "inline-block";
+        if (dlBtn2) {
+          dlBtn2.style.display = "";
+          dlBtn2.disabled = false;
+        }
         downloadShown = true;
       }
 
@@ -174,6 +190,7 @@ function lookup() {
       lookupInProgress = false;
       btn.disabled = false;
       if (screenshotBtn) screenshotBtn.disabled = false;
+      if (dlBtn) dlBtn.disabled = false;
       btn.innerHTML = t('lookup');
     });
 }
@@ -199,6 +216,190 @@ function scrollToSection(key) {
       el.classList.remove('flash-active');
     }, 2400);
   }
+}
+
+let topSectionAnimationTimers = [];
+let resultSectionAnimationTimers = [];
+let resultSectionRevealTimer = null;
+let pendingResultsMarkup = null;
+let resultSectionsRevealAtMs = 0;
+let resultSectionsAnimationPending = false;
+const TOP_BUTTON_ANIMATION_START_MS = 80;
+const TOP_BUTTON_STAGGER_MS = 110;
+const TOP_BUTTON_FADE_DURATION_MS = 620;
+const TOP_SECTION_ANIMATION_START_MS = 120;
+const TOP_SECTION_ANIMATION_STAGGER_MS = 180;
+const TOP_SECTION_FADE_DURATION_MS = 880;
+const RESULT_SECTION_REVEAL_DELAY_MS = 180;
+const RESULT_SECTION_STAGGER_MS = 140;
+
+function getVisibleTopAnimationItems() {
+  return Array.from(document.querySelectorAll('.engage-top-item')).filter(el => {
+    if (!el) return false;
+    const computed = window.getComputedStyle(el);
+    return computed.display !== 'none';
+  });
+}
+
+function getVisibleEngageSections() {
+  return Array.from(document.querySelectorAll('.engage-section')).filter(el => {
+    if (!el) return false;
+    const computed = window.getComputedStyle(el);
+    return computed.display !== 'none';
+  });
+}
+
+function getTopSectionAnimationDurationMs() {
+  const topItemCount = getVisibleTopAnimationItems().length;
+  const sectionCount = getVisibleEngageSections().length;
+  const topItemsDuration = topItemCount > 0
+    ? TOP_BUTTON_ANIMATION_START_MS + ((topItemCount - 1) * TOP_BUTTON_STAGGER_MS) + TOP_BUTTON_FADE_DURATION_MS
+    : 0;
+  const sectionsDuration = sectionCount > 0
+    ? topItemsDuration + TOP_SECTION_ANIMATION_START_MS + ((sectionCount - 1) * TOP_SECTION_ANIMATION_STAGGER_MS) + TOP_SECTION_FADE_DURATION_MS
+    : topItemsDuration;
+  return Math.max(topItemsDuration, sectionsDuration);
+}
+
+function clearResultSectionAnimationTimers() {
+  resultSectionAnimationTimers.forEach(timer => clearTimeout(timer));
+  resultSectionAnimationTimers = [];
+  if (resultSectionRevealTimer) {
+    clearTimeout(resultSectionRevealTimer);
+    resultSectionRevealTimer = null;
+  }
+}
+
+function beginSectionAnimationCycle(options = {}) {
+  const includeTopIntro = !!options.includeTopIntro;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  const results = document.getElementById('results');
+  if (!results) return;
+
+  if (includeTopIntro) {
+    animateTopSections();
+  }
+
+  clearResultSectionAnimationTimers();
+  pendingResultsMarkup = null;
+  resultSectionsRevealAtMs = performance.now() + (includeTopIntro ? getTopSectionAnimationDurationMs() : 0) + RESULT_SECTION_REVEAL_DELAY_MS;
+  resultSectionsAnimationPending = true;
+  results.classList.add('results-fade-out');
+}
+
+function animateResultSectionsIn() {
+  const results = document.getElementById('results');
+  if (!results) return;
+
+  clearResultSectionAnimationTimers();
+  results.classList.remove('results-fade-out');
+
+  const cards = Array.from(results.children).filter(el => el && el.classList && el.classList.contains('card'));
+  if (cards.length === 0) return;
+
+  cards.forEach(card => {
+    card.classList.remove('result-card-in');
+    card.classList.add('result-card-prep');
+  });
+
+  void results.offsetWidth;
+
+  cards.forEach((card, index) => {
+    const timer = window.setTimeout(() => {
+      card.classList.add('result-card-in');
+    }, index * RESULT_SECTION_STAGGER_MS);
+    resultSectionAnimationTimers.push(timer);
+  });
+}
+
+function renderResultsMarkup(markup) {
+  const results = document.getElementById('results');
+  if (!results) return;
+
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  pendingResultsMarkup = markup;
+
+  const applyMarkup = (animateCards) => {
+    if (pendingResultsMarkup === null) return;
+
+    clearResultSectionAnimationTimers();
+    results.innerHTML = pendingResultsMarkup;
+    pendingResultsMarkup = null;
+
+    if (animateCards) {
+      animateResultSectionsIn();
+    } else {
+      results.classList.remove('results-fade-out');
+    }
+
+    startLoadingDotAnimations();
+  };
+
+  if (reducedMotion) {
+    resultSectionsAnimationPending = false;
+    applyMarkup(false);
+    return;
+  }
+
+  if (resultSectionsAnimationPending) {
+    if (resultSectionRevealTimer) {
+      clearTimeout(resultSectionRevealTimer);
+    }
+
+    const delay = Math.max(0, resultSectionsRevealAtMs - performance.now());
+    resultSectionRevealTimer = window.setTimeout(() => {
+      resultSectionRevealTimer = null;
+      resultSectionsAnimationPending = false;
+      applyMarkup(true);
+    }, delay);
+    return;
+  }
+
+  applyMarkup(false);
+}
+
+function animateTopSections() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  const body = document.body;
+  if (!body) return;
+
+  const topItems = getVisibleTopAnimationItems();
+  const sections = getVisibleEngageSections();
+
+  if (topItems.length === 0 && sections.length === 0) return;
+
+  topSectionAnimationTimers.forEach(timer => clearTimeout(timer));
+  topSectionAnimationTimers = [];
+
+  body.classList.add('section-fade-enabled');
+  topItems.forEach(el => {
+    el.classList.remove('engage-top-in');
+  });
+  sections.forEach(el => {
+    el.classList.remove('engage-in');
+  });
+
+  void body.offsetWidth;
+
+  topItems.forEach((el, index) => {
+    const timer = window.setTimeout(() => {
+      el.classList.add('engage-top-in');
+    }, TOP_BUTTON_ANIMATION_START_MS + (index * TOP_BUTTON_STAGGER_MS));
+    topSectionAnimationTimers.push(timer);
+  });
+
+  const topItemsDuration = topItems.length > 0
+    ? TOP_BUTTON_ANIMATION_START_MS + ((topItems.length - 1) * TOP_BUTTON_STAGGER_MS) + TOP_BUTTON_FADE_DURATION_MS
+    : 0;
+
+  sections.forEach((el, index) => {
+    const timer = window.setTimeout(() => {
+      el.classList.add('engage-in');
+    }, topItemsDuration + TOP_SECTION_ANIMATION_START_MS + (index * TOP_SECTION_ANIMATION_STAGGER_MS));
+    topSectionAnimationTimers.push(timer);
+  });
 }
 
 function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = '') {
@@ -248,13 +449,91 @@ function toggleMxDetails(element) {
   el.style.display = isOpen ? "block" : "none";
 }
 
+function formatTtlClock(totalSeconds) {
+  const total = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const secondsPerMinute = 60;
+  const secondsPerHour = 60 * secondsPerMinute;
+  const secondsPerDay = 24 * secondsPerHour;
+  const secondsPerMonth = 30 * secondsPerDay;
+
+  const months = Math.floor(total / secondsPerMonth);
+  let remaining = total % secondsPerMonth;
+  const days = Math.floor(remaining / secondsPerDay);
+  remaining = remaining % secondsPerDay;
+  const hours = Math.floor(remaining / secondsPerHour);
+  const minutes = Math.floor((remaining % secondsPerHour) / secondsPerMinute);
+  const seconds = remaining % secondsPerMinute;
+
+  const segments = [];
+  if (months > 0) {
+    segments.push(`${months}mo`);
+  }
+  if (days > 0) {
+    segments.push(`${days}d`);
+  }
+  if (hours > 0) {
+    segments.push(`${hours}h`);
+  }
+  if (minutes > 0) {
+    segments.push(`${minutes}m`);
+  }
+  if (seconds > 0 || segments.length === 0) {
+    segments.push(`${seconds}s`);
+  }
+  return segments.join(' ');
+}
+
+function formatDnsRecordTtl(ttlSeconds) {
+  if (ttlSeconds === null || ttlSeconds === undefined || ttlSeconds === '') {
+    return escapeHtml(t('unknown'));
+  }
+
+  const total = Math.max(0, Math.floor(Number(ttlSeconds) || 0));
+  return `${escapeHtml(String(total))}s (${escapeHtml(formatTtlClock(total))})`;
+}
+
+function renderDnsRecordsTable(records) {
+  const rows = Array.isArray(records) ? records.filter(Boolean) : [];
+  if (!rows.length) {
+    return `<div class="code">${escapeHtml(t('noRecordsAvailable'))}</div>`;
+  }
+
+  const body = rows.map(record => {
+    const name = escapeHtml(record.name || '');
+    const dnsClass = escapeHtml(record.class || 'IN');
+    const type = escapeHtml(record.type || '');
+    const details = Array.isArray(record.details) ? record.details.filter(Boolean) : [];
+    const data = details.length
+      ? `<div class="dns-record-detail-list">${details.map(item => `<div class="dns-record-detail-row"><span class="dns-record-detail-label">${escapeHtml(t(item.labelKey || ''))}:</span><span class="dns-record-detail-value">${escapeHtml(item.value || '')}</span></div>`).join('')}</div>`
+      : escapeHtml(record.data || '');
+    const ttl = formatDnsRecordTtl(record.ttlSeconds);
+    return `<tr><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+  }).join('');
+
+  return `
+    <div class="code code-lite" style="margin-top:6px;">
+      <table class="mx-table dns-records-table">
+        <thead>
+          <tr>
+            <th>${escapeHtml(t('dnsRecordName'))}</th>
+            <th>${escapeHtml(t('dnsRecordClass'))}</th>
+            <th>${escapeHtml(t('type'))}</th>
+            <th>${escapeHtml(t('dnsRecordData'))}</th>
+            <th>${escapeHtml(t('dnsRecordTtl'))}</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
 function render(r) {
   const loaded = (r && r._loaded) ? r._loaded : {};
   const errors = (r && r._errors) ? r._errors : {};
   const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
   const mxFallbackUsed = !!(r && r.mxFallbackUsed);
   const mxFallbackChecked = r && r.mxFallbackDomainChecked ? r.mxFallbackDomainChecked : null;
-  const allLoaded = !!(loaded.base && loaded.mx && loaded.whois && loaded.dmarc && loaded.dkim && loaded.cname && loaded.reputation);
+  const allLoaded = !!(loaded.base && loaded.mx && loaded.records && loaded.whois && loaded.dmarc && loaded.dkim && loaded.cname && loaded.reputation);
   const anyError = !!(errors && Object.keys(errors).length > 0);
   let gatheredAtLocal = r.collectedAt ? formatLocalDateTime(r.collectedAt) : null;
 
@@ -890,6 +1169,46 @@ function render(r) {
     `);
   }
 
+  if (!loaded.records && !errors.records) {
+    cards.push(card(
+      t('dnsRecords'),
+      t('loadingValue'),
+      'LOADING',
+      'tag-info',
+      'records',
+      true
+    ));
+  } else if (errors.records) {
+    cards.push(card(
+      t('dnsRecords'),
+      errors.records,
+      'ERROR',
+      'tag-fail',
+      'records',
+      true
+    ));
+  } else {
+    const recordsBody = renderDnsRecordsTable(r.dnsRecords);
+    const recordsErrorHtml = r.dnsRecordsError
+      ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('error'))}: ${escapeHtml(r.dnsRecordsError)}</div>`
+      : '';
+
+    cards.push(`
+      <div class="card" id="card-records">
+        <div class="card-header" onclick="toggleCard(this)">
+          <span class="chevron">&#x25BC;</span>
+          <span class="tag tag-info">${escapeHtml(t('info'))}</span>
+          <strong>${escapeHtml(t('dnsRecords'))}</strong>
+          <button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, 'records')">${escapeHtml(t('copy'))}</button>
+        </div>
+        <div id="field-records" class="card-content">
+          ${recordsBody}
+          ${recordsErrorHtml}
+        </div>
+      </div>
+    `);
+  }
+
   // MX (placed directly below Domain per UI request)
   if (!loaded.mx && !errors.mx) {
     cards.push(card(
@@ -1270,8 +1589,7 @@ function render(r) {
     </div>
   `);
 
-  document.getElementById("results").innerHTML = cards.join("");
-  startLoadingDotAnimations();
+  renderResultsMarkup(cards.join(""));
 }
 
 let _loadingDotsTimer = null;
@@ -1346,7 +1664,9 @@ window.addEventListener("load", function () {
   if (d) {
     document.getElementById("domainInput").value = d;
     toggleClearBtn();
-    lookup();
+    lookup({ animateTopIntro: true });
+  } else {
+    animateTopSections();
   }
 
   const reportBtn = document.getElementById("reportIssueBtn");

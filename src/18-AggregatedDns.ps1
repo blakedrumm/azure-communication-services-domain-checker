@@ -11,6 +11,7 @@ function Get-AcsDnsStatus {
 
   $base  = Get-DnsBaseStatus  -Domain $Domain
   $mx    = Get-DnsMxStatus    -Domain $Domain
+  $records = Get-DnsRecordsStatus -Domain $Domain
   $whois = Get-DomainRegistrationStatus -Domain $Domain
   $dmarc = Get-DnsDmarcStatus -Domain $Domain
   $dkim  = Get-DnsDkimStatus  -Domain $Domain
@@ -138,6 +139,9 @@ function Get-AcsDnsStatus {
         mxLookupDomain          = $mx.mxLookupDomain
         mxFallbackDomainChecked = $mx.mxFallbackDomainChecked
         mxFallbackUsed          = $mx.mxFallbackUsed
+
+        dnsRecords      = $records.records
+        dnsRecordsError = $records.error
 
         whoisSource       = $whois.source
         whoisLookupDomain = $whois.lookupDomain
