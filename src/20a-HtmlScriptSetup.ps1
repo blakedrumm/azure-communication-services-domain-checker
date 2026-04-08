@@ -60,7 +60,7 @@ async function ensureMsalLoaded() {
 </script>
 </head>
 
-<body>
+<body class="section-fade-enabled">
 
 <div class="container">
 

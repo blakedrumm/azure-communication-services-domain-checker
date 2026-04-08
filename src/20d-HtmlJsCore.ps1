@@ -7,7 +7,8 @@ function lookup(options = {}) {
   const dlBtn = document.getElementById("downloadBtn");
   const resultsEl = document.getElementById("results");
   const animateTopIntro = !!options.animateTopIntro;
-  const domain = normalizeDomain(input.value);
+  const domainSource = Object.prototype.hasOwnProperty.call(options, 'domainOverride') ? options.domainOverride : input.value;
+  const domain = normalizeDomain(domainSource);
   input.value = domain;
   toggleClearBtn();
 
@@ -24,6 +25,9 @@ function lookup(options = {}) {
   // Cancel any previous lookup's requests and start a new run
   const runId = ++activeLookup.runId;
   cancelInflightLookup();
+  dnsRecordsFilterState.query = '';
+  dnsRecordsFilterState.column = 'all';
+  selectedDnsRecordKeys.clear();
 
   beginSectionAnimationCycle({ includeTopIntro: animateTopIntro });
 
@@ -77,6 +81,19 @@ function lookup(options = {}) {
       activeLookup.controllers = (activeLookup.controllers || []).filter(c => c !== controller);
     }
   }
+
+function showTopBarItem(element) {
+  if (!element) return;
+  element.style.display = '';
+  if (document.body && document.body.classList.contains('section-fade-enabled') && element.classList && element.classList.contains('engage-top-item')) {
+    element.classList.add('engage-top-in');
+  }
+}
+
+function hideTopBarItem(element) {
+  if (!element) return;
+  element.style.display = 'none';
+}
 
   function ensureResultObject() {
     if (!lastResult || typeof lastResult !== "object") {
@@ -333,6 +350,8 @@ function renderResultsMarkup(markup) {
       results.classList.remove('results-fade-out');
     }
 
+    filterDnsRecordsTable();
+
     startLoadingDotAnimations();
   };
 
@@ -492,6 +511,105 @@ function formatDnsRecordTtl(ttlSeconds) {
   return `${escapeHtml(String(total))}s (${escapeHtml(formatTtlClock(total))})`;
 }
 
+const dnsRecordsFilterState = { query: '', column: 'all' };
+const selectedDnsRecordKeys = new Set();
+
+function getDnsRecordSelectionKey(record) {
+  if (!record || typeof record !== 'object') return '';
+  return [record.name || '', record.class || 'IN', record.type || '', record.data || '', String(record.ttlSeconds ?? '')].join('\u001F');
+}
+
+function getDnsRecordSearchText(record) {
+  if (!record || typeof record !== 'object') return '';
+
+  const details = Array.isArray(record.details) ? record.details.filter(Boolean) : [];
+  const detailText = details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ');
+  const raw = [
+    record.name || '',
+    record.class || 'IN',
+    record.type || '',
+    record.data || '',
+    formatDnsRecordTtl(record.ttlSeconds),
+    detailText
+  ].join(' ');
+
+  return String(raw).toLowerCase();
+}
+
+function syncDnsRecordsFilterState() {
+  const searchInput = document.getElementById('dnsRecordsSearchInput');
+  const columnSelect = document.getElementById('dnsRecordsFilterColumn');
+  dnsRecordsFilterState.query = searchInput ? String(searchInput.value || '').trim().toLowerCase() : '';
+  dnsRecordsFilterState.column = columnSelect ? String(columnSelect.value || 'all') : 'all';
+}
+
+function updateDnsRecordsFilterSummary(visibleCount, totalCount) {
+  const summary = document.getElementById('dnsRecordsFilterSummary');
+  if (!summary) return;
+  summary.textContent = t('dnsRecordsFilterSummary', { visible: String(visibleCount), total: String(totalCount) });
+}
+
+function filterDnsRecordsTable() {
+  syncDnsRecordsFilterState();
+
+  const tbody = document.getElementById('dnsRecordsTableBody');
+  const noMatches = document.getElementById('dnsRecordsNoMatches');
+  if (!tbody) return;
+
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  const query = dnsRecordsFilterState.query;
+  const column = dnsRecordsFilterState.column;
+  let visibleCount = 0;
+
+  rows.forEach(row => {
+    const haystack = column === 'all'
+      ? String(row.getAttribute('data-search') || '')
+      : String(row.getAttribute(`data-col-${column}`) || '');
+    const isMatch = !query || haystack.includes(query);
+    row.style.display = isMatch ? '' : 'none';
+    if (isMatch) visibleCount++;
+  });
+
+  if (noMatches) {
+    noMatches.style.display = visibleCount === 0 ? 'block' : 'none';
+  }
+
+  updateDnsRecordsFilterSummary(visibleCount, rows.length);
+}
+
+function clearDnsRecordsFilters() {
+  const searchInput = document.getElementById('dnsRecordsSearchInput');
+  const columnSelect = document.getElementById('dnsRecordsFilterColumn');
+  if (searchInput) searchInput.value = '';
+  if (columnSelect) columnSelect.value = 'all';
+  dnsRecordsFilterState.query = '';
+  dnsRecordsFilterState.column = 'all';
+  filterDnsRecordsTable();
+}
+
+function toggleDnsRecordRowSelection(row) {
+  if (!row) return;
+  const key = String(row.getAttribute('data-row-key') || '');
+  if (!key) return;
+
+  if (selectedDnsRecordKeys.has(key)) {
+    selectedDnsRecordKeys.delete(key);
+    row.classList.remove('dns-record-row-selected');
+    row.setAttribute('aria-pressed', 'false');
+  } else {
+    selectedDnsRecordKeys.add(key);
+    row.classList.add('dns-record-row-selected');
+    row.setAttribute('aria-pressed', 'true');
+  }
+}
+
+function handleDnsRecordRowKeydown(event, row) {
+  if (!event || !row) return;
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  toggleDnsRecordRowSelection(row);
+}
+
 function renderDnsRecordsTable(records) {
   const rows = Array.isArray(records) ? records.filter(Boolean) : [];
   if (!rows.length) {
@@ -503,16 +621,38 @@ function renderDnsRecordsTable(records) {
     const dnsClass = escapeHtml(record.class || 'IN');
     const type = escapeHtml(record.type || '');
     const details = Array.isArray(record.details) ? record.details.filter(Boolean) : [];
+    const ttl = formatDnsRecordTtl(record.ttlSeconds);
     const data = details.length
       ? `<div class="dns-record-detail-list">${details.map(item => `<div class="dns-record-detail-row"><span class="dns-record-detail-label">${escapeHtml(t(item.labelKey || ''))}:</span><span class="dns-record-detail-value">${escapeHtml(item.value || '')}</span></div>`).join('')}</div>`
       : escapeHtml(record.data || '');
-    const ttl = formatDnsRecordTtl(record.ttlSeconds);
-    return `<tr><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+    const rowKey = getDnsRecordSelectionKey(record);
+    const isSelected = selectedDnsRecordKeys.has(rowKey);
+    const searchText = getDnsRecordSearchText(record);
+    return `<tr class="dns-record-row${isSelected ? ' dns-record-row-selected' : ''}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
   }).join('');
 
   return `
     <div class="code code-lite" style="margin-top:6px;">
-      <table class="mx-table dns-records-table">
+      <div class="dns-records-toolbar hide-on-screenshot">
+        <label class="dns-records-toolbar-group" for="dnsRecordsSearchInput">
+          <span>${escapeHtml(t('dnsRecordsSearchLabel'))}</span>
+          <input id="dnsRecordsSearchInput" type="search" class="dns-records-search-input" placeholder="${escapeHtml(t('dnsRecordsSearchPlaceholder'))}" value="${escapeHtml(dnsRecordsFilterState.query)}" oninput="filterDnsRecordsTable()" />
+        </label>
+        <label class="dns-records-toolbar-group" for="dnsRecordsFilterColumn">
+          <span>${escapeHtml(t('dnsRecordsFilterColumn'))}</span>
+          <select id="dnsRecordsFilterColumn" class="dns-records-filter-select" onchange="filterDnsRecordsTable()">
+            <option value="all"${dnsRecordsFilterState.column === 'all' ? ' selected' : ''}>${escapeHtml(t('dnsRecordsFilterAllColumns'))}</option>
+            <option value="name"${dnsRecordsFilterState.column === 'name' ? ' selected' : ''}>${escapeHtml(t('dnsRecordName'))}</option>
+            <option value="class"${dnsRecordsFilterState.column === 'class' ? ' selected' : ''}>${escapeHtml(t('dnsRecordClass'))}</option>
+            <option value="type"${dnsRecordsFilterState.column === 'type' ? ' selected' : ''}>${escapeHtml(t('type'))}</option>
+            <option value="data"${dnsRecordsFilterState.column === 'data' ? ' selected' : ''}>${escapeHtml(t('dnsRecordData'))}</option>
+            <option value="ttl"${dnsRecordsFilterState.column === 'ttl' ? ' selected' : ''}>${escapeHtml(t('dnsRecordTtl'))}</option>
+          </select>
+        </label>
+        <button type="button" class="copy-btn dns-records-clear-btn" onclick="clearDnsRecordsFilters()">${escapeHtml(t('dnsRecordsClearFilters'))}</button>
+        <span id="dnsRecordsFilterSummary" class="dns-records-filter-summary">${escapeHtml(t('dnsRecordsFilterSummary', { visible: String(rows.length), total: String(rows.length) }))}</span>
+      </div>
+      <table id="dnsRecordsTable" class="mx-table dns-records-table">
         <thead>
           <tr>
             <th>${escapeHtml(t('dnsRecordName'))}</th>
@@ -522,8 +662,9 @@ function renderDnsRecordsTable(records) {
             <th>${escapeHtml(t('dnsRecordTtl'))}</th>
           </tr>
         </thead>
-        <tbody>${body}</tbody>
+        <tbody id="dnsRecordsTableBody">${body}</tbody>
       </table>
+      <div id="dnsRecordsNoMatches" class="dns-records-no-matches" style="display:none;">${escapeHtml(t('dnsRecordsNoMatches'))}</div>
     </div>`;
 }
 
@@ -1644,7 +1785,9 @@ document.getElementById('azureResourceSelect').addEventListener('change', functi
 });
 
 // Theme + query-domain initialization
-window.addEventListener("load", function () {
+function initializePage() {
+  const params = new URLSearchParams(window.location.search);
+  const bootstrapDomain = normalizeDomain(params.get("domain") || '');
   currentLanguage = detectLanguage();
 
   // 1. Check for saved theme
@@ -1657,27 +1800,88 @@ window.addEventListener("load", function () {
   applyTheme(savedTheme);
   applyLanguage(currentLanguage, false);
   loadHistory();
+  document.getElementById("domainInput").value = bootstrapDomain;
   toggleClearBtn();
-
-  const params = new URLSearchParams(window.location.search);
-  const d = params.get("domain");
-  if (d) {
-    document.getElementById("domainInput").value = d;
-    toggleClearBtn();
-    lookup({ animateTopIntro: true });
-  } else {
-    animateTopSections();
-  }
 
   const reportBtn = document.getElementById("reportIssueBtn");
   const issueUrl = (acsIssueUrl || '').trim();
   if (reportBtn) {
-    reportBtn.style.display = (!issueUrl || issueUrl.startsWith('__')) ? 'none' : '';
+    if (!issueUrl || issueUrl.startsWith('__')) {
+      hideTopBarItem(reportBtn);
+    } else {
+      showTopBarItem(reportBtn);
+    }
   }
 
   // Initialize Microsoft Entra ID authentication
-  initMsAuth();
-});
+  if (typeof initMsAuth === 'function') {
+    initMsAuth();
+  }
+
+  scheduleInitialLookup(bootstrapDomain);
+}
+
+let initialLookupHasStarted = false;
+let initialLookupIsScheduled = false;
+let pageInitializationHasStarted = false;
+let initialLookupRetryCount = 0;
+const INITIAL_LOOKUP_MAX_RETRIES = 20;
+const INITIAL_LOOKUP_RETRY_DELAY_MS = 50;
+
+function startPageInitialization() {
+  if (pageInitializationHasStarted) return;
+  pageInitializationHasStarted = true;
+  initializePage();
+}
+
+function scheduleInitialLookup(domain) {
+  const bootstrapDomain = normalizeDomain(domain || '');
+  if (initialLookupHasStarted || initialLookupIsScheduled) return;
+
+  if (!bootstrapDomain) {
+    initialLookupHasStarted = true;
+    animateTopSections();
+    return;
+  }
+
+  const input = document.getElementById("domainInput");
+  const lookupBtn = document.getElementById("lookupBtn");
+  if (!input || !lookupBtn || typeof lookup !== 'function') {
+    if (initialLookupRetryCount < INITIAL_LOOKUP_MAX_RETRIES) {
+      initialLookupRetryCount++;
+      window.setTimeout(() => scheduleInitialLookup(bootstrapDomain), INITIAL_LOOKUP_RETRY_DELAY_MS);
+    }
+    return;
+  }
+
+  input.value = bootstrapDomain;
+  toggleClearBtn();
+  initialLookupIsScheduled = true;
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      initialLookupIsScheduled = false;
+      initialLookupHasStarted = true;
+      lookup({ animateTopIntro: true, domainOverride: bootstrapDomain });
+    });
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', startPageInitialization, { once: true });
+} else {
+  window.setTimeout(startPageInitialization, 0);
+}
+
+window.addEventListener('load', () => {
+  const params = new URLSearchParams(window.location.search);
+  scheduleInitialLookup(params.get('domain') || '');
+}, { once: true });
+
+window.addEventListener('pageshow', () => {
+  const params = new URLSearchParams(window.location.search);
+  scheduleInitialLookup(params.get('domain') || '');
+}, { once: true });
 
 // ------------------- Microsoft Entra ID Authentication -------------------
 // Uses MSAL.js v2 with Authorization Code + PKCE (most secure SPA flow).

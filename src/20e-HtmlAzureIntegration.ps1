@@ -220,27 +220,27 @@ function updateAuthUI(authData) {
   const statusEl = document.getElementById('msAuthStatus');
 
   if (authData && msAuthAccount) {
-    if (signInBtn) signInBtn.style.display = 'none';
-    if (signOutBtn) signOutBtn.style.display = '';
+    if (signInBtn) hideTopBarItem(signInBtn);
+    if (signOutBtn) showTopBarItem(signOutBtn);
     if (statusEl) {
-      statusEl.style.display = '';
+      showTopBarItem(statusEl);
       const name = escapeHtml(authData.displayName || msAuthAccount.name || '');
       if (authData.isMicrosoftEmployee) {
-        statusEl.className = 'ms-auth-status ms-employee hide-on-screenshot';
+        statusEl.className = 'ms-auth-status ms-employee hide-on-screenshot engage-top-item engage-top-in';
         statusEl.innerHTML = '&#x2705; ' + name + ' (' + escapeHtml(t('authMicrosoftLabel')) + ')';
       } else {
-        statusEl.className = 'ms-auth-status ms-external hide-on-screenshot';
+        statusEl.className = 'ms-auth-status ms-external hide-on-screenshot engage-top-item engage-top-in';
         statusEl.innerHTML = '&#x1F464; ' + name;
       }
     }
   } else {
     if (signInBtn) {
-      signInBtn.style.display = '';
+      showTopBarItem(signInBtn);
       signInBtn.disabled = false;
       signInBtn.innerHTML = t('signInMicrosoft');
     }
-    if (signOutBtn) signOutBtn.style.display = 'none';
-    if (statusEl) statusEl.style.display = 'none';
+    if (signOutBtn) hideTopBarItem(signOutBtn);
+    if (statusEl) hideTopBarItem(statusEl);
     isMsEmployee = false;
   }
 

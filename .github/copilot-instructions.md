@@ -61,7 +61,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.12`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.22`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics` |
 
@@ -183,5 +183,5 @@ These PowerShell functions are defined in one file but called from multiple othe
 9. **If you add a new PowerShell function that can be called during HTTP request handling**, also add it to the `$functionNames` list in `22-RunspaceSetup.ps1` so it is imported into the runspace pool.
 10. If substantial changes are done, increment the version number. For example, if it was version 1.0.1, increment to 1.0.2. If the changes are breaking, increment to 1.1.0, and if it's a major change, increment to 2.0.0. This is important for metrics and for users to understand the level of change in each release. When the version is updated, also update the version shown in GitHub workflows and in `README.md`, and keep Copilot instructions in sync.
 11. If there are any substantial changes to the application, please update this document to reflect the new structure or logic! This is meant to be a living document that evolves with the codebase. With it being so large, it needs a guide to navigate effectively.
-12. In the DNS records table UI, ensure the Name and Type columns do not wrap; keep them single-line and rely on horizontal scrolling for readability. The Type column header and values should always stay on one line and not wrap. TTL values should show raw seconds plus a compact abbreviated duration such as `5d 2h 33s` when applicable, omitting zero-value units like `0m` and `0s` unless needed for a zero-duration value.
+12. In the DNS records table UI, ensure the Name and Type columns do not wrap; keep them single-line and rely on horizontal scrolling for readability. The Type column header and values should always stay on one line and not wrap. TTL values should show raw seconds plus a compact abbreviated duration such as `5d 2h 33s` when applicable, omitting zero-value units like `0m` and `0s` unless needed for a zero-duration value. The DNS records table should remain searchable/filterable and support toggling yellow row highlighting for screenshot-ready troubleshooting.
 13. When routes, API behavior, configuration, or other user-facing functionality changes, update `README.md` in the same change so repository documentation stays current. Additionally, maintain Copilot instructions to keep documentation in sync.

@@ -594,6 +594,98 @@ button.primary:disabled {
   border-top: none;
 }
 
+.dns-records-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: end;
+  margin-bottom: 10px;
+}
+
+.dns-records-toolbar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.dns-records-search-input,
+.dns-records-filter-select {
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.dns-records-search-input {
+  min-width: 240px;
+}
+
+.dns-records-filter-select {
+  min-width: 150px;
+  color-scheme: light;
+}
+
+.dns-records-filter-select option {
+  background: #ffffff;
+  color: #111827;
+}
+
+html.dark .dns-records-filter-select {
+  color-scheme: dark;
+  background: #111827;
+  color: #f9fafb;
+}
+
+html.dark .dns-records-filter-select option {
+  background: #111827;
+  color: #f9fafb;
+}
+
+.dns-records-clear-btn {
+  min-height: 32px;
+}
+
+.dns-records-filter-summary {
+  margin-left: auto;
+  align-self: center;
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.dns-records-table .dns-record-row {
+  cursor: pointer;
+}
+
+.dns-records-table .dns-record-row:hover td {
+  background: rgba(47, 128, 237, 0.08);
+}
+
+.dns-records-table .dns-record-row:focus-visible td {
+  outline: 2px solid #2f80ed;
+  outline-offset: -2px;
+}
+
+.dns-records-table .dns-record-row.dns-record-row-selected td {
+  background: #fff3a3;
+  color: #4a3b00;
+}
+
+html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
+  background: #8a6d00;
+  color: #fff7d1;
+}
+
+.dns-records-no-matches {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
 .dns-records-table td.dns-record-data {
   white-space: pre-wrap;
   word-break: break-word;
