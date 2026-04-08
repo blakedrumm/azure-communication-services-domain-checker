@@ -117,6 +117,7 @@ jobs:
 
       - name: Create Pull Request
         if: steps.check-update.outputs.needs_update == 'true'
+        id: create-pull-request
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -155,10 +156,35 @@ jobs:
             automated
           draft: false
 
+      - name: Enable Pull Request Auto-Merge
+        if: steps.check-update.outputs.needs_update == 'true' && contains(fromJSON('["created","updated"]'), steps.create-pull-request.outputs.pull-request-operation)
+        id: enable-auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL="${{ steps.create-pull-request.outputs.pull-request-url }}"
+          AUTO_MERGE_ENABLED=$(gh pr view "$PR_URL" --repo "${{ github.repository }}" --json autoMergeRequest --jq '.autoMergeRequest != null' || echo "false")
+
+          if [ "$AUTO_MERGE_ENABLED" = "true" ]; then
+            echo "Auto-merge is already enabled for $PR_URL"
+            echo "auto-merge-status=already-enabled" >> "$GITHUB_OUTPUT"
+          else
+            gh pr merge "$PR_URL" \
+              --repo "${{ github.repository }}" \
+              --squash \
+              --auto \
+              --delete-branch
+            echo "auto-merge-status=enabled" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Summary
         run: |
-          if [ "${{ steps.check-update.outputs.needs_update }}" = "true" ]; then
-            echo "✅ Pull request created for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
-          else
+          if [ "${{ steps.check-update.outputs.needs_update }}" != "true" ]; then
             echo "ℹ️ No update needed. Current version is already the latest."
+          elif [ "${{ steps.enable-auto-merge.outputs.auto-merge-status }}" = "enabled" ]; then
+            echo "✅ Auto-merge enabled for ${{ steps.create-pull-request.outputs.pull-request-url }} (MSAL Browser update to v${{ steps.get-version.outputs.version }})"
+          elif [ "${{ steps.enable-auto-merge.outputs.auto-merge-status }}" = "already-enabled" ]; then
+            echo "ℹ️ Auto-merge was already enabled for ${{ steps.create-pull-request.outputs.pull-request-url }} (MSAL Browser update to v${{ steps.get-version.outputs.version }})"
+          else
+            echo "ℹ️ Pull request state updated for MSAL Browser update to v${{ steps.get-version.outputs.version }}"
           fi
