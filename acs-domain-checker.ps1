@@ -1254,118 +1254,6 @@ function Get-DomainAgeDays {
   return [int][Math]::Floor($age.TotalDays)
 }
 
-# ------------------- SERVER STARTUP HELPERS -------------------
-# Probe a local URL to check if something is already listening (used during startup
-# to give a more helpful error message if the port is occupied).
-function Test-LocalHttpEndpoint {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$Url,
-
-    [int]$TimeoutSec = 3
-  )
-
-  try {
-    $previousProgressPreference = $ProgressPreference
-    $ProgressPreference = 'SilentlyContinue'
-    try {
-      $resp = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
-    }
-    finally {
-      $ProgressPreference = $previousProgressPreference
-    }
-    return [pscustomobject]@{
-      reachable = $true
-      statusCode = [int]$resp.StatusCode
-      statusDescription = [string]$resp.StatusDescription
-      content = [string]$resp.Content
-      error = $null
-    }
-  }
-  catch {
-    $webResp = $null
-    try { $webResp = $_.Exception.Response } catch { $webResp = $null }
-
-    if ($webResp) {
-      $statusCode = $null
-      $statusDescription = $null
-      $content = $null
-      try { $statusCode = [int]$webResp.StatusCode } catch { $statusCode = $null }
-      try { $statusDescription = [string]$webResp.StatusDescription } catch { $statusDescription = $null }
-      try {
-        $stream = $webResp.GetResponseStream()
-        if ($stream) {
-          $reader = [System.IO.StreamReader]::new($stream)
-          try { $content = $reader.ReadToEnd() } finally { try { $reader.Dispose() } catch { } }
-        }
-      } catch { $content = $null }
-
-      return [pscustomobject]@{
-        reachable = $true
-        statusCode = $statusCode
-        statusDescription = $statusDescription
-        content = $content
-        error = $null
-      }
-    }
-
-    return [pscustomobject]@{
-      reachable = $false
-      statusCode = $null
-      statusDescription = $null
-      content = $null
-      error = $_.Exception.Message
-    }
-  }
-}
-
-# Build a user-friendly error message when the HTTP listener fails to start.
-# Probes the port to determine whether another ACS instance, a different service,
-# or a permission issue is the cause.
-function Get-ListenerStartupErrorMessage {
-  param(
-    [Parameter(Mandatory = $true)]
-    [int]$Port,
-
-    [string]$DisplayUrl,
-
-    [string]$BindMode,
-
-    [string]$AttemptedPrefix,
-
-    [string]$AttemptedAddress,
-
-    [string]$FailureMessage
-  )
-
-  $baseUrl = if ([string]::IsNullOrWhiteSpace($DisplayUrl)) { "http://localhost:$Port" } else { $DisplayUrl.TrimEnd('/') }
-  $probe = $null
-  try { $probe = Test-LocalHttpEndpoint -Url "$baseUrl/" -TimeoutSec 2 } catch { $probe = $null }
-
-  if ($probe -and $probe.reachable) {
-    $looksLikeChecker = $false
-    if (-not [string]::IsNullOrWhiteSpace([string]$probe.content)) {
-      if ($probe.content -match 'ACS Email Domain Checker|Azure Communication Services\s*-\s*Email Domain Checker') {
-        $looksLikeChecker = $true
-      }
-    }
-
-    if ($looksLikeChecker) {
-      return "An ACS Email Domain Checker instance appears to already be running on port $Port at $baseUrl/. Reuse that instance, stop the existing process, or start this script with a different -Port value."
-    }
-
-    $statusPart = if ($null -ne $probe.statusCode) { " HTTP $($probe.statusCode)" } else { '' }
-    return "Port $Port is already in use by another HTTP service at $baseUrl/.$statusPart Stop the process using that port or start this script with a different -Port value."
-  }
-
-  $attemptTarget = if (-not [string]::IsNullOrWhiteSpace($AttemptedPrefix)) { $AttemptedPrefix }
-    elseif (-not [string]::IsNullOrWhiteSpace($AttemptedAddress)) { "$AttemptedAddress`:$Port" }
-    else { "port $Port" }
-
-  $reason = if ([string]::IsNullOrWhiteSpace($FailureMessage)) { 'The listener could not be started.' } else { $FailureMessage.Trim() }
-  return "Could not start the local web server on $attemptTarget. $reason Try a different -Port or adjust -Bind ($BindMode)."
-}
-
 # Break domain age into years, months, and days for human-friendly display.
 function Get-DomainAgeParts {
   param([string]$CreationDateUtc)
@@ -1449,11 +1337,6 @@ function Format-ExpiryRemaining {
 
   return ($segments -join ', ')
 }
-
-# ------------------- DMARC / SPF SECURITY GUIDANCE -------------------
-# Analyze a DMARC record and produce human-readable security recommendations.
-# Checks for weak policies (p=none), low pct values, relaxed alignment, missing
-# aggregate/forensic reporting, and missing subdomain policies.
 # ===== DMARC Security Guidance =====
 function Get-DmarcSecurityGuidance {
   param(
@@ -1945,6 +1828,118 @@ if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
 
 # ------------------- WEB SERVER STARTUP -------------------
 # ===== Web Server Startup =====
+# ------------------- SERVER STARTUP HELPERS -------------------
+# Probe a local URL to check if something is already listening (used during startup
+# to give a more helpful error message if the port is occupied).
+function Test-LocalHttpEndpoint {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Url,
+
+    [int]$TimeoutSec = 3
+  )
+
+  try {
+    $previousProgressPreference = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+      $resp = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+    }
+    finally {
+      $ProgressPreference = $previousProgressPreference
+    }
+    return [pscustomobject]@{
+      reachable = $true
+      statusCode = [int]$resp.StatusCode
+      statusDescription = [string]$resp.StatusDescription
+      content = [string]$resp.Content
+      error = $null
+    }
+  }
+  catch {
+    $webResp = $null
+    try { $webResp = $_.Exception.Response } catch { $webResp = $null }
+
+    if ($webResp) {
+      $statusCode = $null
+      $statusDescription = $null
+      $content = $null
+      try { $statusCode = [int]$webResp.StatusCode } catch { $statusCode = $null }
+      try { $statusDescription = [string]$webResp.StatusDescription } catch { $statusDescription = $null }
+      try {
+        $stream = $webResp.GetResponseStream()
+        if ($stream) {
+          $reader = [System.IO.StreamReader]::new($stream)
+          try { $content = $reader.ReadToEnd() } finally { try { $reader.Dispose() } catch { } }
+        }
+      } catch { $content = $null }
+
+      return [pscustomobject]@{
+        reachable = $true
+        statusCode = $statusCode
+        statusDescription = $statusDescription
+        content = $content
+        error = $null
+      }
+    }
+
+    return [pscustomobject]@{
+      reachable = $false
+      statusCode = $null
+      statusDescription = $null
+      content = $null
+      error = $_.Exception.Message
+    }
+  }
+}
+
+# Build a user-friendly error message when the HTTP listener fails to start.
+# Probes the port to determine whether another ACS instance, a different service,
+# or a permission issue is the cause.
+function Get-ListenerStartupErrorMessage {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$Port,
+
+    [string]$DisplayUrl,
+
+    [string]$BindMode,
+
+    [string]$AttemptedPrefix,
+
+    [string]$AttemptedAddress,
+
+    [string]$FailureMessage
+  )
+
+  $baseUrl = if ([string]::IsNullOrWhiteSpace($DisplayUrl)) { "http://localhost:$Port" } else { $DisplayUrl.TrimEnd('/') }
+  $probe = $null
+  try { $probe = Test-LocalHttpEndpoint -Url "$baseUrl/" -TimeoutSec 2 } catch { $probe = $null }
+
+  if ($probe -and $probe.reachable) {
+    $looksLikeChecker = $false
+    if (-not [string]::IsNullOrWhiteSpace([string]$probe.content)) {
+      if ($probe.content -match 'ACS Email Domain Checker|Azure Communication Services\s*-\s*Email Domain Checker') {
+        $looksLikeChecker = $true
+      }
+    }
+
+    if ($looksLikeChecker) {
+      return "An ACS Email Domain Checker instance appears to already be running on port $Port at $baseUrl/. Reuse that instance, stop the existing process, or start this script with a different -Port value."
+    }
+
+    $statusPart = if ($null -ne $probe.statusCode) { " HTTP $($probe.statusCode)" } else { '' }
+    return "Port $Port is already in use by another HTTP service at $baseUrl/.$statusPart Stop the process using that port or start this script with a different -Port value."
+  }
+
+  $attemptTarget = if (-not [string]::IsNullOrWhiteSpace($AttemptedPrefix)) { $AttemptedPrefix }
+    elseif (-not [string]::IsNullOrWhiteSpace($AttemptedAddress)) { "$AttemptedAddress`:$Port" }
+    else { "port $Port" }
+
+  $reason = if ([string]::IsNullOrWhiteSpace($FailureMessage)) { 'The listener could not be started.' } else { $FailureMessage.Trim() }
+  return "Could not start the local web server on $attemptTarget. $reason Try a different -Port or adjust -Bind ($BindMode)."
+}
+
 # Attempt to start a local HTTP listener. The script tries HttpListener first (native .NET HTTP server).
 # If that fails (e.g., on Linux without root, or URL ACL issues on Windows), it falls back to a
 # raw TcpListener-based server that manually parses HTTP/1.1 requests.
@@ -6572,6 +6567,9 @@ ul.guidance li {
   }
 }
 </style>
+'@
+# ===== HTML Body Structure & Script Setup =====
+$htmlPage += @'
 
 <!-- html2canvas for screenshot capture -->
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
@@ -6715,6 +6713,9 @@ let lastResult = null;
 const HISTORY_KEY = "acsDomainHistory";
 const LANG_KEY = "acsLanguage";
 
+'@
+# ===== JavaScript Translations & i18n Data =====
+$htmlPage += @'
 const TRANSLATIONS = {
   en: {
     languageName: 'English',
@@ -10143,6 +10144,9 @@ let lastAuthData = null;
 
 let activeLookup = { runId: 0, controllers: [] };
 
+'@
+# ===== JavaScript Utility Functions =====
+$htmlPage += @'
 function normalizeLanguageCode(lang) {
   const value = String(lang || '').trim().toLowerCase();
   if (!value) return 'en';
@@ -11409,6 +11413,9 @@ function reportIssue() {
   window.open(targetUrl, '_blank', 'noopener');
 }
 
+'@
+# ===== JavaScript Core UI (Lookup, Render, Events) =====
+$htmlPage += @'
 function lookup() {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
@@ -12791,6 +12798,9 @@ let azureDiagnosticsState = {
   isBusy: false
 };
 
+'@
+# ===== JavaScript Azure / MSAL Integration =====
+$htmlPage += @'
 function getMsalConfig() {
   // The client ID is injected server-side from ACS_ENTRA_CLIENT_ID env var.
   // If not set, auth buttons remain visible but disabled with guidance.
@@ -13713,7 +13723,7 @@ async function runAzureQueryTemplate(templateName) {
 </body>
 </html>
 '@
-
+# ===== HTML Post-Processing (Template Replacements) =====
 $htmlPage = $htmlPage.Replace('__APP_VERSION__', $script:AppVersion)
 
 # Inject Entra ID (Azure AD) client ID for Microsoft employee authentication.

@@ -1,4 +1,116 @@
 # ===== Web Server Startup =====
+# ------------------- SERVER STARTUP HELPERS -------------------
+# Probe a local URL to check if something is already listening (used during startup
+# to give a more helpful error message if the port is occupied).
+function Test-LocalHttpEndpoint {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Url,
+
+    [int]$TimeoutSec = 3
+  )
+
+  try {
+    $previousProgressPreference = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+      $resp = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+    }
+    finally {
+      $ProgressPreference = $previousProgressPreference
+    }
+    return [pscustomobject]@{
+      reachable = $true
+      statusCode = [int]$resp.StatusCode
+      statusDescription = [string]$resp.StatusDescription
+      content = [string]$resp.Content
+      error = $null
+    }
+  }
+  catch {
+    $webResp = $null
+    try { $webResp = $_.Exception.Response } catch { $webResp = $null }
+
+    if ($webResp) {
+      $statusCode = $null
+      $statusDescription = $null
+      $content = $null
+      try { $statusCode = [int]$webResp.StatusCode } catch { $statusCode = $null }
+      try { $statusDescription = [string]$webResp.StatusDescription } catch { $statusDescription = $null }
+      try {
+        $stream = $webResp.GetResponseStream()
+        if ($stream) {
+          $reader = [System.IO.StreamReader]::new($stream)
+          try { $content = $reader.ReadToEnd() } finally { try { $reader.Dispose() } catch { } }
+        }
+      } catch { $content = $null }
+
+      return [pscustomobject]@{
+        reachable = $true
+        statusCode = $statusCode
+        statusDescription = $statusDescription
+        content = $content
+        error = $null
+      }
+    }
+
+    return [pscustomobject]@{
+      reachable = $false
+      statusCode = $null
+      statusDescription = $null
+      content = $null
+      error = $_.Exception.Message
+    }
+  }
+}
+
+# Build a user-friendly error message when the HTTP listener fails to start.
+# Probes the port to determine whether another ACS instance, a different service,
+# or a permission issue is the cause.
+function Get-ListenerStartupErrorMessage {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$Port,
+
+    [string]$DisplayUrl,
+
+    [string]$BindMode,
+
+    [string]$AttemptedPrefix,
+
+    [string]$AttemptedAddress,
+
+    [string]$FailureMessage
+  )
+
+  $baseUrl = if ([string]::IsNullOrWhiteSpace($DisplayUrl)) { "http://localhost:$Port" } else { $DisplayUrl.TrimEnd('/') }
+  $probe = $null
+  try { $probe = Test-LocalHttpEndpoint -Url "$baseUrl/" -TimeoutSec 2 } catch { $probe = $null }
+
+  if ($probe -and $probe.reachable) {
+    $looksLikeChecker = $false
+    if (-not [string]::IsNullOrWhiteSpace([string]$probe.content)) {
+      if ($probe.content -match 'ACS Email Domain Checker|Azure Communication Services\s*-\s*Email Domain Checker') {
+        $looksLikeChecker = $true
+      }
+    }
+
+    if ($looksLikeChecker) {
+      return "An ACS Email Domain Checker instance appears to already be running on port $Port at $baseUrl/. Reuse that instance, stop the existing process, or start this script with a different -Port value."
+    }
+
+    $statusPart = if ($null -ne $probe.statusCode) { " HTTP $($probe.statusCode)" } else { '' }
+    return "Port $Port is already in use by another HTTP service at $baseUrl/.$statusPart Stop the process using that port or start this script with a different -Port value."
+  }
+
+  $attemptTarget = if (-not [string]::IsNullOrWhiteSpace($AttemptedPrefix)) { $AttemptedPrefix }
+    elseif (-not [string]::IsNullOrWhiteSpace($AttemptedAddress)) { "$AttemptedAddress`:$Port" }
+    else { "port $Port" }
+
+  $reason = if ([string]::IsNullOrWhiteSpace($FailureMessage)) { 'The listener could not be started.' } else { $FailureMessage.Trim() }
+  return "Could not start the local web server on $attemptTarget. $reason Try a different -Port or adjust -Bind ($BindMode)."
+}
+
 # Attempt to start a local HTTP listener. The script tries HttpListener first (native .NET HTTP server).
 # If that fails (e.g., on Linux without root, or URL ACL issues on Windows), it falls back to a
 # raw TcpListener-based server that manually parses HTTP/1.1 requests.
