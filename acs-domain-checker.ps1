@@ -159,6 +159,7 @@ if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
   $AnonymousMetricsFile = $env:ACS_ANON_METRICS_FILE
 }
 
+# ===== Domain Parsing Utilities =====
 # ------------------- DOMAIN PARSING UTILITIES -------------------
 # Heuristic: derive a registrable ("pay-level") domain from an arbitrary subdomain.
 # Uses a small hardcoded subset of the Public Suffix List (PSL) to handle common
@@ -235,6 +236,7 @@ function Get-ParentDomains {
 
 # Quick check: does the raw whois text contain actual registration data,
 # or is it an error/"not found" response from the whois server?
+# ===== WHOIS Lookup Providers =====
 function Test-WhoisRawTextHasUsableData {
   param([string]$Text)
 
@@ -848,6 +850,7 @@ if ([string]::IsNullOrWhiteSpace($DohEndpoint)) {
   }
 }
 
+# ===== Anonymous Metrics Hash Key & App Version =====
 # ------------------- ANONYMOUS METRICS HASH KEY -------------------
 # The hash key is used to HMAC-SHA256 domain names before storing them in metrics.
 # This ensures no plaintext domain names are ever persisted, only irreversible hashes.
@@ -881,7 +884,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '1.4.5'
+$script:AppVersion = '2.0.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -964,6 +967,7 @@ if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
   $env:ACS_DNS_DOH_ENDPOINT = $DohEndpoint
 }
 
+# ===== RDAP / Whois API Lookup Providers =====
 # ============================
 # RDAP lookup helpers (fixed)
 # - Safer URL joining (no operator precedence surprises)
@@ -1188,6 +1192,7 @@ function Invoke-GoDaddyWhoisLookup {
 # Try to parse a date string (from WHOIS/RDAP output) into a normalized UTC ISO 8601 format.
 # Handles common timezone abbreviations (e.g., CLST, CLT) that .NET's parser often rejects.
 # Returns $null if parsing fails entirely.
+# ===== Date / Age Formatting Utilities =====
 function ConvertTo-NullableUtcIso8601 {
   param([object]$Value)
 
@@ -1449,6 +1454,7 @@ function Format-ExpiryRemaining {
 # Analyze a DMARC record and produce human-readable security recommendations.
 # Checks for weak policies (p=none), low pct values, relaxed alignment, missing
 # aggregate/forensic reporting, and missing subdomain policies.
+# ===== DMARC Security Guidance =====
 function Get-DmarcSecurityGuidance {
   param(
     [string]$DmarcRecord,
@@ -1533,6 +1539,7 @@ function Get-DmarcSecurityGuidance {
 # Sysinternals whois, Linux whois, TCP whois, WhoisXML). Returns a unified object with
 # creation/expiry dates, registrar, domain age assessment, and any errors.
 # If the exact domain fails, walks up parent domains as a last resort.
+# ===== Domain Registration Status =====
 function Get-DomainRegistrationStatus {
   param(
     [Parameter(Mandatory = $true)]
@@ -1937,6 +1944,7 @@ if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
 }
 
 # ------------------- WEB SERVER STARTUP -------------------
+# ===== Web Server Startup =====
 # Attempt to start a local HTTP listener. The script tries HttpListener first (native .NET HTTP server).
 # If that fails (e.g., on Linux without root, or URL ACL issues on Windows), it falls back to a
 # raw TcpListener-based server that manually parses HTTP/1.1 requests.
@@ -2039,6 +2047,7 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
     return
   }
 }
+# ===== Anonymous Metrics (In-Memory & Persistence) =====
 
 # ------------------- ANONYMOUS METRICS (IN-MEMORY) -------------------
 # Metrics are kept in-memory for this process lifetime only.
@@ -2399,6 +2408,7 @@ function Save-AnonymousMetricsPersisted {
 # ------------------- SESSION & COOKIE HANDLING -------------------
 # Generate a random 32-character hex session ID. Used only for metrics counting;
 # not derived from any PII.
+# ===== Session & Cookie Handling =====
 function New-AnonSessionId {
   [Guid]::NewGuid().ToString('N')
 }
@@ -2686,6 +2696,7 @@ if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
 # ------------------- HTTP RESPONSE HELPERS -------------------
 # Set security-related HTTP headers on every response:
 # CORS, Content Security Policy, X-Frame-Options, etc.
+# ===== HTTP Response Helpers =====
 function Set-SecurityHeaders {
   param(
     $Context,
@@ -2860,6 +2871,7 @@ function Write-Html {
 # Perform a DNS query using DNS-over-HTTPS (DoH).
 # Sends a JSON-format query (RFC 8484) to the configured DoH endpoint (default: Cloudflare).
 # Returns objects shaped like Resolve-DnsName output for downstream compatibility.
+# ===== DNS Resolution Layer =====
 function Resolve-DohName {
   param(
     [Parameter(Mandatory = $true)]
@@ -3053,6 +3065,7 @@ function Get-MxRecordObjects {
 # Normalize raw user input into a clean domain name.
 # Accepts: plain domain, email address (takes part after @), or URL (extracts hostname).
 # Strips wildcard prefixes (*.) and surrounding dots, then lowercases the result.
+# ===== Input Normalization & Validation =====
 function ConvertTo-NormalizedDomain {
   param([string]$Raw)
 
@@ -3121,6 +3134,7 @@ function Test-DomainName {
 # "include:spf.protection.outlook.com".
 
 # Split an SPF record string into individual whitespace-delimited tokens.
+# ===== SPF Analysis Engine =====
 function Get-SpfTokens {
   param([string]$SpfRecord)
 
@@ -3944,6 +3958,7 @@ function Get-SpfGuidance {
 
 # ------------------- REQUEST HANDLING UTILITIES -------------------
 # Log a request to the console. Intentionally omits IP addresses and user agents (PII).
+# ===== Request Handling Utilities =====
 function Write-RequestLog {
   param(
     $Context,
@@ -4113,6 +4128,7 @@ function Test-RateLimit {
 
 # Check root TXT records for SPF (v=spf1...) and ACS verification (ms-domain-verification...).
 # Also resolves A/AAAA for the domain and falls back to parent domains if needed.
+# ===== Individual DNS Check Functions =====
 function Get-DnsBaseStatus {
   param([string]$Domain)
 
@@ -4960,6 +4976,7 @@ function Get-DnsCnameStatus {
 # (e.g., 2.1.168.192.bl.spamcop.net). An A record response means the IP is listed.
 
 # Reverse the octets of an IPv4 address for DNSBL queries.
+# ===== DNSBL / Reputation Checking =====
 function ConvertTo-ReversedIpv4 {
   param(
     [Parameter(Mandatory = $true)]
@@ -5331,6 +5348,7 @@ function Get-DnsReputationStatus {
   }
 }
 
+# ===== Aggregated DNS Readiness =====
 # ------------------- AGGREGATED DNS READINESS -------------------
 # The main "check everything" function called by /dns and the CLI -TestDomain mode.
 # Runs all individual checks (TXT/SPF, MX, DMARC, DKIM, CNAME, WHOIS) and assembles
@@ -5501,6 +5519,7 @@ function Get-AcsDnsStatus {
     }
 }
 
+# ===== CLI One-Shot Mode =====
 # ------------------- CLI ONE-SHOT MODE -------------------
 # When -TestDomain is provided, run a full check, print JSON to stdout, and exit
 # without starting the web server.
@@ -5528,6 +5547,7 @@ if (-not [string]::IsNullOrWhiteSpace($TestDomain)) {
   return
 }
 
+# ===== Embedded HTML / UI (Single Page Application) =====
 # ------------------- HTML / UI -------------------
 # The entire web UI is embedded as a PowerShell here-string below.
 # This makes the script a single-file distribution — no external HTML, CSS, or JS files needed.
@@ -13715,6 +13735,7 @@ $issueUrl = $env:ACS_ISSUE_URL
 if ([string]::IsNullOrWhiteSpace($issueUrl)) { $issueUrl = '' }
 $htmlPage = $htmlPage.Replace('__ACS_ISSUE_URL__', $issueUrl)
 
+# ===== Static Pages (Terms of Service, Privacy) & MSAL Setup =====
 # ------------------- Embedded Terms of Service page -------------------
 $script:TosPageHtml = @'
 <!DOCTYPE html>
@@ -14187,6 +14208,7 @@ if ([string]::IsNullOrWhiteSpace($entraTenantId)) {
   Write-Information -InformationAction Continue -MessageData "ACS_ENTRA_TENANT_ID detected"
 }
 
+# ===== Runspace Pool Initialization =====
 # ------------------- MAIN LOOP -------------------
 # Request handling uses a RunspacePool to process multiple HTTP requests concurrently.
 # This keeps the UI responsive while DNS lookups are in flight.
@@ -14318,6 +14340,7 @@ function Invoke-InflightCleanup {
   }
 }
 
+# ===== Per-Request Handler Script =====
 # ------------------- PER-REQUEST HANDLER SCRIPT -------------------
 # This here-string is the script block that runs inside each RunspacePool worker
 # for every incoming HTTP request. It receives the request context, routes by URL path,
@@ -14715,6 +14738,7 @@ catch {
   try { if ($ctx -and $ctx.Response) { $ctx.Response.Close() } } catch {}
 }
 '@
+# ===== HTTP Accept Loop & TcpListener Shim =====
 
 try {
   function ConvertFrom-QueryString {
@@ -14964,6 +14988,7 @@ try {
 catch {
   Write-Error -ErrorRecord $_
 }
+# ===== Graceful Shutdown =====
 finally {
 # ------------------- GRACEFUL SHUTDOWN -------------------
 # Stop listeners, persist final metrics, drain in-flight requests, and dispose the pool.
