@@ -62,6 +62,7 @@ function Get-DomainRegistrationStatus {
   $raw = $null
   $whoisError = $null
   $rawWhoisText = $null
+  $rawRdapText = $null
 
   $rdapError = $null
   $goDaddyError = $null
@@ -78,6 +79,11 @@ function Get-DomainRegistrationStatus {
     # Throw on transport failures so fallback providers can be invoked.
     $raw = Invoke-RdapLookup -Domain $whoisDomain -ThrowOnError
     $source = 'RDAP'
+    try {
+      $rawRdapText = ($raw | ConvertTo-Json -Depth 20)
+    } catch {
+      $rawRdapText = $null
+    }
 
     if ($raw -and $raw.events) {
       foreach ($ev in @($raw.events)) {
@@ -427,6 +433,7 @@ function Get-DomainRegistrationStatus {
         newDomainThresholdDays = $NewDomainWarnThresholdDays
         newDomainWarnThresholdDays = $NewDomainWarnThresholdDays
         newDomainErrorThresholdDays = $NewDomainErrorThresholdDays
+        rawRdapText = $null
         error = $err.Trim()
       }
     }
@@ -484,6 +491,7 @@ function Get-DomainRegistrationStatus {
     newDomainWarnThresholdDays = $NewDomainWarnThresholdDays
     newDomainErrorThresholdDays = $NewDomainErrorThresholdDays
     rawWhoisText = $rawWhoisText
+    rawRdapText = $rawRdapText
     error = $whoisError
   }
 }

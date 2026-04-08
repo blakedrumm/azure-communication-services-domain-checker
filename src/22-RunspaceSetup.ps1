@@ -9,8 +9,9 @@
 # Maximum number of concurrent request-handling runspaces.
 $maxConcurrentRequests = 64
 
-# Per-domain throttling: only one lookup per domain at a time.
-# This prevents a single browser from hammering DNS (e.g., repeated refreshes) for the same domain.
+# Per-domain/route throttling: only one lookup for the same domain + endpoint at a time.
+# This prevents duplicate requests from hammering DNS while still allowing independent
+# lookup stages (TXT, MX, WHOIS, DMARC, etc.) to run in parallel for the same domain.
 
 $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Threading.SemaphoreSlim]]::new([System.StringComparer]::OrdinalIgnoreCase)
 

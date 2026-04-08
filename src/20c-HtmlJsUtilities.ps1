@@ -1168,6 +1168,18 @@ function copyField(btn, key) {
       }
     }
   }
+  if (fieldKey === "whois") {
+    const rawWhois = document.getElementById("whoisRawData");
+    if (rawWhois) {
+      const display = (window.getComputedStyle ? getComputedStyle(rawWhois).display : rawWhois.style.display);
+      if (display && display !== "none") {
+        const rawText = (rawWhois.innerText || rawWhois.textContent || "").trim();
+        if (rawText) {
+          text = (String(text || "").trimEnd() + "\n\n--- Raw WHOIS / RDAP Data ---\n" + rawText).trim();
+        }
+      }
+    }
+  }
   if (!navigator.clipboard) {
     setStatus(t('clipboardUnavailable'));
     return;

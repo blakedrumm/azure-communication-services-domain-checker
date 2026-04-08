@@ -783,6 +783,18 @@ ul.guidance li {
   opacity: 1;
 }
 
+.status-loading-dots {
+  margin-left: 6px;
+  font-size: 1.15em;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--fg);
+}
+
+.status-loading-dots .loading-dot {
+  min-width: 0.4em;
+}
+
 .input-wrapper {
   position: relative;
   flex: 1;

@@ -133,6 +133,7 @@ const TRANSLATIONS = {
     newDomainUnderDays: 'New domain (under {days} days){suffix}',
     noteDomainLessThanDays: 'Domain is less than {days} days old.',
     rawLabel: 'Raw',
+    rawWhoisRdapDataButton: 'Raw WHOIS / RDAP data',
     zonesQueried: 'Zones queried',
     totalQueries: 'Total queries',
     errorsCount: 'Errors',

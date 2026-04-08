@@ -160,6 +160,7 @@ function hideTopBarItem(element) {
         lastResult.whoisNewDomainErrorThresholdDays = data.newDomainErrorThresholdDays;
         lastResult.whoisError = data.error;
         lastResult.whoisRawText = data.rawWhoisText;
+        lastResult.whoisRawRdapText = data.rawRdapText;
       } else if (key === 'reputation') {
         lastResult.reputation = data;
       } else if (key === 'records') {
@@ -233,6 +234,19 @@ function scrollToSection(key) {
       el.classList.remove('flash-active');
     }, 2400);
   }
+}
+
+function showTopBarItem(element) {
+  if (!element) return;
+  element.style.display = '';
+  if (document.body && document.body.classList.contains('section-fade-enabled') && element.classList && element.classList.contains('engage-top-item')) {
+    element.classList.add('engage-top-in');
+  }
+}
+
+function hideTopBarItem(element) {
+  if (!element) return;
+  element.style.display = 'none';
 }
 
 let topSectionAnimationTimers = [];
@@ -468,6 +482,16 @@ function toggleMxDetails(element) {
   el.style.display = isOpen ? "block" : "none";
 }
 
+function toggleWhoisRaw(element) {
+  const el = document.getElementById("whoisRawData");
+  if (!el || !element) return;
+
+  const current = el.style.display;
+  const isOpen = (!current || current === "none");
+  element.textContent = isOpen ? (element.dataset.closeLabel || `${t('rawWhoisRdapDataButton')} -`) : (element.dataset.openLabel || `${t('rawWhoisRdapDataButton')} +`);
+  el.style.display = isOpen ? "block" : "none";
+}
+
 function formatTtlClock(totalSeconds) {
   const total = Math.max(0, Math.floor(Number(totalSeconds) || 0));
   const secondsPerMinute = 60;
@@ -687,7 +711,7 @@ function render(r) {
   let statusText = "";
 
   if (!allLoaded) {
-    statusText = escapeHtml(t('statusChecking', { domain: r.domain || '' }));
+    statusText = `${escapeHtml(t('statusChecking', { domain: r.domain || '' }))} <span class="loading-dots status-loading-dots"><span class="loading-dot active">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span></span>`;
   } else if (anyError) {
     statusText = escapeHtml(t('statusSomeChecksFailed'));
   } else if (loaded.base && r.dnsFailed) {
@@ -865,20 +889,6 @@ function render(r) {
     // But modifying quotaRow is harder with replace_string.
     // Let's look at how quotaRow is defined:
     // const quotaRow = (name, state, detail, infoTitle = null, targetId = null) => { ... const nameHtml = escapeHtml(name) ... }
-
-    // Wait, I can redefine quotaRow or pass a special marker. Or simpler:
-    // The user wants the link "beside the text (Reputation (DNSBL))".
-
-    // Let's modify the usage of quotaRow for Reputation to hack it? No, escapeHtml prevents that.
-
-    // I need to modify the quotaRow definition or the specific calls.
-    // Since I can only replace strings, and the quotaRow definition is local to render(), I can modify quotaRow safely if I find it.
-
-    // Let's see where quotaRow is defined.
-    // const quotaRow = (name, state, detail, infoTitle = null, targetId = null) => {
-    //   const badge = `<span class="tag ${quotaStateClass(state)} status-pill">${escapeHtml(state.toUpperCase())}</span>`;
-    //   const nameHtml = escapeHtml(name) + (infoTitle ? ` <span class="info-dot" title="${escapeHtml(infoTitle)}">i</span>` : "");
-    //   ...
 
     // I will modify `quotaRow` to accept an optional `extraHtml` argument or similar, OR just handle the link insertion inside the Reputation items.
     // But `quotaRow` is used for MX, Domain Reg, SPF too.
@@ -1079,6 +1089,8 @@ function render(r) {
       : (r.dmarc ? t('verified') : t('notStarted')));
 
   const plainTable = [];
+  const htmlTableRows = [];
+  const addRow = (name, value) => { htmlTableRows.push(`<tr><th>${escapeHtml(name)}</th><td>${escapeHtml(value)}</td></tr>`); };
   plainTable.push('| Field | Value |');
   plainTable.push('| --- | --- |');
   plainTable.push(`| ${t('domainNameLabel')} | ${domainForCopy || t('unknown')} |`);
@@ -1091,9 +1103,6 @@ function render(r) {
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
   plainTable.push(`| ${t('reputationDnsbl')} | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
-
-  const htmlTableRows = [];
-  const addRow = (name, value) => { htmlTableRows.push(`<tr><th>${escapeHtml(name)}</th><td>${escapeHtml(value)}</td></tr>`); };
   addRow(t('domainNameLabel'), domainForCopy || t('unknown'));
   addRow(t('domainStatusLabel'), domainStatusText);
   addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
@@ -1228,8 +1237,35 @@ function render(r) {
       addWhoisRow(t('statusLabel'), t('noteDomainLessThanDays', { days: String(r.whoisNewDomainWarnThresholdDays || r.whoisNewDomainThresholdDays || 180) }));
     }
 
-    const rawWhoisHtml = (r.whoisRawText && !r.whoisCreationDateUtc && !r.whoisExpiryDateUtc && !r.whoisRegistrar && !r.whoisRegistrant)
-      ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('rawLabel'))} (${escapeHtml(r.whoisSource || t('rawWhoisLabel'))}):\n${escapeHtml(r.whoisRawText)}</div>`
+    const hasStructuredWhoisDetails = !!(
+      r.whoisCreationDateUtc ||
+      r.whoisExpiryDateUtc ||
+      r.whoisRegistrar ||
+      r.whoisRegistrant ||
+      r.whoisAgeHuman ||
+      r.whoisExpiryHuman ||
+      (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) ||
+      (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) ||
+      isExpired ||
+      isYoung ||
+      isVeryYoung
+    );
+    const rawSections = [];
+    if (r.whoisRawRdapText) {
+      rawSections.push(`${t('rawLabel')} (RDAP):\n${r.whoisRawRdapText}`);
+    }
+    if (r.whoisRawText) {
+      rawSections.push(`${t('rawLabel')} (${r.whoisSource || t('rawWhoisLabel')}):\n${r.whoisRawText}`);
+    }
+    const hasRawRegistrationData = rawSections.length > 0;
+    const showRawInline = hasRawRegistrationData && !hasStructuredWhoisDetails;
+    const rawWhoisButtonOpenLabel = `${t('rawWhoisRdapDataButton')} +`;
+    const rawWhoisButtonCloseLabel = `${t('rawWhoisRdapDataButton')} -`;
+    const rawWhoisButtonHtml = (hasRawRegistrationData && !showRawInline)
+      ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-top:10px;" data-open-label="${escapeHtml(rawWhoisButtonOpenLabel)}" data-close-label="${escapeHtml(rawWhoisButtonCloseLabel)}" onclick="event.stopPropagation(); toggleWhoisRaw(this)">${escapeHtml(rawWhoisButtonOpenLabel)}</button>`
+      : '';
+    const rawWhoisHtml = hasRawRegistrationData
+      ? `<div id="whoisRawData" class="code" style="margin-top:10px;${showRawInline ? '' : ' display:none;'}">${escapeHtml(rawSections.join('\n\n'))}</div>`
       : '';
     const whoisErrorHtml = r.whoisError
       ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('error'))}: ${escapeHtml(r.whoisError)}</div>`
@@ -1258,6 +1294,7 @@ function render(r) {
     </div>
     <div id="field-whois" class="card-content">
       ${whoisRows.length > 0 ? `<div class="kv-grid">${whoisRows.join('')}</div>` : `<div class="code">${escapeHtml(t('noRegistrationInformation'))}</div>`}
+      ${rawWhoisButtonHtml}
       ${rawWhoisHtml}
       ${whoisErrorHtml}
     </div>
@@ -1604,8 +1641,7 @@ function render(r) {
                `${t('errorsCount')}: ${errorCount}`;
     if (percent !== null) {
     const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
-      body += `\n${t('riskLabel')}: ${riskSummary}`;
-      body += `\n${t('reputationWord')}: ${rating} (${percent}%)`;
+      body += `\n${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${rating} (${percent}%)`;
       body += `\n${t('listed')}: ${listed}\n${t('notListed')}: ${notListed}`;
     } else {
       const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
@@ -1750,10 +1786,11 @@ function startLoadingDotAnimations() {
       targets.push(el);
     }
   });
+  document.querySelectorAll('#status .loading-dots').forEach(el => targets.push(el));
   if (targets.length === 0) return;
   let step = 0;
   _loadingDotsTimer = setInterval(() => {
-    const active = document.querySelectorAll('#results .loading-dots');
+    const active = document.querySelectorAll('#results .loading-dots, #status .loading-dots');
     if (active.length === 0) { clearInterval(_loadingDotsTimer); _loadingDotsTimer = null; return; }
     active.forEach(el => {
       const dots = el.querySelectorAll('.loading-dot');

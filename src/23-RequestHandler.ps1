@@ -37,15 +37,18 @@ if ([string]::IsNullOrWhiteSpace($path)) { $path = '/' }
 # - $htmlPage    : the embedded SPA HTML (string)
 # - $domainLocks : shared dictionary of per-domain semaphores
 
-function Get-DomainSemaphore([string]$domain) {
-  # Get/create a per-domain semaphore so concurrent requests for the same domain serialize.
+function Get-DomainSemaphore([string]$domain, [string]$scope) {
+  # Get/create a per-domain+scope semaphore so duplicate work serializes, while
+  # different lookup stages for the same domain can still run concurrently.
+  $scopeKey = if ([string]::IsNullOrWhiteSpace($scope)) { 'default' } else { $scope.Trim() }
+  $lockKey = if ([string]::IsNullOrWhiteSpace($domain)) { $scopeKey } else { "$scopeKey|$domain" }
   $sem = $null
-  if (-not $domainLocks.TryGetValue($domain, [ref]$sem)) {
+  if (-not $domainLocks.TryGetValue($lockKey, [ref]$sem)) {
     $newSem = [System.Threading.SemaphoreSlim]::new(1, 1)
-    if ($domainLocks.TryAdd($domain, $newSem)) {
+    if ($domainLocks.TryAdd($lockKey, $newSem)) {
       $sem = $newSem
     } else {
-      $null = $domainLocks.TryGetValue($domain, [ref]$sem)
+      $null = $domainLocks.TryGetValue($lockKey, [ref]$sem)
     }
   }
   return $sem
@@ -133,8 +136,9 @@ if ($metricsEnabled) {
       return
     }
 
-    # Serialize work for this domain, do the lookup, then release.
-    $sem = Get-DomainSemaphore -domain $domain
+    # Serialize duplicate work for this domain + endpoint, but allow other endpoints
+    # for the same domain to execute in parallel.
+    $sem = Get-DomainSemaphore -domain $domain -scope $path
     $null = $sem.Wait()
     try {
       switch ($path) {
@@ -370,8 +374,9 @@ if ($metricsEnabled) {
       return
     }
 
-    # Serialize work for this domain, do the lookup, then release.
-    $sem = Get-DomainSemaphore -domain $domain
+    # Serialize duplicate work for this domain + endpoint, but allow other endpoints
+    # for the same domain to execute in parallel.
+    $sem = Get-DomainSemaphore -domain $domain -scope $path
     $null = $sem.Wait()
     try {
       if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Started }

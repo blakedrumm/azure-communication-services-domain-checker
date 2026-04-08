@@ -48,6 +48,7 @@
   - CNAME record checks (root and `www` prefix)
 - 🛡️ **DNSBL reputation lookup** with parallel queries and intelligent caching
 - 🌍 **WHOIS/RDAP diagnostics** with multiple fallback providers (Sysinternals, Linux CLI, TCP whois, GoDaddy, WhoisXML, RDAP)
+  - Raw WHOIS/RDAP source text can be opened from the Domain Registration card whenever raw provider output is available
 - 🔐 **Optional API key authentication** and per-IP rate limiting
 - 📊 **Anonymous metrics collection** (HMAC-hashed domains only, privacy-first)
 - 👤 **Microsoft Entra ID sign-in** support for employee verification
@@ -530,7 +531,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.0.22`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.0.29`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -553,8 +554,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.0.22
-git push origin v2.0.22
+git tag v2.0.29
+git push origin v2.0.29
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -565,7 +566,7 @@ git push origin v2.0.22
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.0.22`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.0.29`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -582,11 +583,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.0.22
+docker pull limitlessworlds/acs-domain-checker:2.0.29
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.0.22
-docker pull limitlessworlds/acs-domain-checker:windows-2.0.22
+docker pull limitlessworlds/acs-domain-checker:linux-2.0.29
+docker pull limitlessworlds/acs-domain-checker:windows-2.0.29
 ```
 
 ### 🛠️ Manual Build Script
@@ -601,7 +602,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.0.22
+./acs-domain-checker-dockerhub.ps1 -Version 2.0.29
 ```
 
 **📋 Requirements for manual script:**

@@ -55,13 +55,13 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 | `01-DomainParsing.ps1` | ~77 | `Get-RegistrableDomain`, `Get-ParentDomains` — extract registrable domain from FQDN |
 | `02-WhoisProviders.ps1` | ~614 | Three WHOIS backends: `Invoke-SysinternalsWhoisLookup` (Windows), `Invoke-LinuxWhoisLookup` (Linux), `Invoke-TcpWhoisLookup` (raw TCP fallback) |
 | `04-RdapLookups.ps1` | ~225 | RDAP protocol lookups (`Invoke-RdapLookup`), plus WhoisXML and GoDaddy API fallbacks |
-| `07-DomainRegistration.ps1` | ~405 | `Get-DomainRegistrationStatus` — orchestrates RDAP → WHOIS → API fallback chain, returns creation/expiry dates |
+| `07-DomainRegistration.ps1` | ~405 | `Get-DomainRegistrationStatus` — orchestrates RDAP → WHOIS → API fallback chain, returns creation/expiry dates; expose raw RDAP data when available. If raw WHOIS/RDAP data is the only available content, show it inline without a Raw button; only show the Raw WHOIS/RDAP button when structured WHOIS/RDAP fields are also present and the raw content is hidden behind a collapsible section. |
 
 ### Metrics & Configuration
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.22`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.29`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics` |
 
@@ -185,3 +185,4 @@ These PowerShell functions are defined in one file but called from multiple othe
 11. If there are any substantial changes to the application, please update this document to reflect the new structure or logic! This is meant to be a living document that evolves with the codebase. With it being so large, it needs a guide to navigate effectively.
 12. In the DNS records table UI, ensure the Name and Type columns do not wrap; keep them single-line and rely on horizontal scrolling for readability. The Type column header and values should always stay on one line and not wrap. TTL values should show raw seconds plus a compact abbreviated duration such as `5d 2h 33s` when applicable, omitting zero-value units like `0m` and `0s` unless needed for a zero-duration value. The DNS records table should remain searchable/filterable and support toggling yellow row highlighting for screenshot-ready troubleshooting.
 13. When routes, API behavior, configuration, or other user-facing functionality changes, update `README.md` in the same change so repository documentation stays current. Additionally, maintain Copilot instructions to keep documentation in sync.
+14. Make sure any code changes performed have sufficient comments surround it so its easy to understand the intent and logic when coming back to it later, especially for complex sections like the SPF recursive expansion or the HTTP request handling logic. This will help both human readers and Copilot understand the code better in the future.
