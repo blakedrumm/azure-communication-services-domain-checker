@@ -534,6 +534,74 @@ function formatRdapLabel(label) {
     .replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
+// Map well-known RDAP event actions, entity roles, EPP status codes, and
+// common notice titles to translation keys so they can be localized.  Values
+// that don't match fall back to formatRdapLabel.
+const RDAP_LABEL_KEYS = {
+  // Event actions
+  'registration':                   'rdapActionRegistration',
+  'expiration':                     'rdapActionExpiration',
+  'last changed':                   'rdapActionLastChanged',
+  'last update of rdap database':   'rdapActionLastUpdateRdap',
+  'transfer':                       'rdapActionTransfer',
+  'locked':                         'rdapActionLocked',
+  'unlocked':                       'rdapActionUnlocked',
+  // Entity roles
+  'registrar':                      'rdapRoleRegistrar',
+  'registrant':                     'rdapRoleRegistrant',
+  'administrative':                 'rdapRoleAdministrative',
+  'technical':                      'rdapRoleTechnical',
+  'abuse':                          'rdapRoleAbuse',
+  'billing':                        'rdapRoleBilling',
+  'noc':                            'rdapRoleNoc',
+  // Link attributes
+  'self':                           'rdapLinkRelSelf',
+  'related':                        'rdapLinkRelRelated',
+  'alternate':                      'rdapLinkRelAlternate',
+  'application/rdap+json':          'rdapLinkTypeRdapJson',
+  // Common EPP / RDAP domain status codes (ICANN-defined)
+  'active':                         'eppActive',
+  'inactive':                       'eppInactive',
+  'ok':                             'eppOk',
+  'client delete prohibited':       'eppClientDeleteProhibited',
+  'client hold':                    'eppClientHold',
+  'client renew prohibited':        'eppClientRenewProhibited',
+  'client transfer prohibited':     'eppClientTransferProhibited',
+  'client update prohibited':       'eppClientUpdateProhibited',
+  'server delete prohibited':       'eppServerDeleteProhibited',
+  'server hold':                    'eppServerHold',
+  'server renew prohibited':        'eppServerRenewProhibited',
+  'server transfer prohibited':     'eppServerTransferProhibited',
+  'server update prohibited':       'eppServerUpdateProhibited',
+  'pending create':                 'eppPendingCreate',
+  'pending delete':                 'eppPendingDelete',
+  'pending renew':                  'eppPendingRenew',
+  'pending transfer':               'eppPendingTransfer',
+  'pending update':                 'eppPendingUpdate',
+  'redemption period':              'eppRedemptionPeriod',
+  'auto renew period':              'eppAutoRenewPeriod',
+  'add period':                     'eppAddPeriod',
+  'renew period':                   'eppRenewPeriod',
+  'transfer period':                'eppTransferPeriod',
+  // Common RDAP notice titles returned by most registries
+  'terms of service':               'rdapNoticeTermsOfService',
+  'status codes':                   'rdapNoticeStatusCodes',
+  'rdds inaccuracy complaint form': 'rdapNoticeRddsComplaint'
+};
+
+function translateRdapLabel(rawLabel) {
+  const key = RDAP_LABEL_KEYS[String(rawLabel || '').trim().toLowerCase()];
+  if (key) {
+    const translated = t(key);
+    // t() falls back to the key name if untranslated; in that case use the
+    // formatted label so we never expose a raw translation key.
+    if (translated && translated !== key) {
+      return translated;
+    }
+  }
+  return formatRdapLabel(rawLabel);
+}
+
 function renderRdapDigestSection(title, bodyHtml) {
   if (!bodyHtml) {
     return '';
@@ -616,7 +684,7 @@ function renderRdapDigest(rawRdapText) {
   try {
     rdap = repairObjectStrings(JSON.parse(sourceText));
   } catch {
-    return `<div class="rdap-digest-section"><div class="rdap-digest-title">Raw (RDAP)</div><pre class="code rdap-raw-pre">${escapeHtml(sourceText)}</pre></div>`;
+    return `<div class="rdap-digest-section"><div class="rdap-digest-title">${escapeHtml(t('rdapRawLabel'))}</div><pre class="code rdap-raw-pre">${escapeHtml(sourceText)}</pre></div>`;
   }
 
   const sortedEvents = sortRdapEventsChronologically(rdap.events);
@@ -627,13 +695,16 @@ function renderRdapDigest(rawRdapText) {
   const linkCount = Array.isArray(rdap.links) ? rdap.links.filter(Boolean).length : 0;
   const noticeCount = ([...(Array.isArray(rdap.notices) ? rdap.notices : []), ...(Array.isArray(rdap.remarks) ? rdap.remarks : [])]).filter(Boolean).length;
 
-  const statusHtml = renderRdapDigestPills(rdap.status, status => escapeHtml(formatRdapLabel(status)));
+  // Use translateRdapLabel so EPP status codes (e.g. "client delete prohibited")
+  // are localized when a translation key exists; otherwise falls back to
+  // formatRdapLabel for readable title-casing.
+  const statusHtml = renderRdapDigestPills(rdap.status, status => escapeHtml(translateRdapLabel(status)));
   const eventHtml = renderRdapDigestTimeline(sortedEvents, event => {
     if (!event || typeof event !== 'object') {
       return '';
     }
 
-    const action = formatRdapLabel(event.eventAction || 'Event');
+    const action = translateRdapLabel(event.eventAction || 'Event');
     const value = formatRdapDateValue(event.eventDate);
     return `
       <div class="rdap-timeline-item">
@@ -654,8 +725,8 @@ function renderRdapDigest(rawRdapText) {
     }
 
     const roleText = Array.isArray(entity.roles) && entity.roles.length > 0
-      ? entity.roles.map(role => formatRdapLabel(role)).join(', ')
-      : formatRdapLabel(entity.objectClassName || 'Entity');
+      ? entity.roles.map(role => translateRdapLabel(role)).join(', ')
+      : translateRdapLabel(entity.objectClassName || 'Entity');
     const displayName = getRdapVcardText(entity.vcardArray, 'fn') || getRdapVcardText(entity.vcardArray, 'org') || entity.handle || '';
     const email = getRdapVcardText(entity.vcardArray, 'email');
     const phone = getRdapVcardText(entity.vcardArray, 'tel');
@@ -680,7 +751,7 @@ function renderRdapDigest(rawRdapText) {
       return '';
     }
 
-    const label = [link.rel, link.type].filter(Boolean).map(item => formatRdapLabel(item)).join(' · ');
+    const label = [link.rel, link.type].filter(Boolean).map(item => translateRdapLabel(item)).join(' · ');
     return `
       <div class="rdap-detail-card rdap-link-card">
         <a class="rdap-link" href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(href)}</a>
@@ -692,7 +763,10 @@ function renderRdapDigest(rawRdapText) {
       return '';
     }
 
-    const title = String(notice.title || '').trim();
+    const rawTitle = String(notice.title || '').trim();
+    // Translate well-known RDAP notice titles (e.g. "Terms of Service",
+    // "Status Codes") when a translation key exists.
+    const title = rawTitle ? translateRdapLabel(rawTitle) : '';
     const description = Array.isArray(notice.description) ? notice.description.filter(Boolean).join(' ') : '';
     return `
       <div class="rdap-notice-card">
@@ -703,21 +777,21 @@ function renderRdapDigest(rawRdapText) {
 
   const summaryHeaderHtml = `
     <div class="rdap-summary-grid">
-      ${statusCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${statusCount}</span><span class="rdap-summary-label">Statuses</span></div>` : ''}
-      ${eventCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${eventCount}</span><span class="rdap-summary-label">Events</span></div>` : ''}
-      ${nameserverCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${nameserverCount}</span><span class="rdap-summary-label">Nameservers</span></div>` : ''}
-      ${entityCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${entityCount}</span><span class="rdap-summary-label">Contacts</span></div>` : ''}
-      ${linkCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${linkCount}</span><span class="rdap-summary-label">Links</span></div>` : ''}
-      ${noticeCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${noticeCount}</span><span class="rdap-summary-label">Notices</span></div>` : ''}
+      ${statusCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${statusCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapStatusesLabel'))}</span></div>` : ''}
+      ${eventCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${eventCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapEventsLabel'))}</span></div>` : ''}
+      ${nameserverCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${nameserverCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapNameserversLabel'))}</span></div>` : ''}
+      ${entityCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${entityCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapContactsLabel'))}</span></div>` : ''}
+      ${linkCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${linkCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapLinksLabel'))}</span></div>` : ''}
+      ${noticeCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${noticeCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapNoticesLabel'))}</span></div>` : ''}
     </div>`;
 
   const summarySections = [
-    renderRdapDigestSection(`Status${statusCount > 0 ? ` · ${statusCount}` : ''}`, statusHtml),
-    renderRdapDigestSection(`Events${eventCount > 0 ? ` · ${eventCount}` : ''}`, eventHtml),
-    renderRdapDigestSection(`Nameservers${nameserverCount > 0 ? ` · ${nameserverCount}` : ''}`, nameserverHtml),
-    renderRdapDigestSection(`Contacts${entityCount > 0 ? ` · ${entityCount}` : ''}`, entityHtml),
-    renderRdapDigestSection(`Links${linkCount > 0 ? ` · ${linkCount}` : ''}`, linkHtml),
-    renderRdapDigestSection(`Notices${noticeCount > 0 ? ` · ${noticeCount}` : ''}`, noticeHtml)
+    renderRdapDigestSection(`${t('rdapStatusLabel')}${statusCount > 0 ? ` \u00B7 ${statusCount}` : ''}`, statusHtml),
+    renderRdapDigestSection(`${t('rdapEventsLabel')}${eventCount > 0 ? ` \u00B7 ${eventCount}` : ''}`, eventHtml),
+    renderRdapDigestSection(`${t('rdapNameserversLabel')}${nameserverCount > 0 ? ` \u00B7 ${nameserverCount}` : ''}`, nameserverHtml),
+    renderRdapDigestSection(`${t('rdapContactsLabel')}${entityCount > 0 ? ` \u00B7 ${entityCount}` : ''}`, entityHtml),
+    renderRdapDigestSection(`${t('rdapLinksLabel')}${linkCount > 0 ? ` \u00B7 ${linkCount}` : ''}`, linkHtml),
+    renderRdapDigestSection(`${t('rdapNoticesLabel')}${noticeCount > 0 ? ` \u00B7 ${noticeCount}` : ''}`, noticeHtml)
   ].filter(Boolean).join('');
 
   const prettyJson = (() => {
@@ -733,7 +807,7 @@ function renderRdapDigest(rawRdapText) {
       ${summaryHeaderHtml}
       ${summarySections}
       <details class="rdap-raw-details">
-        <summary>${escapeHtml('Raw (RDAP) JSON')}</summary>
+        <summary>${escapeHtml(t('rdapRawJsonLabel'))}</summary>
         <pre class="code rdap-raw-pre">${escapeHtml(prettyJson)}</pre>
       </details>
     </div>`;

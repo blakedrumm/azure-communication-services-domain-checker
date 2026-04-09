@@ -11725,7 +11725,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: 'Next domain',
     dnsRecordTypes: 'Types',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: 'Status',
+    rdapStatusesLabel: 'Statuses',
+    rdapEventsLabel: 'Events',
+    rdapNameserversLabel: 'Nameservers',
+    rdapContactsLabel: 'Contacts',
+    rdapLinksLabel: 'Links',
+    rdapNoticesLabel: 'Notices',
+    rdapRawJsonLabel: 'Raw (RDAP) JSON',
+    rdapRawLabel: 'Raw (RDAP)',
+    rawWhoisRdapDataButton: 'Raw WHOIS / RDAP data',
+    rdapActionRegistration: 'Registration',
+    rdapActionExpiration: 'Expiration',
+    rdapActionLastChanged: 'Last Changed',
+    rdapActionLastUpdateRdap: 'Last Update Of RDAP Database',
+    rdapActionTransfer: 'Transfer',
+    rdapActionLocked: 'Locked',
+    rdapActionUnlocked: 'Unlocked',
+    rdapRoleRegistrar: 'Registrar',
+    rdapRoleRegistrant: 'Registrant',
+    rdapRoleAdministrative: 'Administrative',
+    rdapRoleTechnical: 'Technical',
+    rdapRoleAbuse: 'Abuse',
+    rdapRoleBilling: 'Billing',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: 'Self',
+    rdapLinkRelRelated: 'Related',
+    rdapLinkRelAlternate: 'Alternate',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   es: {
     dnsRecords: 'Registros DNS',
@@ -11733,6 +11761,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: 'Clase',
     dnsRecordData: 'Datos',
     dnsRecordTtl: 'Tiempo de vida',
+    dnsRecordsSearchLabel: 'Buscar',
+    dnsRecordsSearchPlaceholder: 'Buscar registros DNS',
+    dnsRecordsFilterColumn: 'Columna',
+    dnsRecordsFilterAllColumns: 'Todas las columnas',
+    dnsRecordsClearFilters: 'Limpiar',
+    dnsRecordsFilterSummary: '{visible} de {total} mostrados',
+    dnsRecordsNoMatches: 'No se encontraron registros DNS coincidentes.',
     dnsRecordTypeCovered: 'Tipo cubierto',
     dnsRecordAlgorithm: 'Algoritmo',
     dnsRecordLabels: 'Etiquetas',
@@ -11748,7 +11783,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: 'Siguiente dominio',
     dnsRecordTypes: 'Tipos',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'SO'
+    dnsRecordOs: 'SO',
+    rdapStatusLabel: 'Estado',
+    rdapStatusesLabel: 'Estados',
+    rdapEventsLabel: 'Eventos',
+    rdapNameserversLabel: 'Servidores de nombres',
+    rdapContactsLabel: 'Contactos',
+    rdapLinksLabel: 'Enlaces',
+    rdapNoticesLabel: 'Avisos',
+    rdapRawJsonLabel: 'JSON sin procesar (RDAP)',
+    rdapRawLabel: 'Sin procesar (RDAP)',
+    rawWhoisRdapDataButton: 'Datos WHOIS / RDAP sin procesar',
+    rdapActionRegistration: 'Registro',
+    rdapActionExpiration: 'Expiraci\u00F3n',
+    rdapActionLastChanged: '\u00DAltima modificaci\u00F3n',
+    rdapActionLastUpdateRdap: '\u00DAltima actualizaci\u00F3n de la base de datos RDAP',
+    rdapActionTransfer: 'Transferencia',
+    rdapActionLocked: 'Bloqueado',
+    rdapActionUnlocked: 'Desbloqueado',
+    rdapRoleRegistrar: 'Registrador',
+    rdapRoleRegistrant: 'Titular',
+    rdapRoleAdministrative: 'Administrativo',
+    rdapRoleTechnical: 'T\u00E9cnico',
+    rdapRoleAbuse: 'Abuso',
+    rdapRoleBilling: 'Facturaci\u00F3n',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: 'Propio',
+    rdapLinkRelRelated: 'Relacionado',
+    rdapLinkRelAlternate: 'Alternativo',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   fr: {
     dnsRecords: 'Enregistrements DNS',
@@ -11756,6 +11819,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: 'Classe',
     dnsRecordData: 'Donn\u00E9es',
     dnsRecordTtl: 'Dur\u00E9e de vie',
+    dnsRecordsSearchLabel: 'Rechercher',
+    dnsRecordsSearchPlaceholder: 'Rechercher des enregistrements DNS',
+    dnsRecordsFilterColumn: 'Colonne',
+    dnsRecordsFilterAllColumns: 'Toutes les colonnes',
+    dnsRecordsClearFilters: 'Effacer',
+    dnsRecordsFilterSummary: '{visible} sur {total} affich\u00E9s',
+    dnsRecordsNoMatches: 'Aucun enregistrement DNS correspondant.',
     dnsRecordTypeCovered: 'Type couvert',
     dnsRecordAlgorithm: 'Algorithme',
     dnsRecordLabels: '\u00C9tiquettes',
@@ -11771,7 +11841,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: 'Domaine suivant',
     dnsRecordTypes: 'Types',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: 'Statut',
+    rdapStatusesLabel: 'Statuts',
+    rdapEventsLabel: '\u00C9v\u00E9nements',
+    rdapNameserversLabel: 'Serveurs de noms',
+    rdapContactsLabel: 'Contacts',
+    rdapLinksLabel: 'Liens',
+    rdapNoticesLabel: 'Avis',
+    rdapRawJsonLabel: 'JSON brut (RDAP)',
+    rdapRawLabel: 'Brut (RDAP)',
+    rawWhoisRdapDataButton: 'Donn\u00E9es WHOIS / RDAP brutes',
+    rdapActionRegistration: 'Enregistrement',
+    rdapActionExpiration: 'Expiration',
+    rdapActionLastChanged: 'Derni\u00E8re modification',
+    rdapActionLastUpdateRdap: 'Derni\u00E8re mise \u00E0 jour de la base RDAP',
+    rdapActionTransfer: 'Transfert',
+    rdapActionLocked: 'Verrouill\u00E9',
+    rdapActionUnlocked: 'D\u00E9verrouill\u00E9',
+    rdapRoleRegistrar: 'Bureau d\u2019enregistrement',
+    rdapRoleRegistrant: 'Titulaire',
+    rdapRoleAdministrative: 'Administratif',
+    rdapRoleTechnical: 'Technique',
+    rdapRoleAbuse: 'Abus',
+    rdapRoleBilling: 'Facturation',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: 'Propre',
+    rdapLinkRelRelated: 'Associ\u00E9',
+    rdapLinkRelAlternate: 'Autre',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   de: {
     dnsRecords: 'DNS-Eintr\u00E4ge',
@@ -11779,6 +11877,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: 'Klasse',
     dnsRecordData: 'Daten',
     dnsRecordTtl: 'TTL',
+    dnsRecordsSearchLabel: 'Suche',
+    dnsRecordsSearchPlaceholder: 'DNS-Eintr\u00E4ge durchsuchen',
+    dnsRecordsFilterColumn: 'Spalte',
+    dnsRecordsFilterAllColumns: 'Alle Spalten',
+    dnsRecordsClearFilters: 'L\u00F6schen',
+    dnsRecordsFilterSummary: '{visible} von {total} angezeigt',
+    dnsRecordsNoMatches: 'Keine passenden DNS-Eintr\u00E4ge gefunden.',
     dnsRecordTypeCovered: 'Abgedeckter Typ',
     dnsRecordAlgorithm: 'Algorithmus',
     dnsRecordLabels: 'Labels',
@@ -11794,7 +11899,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: 'N\u00E4chste Dom\u00E4ne',
     dnsRecordTypes: 'Typen',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: 'Status',
+    rdapStatusesLabel: 'Status',
+    rdapEventsLabel: 'Ereignisse',
+    rdapNameserversLabel: 'Nameserver',
+    rdapContactsLabel: 'Kontakte',
+    rdapLinksLabel: 'Links',
+    rdapNoticesLabel: 'Hinweise',
+    rdapRawJsonLabel: 'Roh-JSON (RDAP)',
+    rdapRawLabel: 'Rohdaten (RDAP)',
+    rawWhoisRdapDataButton: 'WHOIS-/RDAP-Rohdaten',
+    rdapActionRegistration: 'Registrierung',
+    rdapActionExpiration: 'Ablauf',
+    rdapActionLastChanged: 'Letzte \u00C4nderung',
+    rdapActionLastUpdateRdap: 'Letztes Update der RDAP-Datenbank',
+    rdapActionTransfer: '\u00DCbertragung',
+    rdapActionLocked: 'Gesperrt',
+    rdapActionUnlocked: 'Entsperrt',
+    rdapRoleRegistrar: 'Registrar',
+    rdapRoleRegistrant: 'Inhaber',
+    rdapRoleAdministrative: 'Administrativ',
+    rdapRoleTechnical: 'Technisch',
+    rdapRoleAbuse: 'Missbrauch',
+    rdapRoleBilling: 'Abrechnung',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: 'Selbst',
+    rdapLinkRelRelated: 'Verwandt',
+    rdapLinkRelAlternate: 'Alternativ',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   'pt-BR': {
     dnsRecords: 'Registros DNS',
@@ -11802,6 +11935,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: 'Classe',
     dnsRecordData: 'Dados',
     dnsRecordTtl: 'Tempo de vida',
+    dnsRecordsSearchLabel: 'Pesquisar',
+    dnsRecordsSearchPlaceholder: 'Pesquisar registros DNS',
+    dnsRecordsFilterColumn: 'Coluna',
+    dnsRecordsFilterAllColumns: 'Todas as colunas',
+    dnsRecordsClearFilters: 'Limpar',
+    dnsRecordsFilterSummary: '{visible} de {total} exibidos',
+    dnsRecordsNoMatches: 'Nenhum registro DNS correspondente encontrado.',
     dnsRecordTypeCovered: 'Tipo coberto',
     dnsRecordAlgorithm: 'Algoritmo',
     dnsRecordLabels: 'R\u00F3tulos',
@@ -11817,7 +11957,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: 'Pr\u00F3ximo dom\u00EDnio',
     dnsRecordTypes: 'Tipos',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'SO'
+    dnsRecordOs: 'SO',
+    rdapStatusLabel: 'Status',
+    rdapStatusesLabel: 'Status',
+    rdapEventsLabel: 'Eventos',
+    rdapNameserversLabel: 'Servidores de nomes',
+    rdapContactsLabel: 'Contatos',
+    rdapLinksLabel: 'Links',
+    rdapNoticesLabel: 'Avisos',
+    rdapRawJsonLabel: 'JSON bruto (RDAP)',
+    rdapRawLabel: 'Bruto (RDAP)',
+    rawWhoisRdapDataButton: 'Dados brutos WHOIS / RDAP',
+    rdapActionRegistration: 'Registro',
+    rdapActionExpiration: 'Expira\u00E7\u00E3o',
+    rdapActionLastChanged: '\u00DAltima altera\u00E7\u00E3o',
+    rdapActionLastUpdateRdap: '\u00DAltima atualiza\u00E7\u00E3o do banco de dados RDAP',
+    rdapActionTransfer: 'Transfer\u00EAncia',
+    rdapActionLocked: 'Bloqueado',
+    rdapActionUnlocked: 'Desbloqueado',
+    rdapRoleRegistrar: 'Registrador',
+    rdapRoleRegistrant: 'Titular',
+    rdapRoleAdministrative: 'Administrativo',
+    rdapRoleTechnical: 'T\u00E9cnico',
+    rdapRoleAbuse: 'Abuso',
+    rdapRoleBilling: 'Faturamento',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: 'Pr\u00F3prio',
+    rdapLinkRelRelated: 'Relacionado',
+    rdapLinkRelAlternate: 'Alternativo',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   ar: {
     dnsRecords: '\u0633\u062C\u0644\u0627\u062A DNS',
@@ -11825,6 +11993,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: '\u0627\u0644\u0641\u0626\u0629',
     dnsRecordData: '\u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A',
     dnsRecordTtl: '\u0645\u062F\u0629 \u0627\u0644\u0628\u0642\u0627\u0621',
+    dnsRecordsSearchLabel: '\u0628\u062D\u062B',
+    dnsRecordsSearchPlaceholder: '\u0628\u062D\u062B \u0641\u064A \u0633\u062C\u0644\u0627\u062A DNS',
+    dnsRecordsFilterColumn: '\u0627\u0644\u0639\u0645\u0648\u062F',
+    dnsRecordsFilterAllColumns: '\u062C\u0645\u064A\u0639 \u0627\u0644\u0623\u0639\u0645\u062F\u0629',
+    dnsRecordsClearFilters: '\u0645\u0633\u062D',
+    dnsRecordsFilterSummary: '{visible} \u0645\u0646 {total} \u0645\u0639\u0631\u0648\u0636',
+    dnsRecordsNoMatches: '\u0644\u0645 \u064A\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 \u0633\u062C\u0644\u0627\u062A DNS \u0645\u0637\u0627\u0628\u0642\u0629.',
     dnsRecordTypeCovered: '\u0627\u0644\u0646\u0648\u0639 \u0627\u0644\u0645\u0634\u0645\u0648\u0644',
     dnsRecordAlgorithm: '\u0627\u0644\u062E\u0648\u0627\u0631\u0632\u0645\u064A\u0629',
     dnsRecordLabels: '\u0627\u0644\u062A\u0633\u0645\u064A\u0627\u062A',
@@ -11840,7 +12015,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: '\u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u062A\u0627\u0644\u064A',
     dnsRecordTypes: '\u0627\u0644\u0623\u0646\u0648\u0627\u0639',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: '\u0627\u0644\u062D\u0627\u0644\u0629',
+    rdapStatusesLabel: '\u0627\u0644\u062D\u0627\u0644\u0627\u062A',
+    rdapEventsLabel: '\u0627\u0644\u0623\u062D\u062F\u0627\u062B',
+    rdapNameserversLabel: '\u062E\u0648\u0627\u062F\u0645 \u0627\u0644\u0623\u0633\u0645\u0627\u0621',
+    rdapContactsLabel: '\u062C\u0647\u0627\u062A \u0627\u0644\u0627\u062A\u0635\u0627\u0644',
+    rdapLinksLabel: '\u0627\u0644\u0631\u0648\u0627\u0628\u0637',
+    rdapNoticesLabel: '\u0627\u0644\u0625\u0634\u0639\u0627\u0631\u0627\u062A',
+    rdapRawJsonLabel: 'JSON \u062E\u0627\u0645 (RDAP)',
+    rdapRawLabel: '\u062E\u0627\u0645 (RDAP)',
+    rawWhoisRdapDataButton: '\u0628\u064A\u0627\u0646\u0627\u062A WHOIS / RDAP \u0627\u0644\u062E\u0627\u0645',
+    rdapActionRegistration: '\u0627\u0644\u062A\u0633\u062C\u064A\u0644',
+    rdapActionExpiration: '\u0627\u0644\u0627\u0646\u062A\u0647\u0627\u0621',
+    rdapActionLastChanged: '\u0622\u062E\u0631 \u062A\u0639\u062F\u064A\u0644',
+    rdapActionLastUpdateRdap: '\u0622\u062E\u0631 \u062A\u062D\u062F\u064A\u062B \u0644\u0642\u0627\u0639\u062F\u0629 \u0628\u064A\u0627\u0646\u0627\u062A RDAP',
+    rdapActionTransfer: '\u0627\u0644\u0646\u0642\u0644',
+    rdapActionLocked: '\u0645\u0642\u0641\u0644',
+    rdapActionUnlocked: '\u063A\u064A\u0631 \u0645\u0642\u0641\u0644',
+    rdapRoleRegistrar: '\u0627\u0644\u0645\u0633\u062C\u0644',
+    rdapRoleRegistrant: '\u0635\u0627\u062D\u0628 \u0627\u0644\u062A\u0633\u062C\u064A\u0644',
+    rdapRoleAdministrative: '\u0625\u062F\u0627\u0631\u064A',
+    rdapRoleTechnical: '\u062A\u0642\u0646\u064A',
+    rdapRoleAbuse: '\u0625\u0633\u0627\u0621\u0629 \u0627\u0633\u062A\u062E\u062F\u0627\u0645',
+    rdapRoleBilling: '\u0627\u0644\u0641\u0648\u0627\u062A\u064A\u0631',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: '\u0630\u0627\u062A\u064A',
+    rdapLinkRelRelated: '\u0645\u0631\u062A\u0628\u0637',
+    rdapLinkRelAlternate: '\u0628\u062F\u064A\u0644',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   'zh-CN': {
     dnsRecords: 'DNS \u8BB0\u5F55',
@@ -11848,6 +12051,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: '\u7C7B\u522B',
     dnsRecordData: '\u6570\u636E',
     dnsRecordTtl: '\u751F\u5B58\u65F6\u95F4',
+    dnsRecordsSearchLabel: '\u641C\u7D22',
+    dnsRecordsSearchPlaceholder: '\u641C\u7D22 DNS \u8BB0\u5F55',
+    dnsRecordsFilterColumn: '\u5217',
+    dnsRecordsFilterAllColumns: '\u6240\u6709\u5217',
+    dnsRecordsClearFilters: '\u6E05\u9664',
+    dnsRecordsFilterSummary: '\u663E\u793A {visible}/{total}',
+    dnsRecordsNoMatches: '\u672A\u627E\u5230\u5339\u914D\u7684 DNS \u8BB0\u5F55\u3002',
     dnsRecordTypeCovered: '\u8986\u76D6\u7C7B\u578B',
     dnsRecordAlgorithm: '\u7B97\u6CD5',
     dnsRecordLabels: '\u6807\u7B7E',
@@ -11863,7 +12073,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: '\u4E0B\u4E00\u4E2A\u57DF\u540D',
     dnsRecordTypes: '\u7C7B\u578B',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: '\u72B6\u6001',
+    rdapStatusesLabel: '\u72B6\u6001',
+    rdapEventsLabel: '\u4E8B\u4EF6',
+    rdapNameserversLabel: '\u540D\u79F0\u670D\u52A1\u5668',
+    rdapContactsLabel: '\u8054\u7CFB\u4EBA',
+    rdapLinksLabel: '\u94FE\u63A5',
+    rdapNoticesLabel: '\u901A\u77E5',
+    rdapRawJsonLabel: '\u539F\u59CB JSON (RDAP)',
+    rdapRawLabel: '\u539F\u59CB (RDAP)',
+    rawWhoisRdapDataButton: '\u539F\u59CB WHOIS / RDAP \u6570\u636E',
+    rdapActionRegistration: '\u6CE8\u518C',
+    rdapActionExpiration: '\u8FC7\u671F',
+    rdapActionLastChanged: '\u6700\u540E\u4FEE\u6539',
+    rdapActionLastUpdateRdap: 'RDAP \u6570\u636E\u5E93\u6700\u540E\u66F4\u65B0',
+    rdapActionTransfer: '\u8F6C\u79FB',
+    rdapActionLocked: '\u5DF2\u9501\u5B9A',
+    rdapActionUnlocked: '\u5DF2\u89E3\u9501',
+    rdapRoleRegistrar: '\u6CE8\u518C\u5546',
+    rdapRoleRegistrant: '\u6CE8\u518C\u4EBA',
+    rdapRoleAdministrative: '\u7BA1\u7406',
+    rdapRoleTechnical: '\u6280\u672F',
+    rdapRoleAbuse: '\u6EE5\u7528',
+    rdapRoleBilling: '\u8BA1\u8D39',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: '\u81EA\u8EAB',
+    rdapLinkRelRelated: '\u76F8\u5173',
+    rdapLinkRelAlternate: '\u5907\u7528',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   'hi-IN': {
     dnsRecords: 'DNS \u0930\u093F\u0915\u0949\u0930\u094D\u0921',
@@ -11871,6 +12109,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: '\u0915\u094D\u0932\u093E\u0938',
     dnsRecordData: '\u0921\u0947\u091F\u093E',
     dnsRecordTtl: 'TTL',
+    dnsRecordsSearchLabel: '\u0916\u094B\u091C\u0947\u0902',
+    dnsRecordsSearchPlaceholder: 'DNS \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0916\u094B\u091C\u0947\u0902',
+    dnsRecordsFilterColumn: '\u0915\u0949\u0932\u092E',
+    dnsRecordsFilterAllColumns: '\u0938\u092D\u0940 \u0915\u0949\u0932\u092E',
+    dnsRecordsClearFilters: '\u0938\u093E\u092B\u093C \u0915\u0930\u0947\u0902',
+    dnsRecordsFilterSummary: '{total} \u092E\u0947\u0902 \u0938\u0947 {visible} \u0926\u093F\u0916\u093E\u090F \u0917\u090F',
+    dnsRecordsNoMatches: '\u0915\u094B\u0908 \u092E\u0947\u0932 \u0916\u093E\u0924\u093E DNS \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u093E\u0964',
     dnsRecordTypeCovered: '\u0915\u0935\u0930 \u0915\u093F\u092F\u093E \u0917\u092F\u093E \u091F\u093E\u0907\u092A',
     dnsRecordAlgorithm: '\u090F\u0932\u094D\u0917\u094B\u0930\u093F\u0925\u092E',
     dnsRecordLabels: '\u0932\u0947\u092C\u0932',
@@ -11886,7 +12131,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: '\u0905\u0917\u0932\u093E \u0921\u094B\u092E\u0947\u0928',
     dnsRecordTypes: '\u091F\u093E\u0907\u092A',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: '\u0938\u094D\u0925\u093F\u0924\u093F',
+    rdapStatusesLabel: '\u0938\u094D\u0925\u093F\u0924\u093F\u092F\u093E\u0901',
+    rdapEventsLabel: '\u0918\u091F\u0928\u093E\u090F\u0901',
+    rdapNameserversLabel: '\u0928\u0947\u092E\u0938\u0930\u094D\u0935\u0930',
+    rdapContactsLabel: '\u0938\u0902\u092A\u0930\u094D\u0915',
+    rdapLinksLabel: '\u0932\u093F\u0902\u0915',
+    rdapNoticesLabel: '\u0938\u0942\u091A\u0928\u093E\u090F\u0901',
+    rdapRawJsonLabel: '\u0930\u0949 JSON (RDAP)',
+    rdapRawLabel: '\u0930\u0949 (RDAP)',
+    rawWhoisRdapDataButton: '\u0930\u0949 WHOIS / RDAP \u0921\u0947\u091F\u093E',
+    rdapActionRegistration: '\u092A\u0902\u091C\u0940\u0915\u0930\u0923',
+    rdapActionExpiration: '\u0938\u092E\u093E\u092A\u094D\u0924\u093F',
+    rdapActionLastChanged: '\u0905\u0902\u0924\u093F\u092E \u092A\u0930\u093F\u0935\u0930\u094D\u0924\u0928',
+    rdapActionLastUpdateRdap: 'RDAP \u0921\u0947\u091F\u093E\u092C\u0947\u0938 \u0915\u093E \u0905\u0902\u0924\u093F\u092E \u0905\u092A\u0921\u0947\u091F',
+    rdapActionTransfer: '\u0938\u094D\u0925\u093E\u0928\u093E\u0902\u0924\u0930\u0923',
+    rdapActionLocked: '\u0932\u0949\u0915',
+    rdapActionUnlocked: '\u0905\u0928\u0932\u0949\u0915',
+    rdapRoleRegistrar: '\u0930\u091C\u093F\u0938\u094D\u091F\u094D\u0930\u093E\u0930',
+    rdapRoleRegistrant: '\u092A\u0902\u091C\u0940\u092F\u0915',
+    rdapRoleAdministrative: '\u092A\u094D\u0930\u0936\u093E\u0938\u0928\u093F\u0915',
+    rdapRoleTechnical: '\u0924\u0915\u0928\u0940\u0915\u0940',
+    rdapRoleAbuse: '\u0926\u0941\u0930\u0941\u092A\u092F\u094B\u0917',
+    rdapRoleBilling: '\u092C\u093F\u0932\u093F\u0902\u0917',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: '\u0938\u094D\u0935\u092F\u0902',
+    rdapLinkRelRelated: '\u0938\u0902\u092C\u0902\u0927\u093F\u0924',
+    rdapLinkRelAlternate: '\u0935\u0948\u0915\u0932\u094D\u092A\u093F\u0915',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   'ja-JP': {
     dnsRecords: 'DNS \u30EC\u30B3\u30FC\u30C9',
@@ -11894,6 +12167,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: '\u30AF\u30E9\u30B9',
     dnsRecordData: '\u30C7\u30FC\u30BF',
     dnsRecordTtl: 'TTL',
+    dnsRecordsSearchLabel: '\u691C\u7D22',
+    dnsRecordsSearchPlaceholder: 'DNS \u30EC\u30B3\u30FC\u30C9\u3092\u691C\u7D22',
+    dnsRecordsFilterColumn: '\u5217',
+    dnsRecordsFilterAllColumns: '\u3059\u3079\u3066\u306E\u5217',
+    dnsRecordsClearFilters: '\u30AF\u30EA\u30A2',
+    dnsRecordsFilterSummary: '{total} \u4EF6\u4E2D {visible} \u4EF6\u8868\u793A',
+    dnsRecordsNoMatches: '\u4E00\u81F4\u3059\u308B DNS \u30EC\u30B3\u30FC\u30C9\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002',
     dnsRecordTypeCovered: '\u5BFE\u8C61\u30BF\u30A4\u30D7',
     dnsRecordAlgorithm: '\u30A2\u30EB\u30B4\u30EA\u30BA\u30E0',
     dnsRecordLabels: '\u30E9\u30D9\u30EB',
@@ -11909,7 +12189,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: '\u6B21\u306E\u30C9\u30E1\u30A4\u30F3',
     dnsRecordTypes: '\u30BF\u30A4\u30D7',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: '\u30B9\u30C6\u30FC\u30BF\u30B9',
+    rdapStatusesLabel: '\u30B9\u30C6\u30FC\u30BF\u30B9',
+    rdapEventsLabel: '\u30A4\u30D9\u30F3\u30C8',
+    rdapNameserversLabel: '\u30CD\u30FC\u30E0\u30B5\u30FC\u30D0\u30FC',
+    rdapContactsLabel: '\u9023\u7D61\u5148',
+    rdapLinksLabel: '\u30EA\u30F3\u30AF',
+    rdapNoticesLabel: '\u901A\u77E5',
+    rdapRawJsonLabel: '\u751F JSON (RDAP)',
+    rdapRawLabel: '\u751F\u30C7\u30FC\u30BF (RDAP)',
+    rawWhoisRdapDataButton: '\u751F WHOIS / RDAP \u30C7\u30FC\u30BF',
+    rdapActionRegistration: '\u767B\u9332',
+    rdapActionExpiration: '\u6709\u52B9\u671F\u9650',
+    rdapActionLastChanged: '\u6700\u7D42\u5909\u66F4',
+    rdapActionLastUpdateRdap: 'RDAP \u30C7\u30FC\u30BF\u30D9\u30FC\u30B9\u306E\u6700\u7D42\u66F4\u65B0',
+    rdapActionTransfer: '\u79FB\u7BA1',
+    rdapActionLocked: '\u30ED\u30C3\u30AF\u6E08\u307F',
+    rdapActionUnlocked: '\u30ED\u30C3\u30AF\u89E3\u9664',
+    rdapRoleRegistrar: '\u30EC\u30B8\u30B9\u30C8\u30E9',
+    rdapRoleRegistrant: '\u767B\u9332\u8005',
+    rdapRoleAdministrative: '\u7BA1\u7406',
+    rdapRoleTechnical: '\u6280\u8853',
+    rdapRoleAbuse: '\u4E0D\u6B63\u5229\u7528',
+    rdapRoleBilling: '\u8ACB\u6C42',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: '\u81EA\u8EAB',
+    rdapLinkRelRelated: '\u95A2\u9023',
+    rdapLinkRelAlternate: '\u4EE3\u66FF',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   },
   'ru-RU': {
     dnsRecords: 'DNS-\u0437\u0430\u043F\u0438\u0441\u0438',
@@ -11917,6 +12225,13 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordClass: '\u041A\u043B\u0430\u0441\u0441',
     dnsRecordData: '\u0414\u0430\u043D\u043D\u044B\u0435',
     dnsRecordTtl: '\u0412\u0440\u0435\u043C\u044F \u0436\u0438\u0437\u043D\u0438',
+    dnsRecordsSearchLabel: '\u041F\u043E\u0438\u0441\u043A',
+    dnsRecordsSearchPlaceholder: '\u041F\u043E\u0438\u0441\u043A \u0437\u0430\u043F\u0438\u0441\u0435\u0439 DNS',
+    dnsRecordsFilterColumn: '\u0421\u0442\u043E\u043B\u0431\u0435\u0446',
+    dnsRecordsFilterAllColumns: '\u0412\u0441\u0435 \u0441\u0442\u043E\u043B\u0431\u0446\u044B',
+    dnsRecordsClearFilters: '\u041E\u0447\u0438\u0441\u0442\u0438\u0442\u044C',
+    dnsRecordsFilterSummary: '{visible} \u0438\u0437 {total} \u043F\u043E\u043A\u0430\u0437\u0430\u043D\u043E',
+    dnsRecordsNoMatches: '\u0421\u043E\u0432\u043F\u0430\u0434\u0430\u044E\u0449\u0438\u0445 DNS-\u0437\u0430\u043F\u0438\u0441\u0435\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E.',
     dnsRecordTypeCovered: '\u041F\u043E\u043A\u0440\u044B\u0432\u0430\u0435\u043C\u044B\u0439 \u0442\u0438\u043F',
     dnsRecordAlgorithm: '\u0410\u043B\u0433\u043E\u0440\u0438\u0442\u043C',
     dnsRecordLabels: '\u041C\u0435\u0442\u043A\u0438',
@@ -11932,7 +12247,35 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     dnsRecordNextDomain: '\u0421\u043B\u0435\u0434\u0443\u044E\u0449\u0438\u0439 \u0434\u043E\u043C\u0435\u043D',
     dnsRecordTypes: '\u0422\u0438\u043F\u044B',
     dnsRecordCpu: 'CPU',
-    dnsRecordOs: 'OS'
+    dnsRecordOs: 'OS',
+    rdapStatusLabel: '\u0421\u0442\u0430\u0442\u0443\u0441',
+    rdapStatusesLabel: '\u0421\u0442\u0430\u0442\u0443\u0441\u044B',
+    rdapEventsLabel: '\u0421\u043E\u0431\u044B\u0442\u0438\u044F',
+    rdapNameserversLabel: '\u0421\u0435\u0440\u0432\u0435\u0440\u044B \u0438\u043C\u0451\u043D',
+    rdapContactsLabel: '\u041A\u043E\u043D\u0442\u0430\u043A\u0442\u044B',
+    rdapLinksLabel: '\u0421\u0441\u044B\u043B\u043A\u0438',
+    rdapNoticesLabel: '\u0423\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u044F',
+    rdapRawJsonLabel: '\u0418\u0441\u0445\u043E\u0434\u043D\u044B\u0439 JSON (RDAP)',
+    rdapRawLabel: '\u0418\u0441\u0445\u043E\u0434\u043D\u044B\u0435 \u0434\u0430\u043D\u043D\u044B\u0435 (RDAP)',
+    rawWhoisRdapDataButton: '\u0418\u0441\u0445\u043E\u0434\u043D\u044B\u0435 \u0434\u0430\u043D\u043D\u044B\u0435 WHOIS / RDAP',
+    rdapActionRegistration: '\u0420\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044F',
+    rdapActionExpiration: '\u0418\u0441\u0442\u0435\u0447\u0435\u043D\u0438\u0435',
+    rdapActionLastChanged: '\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435',
+    rdapActionLastUpdateRdap: '\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435 \u0431\u0430\u0437\u044B \u0434\u0430\u043D\u043D\u044B\u0445 RDAP',
+    rdapActionTransfer: '\u041F\u0435\u0440\u0435\u043D\u043E\u0441',
+    rdapActionLocked: '\u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u043D\u043E',
+    rdapActionUnlocked: '\u0420\u0430\u0437\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u043D\u043E',
+    rdapRoleRegistrar: '\u0420\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0442\u043E\u0440',
+    rdapRoleRegistrant: '\u0412\u043B\u0430\u0434\u0435\u043B\u0435\u0446',
+    rdapRoleAdministrative: '\u0410\u0434\u043C\u0438\u043D\u0438\u0441\u0442\u0440\u0430\u0442\u0438\u0432\u043D\u044B\u0439',
+    rdapRoleTechnical: '\u0422\u0435\u0445\u043D\u0438\u0447\u0435\u0441\u043A\u0438\u0439',
+    rdapRoleAbuse: '\u0417\u043B\u043E\u0443\u043F\u043E\u0442\u0440\u0435\u0431\u043B\u0435\u043D\u0438\u0435',
+    rdapRoleBilling: '\u0411\u0438\u043B\u043B\u0438\u043D\u0433',
+    rdapRoleNoc: 'NOC',
+    rdapLinkRelSelf: '\u0421\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439',
+    rdapLinkRelRelated: '\u0421\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0439',
+    rdapLinkRelAlternate: '\u0410\u043B\u044C\u0442\u0435\u0440\u043D\u0430\u0442\u0438\u0432\u043D\u044B\u0439',
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
   }
 };
 
@@ -13863,6 +14206,42 @@ function formatRdapLabel(label) {
     .replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
+// Map well-known RDAP event actions and entity roles to translation keys so
+// they can be localized.  Values that don't match fall back to formatRdapLabel.
+const RDAP_LABEL_KEYS = {
+  'registration':                   'rdapActionRegistration',
+  'expiration':                     'rdapActionExpiration',
+  'last changed':                   'rdapActionLastChanged',
+  'last update of rdap database':   'rdapActionLastUpdateRdap',
+  'transfer':                       'rdapActionTransfer',
+  'locked':                         'rdapActionLocked',
+  'unlocked':                       'rdapActionUnlocked',
+  'registrar':                      'rdapRoleRegistrar',
+  'registrant':                     'rdapRoleRegistrant',
+  'administrative':                 'rdapRoleAdministrative',
+  'technical':                      'rdapRoleTechnical',
+  'abuse':                          'rdapRoleAbuse',
+  'billing':                        'rdapRoleBilling',
+  'noc':                            'rdapRoleNoc',
+  'self':                           'rdapLinkRelSelf',
+  'related':                        'rdapLinkRelRelated',
+  'alternate':                      'rdapLinkRelAlternate',
+  'application/rdap+json':          'rdapLinkTypeRdapJson'
+};
+
+function translateRdapLabel(rawLabel) {
+  const key = RDAP_LABEL_KEYS[String(rawLabel || '').trim().toLowerCase()];
+  if (key) {
+    const translated = t(key);
+    // t() falls back to the key name if untranslated; in that case use the
+    // formatted label so we never expose a raw translation key.
+    if (translated && translated !== key) {
+      return translated;
+    }
+  }
+  return formatRdapLabel(rawLabel);
+}
+
 function renderRdapDigestSection(title, bodyHtml) {
   if (!bodyHtml) {
     return '';
@@ -13945,7 +14324,7 @@ function renderRdapDigest(rawRdapText) {
   try {
     rdap = repairObjectStrings(JSON.parse(sourceText));
   } catch {
-    return `<div class="rdap-digest-section"><div class="rdap-digest-title">Raw (RDAP)</div><pre class="code rdap-raw-pre">${escapeHtml(sourceText)}</pre></div>`;
+    return `<div class="rdap-digest-section"><div class="rdap-digest-title">${escapeHtml(t('rdapRawLabel'))}</div><pre class="code rdap-raw-pre">${escapeHtml(sourceText)}</pre></div>`;
   }
 
   const sortedEvents = sortRdapEventsChronologically(rdap.events);
@@ -13962,7 +14341,7 @@ function renderRdapDigest(rawRdapText) {
       return '';
     }
 
-    const action = formatRdapLabel(event.eventAction || 'Event');
+    const action = translateRdapLabel(event.eventAction || 'Event');
     const value = formatRdapDateValue(event.eventDate);
     return `
       <div class="rdap-timeline-item">
@@ -13983,8 +14362,8 @@ function renderRdapDigest(rawRdapText) {
     }
 
     const roleText = Array.isArray(entity.roles) && entity.roles.length > 0
-      ? entity.roles.map(role => formatRdapLabel(role)).join(', ')
-      : formatRdapLabel(entity.objectClassName || 'Entity');
+      ? entity.roles.map(role => translateRdapLabel(role)).join(', ')
+      : translateRdapLabel(entity.objectClassName || 'Entity');
     const displayName = getRdapVcardText(entity.vcardArray, 'fn') || getRdapVcardText(entity.vcardArray, 'org') || entity.handle || '';
     const email = getRdapVcardText(entity.vcardArray, 'email');
     const phone = getRdapVcardText(entity.vcardArray, 'tel');
@@ -14009,7 +14388,7 @@ function renderRdapDigest(rawRdapText) {
       return '';
     }
 
-    const label = [link.rel, link.type].filter(Boolean).map(item => formatRdapLabel(item)).join(' · ');
+    const label = [link.rel, link.type].filter(Boolean).map(item => translateRdapLabel(item)).join(' · ');
     return `
       <div class="rdap-detail-card rdap-link-card">
         <a class="rdap-link" href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(href)}</a>
@@ -14032,21 +14411,21 @@ function renderRdapDigest(rawRdapText) {
 
   const summaryHeaderHtml = `
     <div class="rdap-summary-grid">
-      ${statusCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${statusCount}</span><span class="rdap-summary-label">Statuses</span></div>` : ''}
-      ${eventCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${eventCount}</span><span class="rdap-summary-label">Events</span></div>` : ''}
-      ${nameserverCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${nameserverCount}</span><span class="rdap-summary-label">Nameservers</span></div>` : ''}
-      ${entityCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${entityCount}</span><span class="rdap-summary-label">Contacts</span></div>` : ''}
-      ${linkCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${linkCount}</span><span class="rdap-summary-label">Links</span></div>` : ''}
-      ${noticeCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${noticeCount}</span><span class="rdap-summary-label">Notices</span></div>` : ''}
+      ${statusCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${statusCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapStatusesLabel'))}</span></div>` : ''}
+      ${eventCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${eventCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapEventsLabel'))}</span></div>` : ''}
+      ${nameserverCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${nameserverCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapNameserversLabel'))}</span></div>` : ''}
+      ${entityCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${entityCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapContactsLabel'))}</span></div>` : ''}
+      ${linkCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${linkCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapLinksLabel'))}</span></div>` : ''}
+      ${noticeCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${noticeCount}</span><span class="rdap-summary-label">${escapeHtml(t('rdapNoticesLabel'))}</span></div>` : ''}
     </div>`;
 
   const summarySections = [
-    renderRdapDigestSection(`Status${statusCount > 0 ? ` · ${statusCount}` : ''}`, statusHtml),
-    renderRdapDigestSection(`Events${eventCount > 0 ? ` · ${eventCount}` : ''}`, eventHtml),
-    renderRdapDigestSection(`Nameservers${nameserverCount > 0 ? ` · ${nameserverCount}` : ''}`, nameserverHtml),
-    renderRdapDigestSection(`Contacts${entityCount > 0 ? ` · ${entityCount}` : ''}`, entityHtml),
-    renderRdapDigestSection(`Links${linkCount > 0 ? ` · ${linkCount}` : ''}`, linkHtml),
-    renderRdapDigestSection(`Notices${noticeCount > 0 ? ` · ${noticeCount}` : ''}`, noticeHtml)
+    renderRdapDigestSection(`${t('rdapStatusLabel')}${statusCount > 0 ? ` \u00B7 ${statusCount}` : ''}`, statusHtml),
+    renderRdapDigestSection(`${t('rdapEventsLabel')}${eventCount > 0 ? ` \u00B7 ${eventCount}` : ''}`, eventHtml),
+    renderRdapDigestSection(`${t('rdapNameserversLabel')}${nameserverCount > 0 ? ` \u00B7 ${nameserverCount}` : ''}`, nameserverHtml),
+    renderRdapDigestSection(`${t('rdapContactsLabel')}${entityCount > 0 ? ` \u00B7 ${entityCount}` : ''}`, entityHtml),
+    renderRdapDigestSection(`${t('rdapLinksLabel')}${linkCount > 0 ? ` \u00B7 ${linkCount}` : ''}`, linkHtml),
+    renderRdapDigestSection(`${t('rdapNoticesLabel')}${noticeCount > 0 ? ` \u00B7 ${noticeCount}` : ''}`, noticeHtml)
   ].filter(Boolean).join('');
 
   const prettyJson = (() => {
@@ -14062,7 +14441,7 @@ function renderRdapDigest(rawRdapText) {
       ${summaryHeaderHtml}
       ${summarySections}
       <details class="rdap-raw-details">
-        <summary>${escapeHtml('Raw (RDAP) JSON')}</summary>
+        <summary>${escapeHtml(t('rdapRawJsonLabel'))}</summary>
         <pre class="code rdap-raw-pre">${escapeHtml(prettyJson)}</pre>
       </details>
     </div>`;
