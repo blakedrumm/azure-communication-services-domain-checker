@@ -60,9 +60,19 @@
   - Top-bar controls and header sections use staged fade-in animations on page load, while lookup refreshes animate only the lower result sections
 - 🧾 **Detailed DNS records table** - DomainDossier-style dataset with reverse-lookup supplements, DNSSEC record details, and expanded TTL formatting (`seconds (5d 2h 33s)` style when applicable)
   - Searchable/filterable table controls plus click-to-toggle yellow row highlighting for screenshot-ready customer troubleshooting
+  - DNS records filtering uses removable filter chips beneath the search box for clearer multi-filter workflows, with exact-match dropdown suggestions for `Class` and `Type` values and keyboard navigation for faster filtering
+  - Default table ordering is `Type`, then `Name`, then `Data` for easier record-family scanning
+  - DNS records toolbar controls use the main UI font and aligned label/control rows instead of inheriting the monospace styling from the surrounding code container
+  - DNS records search input explicitly overrides the broader `input[type=text]` styling so it stays visually aligned with the adjacent column selector
+  - Active DNS records filter chips render on their own row beneath the search column so the search field stays visually clean while the toolbar remains aligned
   - DNS record `Name`, `Type`, and column headers stay single-line, with horizontal scrolling used on narrow layouts
   - Escaped DNS labels in display-oriented values (for example DNSSEC `NSEC` next-domain names like `\000`) are decoded into readable markers such as `[NUL]`
   - Includes richer `HINFO` and `RRSIG` coverage by using DNSSEC-aware lookups and authoritative fallback queries when direct recursive lookups omit those records
+  - Raw RDAP output is grouped into digestible sections such as status, events, nameservers, contacts, and links before the full JSON view, with polished summary tiles and timeline/card layouts for easier review; RDAP events are displayed chronologically for clearer reading
+  - Guidance waits for the lookup workflow to settle before surfacing terminal TXT timeout messaging, and suppresses that specific error when the detailed DNS records payload already confirms TXT results were collected
+  - TXT/SPF/ACS verification cards and check summaries recover from the detailed DNS records payload when the dedicated base TXT lookup times out but DNS records already prove the queried-domain TXT values were collected
+  - The TXT recovery view-model is shared by `render()` and the derived guidance/check-summary helpers so lookups continue rendering instead of failing client-side when the recovery state is available
+  - The Domain card also recovers queried-domain `A` and `AAAA` addresses from the detailed DNS records payload so it stays consistent with the DNS records table when base lookup data is incomplete
   - Consolidates duplicate DNS rows from mixed resolver sources and keeps the strongest TTL for each unique record/value pair
 - 🌍 **Multi-language support** - 10 languages with RTL support, language picker dropdown, and `?lang=` URL parameter
 - 💻 **Command-line test mode** (`-TestDomain`) for one-shot headless domain validation
@@ -531,7 +541,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.0.29`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.0.44`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -554,8 +564,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.0.29
-git push origin v2.0.29
+git tag v2.0.44
+git push origin v2.0.44
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -566,7 +576,7 @@ git push origin v2.0.29
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.0.29`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.0.44`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -583,11 +593,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.0.29
+docker pull limitlessworlds/acs-domain-checker:2.0.44
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.0.29
-docker pull limitlessworlds/acs-domain-checker:windows-2.0.29
+docker pull limitlessworlds/acs-domain-checker:linux-2.0.44
+docker pull limitlessworlds/acs-domain-checker:windows-2.0.44
 ```
 
 ### 🛠️ Manual Build Script
@@ -602,7 +612,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.0.29
+./acs-domain-checker-dockerhub.ps1 -Version 2.0.44
 ```
 
 **📋 Requirements for manual script:**

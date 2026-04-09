@@ -17,18 +17,73 @@ function Get-AcsDnsStatus {
   $dkim  = Get-DnsDkimStatus  -Domain $Domain
   $cname = Get-DnsCnameStatus -Domain $Domain
 
+  # Recover queried-domain TXT-derived state from the detailed DNS records payload
+  # when the dedicated base TXT lookup timed out but record collection still
+  # produced authoritative TXT rows for the queried domain.
+  $recoveredTxtRecords = @()
+  $recoveredIpv4Addresses = @()
+  $recoveredIpv6Addresses = @()
+  if ($base.dnsFailed -and $records -and $records.records) {
+    try {
+      $recoveredTxtRecords = @($records.records | Where-Object {
+        $_ -and
+        [string]$_.type -eq 'TXT' -and
+        ([string]$_.name).TrimEnd('.').ToLowerInvariant() -eq ([string]$Domain).TrimEnd('.').ToLowerInvariant() -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.data)
+      } | ForEach-Object { [string]$_.data })
+    } catch { }
+  }
+
+  if ($records -and $records.records) {
+    try {
+      $recoveredIpv4Addresses = @($records.records | Where-Object {
+        $_ -and
+        [string]$_.type -eq 'A' -and
+        ([string]$_.name).TrimEnd('.').ToLowerInvariant() -eq ([string]$Domain).TrimEnd('.').ToLowerInvariant() -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.data)
+      } | ForEach-Object { [string]$_.data })
+      $recoveredIpv6Addresses = @($records.records | Where-Object {
+        $_ -and
+        [string]$_.type -eq 'AAAA' -and
+        ([string]$_.name).TrimEnd('.').ToLowerInvariant() -eq ([string]$Domain).TrimEnd('.').ToLowerInvariant() -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.data)
+      } | ForEach-Object { [string]$_.data })
+    } catch { }
+  }
+
+  $recoveredFromDetailedRecords = $recoveredTxtRecords.Count -gt 0
+  $recoveredAddressesFromDetailedRecords = ($recoveredIpv4Addresses.Count -gt 0) -or ($recoveredIpv6Addresses.Count -gt 0)
+  $effectiveDnsFailed = $base.dnsFailed -and -not $recoveredFromDetailedRecords
+  $effectiveDnsError = if ($effectiveDnsFailed) { $base.dnsError } else { $null }
+  $effectiveTxtRecords = if ($recoveredFromDetailedRecords) { $recoveredTxtRecords } else { @($base.txtRecords) }
+  $effectiveIpv4Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv4Addresses } else { @($base.ipv4Addresses) }
+  $effectiveIpv6Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv6Addresses } else { @($base.ipv6Addresses) }
+  $effectiveIpLookupDomain = if ($recoveredAddressesFromDetailedRecords) { $Domain } else { $base.ipLookupDomain }
+  $effectiveIpUsedParent = if ($recoveredAddressesFromDetailedRecords) { $false } else { $base.ipUsedParent }
+  $effectiveSpf = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1) } else { @($base.spfValue) }
+  $effectiveSpfValue = if ($effectiveSpf.Count -gt 0) { $effectiveSpf[0] } else { $null }
+  $effectiveAcs = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1) } else { @($base.acsValue) }
+  $effectiveAcsValue = if ($effectiveAcs.Count -gt 0) { $effectiveAcs[0] } else { $null }
+  $effectiveSpfPresent = [bool]$effectiveSpfValue
+  $effectiveAcsPresent = [bool]$effectiveAcsValue
+  $effectiveSpfHasRequiredInclude = if ($recoveredFromDetailedRecords -and $effectiveSpfValue) {
+    [regex]::IsMatch([string]$effectiveSpfValue, '(?i)(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)')
+  } else {
+    $base.spfHasRequiredInclude
+  }
+
   # ACS domain verification readiness is primarily based on the ms-domain-verification TXT record.
   # Other checks (SPF/MX/DMARC/DKIM/CNAME) are useful guidance but not required for ACS verification.
-  $acsReady = (-not $base.dnsFailed) -and $base.acsPresent
+  $acsReady = (-not $effectiveDnsFailed) -and $effectiveAcsPresent
   $dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records'
 
     # Guidance
     $guidance = New-Object System.Collections.Generic.List[string]
 
-    if ($base.dnsFailed) {
+    if ($effectiveDnsFailed) {
         $guidance.Add("DNS TXT lookup failed or timed out. Other DNS records may still resolve.")
     } else {
-      if (-not $base.spfPresent) {
+      if (-not $effectiveSpfPresent) {
         if ($base.parentSpfPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("SPF is missing on $Domain. Parent domain $($base.txtLookupDomain) publishes SPF, but SPF does not automatically apply to the queried subdomain.")
         } else {
@@ -38,7 +93,7 @@ function Get-AcsDnsStatus {
       foreach ($spfMessage in @($base.spfGuidance)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$spfMessage)) { $guidance.Add([string]$spfMessage) }
       }
-      if (-not $base.acsPresent) {
+      if (-not $effectiveAcsPresent) {
         if ($base.parentAcsPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("ACS ms-domain-verification TXT is missing on $Domain. Parent domain $($base.txtLookupDomain) has an ACS TXT record, but it does not verify the queried subdomain.")
         } else {
@@ -80,13 +135,13 @@ function Get-AcsDnsStatus {
       if ($mx.mxProvider -and $mx.mxProvider -ne 'Unknown') {
         $guidance.Add("Detected MX provider: $($mx.mxProvider)")
       }
-      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $base.spfPresent -and ($base.spfHasRequiredInclude -eq $false)) {
+      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $effectiveSpfPresent -and ($effectiveSpfHasRequiredInclude -eq $false)) {
         $guidance.Add("Your MX indicates Microsoft 365, but SPF does not include spf.protection.outlook.com. Verify your SPF includes the correct provider include.")
       }
-      if ($mx.mxProvider -eq 'Google Workspace / Gmail' -and $base.spfPresent -and ($base.spfValue -notmatch '(?i)_spf\.google\.com')) {
+      if ($mx.mxProvider -eq 'Google Workspace / Gmail' -and $effectiveSpfPresent -and ($effectiveSpfValue -notmatch '(?i)_spf\.google\.com')) {
         $guidance.Add("Your MX indicates Google Workspace, but SPF does not include _spf.google.com. Verify your SPF includes the correct provider include.")
       }
-      if ($mx.mxProvider -eq 'Zoho Mail' -and $base.spfPresent -and ($base.spfValue -notmatch '(?i)include:zoho\.com')) {
+      if ($mx.mxProvider -eq 'Zoho Mail' -and $effectiveSpfPresent -and ($effectiveSpfValue -notmatch '(?i)include:zoho\.com')) {
         $guidance.Add("Your MX indicates Zoho, but SPF does not include include:zoho.com. Verify your SPF includes the correct provider include.")
       }
       if ($whois -and $whois.isExpired -eq $true) {
@@ -105,30 +160,30 @@ function Get-AcsDnsStatus {
         domain     = $Domain
       resolver   = $env:ACS_DNS_RESOLVER
       dohEndpoint = $(if ($env:ACS_DNS_RESOLVER -eq 'DoH' -or ($env:ACS_DNS_RESOLVER -eq 'Auto' -and -not (Get-Command -Name Resolve-DnsName -ErrorAction SilentlyContinue))) { $env:ACS_DNS_DOH_ENDPOINT } else { $null })
-        dnsFailed  = $base.dnsFailed
-        dnsError   = $base.dnsError
+        dnsFailed  = $effectiveDnsFailed
+        dnsError   = $effectiveDnsError
 
         txtLookupDomain = $base.txtLookupDomain
         txtUsedParent   = $base.txtUsedParent
 
-        spfPresent = $base.spfPresent
-        spfValue   = $base.spfValue
+        spfPresent = $effectiveSpfPresent
+        spfValue   = $effectiveSpfValue
         spfAnalysis = $base.spfAnalysis
         spfExpandedText = $base.spfExpandedText
         spfGuidance = $base.spfGuidance
-        spfHasRequiredInclude = $base.spfHasRequiredInclude
+        spfHasRequiredInclude = $effectiveSpfHasRequiredInclude
         spfRequiredInclude = $base.spfRequiredInclude
         spfRequiredIncludeMatchType = $base.spfRequiredIncludeMatchType
         spfRequiredIncludeDetail = $base.spfRequiredIncludeDetail
         spfRequiredIncludeError = $base.spfRequiredIncludeError
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
-        acsPresent = $base.acsPresent
-        acsValue   = $base.acsValue
+        acsPresent = $effectiveAcsPresent
+        acsValue   = $effectiveAcsValue
         parentAcsPresent = $base.parentAcsPresent
         parentAcsValue   = $base.parentAcsValue
 
-        txtRecords = $base.txtRecords
+        txtRecords = $effectiveTxtRecords
         parentTxtRecords = $base.parentTxtRecords
         acsReady   = $acsReady
 

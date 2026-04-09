@@ -903,7 +903,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.29'
+$script:AppVersion = '2.0.44'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -6335,18 +6335,73 @@ function Get-AcsDnsStatus {
   $dkim  = Get-DnsDkimStatus  -Domain $Domain
   $cname = Get-DnsCnameStatus -Domain $Domain
 
+  # Recover queried-domain TXT-derived state from the detailed DNS records payload
+  # when the dedicated base TXT lookup timed out but record collection still
+  # produced authoritative TXT rows for the queried domain.
+  $recoveredTxtRecords = @()
+  $recoveredIpv4Addresses = @()
+  $recoveredIpv6Addresses = @()
+  if ($base.dnsFailed -and $records -and $records.records) {
+    try {
+      $recoveredTxtRecords = @($records.records | Where-Object {
+        $_ -and
+        [string]$_.type -eq 'TXT' -and
+        ([string]$_.name).TrimEnd('.').ToLowerInvariant() -eq ([string]$Domain).TrimEnd('.').ToLowerInvariant() -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.data)
+      } | ForEach-Object { [string]$_.data })
+    } catch { }
+  }
+
+  if ($records -and $records.records) {
+    try {
+      $recoveredIpv4Addresses = @($records.records | Where-Object {
+        $_ -and
+        [string]$_.type -eq 'A' -and
+        ([string]$_.name).TrimEnd('.').ToLowerInvariant() -eq ([string]$Domain).TrimEnd('.').ToLowerInvariant() -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.data)
+      } | ForEach-Object { [string]$_.data })
+      $recoveredIpv6Addresses = @($records.records | Where-Object {
+        $_ -and
+        [string]$_.type -eq 'AAAA' -and
+        ([string]$_.name).TrimEnd('.').ToLowerInvariant() -eq ([string]$Domain).TrimEnd('.').ToLowerInvariant() -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.data)
+      } | ForEach-Object { [string]$_.data })
+    } catch { }
+  }
+
+  $recoveredFromDetailedRecords = $recoveredTxtRecords.Count -gt 0
+  $recoveredAddressesFromDetailedRecords = ($recoveredIpv4Addresses.Count -gt 0) -or ($recoveredIpv6Addresses.Count -gt 0)
+  $effectiveDnsFailed = $base.dnsFailed -and -not $recoveredFromDetailedRecords
+  $effectiveDnsError = if ($effectiveDnsFailed) { $base.dnsError } else { $null }
+  $effectiveTxtRecords = if ($recoveredFromDetailedRecords) { $recoveredTxtRecords } else { @($base.txtRecords) }
+  $effectiveIpv4Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv4Addresses } else { @($base.ipv4Addresses) }
+  $effectiveIpv6Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv6Addresses } else { @($base.ipv6Addresses) }
+  $effectiveIpLookupDomain = if ($recoveredAddressesFromDetailedRecords) { $Domain } else { $base.ipLookupDomain }
+  $effectiveIpUsedParent = if ($recoveredAddressesFromDetailedRecords) { $false } else { $base.ipUsedParent }
+  $effectiveSpf = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1) } else { @($base.spfValue) }
+  $effectiveSpfValue = if ($effectiveSpf.Count -gt 0) { $effectiveSpf[0] } else { $null }
+  $effectiveAcs = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1) } else { @($base.acsValue) }
+  $effectiveAcsValue = if ($effectiveAcs.Count -gt 0) { $effectiveAcs[0] } else { $null }
+  $effectiveSpfPresent = [bool]$effectiveSpfValue
+  $effectiveAcsPresent = [bool]$effectiveAcsValue
+  $effectiveSpfHasRequiredInclude = if ($recoveredFromDetailedRecords -and $effectiveSpfValue) {
+    [regex]::IsMatch([string]$effectiveSpfValue, '(?i)(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)')
+  } else {
+    $base.spfHasRequiredInclude
+  }
+
   # ACS domain verification readiness is primarily based on the ms-domain-verification TXT record.
   # Other checks (SPF/MX/DMARC/DKIM/CNAME) are useful guidance but not required for ACS verification.
-  $acsReady = (-not $base.dnsFailed) -and $base.acsPresent
+  $acsReady = (-not $effectiveDnsFailed) -and $effectiveAcsPresent
   $dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records'
 
     # Guidance
     $guidance = New-Object System.Collections.Generic.List[string]
 
-    if ($base.dnsFailed) {
+    if ($effectiveDnsFailed) {
         $guidance.Add("DNS TXT lookup failed or timed out. Other DNS records may still resolve.")
     } else {
-      if (-not $base.spfPresent) {
+      if (-not $effectiveSpfPresent) {
         if ($base.parentSpfPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("SPF is missing on $Domain. Parent domain $($base.txtLookupDomain) publishes SPF, but SPF does not automatically apply to the queried subdomain.")
         } else {
@@ -6356,7 +6411,7 @@ function Get-AcsDnsStatus {
       foreach ($spfMessage in @($base.spfGuidance)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$spfMessage)) { $guidance.Add([string]$spfMessage) }
       }
-      if (-not $base.acsPresent) {
+      if (-not $effectiveAcsPresent) {
         if ($base.parentAcsPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("ACS ms-domain-verification TXT is missing on $Domain. Parent domain $($base.txtLookupDomain) has an ACS TXT record, but it does not verify the queried subdomain.")
         } else {
@@ -6398,13 +6453,13 @@ function Get-AcsDnsStatus {
       if ($mx.mxProvider -and $mx.mxProvider -ne 'Unknown') {
         $guidance.Add("Detected MX provider: $($mx.mxProvider)")
       }
-      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $base.spfPresent -and ($base.spfHasRequiredInclude -eq $false)) {
+      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $effectiveSpfPresent -and ($effectiveSpfHasRequiredInclude -eq $false)) {
         $guidance.Add("Your MX indicates Microsoft 365, but SPF does not include spf.protection.outlook.com. Verify your SPF includes the correct provider include.")
       }
-      if ($mx.mxProvider -eq 'Google Workspace / Gmail' -and $base.spfPresent -and ($base.spfValue -notmatch '(?i)_spf\.google\.com')) {
+      if ($mx.mxProvider -eq 'Google Workspace / Gmail' -and $effectiveSpfPresent -and ($effectiveSpfValue -notmatch '(?i)_spf\.google\.com')) {
         $guidance.Add("Your MX indicates Google Workspace, but SPF does not include _spf.google.com. Verify your SPF includes the correct provider include.")
       }
-      if ($mx.mxProvider -eq 'Zoho Mail' -and $base.spfPresent -and ($base.spfValue -notmatch '(?i)include:zoho\.com')) {
+      if ($mx.mxProvider -eq 'Zoho Mail' -and $effectiveSpfPresent -and ($effectiveSpfValue -notmatch '(?i)include:zoho\.com')) {
         $guidance.Add("Your MX indicates Zoho, but SPF does not include include:zoho.com. Verify your SPF includes the correct provider include.")
       }
       if ($whois -and $whois.isExpired -eq $true) {
@@ -6423,30 +6478,30 @@ function Get-AcsDnsStatus {
         domain     = $Domain
       resolver   = $env:ACS_DNS_RESOLVER
       dohEndpoint = $(if ($env:ACS_DNS_RESOLVER -eq 'DoH' -or ($env:ACS_DNS_RESOLVER -eq 'Auto' -and -not (Get-Command -Name Resolve-DnsName -ErrorAction SilentlyContinue))) { $env:ACS_DNS_DOH_ENDPOINT } else { $null })
-        dnsFailed  = $base.dnsFailed
-        dnsError   = $base.dnsError
+        dnsFailed  = $effectiveDnsFailed
+        dnsError   = $effectiveDnsError
 
         txtLookupDomain = $base.txtLookupDomain
         txtUsedParent   = $base.txtUsedParent
 
-        spfPresent = $base.spfPresent
-        spfValue   = $base.spfValue
+        spfPresent = $effectiveSpfPresent
+        spfValue   = $effectiveSpfValue
         spfAnalysis = $base.spfAnalysis
         spfExpandedText = $base.spfExpandedText
         spfGuidance = $base.spfGuidance
-        spfHasRequiredInclude = $base.spfHasRequiredInclude
+        spfHasRequiredInclude = $effectiveSpfHasRequiredInclude
         spfRequiredInclude = $base.spfRequiredInclude
         spfRequiredIncludeMatchType = $base.spfRequiredIncludeMatchType
         spfRequiredIncludeDetail = $base.spfRequiredIncludeDetail
         spfRequiredIncludeError = $base.spfRequiredIncludeError
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
-        acsPresent = $base.acsPresent
-        acsValue   = $base.acsValue
+        acsPresent = $effectiveAcsPresent
+        acsValue   = $effectiveAcsValue
         parentAcsPresent = $base.parentAcsPresent
         parentAcsValue   = $base.parentAcsValue
 
-        txtRecords = $base.txtRecords
+        txtRecords = $effectiveTxtRecords
         parentTxtRecords = $base.parentTxtRecords
         acsReady   = $acsReady
 
@@ -6609,6 +6664,11 @@ body {
   max-width: 1100px;
   margin: 0 auto;
   min-width: 0;
+}
+
+.dns-records-toolbar-group-search {
+  grid-template-rows: minmax(14px, auto) 32px auto;
+  align-self: start;
 }
 
 h1 {
@@ -7075,6 +7135,13 @@ button.primary:disabled {
   min-width: 0;
 }
 
+.kv-value-secondary {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  word-break: break-word;
+}
+
 .kv-value em {
   font-style: italic;
 }
@@ -7116,39 +7183,314 @@ button.primary:disabled {
 }
 
 .dns-records-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  align-items: end;
+  /* Explicit grid: labels on row 1, controls on row 2, chips on row 3.
+     This avoids nested grids so labels and controls always align. */
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) minmax(130px, 170px) max-content 1fr;
+  grid-template-rows: auto 32px;
+  gap: 4px 12px;
+  align-items: center;
   margin-bottom: 10px;
-}
-
-.dns-records-toolbar-group {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-muted);
 }
 
-.dns-records-search-input,
-.dns-records-filter-select {
+.dns-records-toolbar-label {
+  min-height: 14px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.dns-records-search-dropdown {
+  position: relative;
+  width: 100%;
+}
+
+input.dns-records-search-input,
+select.dns-records-filter-select {
+  height: 32px;
   min-height: 32px;
   padding: 6px 10px;
   border-radius: 6px;
   border: 1px solid var(--input-border);
-  background: var(--input-bg);
+  background: var(--card-bg);
   color: var(--fg);
-  font: inherit;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  vertical-align: middle;
+  margin: 0;
+  box-sizing: border-box;
 }
 
-.dns-records-search-input {
-  min-width: 240px;
+input.dns-records-search-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.dns-records-search-input::placeholder {
+  color: var(--status);
+  opacity: 1;
+}
+
+.dns-records-search-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: none;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+}
+
+.dns-records-search-suggestions.dns-records-search-suggestions-visible {
+  display: block;
+}
+
+.dns-records-search-suggestion-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: var(--card-bg);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dns-records-search-suggestion-item:hover,
+.dns-records-search-suggestion-item:focus-visible,
+.dns-records-search-suggestion-item.active {
+  background: rgba(47, 128, 237, 0.12);
+  outline: none;
+}
+
+.whois-raw-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.rdap-digest-wrapper {
+  display: grid;
+  gap: 10px;
+}
+
+.rdap-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.rdap-summary-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(47, 128, 237, 0.09), rgba(47, 128, 237, 0.03));
+}
+
+.rdap-summary-count {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.rdap-summary-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rdap-digest-section {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.rdap-digest-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+}
+
+.rdap-digest-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.rdap-digest-list li {
+  line-height: 1.45;
+}
+
+.rdap-pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rdap-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(47, 128, 237, 0.35);
+  background: rgba(47, 128, 237, 0.12);
+  color: var(--code-fg);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.rdap-timeline {
+  position: relative;
+  display: grid;
+  gap: 10px;
+}
+
+.rdap-timeline::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: rgba(47, 128, 237, 0.22);
+}
+
+.rdap-timeline-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.rdap-timeline-marker {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border-radius: 999px;
+  border: 2px solid rgba(47, 128, 237, 0.55);
+  background: var(--code-bg);
+  z-index: 1;
+}
+
+.rdap-timeline-content {
+  min-width: 0;
+}
+
+.rdap-timeline-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--code-fg);
+}
+
+.rdap-timeline-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.rdap-detail-card-list,
+.rdap-link-card-list,
+.rdap-notice-card-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rdap-detail-card,
+.rdap-notice-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+}
+
+.rdap-detail-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--code-fg);
+}
+
+.rdap-detail-primary {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--code-fg);
+}
+
+.rdap-detail-meta {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  word-break: break-word;
+}
+
+.rdap-link-card {
+  background: rgba(47, 128, 237, 0.06);
+}
+
+.rdap-link {
+  color: #6ea8ff;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.rdap-link:hover {
+  text-decoration: underline;
+}
+
+.rdap-digest-muted {
+  color: var(--fg-muted);
+}
+
+.rdap-raw-details {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.rdap-raw-details summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
+}
+
+.rdap-raw-pre {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
 }
 
 .dns-records-filter-select {
+  width: 100%;
   min-width: 150px;
+  appearance: auto;
   color-scheme: light;
+  margin: 0;
 }
 
 .dns-records-filter-select option {
@@ -7168,15 +7510,45 @@ html.dark .dns-records-filter-select option {
 }
 
 .dns-records-clear-btn {
-  min-height: 32px;
+  height: 32px;
 }
 
 .dns-records-filter-summary {
-  margin-left: auto;
-  align-self: center;
-  font-size: 11px;
+  justify-self: end;
+  font-size: 12px;
   color: var(--fg-muted);
   white-space: nowrap;
+}
+
+.dns-records-filter-chip-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-height: 0;
+  padding-top: 4px;
+}
+
+.dns-records-filter-chip {
+  max-width: 100%;
+}
+
+.dns-records-filter-chip-column {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.dns-records-filter-chip-value {
+  color: var(--button-bg);
+  white-space: nowrap;
+}
+
+.dns-records-filter-remove {
+  flex: 0 0 auto;
 }
 
 .dns-records-table .dns-record-row {
@@ -7425,6 +7797,9 @@ ul.guidance li {
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
   .mx-table, .dns-records-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  .dns-records-toolbar { grid-template-columns: 1fr; }
+  .dns-records-filter-summary { margin-left: 0; justify-self: start; }
+  .dns-records-clear-btn { justify-self: start; }
   .top-bar { align-items: stretch; }
   .top-bar button, .language-dropdown, .language-trigger { width: 100%; height: 43px; }
   .language-trigger { min-width: 0; }
@@ -12379,28 +12754,94 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   return guidance;
 }
 
+function getDnsTxtRecoveryState(r) {
+  const loaded = r && r._loaded ? r._loaded : {};
+  const domain = String(r && r.domain || '').trim().toLowerCase();
+  const detailedARecords = loaded.records && Array.isArray(r && r.dnsRecords)
+    ? r.dnsRecords.filter(record => record
+      && String(record.type || '').toUpperCase() === 'A'
+      && String(record.name || '').trim().toLowerCase() === domain)
+      .map(record => String(record.data || '').trim())
+      .filter(Boolean)
+    : [];
+  const detailedAaaaRecords = loaded.records && Array.isArray(r && r.dnsRecords)
+    ? r.dnsRecords.filter(record => record
+      && String(record.type || '').toUpperCase() === 'AAAA'
+      && String(record.name || '').trim().toLowerCase() === domain)
+      .map(record => String(record.data || '').trim())
+      .filter(Boolean)
+    : [];
+  const detailedTxtRecords = loaded.records && Array.isArray(r && r.dnsRecords)
+    ? r.dnsRecords.filter(record => record
+      && String(record.type || '').toUpperCase() === 'TXT'
+      && String(record.name || '').trim().toLowerCase() === domain)
+      .map(record => String(record.data || '').trim())
+      .filter(Boolean)
+    : [];
+  const recoveredFromDetailedRecords = !!(loaded.base && r && r.dnsFailed && detailedTxtRecords.length > 0);
+  const recoveredAddressesFromDetailedRecords = !!(loaded.records && (detailedARecords.length > 0 || detailedAaaaRecords.length > 0));
+  const txtRecords = recoveredFromDetailedRecords
+    ? detailedTxtRecords
+    : (Array.isArray(r && r.txtRecords) ? r.txtRecords.filter(Boolean) : []);
+  const ipv4Addresses = recoveredAddressesFromDetailedRecords
+    ? detailedARecords
+    : (Array.isArray(r && r.ipv4Addresses) ? r.ipv4Addresses.filter(Boolean) : []);
+  const ipv6Addresses = recoveredAddressesFromDetailedRecords
+    ? detailedAaaaRecords
+    : (Array.isArray(r && r.ipv6Addresses) ? r.ipv6Addresses.filter(Boolean) : []);
+  const spfValue = recoveredFromDetailedRecords
+    ? (txtRecords.find(value => /^v=spf1/i.test(String(value || '').trim())) || null)
+    : (r ? r.spfValue : null);
+  const acsValue = recoveredFromDetailedRecords
+    ? (txtRecords.find(value => /ms-domain-verification/i.test(String(value || '').trim())) || null)
+    : (r ? r.acsValue : null);
+  const spfHasRequiredInclude = recoveredFromDetailedRecords && spfValue
+    ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
+    : (r ? r.spfHasRequiredInclude : null);
+
+  return {
+    recoveredFromDetailedRecords,
+    recoveredAddressesFromDetailedRecords,
+    txtLookupResolved: !!(loaded.base && (!r.dnsFailed || recoveredFromDetailedRecords)),
+    txtRecords,
+    ipv4Addresses,
+    ipv6Addresses,
+    ipLookupDomain: recoveredAddressesFromDetailedRecords ? (r && r.domain) : (r ? r.ipLookupDomain : null),
+    ipUsedParent: recoveredAddressesFromDetailedRecords ? false : !!(r && r.ipUsedParent),
+    spfValue,
+    spfPresent: !!spfValue,
+    spfHasRequiredInclude,
+    acsValue,
+    acsPresent: !!acsValue
+  };
+}
+
 function buildGuidance(r) {
   const guidance = [];
   const loaded = r && r._loaded ? r._loaded : {};
   const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
+  const txtRecovery = getDnsTxtRecoveryState(r);
+  const guidanceWorkflowComplete = ['base', 'mx', 'records', 'whois', 'dmarc', 'dkim', 'cname', 'reputation'].every(key => loaded[key] === true);
 
-  if (loaded.base && r.dnsFailed) {
+  // Only surface a terminal TXT lookup failure once the broader lookup workflow
+  // has settled, and suppress it when the detailed DNS records payload already
+  // proves TXT records were successfully collected.
+  if (loaded.base && r.dnsFailed && guidanceWorkflowComplete && !txtRecovery.recoveredFromDetailedRecords) {
     guidance.push({ type: 'error', text: t('guidanceDnsTxtFailed') });
-    return guidance;
   }
 
-  if (loaded.base) {
-    if (!r.spfPresent) {
+  if (loaded.base && txtRecovery.txtLookupResolved) {
+    if (!txtRecovery.spfPresent) {
       if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
       }
     }
-    if (r.spfPresent && r.spfHasRequiredInclude !== true) {
+    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
       guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
     }
-    if (!r.acsPresent) {
+    if (!txtRecovery.acsPresent) {
       if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceAcsMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
@@ -12466,13 +12907,13 @@ function buildGuidance(r) {
     guidance.push({ type: 'attention', text: t('guidanceCnameMissing') });
   }
 
-  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && r.spfPresent && r.spfHasRequiredInclude === false) {
+  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === false) {
     guidance.push({ type: 'attention', text: t('guidanceMxMicrosoftSpf') });
   }
-  if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && r.spfPresent && r.spfValue && !/_spf\.google\.com/i.test(r.spfValue)) {
+  if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && txtRecovery.spfPresent && txtRecovery.spfValue && !/_spf\.google\.com/i.test(txtRecovery.spfValue)) {
     guidance.push({ type: 'attention', text: t('guidanceMxGoogleSpf') });
   }
-  if (loaded.base && loaded.mx && r.mxProvider === 'Zoho Mail' && r.spfPresent && r.spfValue && !/include:zoho\.com/i.test(r.spfValue)) {
+  if (loaded.base && loaded.mx && r.mxProvider === 'Zoho Mail' && txtRecovery.spfPresent && txtRecovery.spfValue && !/include:zoho\.com/i.test(txtRecovery.spfValue)) {
     guidance.push({ type: 'attention', text: t('guidanceMxZohoSpf') });
   }
 
@@ -12485,8 +12926,9 @@ function buildGuidance(r) {
 
 function recomputeDerived(r) {
   const loaded = r && r._loaded ? r._loaded : {};
+  r._txtRecovery = getDnsTxtRecoveryState(r);
   if (loaded.base) {
-    r.acsReady = (!r.dnsFailed) && !!r.acsPresent;
+    r.acsReady = r._txtRecovery.txtLookupResolved && !!r._txtRecovery.acsPresent;
   } else {
     r.acsReady = false;
   }
@@ -12496,6 +12938,7 @@ function recomputeDerived(r) {
 function buildTestSummaryHtml(r) {
   const loaded = (r && r._loaded) ? r._loaded : {};
   const errors = (r && r._errors) ? r._errors : {};
+  const txtRecovery = getDnsTxtRecoveryState(r);
 
   const classForState = (state) => {
     switch (state) {
@@ -12518,7 +12961,7 @@ function buildTestSummaryHtml(r) {
     add("ACS Readiness", "pending");
   } else if (errors.base) {
     add("ACS Readiness", "error");
-  } else if (r.dnsFailed) {
+  } else if (!txtRecovery.txtLookupResolved) {
     add("ACS Readiness", "fail");
   } else {
     add("ACS Readiness", r.acsReady ? "pass" : "fail");
@@ -12530,7 +12973,7 @@ function buildTestSummaryHtml(r) {
   } else if (errors.base) {
     add("Domain", "error");
   } else {
-    add("Domain", r.dnsFailed ? "fail" : "pass");
+    add("Domain", txtRecovery.txtLookupResolved ? "pass" : "fail");
   }
 
   // MX (placed directly below Domain per UI request)
@@ -12552,14 +12995,14 @@ function buildTestSummaryHtml(r) {
     add("SPF (queried domain TXT)", "error");
     add("ACS TXT", "error");
     add("TXT Records", "error");
-  } else if (r.dnsFailed) {
+  } else if (!txtRecovery.txtLookupResolved) {
     add("SPF (queried domain TXT)", "unavailable", true);
     add("ACS TXT", "fail");
     add("TXT Records", "unavailable", true);
   } else {
-    add("SPF (queried domain TXT)", (r.spfPresent && r.spfHasRequiredInclude === true) ? "pass" : "fail", true);
-    add("ACS TXT", r.acsPresent ? "pass" : "fail");
-    const hasTxt = Array.isArray(r.txtRecords) && r.txtRecords.length > 0;
+    add("SPF (queried domain TXT)", (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) ? "pass" : "fail", true);
+    add("ACS TXT", txtRecovery.acsPresent ? "pass" : "fail");
+    const hasTxt = Array.isArray(txtRecovery.txtRecords) && txtRecovery.txtRecords.length > 0;
     add("TXT Records", hasTxt ? "pass" : "fail", true);
   }
 
@@ -13378,6 +13821,253 @@ function toggleWhoisRaw(element) {
   el.style.display = isOpen ? "block" : "none";
 }
 
+// Convert RDAP JSON into small grouped sections first so the registration card
+// is readable before the user decides to expand the full raw payload.
+function getRdapVcardText(vcardArray, propertyName) {
+  const cardEntries = Array.isArray(vcardArray) && vcardArray.length >= 2 && Array.isArray(vcardArray[1]) ? vcardArray[1] : [];
+  for (const entry of cardEntries) {
+    if (!Array.isArray(entry) || entry.length < 4 || String(entry[0] || '').toLowerCase() !== String(propertyName || '').toLowerCase()) {
+      continue;
+    }
+
+    const value = entry[3];
+    if (Array.isArray(value)) {
+      const flattened = value.flat(Infinity).filter(Boolean).map(item => String(item).trim()).filter(Boolean);
+      if (flattened.length > 0) {
+        return flattened.join(', ');
+      }
+    }
+
+    const text = String(value || '').trim();
+    if (text) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
+function formatRdapDateValue(value) {
+  const rawValue = String(value || '').trim();
+  if (!rawValue) {
+    return '';
+  }
+
+  return formatLocalDateTime(rawValue) || rawValue;
+}
+
+function formatRdapLabel(label) {
+  return String(label || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+function renderRdapDigestSection(title, bodyHtml) {
+  if (!bodyHtml) {
+    return '';
+  }
+
+  return `<div class="rdap-digest-section"><div class="rdap-digest-title">${escapeHtml(title)}</div>${bodyHtml}</div>`;
+}
+
+function renderRdapDigestList(items, formatter) {
+  const values = (Array.isArray(items) ? items : []).map(item => formatter(item)).filter(Boolean);
+  if (!values.length) {
+    return '';
+  }
+
+  return `<ul class="rdap-digest-list">${values.map(value => `<li>${value}</li>`).join('')}</ul>`;
+}
+
+function renderRdapDigestPills(items, formatter) {
+  const values = (Array.isArray(items) ? items : []).map(item => formatter(item)).filter(Boolean);
+  if (!values.length) {
+    return '';
+  }
+
+  return `<div class="rdap-pill-list">${values.map(value => `<span class="rdap-pill">${value}</span>`).join('')}</div>`;
+}
+
+function renderRdapDigestTimeline(items, formatter) {
+  const values = (Array.isArray(items) ? items : []).map(item => formatter(item)).filter(Boolean);
+  if (!values.length) {
+    return '';
+  }
+
+  return `<div class="rdap-timeline">${values.join('')}</div>`;
+}
+
+// RDAP providers do not always return events in a reader-friendly order, so
+// normalize them chronologically before building the timeline.
+function sortRdapEventsChronologically(events) {
+  return [...(Array.isArray(events) ? events : [])]
+    .map((event, index) => ({ event, index }))
+    .sort((left, right) => {
+      const leftDate = Date.parse(left && left.event && left.event.eventDate ? left.event.eventDate : '');
+      const rightDate = Date.parse(right && right.event && right.event.eventDate ? right.event.eventDate : '');
+      const leftValid = Number.isFinite(leftDate);
+      const rightValid = Number.isFinite(rightDate);
+
+      if (leftValid && rightValid) {
+        return leftDate - rightDate;
+      }
+
+      if (leftValid) {
+        return -1;
+      }
+
+      if (rightValid) {
+        return 1;
+      }
+
+      return left.index - right.index;
+    })
+    .map(item => item.event);
+}
+
+function renderRdapDigestCards(items, formatter, className = 'rdap-detail-card-list') {
+  const values = (Array.isArray(items) ? items : []).map(item => formatter(item)).filter(Boolean);
+  if (!values.length) {
+    return '';
+  }
+
+  return `<div class="${className}">${values.join('')}</div>`;
+}
+
+function renderRdapDigest(rawRdapText) {
+  const sourceText = String(rawRdapText || '').trim();
+  if (!sourceText) {
+    return '';
+  }
+
+  let rdap;
+  try {
+    rdap = repairObjectStrings(JSON.parse(sourceText));
+  } catch {
+    return `<div class="rdap-digest-section"><div class="rdap-digest-title">Raw (RDAP)</div><pre class="code rdap-raw-pre">${escapeHtml(sourceText)}</pre></div>`;
+  }
+
+  const sortedEvents = sortRdapEventsChronologically(rdap.events);
+  const statusCount = Array.isArray(rdap.status) ? rdap.status.filter(Boolean).length : 0;
+  const eventCount = sortedEvents.filter(Boolean).length;
+  const nameserverCount = Array.isArray(rdap.nameservers) ? rdap.nameservers.filter(Boolean).length : 0;
+  const entityCount = Array.isArray(rdap.entities) ? rdap.entities.filter(Boolean).length : 0;
+  const linkCount = Array.isArray(rdap.links) ? rdap.links.filter(Boolean).length : 0;
+  const noticeCount = ([...(Array.isArray(rdap.notices) ? rdap.notices : []), ...(Array.isArray(rdap.remarks) ? rdap.remarks : [])]).filter(Boolean).length;
+
+  const statusHtml = renderRdapDigestPills(rdap.status, status => escapeHtml(formatRdapLabel(status)));
+  const eventHtml = renderRdapDigestTimeline(sortedEvents, event => {
+    if (!event || typeof event !== 'object') {
+      return '';
+    }
+
+    const action = formatRdapLabel(event.eventAction || 'Event');
+    const value = formatRdapDateValue(event.eventDate);
+    return `
+      <div class="rdap-timeline-item">
+        <div class="rdap-timeline-marker"></div>
+        <div class="rdap-timeline-content">
+          <div class="rdap-timeline-title">${escapeHtml(action)}</div>
+          ${value ? `<div class="rdap-timeline-meta">${escapeHtml(value)}</div>` : ''}
+        </div>
+      </div>`;
+  });
+  const nameserverHtml = renderRdapDigestPills(rdap.nameservers, nameserver => {
+    const ldhName = nameserver && typeof nameserver === 'object' ? (nameserver.ldhName || nameserver.unicodeName || nameserver.handle) : nameserver;
+    return escapeHtml(String(ldhName || '').toLowerCase());
+  });
+  const entityHtml = renderRdapDigestCards(rdap.entities, entity => {
+    if (!entity || typeof entity !== 'object') {
+      return '';
+    }
+
+    const roleText = Array.isArray(entity.roles) && entity.roles.length > 0
+      ? entity.roles.map(role => formatRdapLabel(role)).join(', ')
+      : formatRdapLabel(entity.objectClassName || 'Entity');
+    const displayName = getRdapVcardText(entity.vcardArray, 'fn') || getRdapVcardText(entity.vcardArray, 'org') || entity.handle || '';
+    const email = getRdapVcardText(entity.vcardArray, 'email');
+    const phone = getRdapVcardText(entity.vcardArray, 'tel');
+    const details = [
+      displayName ? `<div class="rdap-detail-primary">${escapeHtml(displayName)}</div>` : '',
+      email ? `<div class="rdap-detail-meta">${escapeHtml(email)}</div>` : '',
+      phone ? `<div class="rdap-detail-meta">${escapeHtml(phone)}</div>` : ''
+    ].filter(Boolean).join('');
+    return `
+      <div class="rdap-detail-card">
+        <div class="rdap-detail-card-title">${escapeHtml(roleText)}</div>
+        ${details || `<div class="rdap-detail-meta">${escapeHtml(entity.handle || '')}</div>`}
+      </div>`;
+  });
+  const linkHtml = renderRdapDigestCards(rdap.links, link => {
+    if (!link || typeof link !== 'object') {
+      return '';
+    }
+
+    const href = String(link.href || link.value || '').trim();
+    if (!href) {
+      return '';
+    }
+
+    const label = [link.rel, link.type].filter(Boolean).map(item => formatRdapLabel(item)).join(' · ');
+    return `
+      <div class="rdap-detail-card rdap-link-card">
+        <a class="rdap-link" href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(href)}</a>
+        ${label ? `<div class="rdap-detail-meta">${escapeHtml(label)}</div>` : ''}
+      </div>`;
+  }, 'rdap-link-card-list');
+  const noticeHtml = renderRdapDigestCards([...(Array.isArray(rdap.notices) ? rdap.notices : []), ...(Array.isArray(rdap.remarks) ? rdap.remarks : [])], notice => {
+    if (!notice || typeof notice !== 'object') {
+      return '';
+    }
+
+    const title = String(notice.title || '').trim();
+    const description = Array.isArray(notice.description) ? notice.description.filter(Boolean).join(' ') : '';
+    return `
+      <div class="rdap-notice-card">
+        ${title ? `<div class="rdap-detail-card-title">${escapeHtml(title)}</div>` : ''}
+        ${description ? `<div class="rdap-detail-meta">${escapeHtml(description)}</div>` : ''}
+      </div>`;
+  }, 'rdap-notice-card-list');
+
+  const summaryHeaderHtml = `
+    <div class="rdap-summary-grid">
+      ${statusCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${statusCount}</span><span class="rdap-summary-label">Statuses</span></div>` : ''}
+      ${eventCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${eventCount}</span><span class="rdap-summary-label">Events</span></div>` : ''}
+      ${nameserverCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${nameserverCount}</span><span class="rdap-summary-label">Nameservers</span></div>` : ''}
+      ${entityCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${entityCount}</span><span class="rdap-summary-label">Contacts</span></div>` : ''}
+      ${linkCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${linkCount}</span><span class="rdap-summary-label">Links</span></div>` : ''}
+      ${noticeCount > 0 ? `<div class="rdap-summary-tile"><span class="rdap-summary-count">${noticeCount}</span><span class="rdap-summary-label">Notices</span></div>` : ''}
+    </div>`;
+
+  const summarySections = [
+    renderRdapDigestSection(`Status${statusCount > 0 ? ` · ${statusCount}` : ''}`, statusHtml),
+    renderRdapDigestSection(`Events${eventCount > 0 ? ` · ${eventCount}` : ''}`, eventHtml),
+    renderRdapDigestSection(`Nameservers${nameserverCount > 0 ? ` · ${nameserverCount}` : ''}`, nameserverHtml),
+    renderRdapDigestSection(`Contacts${entityCount > 0 ? ` · ${entityCount}` : ''}`, entityHtml),
+    renderRdapDigestSection(`Links${linkCount > 0 ? ` · ${linkCount}` : ''}`, linkHtml),
+    renderRdapDigestSection(`Notices${noticeCount > 0 ? ` · ${noticeCount}` : ''}`, noticeHtml)
+  ].filter(Boolean).join('');
+
+  const prettyJson = (() => {
+    try {
+      return JSON.stringify(rdap, null, 2);
+    } catch {
+      return sourceText;
+    }
+  })();
+
+  return `
+    <div class="rdap-digest-wrapper">
+      ${summaryHeaderHtml}
+      ${summarySections}
+      <details class="rdap-raw-details">
+        <summary>${escapeHtml('Raw (RDAP) JSON')}</summary>
+        <pre class="code rdap-raw-pre">${escapeHtml(prettyJson)}</pre>
+      </details>
+    </div>`;
+}
+
 function formatTtlClock(totalSeconds) {
   const total = Math.max(0, Math.floor(Number(totalSeconds) || 0));
   const secondsPerMinute = 60;
@@ -13421,8 +14111,34 @@ function formatDnsRecordTtl(ttlSeconds) {
   return `${escapeHtml(String(total))}s (${escapeHtml(formatTtlClock(total))})`;
 }
 
-const dnsRecordsFilterState = { query: '', column: 'all' };
+const dnsRecordsFilterState = { query: '', column: 'all', filters: [] };
 const selectedDnsRecordKeys = new Set();
+const dnsRecordFilterSuggestionState = { activeIndex: -1, items: [] };
+
+// Keep the DNS records table stable and predictable by applying an explicit
+// client-side default sort before the rows are rendered.
+function compareDnsRecordSortValues(leftValue, rightValue) {
+  return String(leftValue || '').localeCompare(String(rightValue || ''), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function sortDnsRecordsRows(records) {
+  return [...(Array.isArray(records) ? records : [])].sort((left, right) => {
+    const valueComparisons = [
+      compareDnsRecordSortValues(left && left.type, right && right.type),
+      compareDnsRecordSortValues(left && left.name, right && right.name),
+      compareDnsRecordSortValues(left && left.data, right && right.data),
+      compareDnsRecordSortValues(left && left.class, right && right.class)
+    ];
+
+    for (const comparison of valueComparisons) {
+      if (comparison !== 0) {
+        return comparison;
+      }
+    }
+
+    return (Number(left && left.ttlSeconds) || 0) - (Number(right && right.ttlSeconds) || 0);
+  });
+}
 
 function getDnsRecordSelectionKey(record) {
   if (!record || typeof record !== 'object') return '';
@@ -13453,6 +14169,328 @@ function syncDnsRecordsFilterState() {
   dnsRecordsFilterState.column = columnSelect ? String(columnSelect.value || 'all') : 'all';
 }
 
+function getDnsRecordFilterColumnLabel(column) {
+  switch (String(column || 'all')) {
+    case 'name': return t('dnsRecordName');
+    case 'class': return t('dnsRecordClass');
+    case 'type': return t('type');
+    case 'data': return t('dnsRecordData');
+    case 'ttl': return t('dnsRecordTtl');
+    case 'all':
+    default: return t('dnsRecordsFilterAllColumns');
+  }
+}
+
+function getDnsRecordFilterChipKey(filter) {
+  if (!filter || typeof filter !== 'object') return '';
+  return `${String(filter.column || 'all')}\u001F${String(filter.query || '')}`;
+}
+
+// Store DNS record filters as removable chips so users can see exactly which
+// constraints are active instead of having to infer them from a single textbox.
+function updateDnsRecordsFilterChips() {
+  const container = document.getElementById('dnsRecordsFilterChips');
+  if (!container) {
+    return;
+  }
+
+  const filters = Array.isArray(dnsRecordsFilterState.filters) ? dnsRecordsFilterState.filters : [];
+  if (!filters.length) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+    return;
+  }
+
+  container.innerHTML = filters.map((filter, index) => {
+    return `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})">&#x2715;</button></span>`;
+  }).join('');
+  container.style.display = 'flex';
+}
+
+function addDnsRecordsFilter(rawValue = null, rawColumn = null) {
+  const searchInput = document.getElementById('dnsRecordsSearchInput');
+  const columnSelect = document.getElementById('dnsRecordsFilterColumn');
+  const column = String(rawColumn || (columnSelect ? columnSelect.value : dnsRecordsFilterState.column) || 'all');
+  const inputValue = rawValue === null || rawValue === undefined
+    ? String(searchInput ? searchInput.value || '' : '')
+    : String(rawValue || '');
+  const trimmedValue = inputValue.trim();
+  if (!trimmedValue) {
+    return false;
+  }
+
+  const pendingFilters = [];
+  if ((column === 'class' || column === 'type') && /\s/.test(trimmedValue)) {
+    const parts = trimmedValue.split(/\s+/).filter(Boolean);
+    const primaryValue = parts.shift() || '';
+    if (primaryValue) {
+      pendingFilters.push({ column, query: primaryValue.toLowerCase(), displayValue: primaryValue });
+    }
+    if (parts.length > 0) {
+      const remainingText = parts.join(' ');
+      pendingFilters.push({ column: 'all', query: remainingText.toLowerCase(), displayValue: remainingText });
+    }
+  } else {
+    pendingFilters.push({ column, query: trimmedValue.toLowerCase(), displayValue: trimmedValue });
+  }
+
+  let changed = false;
+  pendingFilters.forEach(filter => {
+    const key = getDnsRecordFilterChipKey(filter);
+    if (!key) {
+      return;
+    }
+
+    const exists = dnsRecordsFilterState.filters.some(existing => getDnsRecordFilterChipKey(existing) === key);
+    if (!exists) {
+      dnsRecordsFilterState.filters.push(filter);
+      changed = true;
+    }
+  });
+
+  if (searchInput) {
+    searchInput.value = '';
+    searchInput.focus();
+  }
+  dnsRecordsFilterState.query = '';
+  hideDnsRecordFilterSuggestions();
+  updateDnsRecordsFilterChips();
+  filterDnsRecordsTable();
+  return changed;
+}
+
+function removeDnsRecordsFilterByIndex(index) {
+  const filters = Array.isArray(dnsRecordsFilterState.filters) ? dnsRecordsFilterState.filters : [];
+  if (index < 0 || index >= filters.length) {
+    return;
+  }
+
+  filters.splice(index, 1);
+  updateDnsRecordsFilterChips();
+  filterDnsRecordsTable();
+}
+
+function hideDnsRecordFilterSuggestions() {
+  const searchInput = document.getElementById('dnsRecordsSearchInput');
+  const suggestionsList = document.getElementById('dnsRecordsSearchSuggestions');
+  if (!suggestionsList) {
+    return;
+  }
+
+  dnsRecordFilterSuggestionState.items = [];
+  dnsRecordFilterSuggestionState.activeIndex = -1;
+  suggestionsList.innerHTML = '';
+  suggestionsList.classList.remove('dns-records-search-suggestions-visible');
+  if (searchInput) {
+    searchInput.setAttribute('aria-expanded', 'false');
+    searchInput.removeAttribute('aria-activedescendant');
+  }
+}
+
+function getDnsRecordFilterSuggestionButtons() {
+  const suggestionsList = document.getElementById('dnsRecordsSearchSuggestions');
+  return suggestionsList ? Array.from(suggestionsList.querySelectorAll('.dns-records-search-suggestion-item')) : [];
+}
+
+function setActiveDnsRecordFilterSuggestion(index) {
+  const searchInput = document.getElementById('dnsRecordsSearchInput');
+  const buttons = getDnsRecordFilterSuggestionButtons();
+  if (!buttons.length) {
+    dnsRecordFilterSuggestionState.activeIndex = -1;
+    if (searchInput) {
+      searchInput.removeAttribute('aria-activedescendant');
+    }
+    return;
+  }
+
+  const boundedIndex = Math.max(0, Math.min(index, buttons.length - 1));
+  dnsRecordFilterSuggestionState.activeIndex = boundedIndex;
+  buttons.forEach((button, buttonIndex) => {
+    const isActive = buttonIndex === boundedIndex;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    if (isActive) {
+      button.scrollIntoView({ block: 'nearest' });
+      if (searchInput) {
+        searchInput.setAttribute('aria-activedescendant', button.id);
+      }
+    }
+  });
+}
+
+function moveDnsRecordFilterSuggestion(offset) {
+  const buttons = getDnsRecordFilterSuggestionButtons();
+  if (!buttons.length) {
+    return;
+  }
+
+  const currentIndex = dnsRecordFilterSuggestionState.activeIndex;
+  const nextIndex = currentIndex < 0
+    ? (offset >= 0 ? 0 : buttons.length - 1)
+    : (currentIndex + offset + buttons.length) % buttons.length;
+  setActiveDnsRecordFilterSuggestion(nextIndex);
+}
+
+// For narrow enum-style columns such as Class and Type, surface distinct
+// values in a compact custom picker so filtering can stay exact-match only.
+function getDnsRecordFilterSuggestions(column, query = '') {
+  if (column !== 'class' && column !== 'type') {
+    return [];
+  }
+
+  const tbody = document.getElementById('dnsRecordsTableBody');
+  if (!tbody) {
+    return [];
+  }
+
+  const suggestions = new Map();
+  Array.from(tbody.querySelectorAll('tr')).forEach(row => {
+    const normalizedValue = String(row.getAttribute(`data-col-${column}`) || '').trim();
+    const displayValue = String(row.getAttribute(`data-col-display-${column}`) || '').trim();
+    if (!normalizedValue || !displayValue || suggestions.has(normalizedValue)) {
+      return;
+    }
+
+    suggestions.set(normalizedValue, displayValue);
+  });
+
+  const allSuggestions = Array.from(suggestions.entries())
+    .map(([normalizedValue, displayValue]) => ({ normalizedValue, displayValue }))
+    .sort((left, right) => compareDnsRecordSortValues(left.displayValue, right.displayValue));
+
+  const normalizedQuery = String(query || '').trim().toLowerCase();
+  if (!normalizedQuery) {
+    return allSuggestions;
+  }
+
+  const exactMatches = allSuggestions.filter(item => item.normalizedValue === normalizedQuery);
+  if (exactMatches.length > 0) {
+    return exactMatches;
+  }
+
+  const prefixMatches = allSuggestions.filter(item => item.normalizedValue.startsWith(normalizedQuery));
+  if (prefixMatches.length > 0) {
+    return prefixMatches;
+  }
+
+  return allSuggestions.filter(item => item.normalizedValue.includes(normalizedQuery));
+}
+
+function updateDnsRecordFilterSuggestions() {
+  const searchInput = document.getElementById('dnsRecordsSearchInput');
+  const suggestionsList = document.getElementById('dnsRecordsSearchSuggestions');
+  if (!searchInput || !suggestionsList) {
+    return;
+  }
+
+  const primary = String(dnsRecordsFilterState.query || '').trim().toLowerCase();
+  const suggestionValues = getDnsRecordFilterSuggestions(dnsRecordsFilterState.column, dnsRecordsFilterState.query);
+  const shouldShowSuggestions = (dnsRecordsFilterState.column === 'class' || dnsRecordsFilterState.column === 'type')
+    && document.activeElement === searchInput
+    && !!primary
+    && suggestionValues.length > 0
+    && !suggestionValues.some(item => item.normalizedValue === primary);
+
+  if (!shouldShowSuggestions) {
+    hideDnsRecordFilterSuggestions();
+    return;
+  }
+
+  dnsRecordFilterSuggestionState.items = suggestionValues;
+  suggestionsList.innerHTML = suggestionValues
+    .map((item, index) => `<button type="button" id="dnsRecordsSearchSuggestion-${index}" class="dns-records-search-suggestion-item" role="option" aria-selected="false" data-value="${escapeHtml(item.displayValue)}" onmousedown="event.preventDefault()" onmouseenter="setActiveDnsRecordFilterSuggestion(${index})" onclick="selectDnsRecordFilterSuggestion(this.getAttribute('data-value') || '')">${escapeHtml(item.displayValue)}</button>`)
+    .join('');
+  suggestionsList.classList.add('dns-records-search-suggestions-visible');
+
+  const preferredIndex = suggestionValues.findIndex(item => item.normalizedValue === primary);
+  searchInput.setAttribute('aria-expanded', 'true');
+  setActiveDnsRecordFilterSuggestion(preferredIndex >= 0 ? preferredIndex : 0);
+}
+
+function selectDnsRecordFilterSuggestion(value) {
+  addDnsRecordsFilter(String(value || '').trim(), dnsRecordsFilterState.column);
+}
+
+function handleDnsRecordFilterKeydown(event) {
+  if (!event) {
+    return;
+  }
+
+  // Keep keyboard behavior aligned with a standard combobox so Arrow keys move
+  // through suggestions, Enter selects, and Escape dismisses the popup.
+  const isSuggestionListVisible = !!document.querySelector('.dns-records-search-suggestions.dns-records-search-suggestions-visible');
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    if (!isSuggestionListVisible) {
+      updateDnsRecordFilterSuggestions();
+    }
+    moveDnsRecordFilterSuggestion(1);
+    return;
+  }
+
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (!isSuggestionListVisible) {
+      updateDnsRecordFilterSuggestions();
+    }
+    moveDnsRecordFilterSuggestion(-1);
+    return;
+  }
+
+  if (event.key === 'Home' && isSuggestionListVisible) {
+    event.preventDefault();
+    setActiveDnsRecordFilterSuggestion(0);
+    return;
+  }
+
+  if (event.key === 'End' && isSuggestionListVisible) {
+    event.preventDefault();
+    setActiveDnsRecordFilterSuggestion(getDnsRecordFilterSuggestionButtons().length - 1);
+    return;
+  }
+
+  if (event.key === 'Enter' && isSuggestionListVisible && dnsRecordFilterSuggestionState.activeIndex >= 0) {
+    event.preventDefault();
+    const activeButton = getDnsRecordFilterSuggestionButtons()[dnsRecordFilterSuggestionState.activeIndex];
+    if (activeButton) {
+      selectDnsRecordFilterSuggestion(activeButton.getAttribute('data-value') || '');
+    }
+    return;
+  }
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    addDnsRecordsFilter();
+    return;
+  }
+
+  if (event.key === 'Backspace' && !String((event.target && event.target.value) || '').trim() && Array.isArray(dnsRecordsFilterState.filters) && dnsRecordsFilterState.filters.length > 0) {
+    dnsRecordsFilterState.filters.pop();
+    updateDnsRecordsFilterChips();
+    filterDnsRecordsTable();
+    return;
+  }
+
+  if (event.key === 'Escape') {
+    hideDnsRecordFilterSuggestions();
+  }
+}
+
+function matchesDnsRecordFilter(haystack, query, column) {
+  const normalizedQuery = String(query || '').trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  // Class and Type remain exact-match filters, while broader columns keep
+  // substring matching so multiple chips can be combined intuitively.
+  if (column === 'class' || column === 'type') {
+    return haystack === normalizedQuery;
+  }
+
+  return haystack.includes(normalizedQuery);
+}
+
 function updateDnsRecordsFilterSummary(visibleCount, totalCount) {
   const summary = document.getElementById('dnsRecordsFilterSummary');
   if (!summary) return;
@@ -13461,21 +14499,25 @@ function updateDnsRecordsFilterSummary(visibleCount, totalCount) {
 
 function filterDnsRecordsTable() {
   syncDnsRecordsFilterState();
+  updateDnsRecordFilterSuggestions();
+  updateDnsRecordsFilterChips();
 
   const tbody = document.getElementById('dnsRecordsTableBody');
   const noMatches = document.getElementById('dnsRecordsNoMatches');
   if (!tbody) return;
 
   const rows = Array.from(tbody.querySelectorAll('tr'));
-  const query = dnsRecordsFilterState.query;
-  const column = dnsRecordsFilterState.column;
+  const filters = Array.isArray(dnsRecordsFilterState.filters) ? dnsRecordsFilterState.filters : [];
   let visibleCount = 0;
 
   rows.forEach(row => {
-    const haystack = column === 'all'
-      ? String(row.getAttribute('data-search') || '')
-      : String(row.getAttribute(`data-col-${column}`) || '');
-    const isMatch = !query || haystack.includes(query);
+    const isMatch = filters.every(filter => {
+      const column = String(filter && filter.column || 'all');
+      const haystack = column === 'all'
+        ? String(row.getAttribute('data-search') || '')
+        : String(row.getAttribute(`data-col-${column}`) || '');
+      return matchesDnsRecordFilter(haystack, filter && filter.query, column);
+    });
     row.style.display = isMatch ? '' : 'none';
     if (isMatch) visibleCount++;
   });
@@ -13494,6 +14536,9 @@ function clearDnsRecordsFilters() {
   if (columnSelect) columnSelect.value = 'all';
   dnsRecordsFilterState.query = '';
   dnsRecordsFilterState.column = 'all';
+  dnsRecordsFilterState.filters = [];
+  hideDnsRecordFilterSuggestions();
+  updateDnsRecordsFilterChips();
   filterDnsRecordsTable();
 }
 
@@ -13521,7 +14566,7 @@ function handleDnsRecordRowKeydown(event, row) {
 }
 
 function renderDnsRecordsTable(records) {
-  const rows = Array.isArray(records) ? records.filter(Boolean) : [];
+  const rows = sortDnsRecordsRows(Array.isArray(records) ? records.filter(Boolean) : []);
   if (!rows.length) {
     return `<div class="code">${escapeHtml(t('noRecordsAvailable'))}</div>`;
   }
@@ -13538,29 +14583,30 @@ function renderDnsRecordsTable(records) {
     const rowKey = getDnsRecordSelectionKey(record);
     const isSelected = selectedDnsRecordKeys.has(rowKey);
     const searchText = getDnsRecordSearchText(record);
-    return `<tr class="dns-record-row${isSelected ? ' dns-record-row-selected' : ''}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+    return `<tr class="dns-record-row${isSelected ? ' dns-record-row-selected' : ''}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
   }).join('');
 
   return `
     <div class="code code-lite" style="margin-top:6px;">
       <div class="dns-records-toolbar hide-on-screenshot">
-        <label class="dns-records-toolbar-group" for="dnsRecordsSearchInput">
-          <span>${escapeHtml(t('dnsRecordsSearchLabel'))}</span>
-          <input id="dnsRecordsSearchInput" type="search" class="dns-records-search-input" placeholder="${escapeHtml(t('dnsRecordsSearchPlaceholder'))}" value="${escapeHtml(dnsRecordsFilterState.query)}" oninput="filterDnsRecordsTable()" />
-        </label>
-        <label class="dns-records-toolbar-group" for="dnsRecordsFilterColumn">
-          <span>${escapeHtml(t('dnsRecordsFilterColumn'))}</span>
-          <select id="dnsRecordsFilterColumn" class="dns-records-filter-select" onchange="filterDnsRecordsTable()">
-            <option value="all"${dnsRecordsFilterState.column === 'all' ? ' selected' : ''}>${escapeHtml(t('dnsRecordsFilterAllColumns'))}</option>
-            <option value="name"${dnsRecordsFilterState.column === 'name' ? ' selected' : ''}>${escapeHtml(t('dnsRecordName'))}</option>
-            <option value="class"${dnsRecordsFilterState.column === 'class' ? ' selected' : ''}>${escapeHtml(t('dnsRecordClass'))}</option>
-            <option value="type"${dnsRecordsFilterState.column === 'type' ? ' selected' : ''}>${escapeHtml(t('type'))}</option>
-            <option value="data"${dnsRecordsFilterState.column === 'data' ? ' selected' : ''}>${escapeHtml(t('dnsRecordData'))}</option>
-            <option value="ttl"${dnsRecordsFilterState.column === 'ttl' ? ' selected' : ''}>${escapeHtml(t('dnsRecordTtl'))}</option>
-          </select>
-        </label>
+        <label class="dns-records-toolbar-label" for="dnsRecordsSearchInput">${escapeHtml(t('dnsRecordsSearchLabel'))}</label>
+        <label class="dns-records-toolbar-label" for="dnsRecordsFilterColumn">${escapeHtml(t('dnsRecordsFilterColumn'))}</label>
+        <span></span><span></span>
+        <div class="dns-records-search-dropdown">
+          <input id="dnsRecordsSearchInput" type="text" class="dns-records-search-input" placeholder="${escapeHtml(t('dnsRecordsSearchPlaceholder'))}" value="${escapeHtml(dnsRecordsFilterState.query)}" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="dnsRecordsSearchSuggestions" onfocus="updateDnsRecordFilterSuggestions()" oninput="filterDnsRecordsTable()" onkeydown="handleDnsRecordFilterKeydown(event)" onblur="window.setTimeout(hideDnsRecordFilterSuggestions, 120)" />
+          <div id="dnsRecordsSearchSuggestions" class="dns-records-search-suggestions" role="listbox" aria-label="${escapeHtml(t('dnsRecordsSearchLabel'))}"></div>
+        </div>
+        <select id="dnsRecordsFilterColumn" class="dns-records-filter-select" onchange="filterDnsRecordsTable()">
+          <option value="all"${dnsRecordsFilterState.column === 'all' ? ' selected' : ''}>${escapeHtml(t('dnsRecordsFilterAllColumns'))}</option>
+          <option value="name"${dnsRecordsFilterState.column === 'name' ? ' selected' : ''}>${escapeHtml(t('dnsRecordName'))}</option>
+          <option value="class"${dnsRecordsFilterState.column === 'class' ? ' selected' : ''}>${escapeHtml(t('dnsRecordClass'))}</option>
+          <option value="type"${dnsRecordsFilterState.column === 'type' ? ' selected' : ''}>${escapeHtml(t('type'))}</option>
+          <option value="data"${dnsRecordsFilterState.column === 'data' ? ' selected' : ''}>${escapeHtml(t('dnsRecordData'))}</option>
+          <option value="ttl"${dnsRecordsFilterState.column === 'ttl' ? ' selected' : ''}>${escapeHtml(t('dnsRecordTtl'))}</option>
+        </select>
         <button type="button" class="copy-btn dns-records-clear-btn" onclick="clearDnsRecordsFilters()">${escapeHtml(t('dnsRecordsClearFilters'))}</button>
         <span id="dnsRecordsFilterSummary" class="dns-records-filter-summary">${escapeHtml(t('dnsRecordsFilterSummary', { visible: String(rows.length), total: String(rows.length) }))}</span>
+        <div id="dnsRecordsFilterChips" class="dns-records-filter-chip-row" style="display:${dnsRecordsFilterState.filters.length ? 'flex' : 'none'};">${(dnsRecordsFilterState.filters || []).map((filter, index) => `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})">&#x2715;</button></span>`).join('')}</div>
       </div>
       <table id="dnsRecordsTable" class="mx-table dns-records-table">
         <thead>
@@ -13581,6 +14627,17 @@ function renderDnsRecordsTable(records) {
 function render(r) {
   const loaded = (r && r._loaded) ? r._loaded : {};
   const errors = (r && r._errors) ? r._errors : {};
+  // The TXT recovery helper normalizes the effective TXT/SPF/ACS view so the
+  // cards can keep rendering even when the dedicated base TXT lookup timed out
+  // but the detailed DNS records payload still contains the queried-domain TXT rows.
+  const txtRecovery = (r && r._txtRecovery) ? r._txtRecovery : getDnsTxtRecoveryState(r);
+  const txtLookupResolved = !!txtRecovery.txtLookupResolved;
+  const effectiveTxtRecords = Array.isArray(txtRecovery.txtRecords) ? txtRecovery.txtRecords : [];
+  const effectiveSpfPresent = !!txtRecovery.spfPresent;
+  const effectiveSpfValue = txtRecovery.spfValue || null;
+  const effectiveSpfHasRequiredInclude = txtRecovery.spfHasRequiredInclude;
+  const effectiveAcsPresent = !!txtRecovery.acsPresent;
+  const effectiveAcsValue = txtRecovery.acsValue || null;
   const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
   const mxFallbackUsed = !!(r && r.mxFallbackUsed);
   const mxFallbackChecked = r && r.mxFallbackDomainChecked ? r.mxFallbackDomainChecked : null;
@@ -13600,7 +14657,7 @@ function render(r) {
     statusText = `${escapeHtml(t('statusChecking', { domain: r.domain || '' }))} <span class="loading-dots status-loading-dots"><span class="loading-dot active">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span></span>`;
   } else if (anyError) {
     statusText = escapeHtml(t('statusSomeChecksFailed'));
-  } else if (loaded.base && r.dnsFailed) {
+  } else if (loaded.base && !txtLookupResolved) {
     statusText = escapeHtml(t('statusTxtFailed'));
   } else {
     // Determine overall status for Email Quota and Domain Verification
@@ -13656,7 +14713,7 @@ function render(r) {
     }
 
     // 4. SPF
-    if (!r.spfPresent || r.spfHasRequiredInclude !== true) { quotaFail = true; }
+    if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
 
     let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     if (quotaFail) {
@@ -13899,14 +14956,14 @@ function render(r) {
     quotaItems.push(quotaRow(t('spfQueried'), 'error', errors.base, null, 'spf'));
     quotaLines.push(`**SPF (queried domain TXT):** ERROR${errors.base ? ' - ' + errors.base : ''}`);
     quotaLinesHtml.push(`<strong>SPF (queried domain TXT):</strong> ERROR${errors.base ? ' - ' + escapeHtml(errors.base) : ''}`);
-  } else if (r.dnsFailed) {
+  } else if (!txtLookupResolved) {
     quotaItems.push(quotaRow(t('spfQueried'), 'fail', r.dnsError || t('txtLookupFailedOrTimedOut'), null, 'spf'));
     quotaLines.push(`**${t('spfQueried')}:** FAIL${r.dnsError ? ' - ' + r.dnsError : ' - ' + t('txtLookupFailedOrTimedOut')}`);
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> FAIL${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
   } else {
-    const spfPassesRequirement = !!(r.spfPresent && r.spfHasRequiredInclude === true);
-    const spfDetail = r.spfPresent
-      ? ([r.spfValue, getLocalizedSpfRequirementSummary(r)].filter(Boolean).join("\n\n"))
+    const spfPassesRequirement = !!(effectiveSpfPresent && effectiveSpfHasRequiredInclude === true);
+    const spfDetail = effectiveSpfPresent
+      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n"))
       : t('noSpfRecordDetected');
     quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : 'fail', spfDetail, null, 'spf'));
     const spfState = spfPassesRequirement ? 'PASS' : 'FAIL';
@@ -13948,13 +15005,13 @@ function render(r) {
     ? t('pending')
     : (errors.base
       ? t('error')
-      : (r.acsPresent ? t('verified') : t('notVerified')));
+      : (effectiveAcsPresent ? t('verified') : t('notVerified')));
 
   const spfStatusText = (!loaded.base && !errors.base)
     ? t('pending')
     : (errors.base
       ? t('error')
-      : ((r.spfPresent && r.spfHasRequiredInclude !== false) ? t('verified') : t('notStarted')));
+      : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude !== false) ? t('verified') : t('notStarted')));
 
   const dkim1StatusText = (!loaded.dkim && !errors.dkim)
     ? t('pending')
@@ -14036,16 +15093,16 @@ function render(r) {
   } else if (errors.base) {
     verificationItems.push(verifyRow(t('dnsTxtLookup'), 'error', errors.base, 'txtRecords'));
     verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), 'error', t('unableDetermineAcsTxtValue'), 'acsTxt'));
-  } else if (r.dnsFailed) {
+  } else if (!txtLookupResolved) {
     verificationItems.push(verifyRow(t('dnsTxtLookup'), 'fail', r.dnsError || t('txtLookupFailedOrTimedOut'), 'txtRecords'));
     verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), 'fail', t('missingRequiredAcsTxt'), 'acsTxt'));
   } else {
     verificationItems.push(verifyRow(t('dnsTxtLookup'), 'pass', t('resolvedSuccessfully'), 'txtRecords'));
-    verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), r.acsPresent ? 'pass' : 'fail', r.acsPresent ? t('msDomainVerificationFound') : t('addAcsTxtFromPortal'), 'acsTxt'));
+    verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), effectiveAcsPresent ? 'pass' : 'fail', effectiveAcsPresent ? t('msDomainVerificationFound') : t('addAcsTxtFromPortal'), 'acsTxt'));
   }
 
   // Overall ACS readiness
-  verificationItems.push(verifyRow(t('acsReadiness'), (loaded.base && !errors.base && !r.dnsFailed && r.acsPresent) ? 'pass' : (loaded.base && !errors.base ? 'fail' : 'pending'), r.acsReady ? t('acsReadyMessage') : t('missingRequiredAcsTxt'), 'verification'));
+  verificationItems.push(verifyRow(t('acsReadiness'), (loaded.base && !errors.base && txtLookupResolved && effectiveAcsPresent) ? 'pass' : (loaded.base && !errors.base ? 'fail' : 'pending'), r.acsReady ? t('acsReadyMessage') : t('missingRequiredAcsTxt'), 'verification'));
 
   cards.push(`
   <div class="card" id="card-verification">
@@ -14089,10 +15146,28 @@ function render(r) {
     const whoisRows = [];
     const addWhoisRow = (label, value, options = {}) => {
       if (value === null || value === undefined || value === '') return;
-      const valueHtml = options.italic
+      const valueHtml = options.html
+        ? options.html
+        : options.italic
         ? `<em>${escapeHtml(value)}</em>`
         : escapeHtml(value);
       whoisRows.push(`<div class="kv-label">${escapeHtml(label)}:</div><div class="kv-value">${valueHtml}</div>`);
+    };
+
+    const formatWhoisDateValueHtml = (dateValue) => {
+      const rawValue = String(dateValue || '').trim();
+      if (!rawValue) {
+        return '';
+      }
+
+      const localized = formatLocalDateTime(rawValue);
+      if (!localized || localized === rawValue) {
+        return escapeHtml(rawValue);
+      }
+
+      // Show the human-readable local time first, then the raw UTC value
+      // prefixed with "UTC:" so users can distinguish the two formats.
+      return `<div>${escapeHtml(localized)}</div><div class="kv-value-secondary">UTC: ${escapeHtml(rawValue)}</div>`;
     };
 
     addWhoisRow(t('lookupDomainLabel'), r.whoisLookupDomain);
@@ -14100,8 +15175,8 @@ function render(r) {
       whoisRows.push('<div class="kv-spacer"></div>');
     }
     addWhoisRow(t('source'), r.whoisSource, { italic: true });
-    addWhoisRow(t('creationDate'), r.whoisCreationDateUtc);
-    addWhoisRow(t('registryExpiryDate'), r.whoisExpiryDateUtc);
+    addWhoisRow(t('creationDate'), r.whoisCreationDateUtc, { html: formatWhoisDateValueHtml(r.whoisCreationDateUtc) });
+    addWhoisRow(t('registryExpiryDate'), r.whoisExpiryDateUtc, { html: formatWhoisDateValueHtml(r.whoisExpiryDateUtc) });
     addWhoisRow(t('registrarLabel'), r.whoisRegistrar);
     addWhoisRow(t('registrantLabel'), r.whoisRegistrant);
     if (r.whoisAgeHuman) {
@@ -14136,14 +15211,14 @@ function render(r) {
       isYoung ||
       isVeryYoung
     );
-    const rawSections = [];
+    const rawSectionHtml = [];
     if (r.whoisRawRdapText) {
-      rawSections.push(`${t('rawLabel')} (RDAP):\n${r.whoisRawRdapText}`);
+      rawSectionHtml.push(renderRdapDigest(r.whoisRawRdapText));
     }
     if (r.whoisRawText) {
-      rawSections.push(`${t('rawLabel')} (${r.whoisSource || t('rawWhoisLabel')}):\n${r.whoisRawText}`);
+      rawSectionHtml.push(`<div class="rdap-digest-section"><div class="rdap-digest-title">${escapeHtml(`${t('rawLabel')} (${r.whoisSource || t('rawWhoisLabel')})`)}</div><pre class="code rdap-raw-pre">${escapeHtml(r.whoisRawText)}</pre></div>`);
     }
-    const hasRawRegistrationData = rawSections.length > 0;
+    const hasRawRegistrationData = rawSectionHtml.length > 0;
     const showRawInline = hasRawRegistrationData && !hasStructuredWhoisDetails;
     const rawWhoisButtonOpenLabel = `${t('rawWhoisRdapDataButton')} +`;
     const rawWhoisButtonCloseLabel = `${t('rawWhoisRdapDataButton')} -`;
@@ -14151,7 +15226,7 @@ function render(r) {
       ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-top:10px;" data-open-label="${escapeHtml(rawWhoisButtonOpenLabel)}" data-close-label="${escapeHtml(rawWhoisButtonCloseLabel)}" onclick="event.stopPropagation(); toggleWhoisRaw(this)">${escapeHtml(rawWhoisButtonOpenLabel)}</button>`
       : '';
     const rawWhoisHtml = hasRawRegistrationData
-      ? `<div id="whoisRawData" class="code" style="margin-top:10px;${showRawInline ? '' : ' display:none;'}">${escapeHtml(rawSections.join('\n\n'))}</div>`
+      ? `<div id="whoisRawData" class="whois-raw-panel" style="margin-top:10px;${showRawInline ? '' : ' display:none;'}">${rawSectionHtml.join('')}</div>`
       : '';
     const whoisErrorHtml = r.whoisError
       ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('error'))}: ${escapeHtml(r.whoisError)}</div>`
@@ -14189,12 +15264,12 @@ function render(r) {
   }
 
   {
-    const baseLoaded = loaded.base && !errors.base && !r.dnsFailed;
-    const ipv4List = Array.isArray(r.ipv4Addresses) ? r.ipv4Addresses.filter(x => x) : [];
-    const ipv6List = Array.isArray(r.ipv6Addresses) ? r.ipv6Addresses.filter(x => x) : [];
-    const ipLookupDomain = r.ipLookupDomain || r.domain;
-    const ipUsedParent = r.ipUsedParent === true && ipLookupDomain && ipLookupDomain !== r.domain;
-    const domainLabel = basePending ? "PENDING" : (baseError ? "ERROR" : (r.dnsFailed ? "DNS ERROR" : "LOOKED UP"));
+  const baseLoaded = loaded.base && !errors.base && txtLookupResolved;
+    const ipv4List = Array.isArray(txtRecovery.ipv4Addresses) ? txtRecovery.ipv4Addresses : [];
+    const ipv6List = Array.isArray(txtRecovery.ipv6Addresses) ? txtRecovery.ipv6Addresses : [];
+    const ipLookupDomain = txtRecovery.ipLookupDomain || r.ipLookupDomain || r.domain;
+    const ipUsedParent = txtRecovery.ipUsedParent === true && ipLookupDomain && ipLookupDomain !== r.domain;
+  const domainLabel = basePending ? "PENDING" : (baseError ? "ERROR" : (txtLookupResolved ? "LOOKED UP" : "DNS ERROR"));
     const domainClass = basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info");
 
     const ipNote = baseLoaded && ipUsedParent
@@ -14412,9 +15487,9 @@ function render(r) {
 
   // Match card order to the Check Summary.
   const spfCardBaseValue = loaded.base
-    ? (r.spfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
+    ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary(r)].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n");
   // The expanded SPF analysis is server-generated in English, and it is only meaningful once the
   // base TXT payload has loaded, so only render it for English after the base check completes.
   const spfExpandedSection = currentLanguage === 'en' && loaded.base && r.spfExpandedText
@@ -14423,22 +15498,22 @@ function render(r) {
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')) + spfExpandedSection,
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((r.spfPresent && r.spfHasRequiredInclude === true) ? "PASS" : "FAIL")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((r.spfPresent && r.spfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : "FAIL")),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
     "spf"
   ));
 
   cards.push(card(
     t('acsDomainVerificationTxt'),
-    loaded.base ? (r.acsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : (r.acsPresent ? "PASS" : "MISSING")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : (r.acsPresent ? "tag-pass" : "tag-fail")),
+    loaded.base ? (effectiveAcsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    basePending ? "LOADING" : (baseError ? "ERROR" : (effectiveAcsPresent ? "PASS" : "MISSING")),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : (effectiveAcsPresent ? "tag-pass" : "tag-fail")),
     "acsTxt"
   ));
 
   cards.push(card(
     t('txtRecordsQueried'),
-    loaded.base ? (((r.txtRecords || []).join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noTxtRecordsOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainTxtRecordsInfo', { lookupDomain: r.txtLookupDomain })}\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    loaded.base ? ((effectiveTxtRecords.join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noTxtRecordsOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainTxtRecordsInfo', { lookupDomain: r.txtLookupDomain })}\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     basePending ? "LOADING" : (baseError ? "ERROR" : "INFO"),
     basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info"),
     "txtRecords",
@@ -14562,6 +15637,7 @@ function render(r) {
     "cname"
   ));
 
+  const guidanceWorkflowComplete = Object.values(loaded).length > 0 && Object.values(loaded).every(Boolean);
   const guidanceItems = (r.guidance || []).map(g => {
     let iconHtml = '';
     let text = g;
@@ -14607,7 +15683,7 @@ function render(r) {
       </div>
       <div id="field-guidance" class="card-content">
         <ul class="guidance">
-          ${guidanceItems || `<li>${escapeHtml(t('noAdditionalGuidance'))}</li>`}
+          ${guidanceItems || `<li>${escapeHtml(guidanceWorkflowComplete ? t('noAdditionalGuidance') : t('loadingValue'))}</li>`}
         </ul>
       </div>
     </div>
@@ -16260,8 +17336,9 @@ if ([string]::IsNullOrWhiteSpace($entraTenantId)) {
 # Maximum number of concurrent request-handling runspaces.
 $maxConcurrentRequests = 64
 
-# Per-domain throttling: only one lookup per domain at a time.
-# This prevents a single browser from hammering DNS (e.g., repeated refreshes) for the same domain.
+# Per-domain/route throttling: only one lookup for the same domain + endpoint at a time.
+# This prevents duplicate requests from hammering DNS while still allowing independent
+# lookup stages (TXT, MX, WHOIS, DMARC, etc.) to run in parallel for the same domain.
 
 $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Threading.SemaphoreSlim]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
@@ -16420,15 +17497,18 @@ if ([string]::IsNullOrWhiteSpace($path)) { $path = '/' }
 # - $htmlPage    : the embedded SPA HTML (string)
 # - $domainLocks : shared dictionary of per-domain semaphores
 
-function Get-DomainSemaphore([string]$domain) {
-  # Get/create a per-domain semaphore so concurrent requests for the same domain serialize.
+function Get-DomainSemaphore([string]$domain, [string]$scope) {
+  # Get/create a per-domain+scope semaphore so duplicate work serializes, while
+  # different lookup stages for the same domain can still run concurrently.
+  $scopeKey = if ([string]::IsNullOrWhiteSpace($scope)) { 'default' } else { $scope.Trim() }
+  $lockKey = if ([string]::IsNullOrWhiteSpace($domain)) { $scopeKey } else { "$scopeKey|$domain" }
   $sem = $null
-  if (-not $domainLocks.TryGetValue($domain, [ref]$sem)) {
+  if (-not $domainLocks.TryGetValue($lockKey, [ref]$sem)) {
     $newSem = [System.Threading.SemaphoreSlim]::new(1, 1)
-    if ($domainLocks.TryAdd($domain, $newSem)) {
+    if ($domainLocks.TryAdd($lockKey, $newSem)) {
       $sem = $newSem
     } else {
-      $null = $domainLocks.TryGetValue($domain, [ref]$sem)
+      $null = $domainLocks.TryGetValue($lockKey, [ref]$sem)
     }
   }
   return $sem
@@ -16516,8 +17596,9 @@ if ($metricsEnabled) {
       return
     }
 
-    # Serialize work for this domain, do the lookup, then release.
-    $sem = Get-DomainSemaphore -domain $domain
+    # Serialize duplicate work for this domain + endpoint, but allow other endpoints
+    # for the same domain to execute in parallel.
+    $sem = Get-DomainSemaphore -domain $domain -scope $path
     $null = $sem.Wait()
     try {
       switch ($path) {
@@ -16753,8 +17834,9 @@ if ($metricsEnabled) {
       return
     }
 
-    # Serialize work for this domain, do the lookup, then release.
-    $sem = Get-DomainSemaphore -domain $domain
+    # Serialize duplicate work for this domain + endpoint, but allow other endpoints
+    # for the same domain to execute in parallel.
+    $sem = Get-DomainSemaphore -domain $domain -scope $path
     $null = $sem.Wait()
     try {
       if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Started }

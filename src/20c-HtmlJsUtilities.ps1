@@ -774,28 +774,94 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   return guidance;
 }
 
+function getDnsTxtRecoveryState(r) {
+  const loaded = r && r._loaded ? r._loaded : {};
+  const domain = String(r && r.domain || '').trim().toLowerCase();
+  const detailedARecords = loaded.records && Array.isArray(r && r.dnsRecords)
+    ? r.dnsRecords.filter(record => record
+      && String(record.type || '').toUpperCase() === 'A'
+      && String(record.name || '').trim().toLowerCase() === domain)
+      .map(record => String(record.data || '').trim())
+      .filter(Boolean)
+    : [];
+  const detailedAaaaRecords = loaded.records && Array.isArray(r && r.dnsRecords)
+    ? r.dnsRecords.filter(record => record
+      && String(record.type || '').toUpperCase() === 'AAAA'
+      && String(record.name || '').trim().toLowerCase() === domain)
+      .map(record => String(record.data || '').trim())
+      .filter(Boolean)
+    : [];
+  const detailedTxtRecords = loaded.records && Array.isArray(r && r.dnsRecords)
+    ? r.dnsRecords.filter(record => record
+      && String(record.type || '').toUpperCase() === 'TXT'
+      && String(record.name || '').trim().toLowerCase() === domain)
+      .map(record => String(record.data || '').trim())
+      .filter(Boolean)
+    : [];
+  const recoveredFromDetailedRecords = !!(loaded.base && r && r.dnsFailed && detailedTxtRecords.length > 0);
+  const recoveredAddressesFromDetailedRecords = !!(loaded.records && (detailedARecords.length > 0 || detailedAaaaRecords.length > 0));
+  const txtRecords = recoveredFromDetailedRecords
+    ? detailedTxtRecords
+    : (Array.isArray(r && r.txtRecords) ? r.txtRecords.filter(Boolean) : []);
+  const ipv4Addresses = recoveredAddressesFromDetailedRecords
+    ? detailedARecords
+    : (Array.isArray(r && r.ipv4Addresses) ? r.ipv4Addresses.filter(Boolean) : []);
+  const ipv6Addresses = recoveredAddressesFromDetailedRecords
+    ? detailedAaaaRecords
+    : (Array.isArray(r && r.ipv6Addresses) ? r.ipv6Addresses.filter(Boolean) : []);
+  const spfValue = recoveredFromDetailedRecords
+    ? (txtRecords.find(value => /^v=spf1/i.test(String(value || '').trim())) || null)
+    : (r ? r.spfValue : null);
+  const acsValue = recoveredFromDetailedRecords
+    ? (txtRecords.find(value => /ms-domain-verification/i.test(String(value || '').trim())) || null)
+    : (r ? r.acsValue : null);
+  const spfHasRequiredInclude = recoveredFromDetailedRecords && spfValue
+    ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
+    : (r ? r.spfHasRequiredInclude : null);
+
+  return {
+    recoveredFromDetailedRecords,
+    recoveredAddressesFromDetailedRecords,
+    txtLookupResolved: !!(loaded.base && (!r.dnsFailed || recoveredFromDetailedRecords)),
+    txtRecords,
+    ipv4Addresses,
+    ipv6Addresses,
+    ipLookupDomain: recoveredAddressesFromDetailedRecords ? (r && r.domain) : (r ? r.ipLookupDomain : null),
+    ipUsedParent: recoveredAddressesFromDetailedRecords ? false : !!(r && r.ipUsedParent),
+    spfValue,
+    spfPresent: !!spfValue,
+    spfHasRequiredInclude,
+    acsValue,
+    acsPresent: !!acsValue
+  };
+}
+
 function buildGuidance(r) {
   const guidance = [];
   const loaded = r && r._loaded ? r._loaded : {};
   const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
+  const txtRecovery = getDnsTxtRecoveryState(r);
+  const guidanceWorkflowComplete = ['base', 'mx', 'records', 'whois', 'dmarc', 'dkim', 'cname', 'reputation'].every(key => loaded[key] === true);
 
-  if (loaded.base && r.dnsFailed) {
+  // Only surface a terminal TXT lookup failure once the broader lookup workflow
+  // has settled, and suppress it when the detailed DNS records payload already
+  // proves TXT records were successfully collected.
+  if (loaded.base && r.dnsFailed && guidanceWorkflowComplete && !txtRecovery.recoveredFromDetailedRecords) {
     guidance.push({ type: 'error', text: t('guidanceDnsTxtFailed') });
-    return guidance;
   }
 
-  if (loaded.base) {
-    if (!r.spfPresent) {
+  if (loaded.base && txtRecovery.txtLookupResolved) {
+    if (!txtRecovery.spfPresent) {
       if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
       }
     }
-    if (r.spfPresent && r.spfHasRequiredInclude !== true) {
+    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
       guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
     }
-    if (!r.acsPresent) {
+    if (!txtRecovery.acsPresent) {
       if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceAcsMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
@@ -861,13 +927,13 @@ function buildGuidance(r) {
     guidance.push({ type: 'attention', text: t('guidanceCnameMissing') });
   }
 
-  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && r.spfPresent && r.spfHasRequiredInclude === false) {
+  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === false) {
     guidance.push({ type: 'attention', text: t('guidanceMxMicrosoftSpf') });
   }
-  if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && r.spfPresent && r.spfValue && !/_spf\.google\.com/i.test(r.spfValue)) {
+  if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && txtRecovery.spfPresent && txtRecovery.spfValue && !/_spf\.google\.com/i.test(txtRecovery.spfValue)) {
     guidance.push({ type: 'attention', text: t('guidanceMxGoogleSpf') });
   }
-  if (loaded.base && loaded.mx && r.mxProvider === 'Zoho Mail' && r.spfPresent && r.spfValue && !/include:zoho\.com/i.test(r.spfValue)) {
+  if (loaded.base && loaded.mx && r.mxProvider === 'Zoho Mail' && txtRecovery.spfPresent && txtRecovery.spfValue && !/include:zoho\.com/i.test(txtRecovery.spfValue)) {
     guidance.push({ type: 'attention', text: t('guidanceMxZohoSpf') });
   }
 
@@ -880,8 +946,9 @@ function buildGuidance(r) {
 
 function recomputeDerived(r) {
   const loaded = r && r._loaded ? r._loaded : {};
+  r._txtRecovery = getDnsTxtRecoveryState(r);
   if (loaded.base) {
-    r.acsReady = (!r.dnsFailed) && !!r.acsPresent;
+    r.acsReady = r._txtRecovery.txtLookupResolved && !!r._txtRecovery.acsPresent;
   } else {
     r.acsReady = false;
   }
@@ -891,6 +958,7 @@ function recomputeDerived(r) {
 function buildTestSummaryHtml(r) {
   const loaded = (r && r._loaded) ? r._loaded : {};
   const errors = (r && r._errors) ? r._errors : {};
+  const txtRecovery = getDnsTxtRecoveryState(r);
 
   const classForState = (state) => {
     switch (state) {
@@ -913,7 +981,7 @@ function buildTestSummaryHtml(r) {
     add("ACS Readiness", "pending");
   } else if (errors.base) {
     add("ACS Readiness", "error");
-  } else if (r.dnsFailed) {
+  } else if (!txtRecovery.txtLookupResolved) {
     add("ACS Readiness", "fail");
   } else {
     add("ACS Readiness", r.acsReady ? "pass" : "fail");
@@ -925,7 +993,7 @@ function buildTestSummaryHtml(r) {
   } else if (errors.base) {
     add("Domain", "error");
   } else {
-    add("Domain", r.dnsFailed ? "fail" : "pass");
+    add("Domain", txtRecovery.txtLookupResolved ? "pass" : "fail");
   }
 
   // MX (placed directly below Domain per UI request)
@@ -947,14 +1015,14 @@ function buildTestSummaryHtml(r) {
     add("SPF (queried domain TXT)", "error");
     add("ACS TXT", "error");
     add("TXT Records", "error");
-  } else if (r.dnsFailed) {
+  } else if (!txtRecovery.txtLookupResolved) {
     add("SPF (queried domain TXT)", "unavailable", true);
     add("ACS TXT", "fail");
     add("TXT Records", "unavailable", true);
   } else {
-    add("SPF (queried domain TXT)", (r.spfPresent && r.spfHasRequiredInclude === true) ? "pass" : "fail", true);
-    add("ACS TXT", r.acsPresent ? "pass" : "fail");
-    const hasTxt = Array.isArray(r.txtRecords) && r.txtRecords.length > 0;
+    add("SPF (queried domain TXT)", (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) ? "pass" : "fail", true);
+    add("ACS TXT", txtRecovery.acsPresent ? "pass" : "fail");
+    const hasTxt = Array.isArray(txtRecovery.txtRecords) && txtRecovery.txtRecords.length > 0;
     add("TXT Records", hasTxt ? "pass" : "fail", true);
   }
 
