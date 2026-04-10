@@ -46,6 +46,7 @@ $script:TosPageHtml = @'
 
 <h2 id="tosSection6Title">6. Data &amp; Privacy</h2>
 <p id="tosSection6Body">The Tool does not collect personally identifiable information. Optional anonymous usage metrics (when enabled) contain only HMAC-hashed domain names and aggregate counters. See the <a id="privacyLink" href="/privacy">Privacy Statement</a> for details.</p>
+<p><a id="tosManageCookiesLink" href="/?openCookieSettings=1">Manage cookie settings</a></p>
 
 <h2 id="tosSection7Title">7. Third-Party Services</h2>
 <p id="tosSection7Body">The Tool may interact with third-party DNS resolvers, WHOIS providers, and Azure APIs. Your use of those services is subject to their respective terms.</p>
@@ -197,6 +198,23 @@ $script:TosPageHtml = @'
     }
   };
 
+  const TERMS_CONSENT_OVERRIDES = {
+    en: { manageCookies: 'Manage cookie settings' },
+    es: { manageCookies: 'Administrar configuración de cookies' },
+    fr: { manageCookies: 'Gérer les paramètres des cookies' },
+    de: { manageCookies: 'Cookie-Einstellungen verwalten' },
+    'pt-BR': { manageCookies: 'Gerenciar configurações de cookies' },
+    ar: { manageCookies: 'إدارة إعدادات ملفات تعريف الارتباط' },
+    'zh-CN': { manageCookies: '管理 Cookie 设置' },
+    'hi-IN': { manageCookies: 'कुकी सेटिंग्स प्रबंधित करें' },
+    'ja-JP': { manageCookies: 'Cookie設定を管理' },
+    'ru-RU': { manageCookies: 'Управление настройками cookie' }
+  };
+
+  Object.keys(TERMS_CONSENT_OVERRIDES).forEach(code => {
+    TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, TERMS_CONSENT_OVERRIDES[code]);
+  });
+
   function normalizeLanguageCode(lang) {
     const value = String(lang || '').trim().toLowerCase();
     if (!value) return 'en';
@@ -246,6 +264,11 @@ $script:TosPageHtml = @'
 
   const privacyLink = document.getElementById('privacyLink');
   if (privacyLink) privacyLink.href = '/privacy?lang=' + encodeURIComponent(lang);
+  const tosManageCookiesLink = document.getElementById('tosManageCookiesLink');
+  if (tosManageCookiesLink) {
+    tosManageCookiesLink.textContent = t.manageCookies || 'Manage cookie settings';
+    tosManageCookiesLink.href = '/?lang=' + encodeURIComponent(lang) + '&openCookieSettings=1';
+  }
 })();
 </script>
 </body>
@@ -305,8 +328,14 @@ $script:PrivacyPageHtml = @'
 <h2 id="privacySection6Title">6. DNS Lookups</h2>
 <p id="privacySection6Body">DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.</p>
 
-<h2 id="privacySection7Title">7. Local Storage</h2>
-<p id="privacySection7Body">The Tool uses your browser&rsquo;s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.</p>
+<h2 id="privacySection7Title">7. Browser Storage and Cookie Consent</h2>
+<p id="privacySection7Body">The Tool uses your browser&rsquo;s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.</p>
+<ul>
+  <li id="privacySection7Item1">Essential storage keeps your consent choice so the Tool can respect it.</li>
+  <li id="privacySection7Item2">Preference storage is optional and only keeps theme, language, and recent lookup history in your browser.</li>
+  <li id="privacySection7Item3">Analytics storage is optional and, when enabled, may include a temporary first-party session cookie plus anonymous aggregate counters.</li>
+</ul>
+<p><a id="privacyManageCookiesLink" href="/?openCookieSettings=1">Manage cookie settings</a></p>
 
 <h2 id="privacySection8Title">8. Third-Party Services</h2>
 <p id="privacySection8Body">The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.</p>
@@ -327,7 +356,7 @@ $script:PrivacyPageHtml = @'
       s4t: '4. Microsoft Entra ID Authentication', s4b: 'If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser\u2019s session storage and are never sent to the Tool\u2019s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.',
       s5t: '5. Azure Resource Queries', s5b: 'When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool\u2019s server does not proxy, log, or store any Azure data.',
       s6t: '6. DNS Lookups', s6b: 'DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.',
-      s7t: '7. Local Storage', s7b: 'The Tool uses your browser\u2019s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.',
+      s7t: '7. Browser Storage and Cookie Consent', s7b: 'The Tool uses your browser\u2019s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.',
       s8t: '8. Third-Party Services', s8b: 'The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.',
       s9t: '9. Changes to This Statement', s9b: 'This privacy statement may be updated from time to time. Changes take effect when published in the Tool.',
       s10t: '10. Contact', s10b: 'For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
@@ -342,6 +371,93 @@ $script:PrivacyPageHtml = @'
     'ja-JP': { pageTitle: '\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8 - ACS Email Domain Checker', back: '\u2190 ACS Email Domain Checker \u306B\u623B\u308B', title: '\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8', updatedLabel: '\u6700\u7D42\u66F4\u65B0:', updatedValue: '2026\u5E743\u6708', s1t: '1. \u6982\u8981', s1b: 'ACS Email Domain Checker\uFF08\u300C\u672C\u30C4\u30FC\u30EB\u300D\uFF09\u306F\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC\u3092\u8003\u616E\u3057\u3066\u8A2D\u8A08\u3055\u308C\u3066\u3044\u307E\u3059\u3002\u3053\u306E\u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8\u3067\u306F\u3001\u672C\u30C4\u30FC\u30EB\u304C\u53CE\u96C6\u3059\u308B\u30C7\u30FC\u30BF\u3068\u53CE\u96C6\u3057\u306A\u3044\u30C7\u30FC\u30BF\u306B\u3064\u3044\u3066\u8AAC\u660E\u3057\u307E\u3059\u3002', s2t: '2. \u53CE\u96C6\u3057\u306A\u3044\u30C7\u30FC\u30BF', s2l1: '<strong>\u500B\u4EBA\u60C5\u5831\u306A\u3057</strong> \u2014 \u672C\u30C4\u30FC\u30EB\u306F\u3001\u6C0F\u540D\u3001\u30E1\u30FC\u30EB \u30A2\u30C9\u30EC\u30B9\u3001IP \u30A2\u30C9\u30EC\u30B9\u3001\u30CF\u30FC\u30C9\u30A6\u30A7\u30A2\u8B58\u5225\u5B50\u3092\u53CE\u96C6\u3057\u307E\u305B\u3093\u3002', s2l2: '<strong>\u30C8\u30E9\u30C3\u30AD\u30F3\u30B0 Cookie \u306A\u3057</strong> \u2014 \u672C\u30C4\u30FC\u30EB\u306F\u5E83\u544A\u307E\u305F\u306F\u5206\u6790\u7528\u306E\u30C8\u30E9\u30C3\u30AD\u30F3\u30B0 Cookie \u3092\u4F7F\u7528\u3057\u307E\u305B\u3093\u3002', s2l3: '<strong>\u30AF\u30A8\u30EA \u30ED\u30B0\u306A\u3057</strong> \u2014 \u691C\u7D22\u3057\u305F\u30C9\u30E1\u30A4\u30F3\u540D\u306F\u30B5\u30FC\u30D0\u30FC\u306B\u4FDD\u5B58\u3055\u308C\u307E\u305B\u3093\u3002', s3t: '3. \u533F\u540D\u5229\u7528\u30E1\u30C8\u30EA\u30C3\u30AF\uFF08\u4EFB\u610F\uFF09', s3i: '\u533F\u540D\u30E1\u30C8\u30EA\u30C3\u30AF\u304C\u6709\u52B9\u306A\u5834\u5408\u3001\u672C\u30C4\u30FC\u30EB\u306F\u6B21\u3092\u53CE\u96C6\u3057\u307E\u3059\u3002', s3l1: 'HMAC \u30CF\u30C3\u30B7\u30E5\u5316\u3055\u308C\u305F\u30C9\u30E1\u30A4\u30F3\u540D\uFF08\u4E0D\u53EF\u9006\u3067\u3042\u308A\u3001\u5143\u306E\u30C9\u30E1\u30A4\u30F3\u306F\u5FA9\u5143\u3067\u304D\u307E\u305B\u3093\uFF09\u3002', s3l2: '\u96C6\u8A08\u3055\u308C\u305F\u53C2\u7167\u30AB\u30A6\u30F3\u30BF\u30FC\u3068\u521D\u56DE\u691C\u51FA\u30BF\u30A4\u30E0\u30B9\u30BF\u30F3\u30D7\u3002', s3l3: '\u30E9\u30F3\u30C0\u30E0\u306A\u30BB\u30C3\u30B7\u30E7\u30F3\u8B58\u5225\u5B50\uFF08\u518D\u8D77\u52D5\u5F8C\u306B\u4FDD\u6301\u3055\u308C\u307E\u305B\u3093\uFF09\u3002', s3b: '\u533F\u540D\u30E1\u30C8\u30EA\u30C3\u30AF\u306F <code>-DisableAnonymousMetrics</code> \u30D5\u30E9\u30B0\u3067\u5B8C\u5168\u306B\u7121\u52B9\u306B\u3067\u304D\u307E\u3059\u3002', s4t: '4. Microsoft Entra ID \u8A8D\u8A3C', s4b: 'Microsoft \u3067\u30B5\u30A4\u30F3\u30A4\u30F3\u3059\u308B\u5834\u5408\u3001\u672C\u30C4\u30FC\u30EB\u306F Authorization Code + PKCE \u30D5\u30ED\u30FC\u3067 MSAL.js \u3092\u4F7F\u7528\u3057\u307E\u3059\u3002\u30C8\u30FC\u30AF\u30F3\u306F\u30D6\u30E9\u30A6\u30B6\u30FC\u306E\u30BB\u30C3\u30B7\u30E7\u30F3 \u30B9\u30C8\u30EC\u30FC\u30B8\u306B\u4FDD\u5B58\u3055\u308C\u3001\u672C\u30C4\u30FC\u30EB\u306E\u30B5\u30FC\u30D0\u30FC\u306B\u9001\u4FE1\u3055\u308C\u308B\u3053\u3068\u306F\u3042\u308A\u307E\u305B\u3093\u3002\u672C\u30C4\u30FC\u30EB\u306F UI \u306B\u672C\u4EBA\u78BA\u8A8D\u60C5\u5831\u3092\u8868\u793A\u3059\u308B\u305F\u3081\u306B\u3001Microsoft Graph \u304B\u3089\u8868\u793A\u540D\u3068\u30E1\u30FC\u30EB \u30A2\u30C9\u30EC\u30B9\u306E\u307F\u3092\u8AAD\u307F\u53D6\u308A\u307E\u3059\u3002', s5t: '5. Azure \u30EA\u30BD\u30FC\u30B9 \u30AF\u30A8\u30EA', s5b: 'Azure Workspace Diagnostics \u3092\u4F7F\u7528\u3059\u308B\u5834\u5408\u3001\u3059\u3079\u3066\u306E API \u547C\u3073\u51FA\u3057\u306F\u304A\u5BA2\u69D8\u81EA\u8EAB\u306E\u30A2\u30AF\u30BB\u30B9 \u30C8\u30FC\u30AF\u30F3\u3092\u4F7F\u7528\u3057\u3066\u30D6\u30E9\u30A6\u30B6\u30FC\u304B\u3089 Azure Resource Manager \u3068 Log Analytics \u306B\u76F4\u63A5\u9001\u4FE1\u3055\u308C\u307E\u3059\u3002\u672C\u30C4\u30FC\u30EB\u306E\u30B5\u30FC\u30D0\u30FC\u306F Azure \u30C7\u30FC\u30BF\u3092\u30D7\u30ED\u30AD\u30B7\u3001\u8A18\u9332\u3001\u4FDD\u5B58\u3057\u307E\u305B\u3093\u3002', s6t: '6. DNS \u53C2\u7167', s6b: 'DNS \u30AF\u30A8\u30EA\u306F\u3001\u69CB\u6210\u3055\u308C\u305F\u30EA\u30BE\u30EB\u30D0\u30FC\uFF08\u30B7\u30B9\u30C6\u30E0 DNS \u307E\u305F\u306F DNS-over-HTTPS\uFF09\u3092\u4F7F\u7528\u3057\u3066\u30B5\u30FC\u30D0\u30FC\u5074\u3067\u5B9F\u884C\u3055\u308C\u307E\u3059\u3002\u7D50\u679C\u306F\u30D6\u30E9\u30A6\u30B6\u30FC\u306B\u8FD4\u3055\u308C\u3001\u4FDD\u5B58\u3055\u308C\u307E\u305B\u3093\u3002', s7t: '7. \u30ED\u30FC\u30AB\u30EB \u30B9\u30C8\u30EC\u30FC\u30B8', s7b: '\u672C\u30C4\u30FC\u30EB\u306F\u3001\u30C6\u30FC\u30DE\u8A2D\u5B9A\u3068\u6700\u8FD1\u306E\u30C9\u30E1\u30A4\u30F3\u5C65\u6B74\u3092\u4FDD\u6301\u3059\u308B\u305F\u3081\u306B\u3001\u30D6\u30E9\u30A6\u30B6\u30FC\u306E <code>localStorage</code> \u3092\u4F7F\u7528\u3057\u307E\u3059\u3002\u3053\u306E\u30C7\u30FC\u30BF\u304C\u30D6\u30E9\u30A6\u30B6\u30FC\u5916\u306B\u9001\u4FE1\u3055\u308C\u308B\u3053\u3068\u306F\u3042\u308A\u307E\u305B\u3093\u3002', s8t: '8. \u30B5\u30FC\u30C9\u30D1\u30FC\u30C6\u30A3 \u30B5\u30FC\u30D3\u30B9', s8b: '\u672C\u30C4\u30FC\u30EB\u306F DNS \u89E3\u6C7A\uFF08DNS-over-HTTPS \u30D7\u30ED\u30D0\u30A4\u30C0\u30FC\u306A\u3069\uFF09\u3001WHOIS \u53C2\u7167\u3001\u304A\u3088\u3073 DNSBL \u8A55\u5224\u30C1\u30A7\u30C3\u30AF\u306B\u30B5\u30FC\u30C9\u30D1\u30FC\u30C6\u30A3 \u30B5\u30FC\u30D3\u30B9\u3092\u4F7F\u7528\u3059\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u3053\u308C\u3089\u306E\u30B5\u30FC\u30D3\u30B9\u306B\u306F\u72EC\u81EA\u306E\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30DD\u30EA\u30B7\u30FC\u304C\u3042\u308A\u307E\u3059\u3002', s9t: '9. \u672C\u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8\u306E\u5909\u66F4', s9b: '\u3053\u306E\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8\u306F\u968F\u6642\u66F4\u65B0\u3055\u308C\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u5909\u66F4\u306F\u672C\u30C4\u30FC\u30EB\u3067\u516C\u958B\u3055\u308C\u305F\u6642\u70B9\u3067\u6709\u52B9\u306B\u306A\u308A\u307E\u3059\u3002', s10t: '10. \u304A\u554F\u3044\u5408\u308F\u305B', s10b: '\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC\u306B\u95A2\u3059\u308B\u3054\u8CEA\u554F\u306F\u3001<a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a> \u3092\u3054\u89A7\u304F\u3060\u3055\u3044\u3002' },
     'ru-RU': { pageTitle: '\u0417\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0435 \u043E \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438 - ACS Email Domain Checker', back: '\u2190 \u041D\u0430\u0437\u0430\u0434 \u043A ACS Email Domain Checker', title: '\u0417\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0435 \u043E \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438', updatedLabel: '\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435:', updatedValue: '\u041C\u0430\u0440\u0442 2026', s1t: '1. \u041E\u0431\u0437\u043E\u0440', s1b: 'ACS Email Domain Checker (\u00AB\u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u00BB) \u0440\u0430\u0437\u0440\u0430\u0431\u043E\u0442\u0430\u043D \u0441 \u0443\u0447\u0435\u0442\u043E\u043C \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438. \u0412 \u044D\u0442\u043E\u043C \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0438 \u043E\u0431\u044A\u044F\u0441\u043D\u044F\u0435\u0442\u0441\u044F, \u043A\u0430\u043A\u0438\u0435 \u0434\u0430\u043D\u043D\u044B\u0435 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442, \u0430 \u043A\u0430\u043A\u0438\u0435 \u2014 \u043D\u0435\u0442.', s2t: '2. \u0414\u0430\u043D\u043D\u044B\u0435, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u043C\u044B \u043D\u0435 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u043C', s2l1: '<strong>\u041D\u0435\u0442 \u043B\u0438\u0447\u043D\u043E\u0439 \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u0438</strong> \u2014 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u043D\u0435 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442 \u0438\u043C\u0435\u043D\u0430, \u0430\u0434\u0440\u0435\u0441\u0430 \u044D\u043B\u0435\u043A\u0442\u0440\u043E\u043D\u043D\u043E\u0439 \u043F\u043E\u0447\u0442\u044B, IP-\u0430\u0434\u0440\u0435\u0441\u0430 \u0438\u043B\u0438 \u0430\u043F\u043F\u0430\u0440\u0430\u0442\u043D\u044B\u0435 \u0438\u0434\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0442\u043E\u0440\u044B.', s2l2: '<strong>\u041D\u0435\u0442 \u0444\u0430\u0439\u043B\u043E\u0432 cookie \u043E\u0442\u0441\u043B\u0435\u0436\u0438\u0432\u0430\u043D\u0438\u044F</strong> \u2014 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u043D\u0435 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442 \u0440\u0435\u043A\u043B\u0430\u043C\u043D\u044B\u0435 \u0438\u043B\u0438 \u0430\u043D\u0430\u043B\u0438\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0435 cookie \u043E\u0442\u0441\u043B\u0435\u0436\u0438\u0432\u0430\u043D\u0438\u044F.', s2l3: '<strong>\u041D\u0435\u0442 \u0436\u0443\u0440\u043D\u0430\u043B\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432</strong> \u2014 \u0434\u043E\u043C\u0435\u043D\u043D\u044B\u0435 \u0438\u043C\u0435\u043D\u0430, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u0432\u044B \u0438\u0449\u0435\u0442\u0435, \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435.', s3t: '3. \u0410\u043D\u043E\u043D\u0438\u043C\u043D\u044B\u0435 \u043C\u0435\u0442\u0440\u0438\u043A\u0438 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u044F (\u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E)', s3i: '\u0415\u0441\u043B\u0438 \u0432\u043A\u043B\u044E\u0447\u0435\u043D\u044B \u0430\u043D\u043E\u043D\u0438\u043C\u043D\u044B\u0435 \u043C\u0435\u0442\u0440\u0438\u043A\u0438, \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442:', s3l1: '\u0414\u043E\u043C\u0435\u043D\u043D\u044B\u0435 \u0438\u043C\u0435\u043D\u0430, \u0445\u044D\u0448\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u0441 \u043F\u043E\u043C\u043E\u0449\u044C\u044E HMAC (\u043D\u0435\u043E\u0431\u0440\u0430\u0442\u0438\u043C\u043E; \u0438\u0441\u0445\u043E\u0434\u043D\u044B\u0439 \u0434\u043E\u043C\u0435\u043D \u043D\u0435\u0432\u043E\u0437\u043C\u043E\u0436\u043D\u043E \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C).', s3l2: '\u0410\u0433\u0440\u0435\u0433\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u0441\u0447\u0435\u0442\u0447\u0438\u043A\u0438 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u0438 \u043E\u0442\u043C\u0435\u0442\u043A\u0438 \u0432\u0440\u0435\u043C\u0435\u043D\u0438 \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u043F\u043E\u044F\u0432\u043B\u0435\u043D\u0438\u044F.', s3l3: '\u0421\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u0439 \u0438\u0434\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0442\u043E\u0440 \u0441\u0435\u0430\u043D\u0441\u0430 (\u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0443\u0441\u043A\u0430).', s3b: '\u0410\u043D\u043E\u043D\u0438\u043C\u043D\u044B\u0435 \u043C\u0435\u0442\u0440\u0438\u043A\u0438 \u043C\u043E\u0436\u043D\u043E \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u043E\u0442\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0441 \u043F\u043E\u043C\u043E\u0449\u044C\u044E \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u0430 <code>-DisableAnonymousMetrics</code>.', s4t: '4. \u0410\u0443\u0442\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0446\u0438\u044F Microsoft Entra ID', s4b: '\u0415\u0441\u043B\u0438 \u0432\u044B \u0440\u0435\u0448\u0438\u0442\u0435 \u0432\u043E\u0439\u0442\u0438 \u0441 \u043F\u043E\u043C\u043E\u0449\u044C\u044E Microsoft, \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442 MSAL.js \u0441 \u043F\u043E\u0442\u043E\u043A\u043E\u043C Authorization Code + PKCE. \u0422\u043E\u043A\u0435\u043D\u044B \u0445\u0440\u0430\u043D\u044F\u0442\u0441\u044F \u0432 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435 \u0441\u0435\u0430\u043D\u0441\u0430 \u0432\u0430\u0448\u0435\u0433\u043E \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u0438 \u043D\u0438\u043A\u043E\u0433\u0434\u0430 \u043D\u0435 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0442\u0441\u044F \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430. \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0441\u0447\u0438\u0442\u044B\u0432\u0430\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0432\u0430\u0448\u0435 \u043E\u0442\u043E\u0431\u0440\u0430\u0436\u0430\u0435\u043C\u043E\u0435 \u0438\u043C\u044F \u0438 \u0430\u0434\u0440\u0435\u0441 \u044D\u043B\u0435\u043A\u0442\u0440\u043E\u043D\u043D\u043E\u0439 \u043F\u043E\u0447\u0442\u044B \u0438\u0437 Microsoft Graph, \u0447\u0442\u043E\u0431\u044B \u043F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0432\u0430\u0448\u0443 \u043B\u0438\u0447\u043D\u043E\u0441\u0442\u044C \u0432 \u0438\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0435.', s5t: '5. \u0417\u0430\u043F\u0440\u043E\u0441\u044B \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 Azure', s5b: '\u041F\u0440\u0438 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0438 Azure Workspace Diagnostics \u0432\u0441\u0435 \u0432\u044B\u0437\u043E\u0432\u044B API \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u044E\u0442\u0441\u044F \u043D\u0430\u043F\u0440\u044F\u043C\u0443\u044E \u0438\u0437 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u0432 Azure Resource Manager \u0438 Log Analytics \u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0435\u043C \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0433\u043E \u0442\u043E\u043A\u0435\u043D\u0430 \u0434\u043E\u0441\u0442\u0443\u043F\u0430. \u0421\u0435\u0440\u0432\u0435\u0440 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435 \u0432\u044B\u0441\u0442\u0443\u043F\u0430\u0435\u0442 \u0432 \u0440\u043E\u043B\u0438 \u043F\u0440\u043E\u043A\u0441\u0438, \u043D\u0435 \u0436\u0443\u0440\u043D\u0430\u043B\u0438\u0440\u0443\u0435\u0442 \u0438 \u043D\u0435 \u0445\u0440\u0430\u043D\u0438\u0442 \u0434\u0430\u043D\u043D\u044B\u0435 Azure.', s6t: '6. DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B', s6b: 'DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u044E\u0442\u0441\u044F \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0435\u043C \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043D\u043D\u043E\u0433\u043E \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u0430 (\u0441\u0438\u0441\u0442\u0435\u043C\u043D\u044B\u0439 DNS \u0438\u043B\u0438 DNS-over-HTTPS). \u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u044B \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u044E\u0442\u0441\u044F \u0432 \u0432\u0430\u0448 \u0431\u0440\u0430\u0443\u0437\u0435\u0440 \u0438 \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F.', s7t: '7. \u041B\u043E\u043A\u0430\u043B\u044C\u043D\u043E\u0435 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435', s7b: '\u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442 <code>localStorage</code> \u0432\u0430\u0448\u0435\u0433\u043E \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u0434\u043B\u044F \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u044F \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043A \u0442\u0435\u043C\u044B \u0438 \u0438\u0441\u0442\u043E\u0440\u0438\u0438 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0445 \u0434\u043E\u043C\u0435\u043D\u043E\u0432. \u042D\u0442\u0438 \u0434\u0430\u043D\u043D\u044B\u0435 \u043D\u0438\u043A\u043E\u0433\u0434\u0430 \u043D\u0435 \u043F\u043E\u043A\u0438\u0434\u0430\u044E\u0442 \u0432\u0430\u0448 \u0431\u0440\u0430\u0443\u0437\u0435\u0440.', s8t: '8. \u0421\u0442\u043E\u0440\u043E\u043D\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044B', s8b: '\u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u043C\u043E\u0436\u0435\u0442 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u0441\u0442\u043E\u0440\u043E\u043D\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044B \u0434\u043B\u044F \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u044F DNS (\u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440, \u043F\u043E\u0441\u0442\u0430\u0432\u0449\u0438\u043A\u043E\u0432 DNS-over-HTTPS), WHOIS-\u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u043E\u043A \u0440\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u0438 DNSBL. \u0423 \u044D\u0442\u0438\u0445 \u0441\u0435\u0440\u0432\u0438\u0441\u043E\u0432 \u0435\u0441\u0442\u044C \u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0435 \u043F\u043E\u043B\u0438\u0442\u0438\u043A\u0438 \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438.', s9t: '9. \u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0432 \u044D\u0442\u043E\u043C \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0438', s9b: '\u042D\u0442\u043E \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0435 \u043E \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438 \u043C\u043E\u0436\u0435\u0442 \u0432\u0440\u0435\u043C\u044F \u043E\u0442 \u0432\u0440\u0435\u043C\u0435\u043D\u0438 \u043E\u0431\u043D\u043E\u0432\u043B\u044F\u0442\u044C\u0441\u044F. \u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0432\u0441\u0442\u0443\u043F\u0430\u044E\u0442 \u0432 \u0441\u0438\u043B\u0443 \u043F\u043E\u0441\u043B\u0435 \u043F\u0443\u0431\u043B\u0438\u043A\u0430\u0446\u0438\u0438 \u0432 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0435.', s10t: '10. \u041A\u043E\u043D\u0442\u0430\u043A\u0442\u044B', s10b: '\u041F\u043E \u0432\u043E\u043F\u0440\u043E\u0441\u0430\u043C, \u0441\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u043C \u0441 \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u044C\u044E, \u043F\u043E\u0441\u0435\u0442\u0438\u0442\u0435 <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' }
   };
+
+  const PRIVACY_CONSENT_OVERRIDES = {
+    en: {
+      s7t: '7. Browser Storage and Cookie Consent',
+      s7b: 'The Tool uses your browser\'s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.',
+      s7l1: 'Essential storage keeps your consent choice so the Tool can respect it.',
+      s7l2: 'Preference storage is optional and only keeps theme, language, and recent lookup history in your browser.',
+      s7l3: 'Analytics storage is optional and, when enabled, may include a temporary first-party session cookie plus anonymous aggregate counters.',
+      manageCookies: 'Manage cookie settings'
+    },
+    es: {
+      s7t: '7. Almacenamiento del navegador y consentimiento de cookies',
+      s7b: 'La Herramienta usa <code>localStorage</code> del navegador para guardar el estado del consentimiento y, si usted lo permite, sus preferencias de tema, idioma e historial reciente de dominios. Si permite el análisis anónimo, la Herramienta también puede emitir una cookie temporal de sesión propia usada solo para recuentos agregados.',
+      s7l1: 'El almacenamiento esencial conserva su elección de consentimiento para que la Herramienta pueda respetarla.',
+      s7l2: 'El almacenamiento de preferencias es opcional y solo mantiene tema, idioma e historial reciente de búsquedas en su navegador.',
+      s7l3: 'El almacenamiento analítico es opcional y, cuando está habilitado, puede incluir una cookie temporal de sesión propia y contadores agregados anónimos.',
+      manageCookies: 'Administrar configuración de cookies'
+    },
+    fr: {
+      s7t: '7. Stockage du navigateur et consentement aux cookies',
+      s7b: 'L’Outil utilise le <code>localStorage</code> du navigateur pour mémoriser l’état du consentement et, si vous l’autorisez, vos préférences de thème, de langue et l’historique récent des domaines. Si vous autorisez les analyses anonymes, l’Outil peut aussi émettre un cookie de session propriétaire temporaire utilisé uniquement pour des comptages agrégés.',
+      s7l1: 'Le stockage essentiel conserve votre choix de consentement afin que l’Outil puisse le respecter.',
+      s7l2: 'Le stockage des préférences est facultatif et conserve uniquement le thème, la langue et l’historique récent des recherches dans votre navigateur.',
+      s7l3: 'Le stockage analytique est facultatif et, lorsqu’il est activé, peut inclure un cookie de session propriétaire temporaire ainsi que des compteurs agrégés anonymes.',
+      manageCookies: 'Gérer les paramètres des cookies'
+    },
+    de: {
+      s7t: '7. Browserspeicher und Cookie-Einwilligung',
+      s7b: 'Das Tool verwendet <code>localStorage</code> des Browsers für den Einwilligungsstatus und, wenn Sie es erlauben, für Design-, Sprach- und jüngste Domänenverlaufseinstellungen. Wenn Sie anonyme Analytik zulassen, kann das Tool außerdem ein temporäres eigenes Sitzungscookie nur für aggregierte Zählungen setzen.',
+      s7l1: 'Der essenzielle Speicher bewahrt Ihre Einwilligungsentscheidung auf, damit das Tool sie beachten kann.',
+      s7l2: 'Der Präferenzspeicher ist optional und hält nur Design, Sprache und den jüngsten Suchverlauf in Ihrem Browser fest.',
+      s7l3: 'Der Analytikspeicher ist optional und kann, wenn aktiviert, ein temporäres eigenes Sitzungscookie sowie anonyme aggregierte Zähler enthalten.',
+      manageCookies: 'Cookie-Einstellungen verwalten'
+    },
+    'pt-BR': {
+      s7t: '7. Armazenamento do navegador e consentimento de cookies',
+      s7b: 'A Ferramenta usa o <code>localStorage</code> do navegador para armazenar o estado do consentimento e, se você permitir, suas preferências de tema, idioma e histórico recente de domínios. Se você permitir análises anônimas, a Ferramenta também poderá emitir um cookie temporário de sessão própria usado apenas para contagens agregadas.',
+      s7l1: 'O armazenamento essencial mantém sua escolha de consentimento para que a Ferramenta possa respeitá-la.',
+      s7l2: 'O armazenamento de preferências é opcional e mantém apenas tema, idioma e histórico recente de consultas no seu navegador.',
+      s7l3: 'O armazenamento analítico é opcional e, quando habilitado, pode incluir um cookie temporário de sessão própria e contadores agregados anônimos.',
+      manageCookies: 'Gerenciar configurações de cookies'
+    },
+    ar: {
+      s7t: '7. تخزين المتصفح وموافقة ملفات تعريف الارتباط',
+      s7b: 'تستخدم الأداة <code>localStorage</code> في المتصفح لتخزين حالة الموافقة، وإذا سمحت بذلك، لتخزين تفضيلات المظهر واللغة وسجل النطاقات الأخير. وإذا سمحت بالتحليلات المجهولة، فقد تصدر الأداة أيضًا ملف تعريف ارتباط مؤقتًا للجلسة من الطرف الأول لاستخدامه فقط في العدّ المجمّع.',
+      s7l1: 'يحفظ التخزين الأساسي اختيارك للموافقة حتى تتمكن الأداة من احترامه.',
+      s7l2: 'تخزين التفضيلات اختياري ويحتفظ فقط بالمظهر واللغة وسجل البحث الأخير داخل متصفحك.',
+      s7l3: 'تخزين التحليلات اختياري، وعند تمكينه قد يتضمن ملف تعريف ارتباط مؤقتًا للجلسة ومقاييس مجمعة مجهولة.',
+      manageCookies: 'إدارة إعدادات ملفات تعريف الارتباط'
+    },
+    'zh-CN': {
+      s7t: '7. 浏览器存储与 Cookie 同意',
+      s7b: '本工具使用浏览器中的 <code>localStorage</code> 保存同意状态；如果您允许，还会保存主题、语言和最近的域历史记录。如果您允许匿名分析，本工具还可能设置一个临时的第一方会话 Cookie，仅用于聚合计数。',
+      s7l1: '必要存储会保留您的同意选择，以便本工具能够遵循该选择。',
+      s7l2: '偏好设置存储是可选的，仅在您的浏览器中保存主题、语言和最近的查询历史。',
+      s7l3: '分析存储是可选的，启用后可能包括临时的第一方会话 Cookie 和匿名聚合计数器。',
+      manageCookies: '管理 Cookie 设置'
+    },
+    'hi-IN': {
+      s7t: '7. ब्राउज़र संग्रहण और कुकी सहमति',
+      s7b: 'यह टूल सहमति की स्थिति के लिए आपके ब्राउज़र के <code>localStorage</code> का उपयोग करता है और, यदि आप अनुमति दें, तो थीम, भाषा और हाल का डोमेन इतिहास भी वहीं रखता है। यदि आप गुमनाम विश्लेषण की अनुमति देते हैं, तो यह टूल केवल कुल गणना के लिए एक अस्थायी प्रथम-पक्ष सत्र कुकी भी जारी कर सकता है।',
+      s7l1: 'आवश्यक संग्रहण आपकी सहमति पसंद को सुरक्षित रखता है ताकि टूल उसका सम्मान कर सके।',
+      s7l2: 'प्राथमिकता संग्रहण वैकल्पिक है और केवल थीम, भाषा और हाल की खोज इतिहास को आपके ब्राउज़र में रखता है।',
+      s7l3: 'विश्लेषण संग्रहण वैकल्पिक है और सक्षम होने पर इसमें एक अस्थायी प्रथम-पक्ष सत्र कुकी और गुमनाम कुल काउंटर शामिल हो सकते हैं।',
+      manageCookies: 'कुकी सेटिंग्स प्रबंधित करें'
+    },
+    'ja-JP': {
+      s7t: '7. ブラウザー保存領域とCookie同意',
+      s7b: '本ツールは同意状態の保存にブラウザーの <code>localStorage</code> を使用し、許可された場合はテーマ、言語、最近のドメイン履歴も保存します。匿名分析を許可した場合は、集計カウント専用の一時的なファーストパーティ セッション Cookie を発行することがあります。',
+      s7l1: '必須保存領域は、ツールが同意内容を尊重できるように、あなたの選択を保持します。',
+      s7l2: '設定保存は任意であり、テーマ、言語、最近の検索履歴のみをブラウザーに保持します。',
+      s7l3: '分析保存は任意であり、有効な場合は一時的なファーストパーティ セッション Cookie と匿名の集計カウンターを含むことがあります。',
+      manageCookies: 'Cookie設定を管理'
+    },
+    'ru-RU': {
+      s7t: '7. Хранилище браузера и согласие на cookie',
+      s7b: 'Инструмент использует <code>localStorage</code> браузера для хранения состояния согласия и, если вы это разрешите, для сохранения темы, языка и недавней истории доменов. Если вы разрешаете анонимную аналитику, инструмент также может установить временный собственный cookie сессии только для агрегированных подсчетов.',
+      s7l1: 'Обязательное хранилище сохраняет ваш выбор согласия, чтобы инструмент мог его соблюдать.',
+      s7l2: 'Хранилище предпочтений является необязательным и сохраняет только тему, язык и недавнюю историю запросов в вашем браузере.',
+      s7l3: 'Хранилище аналитики является необязательным и при включении может включать временный собственный cookie сессии и анонимные агрегированные счетчики.',
+      manageCookies: 'Управление настройками cookie'
+    }
+  };
+
+  Object.keys(PRIVACY_CONSENT_OVERRIDES).forEach(code => {
+    TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, PRIVACY_CONSENT_OVERRIDES[code]);
+  });
 
   function normalizeLanguageCode(lang) {
     const value = String(lang || '').trim().toLowerCase();
@@ -380,9 +496,17 @@ $script:PrivacyPageHtml = @'
   setText('privacySection5Title', t.s5t); setText('privacySection5Body', t.s5b);
   setText('privacySection6Title', t.s6t); setText('privacySection6Body', t.s6b);
   setText('privacySection7Title', t.s7t); setHtml('privacySection7Body', t.s7b);
+  setText('privacySection7Item1', t.s7l1);
+  setText('privacySection7Item2', t.s7l2);
+  setText('privacySection7Item3', t.s7l3);
   setText('privacySection8Title', t.s8t); setText('privacySection8Body', t.s8b);
   setText('privacySection9Title', t.s9t); setText('privacySection9Body', t.s9b);
   setText('privacySection10Title', t.s10t); setHtml('privacySection10Body', t.s10b);
+  const privacyManageCookiesLink = document.getElementById('privacyManageCookiesLink');
+  if (privacyManageCookiesLink) {
+    privacyManageCookiesLink.textContent = t.manageCookies || 'Manage cookie settings';
+    privacyManageCookiesLink.href = '/?lang=' + encodeURIComponent(lang) + '&openCookieSettings=1';
+  }
 })();
 </script>
 </body>
@@ -452,6 +576,11 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
     }
   }
 }
+
+# Local static asset root used for same-origin UI assets such as Lucide SVG icons
+# and language flag SVGs. These are optional but avoid third-party CDN fetches
+# that can trigger browser tracking-prevention warnings.
+$script:AssetsRoot = Join-Path -Path $PSScriptRoot -ChildPath 'assets'
 
 if (Test-Path -LiteralPath $msalLocalPath) {
   Write-Information -InformationAction Continue -MessageData "MSAL local script detected at: $msalLocalPath"

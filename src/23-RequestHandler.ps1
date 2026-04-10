@@ -4,7 +4,7 @@
 # for every incoming HTTP request. It receives the request context, routes by URL path,
 # and dispatches to the appropriate DNS check function or serves the HTML UI.
 $handlerScript = @'
-param($ctx, $htmlPage, $domainLocks, $msalLocalPath, $tosPageHtml, $privacyPageHtml)
+param($ctx, $htmlPage, $domainLocks, $msalLocalPath, $tosPageHtml, $privacyPageHtml, $assetsRoot)
 
 # TcpListener shim may not always provide a fully populated Url object.
 $path = $null
@@ -55,10 +55,16 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
 }
 
 try {
-# Anonymous metrics: create / track an anonymous session id via cookie (no PII).
+# Anonymous metrics are only allowed after the browser explicitly sends
+# analytics consent in the consent header. This prevents non-essential
+# analytics cookies from being issued before the user opts in.
 $metricsEnabled = ($env:ACS_ENABLE_ANON_METRICS -eq '1') -or ($true -eq $AcsAnonMetricsEnabled)
+$analyticsConsentState = $null
 if ($metricsEnabled) {
-  $null = Get-OrCreate-AnonymousSessionId -Context $ctx
+  $analyticsConsentState = Get-AnonymousAnalyticsConsentState -Context $ctx
+  if ($false -eq $analyticsConsentState) {
+    Clear-AnonymousSessionCookie -Context $ctx
+  }
 }
 
   # 1) Serve the UI
@@ -97,9 +103,58 @@ if ($metricsEnabled) {
     return
   }
 
+  # 1a-assets) Serve local static assets from the repository assets folder.
+  # Restrict responses to files beneath the configured assets root to prevent
+  # path traversal from exposing arbitrary content on disk.
+  if ($path.StartsWith('/assets/', [System.StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrWhiteSpace($assetsRoot)) {
+    try {
+      $relativeAssetPath = $path.Substring(8) -replace '/', [System.IO.Path]::DirectorySeparatorChar
+      $rootFullPath = [System.IO.Path]::GetFullPath($assetsRoot)
+      $assetFullPath = [System.IO.Path]::GetFullPath((Join-Path -Path $rootFullPath -ChildPath $relativeAssetPath))
+
+      if (-not $assetFullPath.StartsWith($rootFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Json -Context $ctx -Object @{ error = 'Invalid asset path.' } -StatusCode 400
+        return
+      }
+
+      $contentType = 'application/octet-stream'
+      switch ([System.IO.Path]::GetExtension($assetFullPath).ToLowerInvariant()) {
+        '.svg' { $contentType = 'image/svg+xml; charset=utf-8' }
+        '.png' { $contentType = 'image/png' }
+        '.jpg' { $contentType = 'image/jpeg' }
+        '.jpeg' { $contentType = 'image/jpeg' }
+        '.gif' { $contentType = 'image/gif' }
+        '.webp' { $contentType = 'image/webp' }
+        '.ico' { $contentType = 'image/x-icon' }
+        '.js' { $contentType = 'application/javascript; charset=utf-8' }
+        '.css' { $contentType = 'text/css; charset=utf-8' }
+      }
+
+      Write-FileResponse -Context $ctx -Path $assetFullPath -ContentType $contentType
+      return
+    } catch {
+      Write-Json -Context $ctx -Object @{ error = 'Failed to load requested asset.' } -StatusCode 500
+      return
+    }
+  }
+
   # 1b) Metrics endpoint handled by caller (fast-path in main loop). Keep here as safety net only.
   if ($path -eq "/api/metrics") {
     Handle-MetricsRequest -Context $ctx -MetricsEnabled $metricsEnabled
+    return
+  }
+
+  # 1c) Consent sync endpoint. This is called by the SPA after the user saves
+  # cookie preferences so the server can immediately clear any existing
+  # analytics session cookie when analytics consent is rejected.
+  if ($path -eq '/api/consent') {
+    if ($false -eq $analyticsConsentState) {
+      Clear-AnonymousSessionCookie -Context $ctx
+    }
+    Write-Json -Context $ctx -Object @{
+      ok = $true
+      analyticsConsent = $(if ($null -eq $analyticsConsentState) { $null } else { [bool]$analyticsConsentState })
+    }
     return
   }
 
@@ -143,9 +198,12 @@ if ($metricsEnabled) {
     try {
       switch ($path) {
         "/api/base"  {
-          if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Started }
+          if ($metricsEnabled -and ($true -eq $analyticsConsentState)) {
+            $null = Get-OrCreate-AnonymousSessionId -Context $ctx
+            Update-AnonymousMetrics -Domain $domain -Started
+          }
           Write-Json -Context $ctx -Object (Get-DnsBaseStatus  -Domain $domain)
-          if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Completed }
+          if ($metricsEnabled -and ($true -eq $analyticsConsentState)) { Update-AnonymousMetrics -Domain $domain -Completed }
         }
         "/api/mx"    { Write-Json -Context $ctx -Object (Get-DnsMxStatus    -Domain $domain) }
         "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain) }

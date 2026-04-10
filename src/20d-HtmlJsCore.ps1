@@ -62,11 +62,12 @@ function lookup(options = {}) {
     const controller = new AbortController();
     activeLookup.controllers.push(controller);
     try {
-      const headers = {};
+      let headers = {};
       const apiKey = (acsApiKey || '').trim();
       if (apiKey && !apiKey.startsWith('__')) {
         headers['X-Api-Key'] = apiKey;
       }
+      headers = buildConsentRequestHeaders(headers);
       const r = await fetch(path + "?domain=" + encodeURIComponent(domain), { signal: controller.signal, headers: headers });
       if (!r.ok) {
         let body = "";
@@ -2394,20 +2395,20 @@ function render(r) {
     }
 
     let iconClass = 'icon-info';
-    let iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg';
+    let iconSrc = getLucideIconUrl('info');
     let iconTitle = t('guidanceIconInformational');
 
     if (type === 'error') {
       iconClass = 'icon-error';
-      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/alert-circle.svg';
+      iconSrc = getLucideIconUrl('alert-circle');
       iconTitle = t('guidanceIconError');
     } else if (type === 'attention') {
       iconClass = 'icon-warning';
-      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg';
+      iconSrc = getLucideIconUrl('triangle-alert');
       iconTitle = t('guidanceIconAttention');
     } else if (type === 'success') {
       iconClass = 'icon-success';
-      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/check-circle.svg';
+      iconSrc = getLucideIconUrl('check-circle');
       iconTitle = t('guidanceIconSuccess');
     }
 
@@ -2422,8 +2423,8 @@ function render(r) {
         <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
         <strong>${renderLabelWithIcon('guidance')}</strong>
         <div class="card-icons" style="margin-left: auto; font-size: 0.8em; display: flex; align-items: center; gap: 6px;">
-           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg" class="status-icon icon-warning" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendAttention'))}"/> <span style="margin-right: 8px;">${escapeHtml(t('guidanceLegendAttention'))}</span>
-           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg" class="status-icon icon-info" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendInformational'))}"/> <span>${escapeHtml(t('guidanceLegendInformational'))}</span>
+           <img src="${getLucideIconUrl('triangle-alert')}" class="status-icon icon-warning" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendAttention'))}"/> <span style="margin-right: 8px;">${escapeHtml(t('guidanceLegendAttention'))}</span>
+           <img src="${getLucideIconUrl('info')}" class="status-icon icon-info" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendInformational'))}"/> <span>${escapeHtml(t('guidanceLegendInformational'))}</span>
         </div>
       </div>
       <div id="field-guidance" class="card-content">
@@ -2532,6 +2533,9 @@ document.getElementById('azureResourceSelect').addEventListener('change', functi
 function initializePage() {
   const params = new URLSearchParams(window.location.search);
   const bootstrapDomain = normalizeDomain(params.get("domain") || '');
+  const openCookieSettingsRequested = typeof consumeOpenCookieSettingsRequest === 'function'
+    ? consumeOpenCookieSettingsRequest()
+    : false;
   currentLanguage = detectLanguage();
 
   // 1. Check for saved theme
@@ -2539,7 +2543,8 @@ function initializePage() {
   const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   const defaultTheme = systemPrefersDark ? "dark" : "light";
 
-  const savedTheme = localStorage.getItem("acsTheme") || defaultTheme;
+  // Read saved theme only if functional cookies are consented
+  const savedTheme = consentAwareGetItem("acsTheme", 'functional') || defaultTheme;
 
   applyTheme(savedTheme);
   applyLanguage(currentLanguage, false);
@@ -2560,6 +2565,12 @@ function initializePage() {
   // Initialize Microsoft Entra ID authentication
   if (typeof initMsAuth === 'function') {
     initMsAuth();
+  }
+
+  // Show cookie consent banner if no consent has been given yet (EU GDPR / ePrivacy)
+  if (shouldShowCookieConsent() || openCookieSettingsRequested) {
+    applyCookieConsentLanguage();
+    showCookieConsentBanner();
   }
 
   scheduleInitialLookup(bootstrapDomain);

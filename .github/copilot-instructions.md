@@ -19,13 +19,17 @@ This is a **single-file PowerShell web application** that runs a local HTTP serv
 
 | File | Purpose |
 |---|---|
-| `Build-Release.ps1` | Concatenates all `src/*.ps1` files (sorted by filename) into the monolithic `acs-domain-checker.ps1`. |
+| `Build-Release.ps1` | Optionally refreshes local UI assets via `Download-UiAssets.ps1`, then concatenates all `src/*.ps1` files (sorted by numeric prefix + optional letter suffix) into the monolithic `acs-domain-checker.ps1`. |
 
 ### How to rebuild
 
 ```powershell
 pwsh -NoProfile -File ./Build-Release.ps1 -Force
 ```
+
+By default, `Build-Release.ps1` also invokes `Download-UiAssets.ps1` first so local Lucide and flag SVG assets are present under `assets/vendor/...`. Use `-SkipUiAssetDownload` when rebuilding in an offline or restricted environment.
+
+> **Important:** The build uses a custom sort key (numeric prefix then optional letter suffix) instead of plain `Sort-Object Name`. PowerShell's default culture-sensitive string comparison treats hyphens as ignorable, which causes `20a-*` to sort before `20-*` and breaks the HTML assembly order.
 
 The `acs-domain-checker.ps1` at the repo root is the **built artifact** — do **not**
 edit it directly. All changes go into `src/` files, then rebuild.
@@ -61,7 +65,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.44`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.47`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics` |
 
@@ -92,7 +96,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 | `08-ServerStartup.ps1` | ~215 | HTTP listener startup (HttpListener → TcpListener fallback), port probing helpers (`Test-LocalHttpEndpoint`, `Get-ListenerStartupErrorMessage`) |
 | `19-CliMode.ps1` | ~28 | CLI-only path — calls `Get-AcsDnsStatus` and outputs JSON when `-TestDomain` is set |
 | `22-RunspaceSetup.ps1` | ~132 | PowerShell runspace pool setup for concurrent DNS lookups; imports helper functions used during HTTP request handling |
-| `23-RequestHandler.ps1` | ~398 | HTTP request router — maps URL paths to handler logic, including `/api/records` for the DNS records table |
+| `23-RequestHandler.ps1` | ~398 | HTTP request router — maps URL paths to handler logic, including `/api/records` for the DNS records table and `/assets/*` for same-origin static asset delivery |
 | `24-RequestLoop.ps1` | ~250 | Main HTTP listener loop — accepts connections, dispatches to handler |
 | `25-Shutdown.ps1` | ~17 | Cleanup on exit — dispose listeners, runspace pool |
 
@@ -105,7 +109,7 @@ The web UI is split across seven files that build the `$htmlPage` here-string vi
 | `20-HtmlCss.ps1` | ~1,026 | Initializes `$htmlPage`. Contains `<!DOCTYPE html>`, `<head>`, and all CSS styles through `</style>` |
 | `20a-HtmlScriptSetup.ps1` | ~146 | External script tags (html2canvas CDN, MSAL loader), HTML `<body>` structure, main `<script>` tag opening with global JS variables |
 | `20b-HtmlTranslations.ps1` | ~3,431 | All JavaScript i18n data: `TRANSLATIONS`, `TRANSLATION_EXTENSIONS`, `REMAINING_TRANSLATION_OVERRIDES`, `MX_PROVIDER_HINTS`, `WHOIS_STATUS_LABELS`, `RISK_SUMMARY_LABELS`, `RUNTIME_TRANSLATION_OVERRIDES`, `GUIDANCE_AND_AZURE_OVERRIDES`, language config constants |
-| `20c-HtmlJsUtilities.ps1` | ~1,269 | JavaScript utility functions: language switching, domain normalization/validation, history management, HTML escaping, localization helpers, guidance text formatting, test summary |
+| `20c-HtmlJsUtilities.ps1` | ~1,269 | JavaScript utility functions: language switching, domain normalization/validation, cookie consent management, history management, HTML escaping, localization helpers, guidance text formatting, test summary |
 | `20d-HtmlJsCore.ps1` | ~1,385 | Core UI JavaScript: theme toggle, clipboard/copy, screenshot capture, `lookup()`, `render()`, `card()`, event listeners, initialization |
 | `20e-HtmlAzureIntegration.ps1` | ~924 | Azure/MSAL authentication, ARM API calls, subscription/resource/workspace discovery, Log Analytics query execution, closing `</script></body></html>` |
 | `20f-HtmlPostProcess.ps1` | ~22 | PowerShell template replacements: injects `__APP_VERSION__`, `__ENTRA_CLIENT_ID__`, `__ENTRA_TENANT_ID__`, `__ACS_API_KEY__`, `__ACS_ISSUE_URL__` |
@@ -114,7 +118,7 @@ The web UI is split across seven files that build the `$htmlPage` here-string vi
 
 | File | Lines | Contents |
 |---|---|---|
-| `21-StaticPages.ps1` | ~473 | `$script:TosPageHtml` (Terms of Service) and `$script:PrivacyPageHtml` (Privacy Policy) — standalone HTML pages served at `/terms` and `/privacy` |
+| `21-StaticPages.ps1` | ~473 | `$script:TosPageHtml` (Terms of Service) and `$script:PrivacyPageHtml` (Privacy Policy) — standalone HTML pages served at `/terms` and `/privacy`, including localized cookie-management links back into the SPA |
 
 ---
 
@@ -185,5 +189,6 @@ These PowerShell functions are defined in one file but called from multiple othe
 11. If there are any substantial changes to the application, please update this document to reflect the new structure or logic! This is meant to be a living document that evolves with the codebase. With it being so large, it needs a guide to navigate effectively.
 12. In the DNS records table UI, ensure the Name and Type columns do not wrap; keep them single-line and rely on horizontal scrolling for readability. The Type column header and values should always stay on one line and not wrap. TTL values should show raw seconds plus a compact abbreviated duration such as `5d 2h 33s` when applicable, omitting zero-value units like `0m` and `0s` unless needed for a zero-duration value. The DNS records table should remain searchable/filterable, support toggling yellow row highlighting for screenshot-ready troubleshooting, and use a removable filter-chip workflow beneath the search box for clearer multi-filter behavior. Enum-style `Class` and `Type` filtering should continue to use exact-match dropdown suggestions with keyboard navigation. Default ordering should be `Type`, then `Name`, then `Data`.
 13. When routes, API behavior, configuration, or other user-facing functionality changes, update `README.md` in the same change so repository documentation stays current. Additionally, maintain Copilot instructions to keep documentation in sync.
-14. Make sure any code changes performed have sufficient comments surround it so its easy to understand the intent and logic when coming back to it later, especially for complex sections like the SPF recursive expansion or the HTTP request handling logic. This will help both human readers and Copilot understand the code better in the future.
-15. When exposing raw RDAP data in the domain registration UI, prefer a digestible grouped presentation (status, events, nameservers, contacts, links, then expandable raw JSON) rather than showing only an undifferentiated JSON blob, favor polished summary/timeline/card layouts over plain bullet lists when possible, and order RDAP events chronologically. In the Guidance section, avoid surfacing terminal DNS TXT timeout guidance until the lookup workflow has settled, and suppress that specific message when the detailed DNS records payload already confirms TXT records were collected. Likewise, TXT-dependent checks/cards and the Domain card address view should recover from the detailed DNS records payload when the dedicated base lookup data is incomplete but queried-domain DNS records are still available there.
+14. Local UI assets such as toolbar/status SVG icons and language flag SVGs can be downloaded with `Download-UiAssets.ps1`. Keep that script in sync with the asset names referenced by `20b-HtmlTranslations.ps1` and `20c-HtmlJsUtilities.ps1`.
+15. Make sure any code changes performed have sufficient comments surround it so its easy to understand the intent and logic when coming back to it later, especially for complex sections like the SPF recursive expansion or the HTTP request handling logic. This will help both human readers and Copilot understand the code better in the future.
+16. When exposing raw RDAP data in the domain registration UI, prefer a digestible grouped presentation (status, events, nameservers, contacts, links, then expandable raw JSON) rather than showing only an undifferentiated JSON blob, favor polished summary/timeline/card layouts over plain bullet lists when possible, and order RDAP events chronologically. In the Guidance section, avoid surfacing terminal DNS TXT timeout guidance until the lookup workflow has settled, and suppress that specific message when the detailed DNS records payload already confirms TXT records were collected. Likewise, TXT-dependent checks/cards and the Domain card address view should recover from the detailed DNS records payload when the dedicated base lookup data is incomplete but queried-domain DNS records are still available there.

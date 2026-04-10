@@ -25,6 +25,63 @@ function Get-RequestCookies {
   return $dict
 }
 
+# Read a specific request header from either HttpListener or the TcpListener shim.
+function Get-RequestHeaderValue {
+  param(
+    $Context,
+    [string]$Name
+  )
+
+  if (-not $Context -or [string]::IsNullOrWhiteSpace($Name)) { return $null }
+  try {
+    $props = $Context.Request.PSObject.Properties
+    if ($props.Match('Headers').Count -gt 0 -and $Context.Request.Headers) {
+      if ($Context.Request.Headers.ContainsKey($Name)) { return [string]$Context.Request.Headers[$Name] }
+      $lower = $Name.ToLowerInvariant()
+      if ($Context.Request.Headers.ContainsKey($lower)) { return [string]$Context.Request.Headers[$lower] }
+    } elseif ($Context.Request -is [System.Net.HttpListenerRequest]) {
+      try { return [string]$Context.Request.Headers[$Name] } catch { return $null }
+    }
+  } catch { }
+  return $null
+}
+
+# Parse the consent header sent by the browser UI. Returns $true, $false, or $null
+# when the request did not explicitly include an analytics consent state.
+function Get-AnonymousAnalyticsConsentState {
+  param($Context)
+
+  $raw = Get-RequestHeaderValue -Context $Context -Name 'X-ACS-Cookie-Consent'
+  if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+
+  try {
+    foreach ($part in ($raw -split ';')) {
+      $segment = [string]$part
+      if ([string]::IsNullOrWhiteSpace($segment)) { continue }
+      $kv = $segment.Trim() -split '=', 2
+      if ($kv.Count -ne 2) { continue }
+      $name = ([string]$kv[0]).Trim().ToLowerInvariant()
+      $value = ([string]$kv[1]).Trim().ToLowerInvariant()
+      if ($name -ne 'analytics') { continue }
+      if ($value -in @('1', 'true', 'yes', 'on')) { return $true }
+      if ($value -in @('0', 'false', 'no', 'off')) { return $false }
+    }
+  } catch { }
+
+  return $null
+}
+
+# Remove the analytics session cookie when the user explicitly rejects analytics.
+function Clear-AnonymousSessionCookie {
+  param($Context)
+
+  try {
+    if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+      $Context.Response.Headers.Add('Set-Cookie', 'acs_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax; HttpOnly')
+    }
+  } catch { }
+}
+
 # Read the acs_session cookie from the request, or create a new one and set it on the response.
 # Also registers the session in the in-memory metrics session tracker.
 function Get-OrCreate-AnonymousSessionId {

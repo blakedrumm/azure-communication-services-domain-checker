@@ -25,6 +25,7 @@
 - [Terms of Service & Privacy Pages](#-terms-of-service--privacy-pages)
 - [Security Notes](#-security-notes)
 - [Troubleshooting](#-troubleshooting)
+- [Build & Local UI Assets](#-build--local-ui-assets)
 - [Contributing](#-contributing)
 - [License](#-license)
 
@@ -299,6 +300,8 @@ The tool enriches results with domain registration metadata (creation date, expi
 
 WHOIS data is used to populate the **Email Quota** checklist and to surface warnings for expired or newly-registered domains.
 
+The WHOIS normalization layer also recognizes registry-specific labels used by providers such as EDUCAUSE for `.edu` domains, including `Domain record activated`, `Domain expires`, and block-style `Registrant:` sections.
+
 ## 🔌 API Endpoints
 
 The application exposes the following RESTful API endpoints:
@@ -379,6 +382,14 @@ Customize the application behavior using these environment variables:
 | `ACS_ENABLE_ANON_METRICS` | `0` | Set to `1` to enable anonymous metrics collection |
 | `ACS_ANON_METRICS_FILE` | _(none)_ | File path to persist metrics data (JSON format) |
 | `ACS_METRICS_HASH_KEY` | _(generated)_ | Stable HMAC key for domain hashing |
+
+When browser-based anonymous metrics are enabled, the SPA now asks the user for cookie consent before storing optional preferences or sending analytics consent that allows the temporary `acs_session` analytics cookie. The consent banner is localized across all supported UI languages, and the `/terms` and `/privacy` pages now include links that reopen cookie management directly in the SPA.
+
+To avoid browser tracking-prevention warnings from third-party SVG downloads, the SPA can also serve Lucide and flag SVG files from same-origin `/assets/*` paths. Use `Download-UiAssets.ps1` to fetch those files into the repository `assets/vendor/...` folders.
+
+```powershell
+pwsh -NoProfile -File .\Download-UiAssets.ps1
+```
 
 ### 🔐 Authentication
 | Variable | Default | Description |
@@ -564,8 +575,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.0.44
-git push origin v2.0.44
+git tag v2.0.45
+git push origin v2.0.45
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -576,7 +587,7 @@ git push origin v2.0.44
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.0.44`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.0.45`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images

@@ -254,11 +254,102 @@ function Test-WhoisRawTextHasUsableData {
 }
 
 function Get-WhoisCreationDateLabelRegex {
-  '(?i)^(Creation Date|Created On|Registered On|Registered on|Registration Date|Registered|Domain Create Date|Creation date):\s*(.+)$'
+  '(?im)^(Creation Date|Created On|Registered On|Registered on|Registration Date|Registered|Domain Create Date|Creation date|Domain record activated):\s*(.+)$'
 }
 
 function Get-WhoisExpiryDateLabelRegex {
-  '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$'
+  '(?im)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date|Domain expires):\s*(.+)$'
+}
+
+# Keep WHOIS field extraction in one place so all fallback providers recognize
+# the same registry-specific labels and block-style sections such as EDUCAUSE's
+# multi-line "Registrant:" blocks for .edu domains.
+function Get-WhoisParsedRegistrationData {
+  param([string]$Text)
+
+  $creation = $null
+  $expiry = $null
+  $registrar = $null
+  $registrant = $null
+
+  if ([string]::IsNullOrWhiteSpace($Text)) {
+    return [pscustomobject]@{
+      creationDate = $creation
+      expiryDate   = $expiry
+      registrar    = $registrar
+      registrant   = $registrant
+    }
+  }
+
+  $canConvertDates = $true
+  if (-not (Get-Command -Name ConvertTo-NullableUtcIso8601 -ErrorAction SilentlyContinue)) {
+    $canConvertDates = $false
+  }
+
+  $creationPattern = Get-WhoisCreationDateLabelRegex
+  $expiryPattern = Get-WhoisExpiryDateLabelRegex
+  $lines = $Text -split "`r?`n"
+
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    $l = [string]$lines[$i]
+    $trimmed = $l.Trim()
+    if (-not $trimmed) { continue }
+
+    if (-not $creation -and $trimmed -match $creationPattern) {
+      $val = $Matches[2].Trim()
+      if ($canConvertDates) {
+        try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
+      } else {
+        $creation = $val
+      }
+      continue
+    }
+
+    if (-not $expiry -and $trimmed -match $expiryPattern) {
+      $val = $Matches[2].Trim()
+      if ($canConvertDates) {
+        try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
+      } else {
+        $expiry = $val
+      }
+      continue
+    }
+
+    if (-not $registrar -and $trimmed -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
+      $registrar = $Matches[2].Trim()
+      continue
+    }
+
+    if (-not $registrant -and $trimmed -match '(?i)^(Registrant Name|Registrant Organisation|Registrant Organization):\s*(.+)$') {
+      $registrant = $Matches[2].Trim()
+      continue
+    }
+
+    if (-not $registrant -and $trimmed -match '(?i)^Registrant:\s*$') {
+      for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+        $candidate = [string]$lines[$j]
+        $candidateTrimmed = $candidate.Trim()
+        if (-not $candidateTrimmed) {
+          if ($j -gt ($i + 1)) { break }
+          continue
+        }
+
+        if ($candidateTrimmed -match '^[A-Za-z][A-Za-z0-9 .''()&,/+-]{0,80}:\s*') {
+          break
+        }
+
+        $registrant = $candidateTrimmed
+        break
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    creationDate = $creation
+    expiryDate   = $expiry
+    registrar    = $registrar
+    registrant   = $registrant
+  }
 }
 
 # Windows-only WHOIS lookup using the Sysinternals whois.exe tool.
@@ -349,49 +440,12 @@ function Invoke-SysinternalsWhoisLookup {
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
 
-    # Parse what we can (never fail the whole lookup on parse issues)
-    $creation   = $null
-    $expiry     = $null
-    $registrar  = $null
-    $registrant = $null
-
-    $creationPattern = Get-WhoisCreationDateLabelRegex
-    $expiryPattern = Get-WhoisExpiryDateLabelRegex
-
-    foreach ($line in ($text -split "`r?`n")) {
-      $l = $line.Trim()
-      if (-not $l) { continue }
-
-      if (-not $creation -and $l -match $creationPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
-        } else {
-          $creation = $val
-        }
-        continue
-      }
-
-      if (-not $expiry -and $l -match $expiryPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
-        } else {
-          $expiry = $val
-        }
-        continue
-      }
-
-      if (-not $registrar -and $l -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
-        $registrar = $Matches[2].Trim()
-        continue
-      }
-
-      if (-not $registrant -and $l -match '(?i)^Registrant (Organization|Organisation|Name):\s*(.+)$') {
-        $registrant = $Matches[2].Trim()
-        continue
-      }
-    }
+    # Parse what we can (never fail the whole lookup on parse issues).
+    $parsed = Get-WhoisParsedRegistrationData -Text $text
+    $creation = $parsed.creationDate
+    $expiry = $parsed.expiryDate
+    $registrar = $parsed.registrar
+    $registrant = $parsed.registrant
 
     return [pscustomobject]@{
       creationDate = $creation
@@ -613,48 +667,11 @@ function Invoke-LinuxWhoisLookup {
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
 
-    $creation   = $null
-    $expiry     = $null
-    $registrar  = $null
-    $registrant = $null
-
-    $creationPattern = Get-WhoisCreationDateLabelRegex
-    $expiryPattern = Get-WhoisExpiryDateLabelRegex
-
-    foreach ($line in ($text -split "`r?`n")) {
-      $l = $line.Trim()
-      if (-not $l) { continue }
-
-      if (-not $creation -and $l -match $creationPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
-        } else {
-          $creation = $val
-        }
-        continue
-      }
-
-      if (-not $expiry -and $l -match $expiryPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
-        } else {
-          $expiry = $val
-        }
-        continue
-      }
-
-      if (-not $registrar -and $l -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
-        $registrar = $Matches[2].Trim()
-        continue
-      }
-
-      if (-not $registrant -and $l -match '(?i)^(Registrant Name|Registrant|Registrant Organisation|Registrant Organization):\s*(.+)$') {
-        $registrant = $Matches[2].Trim()
-        continue
-      }
-    }
+    $parsed = Get-WhoisParsedRegistrationData -Text $text
+    $creation = $parsed.creationDate
+    $expiry = $parsed.expiryDate
+    $registrar = $parsed.registrar
+    $registrant = $parsed.registrant
 
     return [pscustomobject]@{
       creationDate = $creation
@@ -793,45 +810,13 @@ function Invoke-TcpWhoisLookup {
       # Skip responses that indicate no data or invalid queries / malformed subdomain lookups.
       if ($text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE|Malformed request\.?|Invalid query|Invalid domain name|This query returned 0 objects)\b') { continue }
 
-      # Parse registration fields (same patterns as Invoke-LinuxWhoisLookup).
-      $creation   = $null
-      $expiry     = $null
-      $registrar  = $null
-      $registrant = $null
-
-      $creationPattern = Get-WhoisCreationDateLabelRegex
-      $expiryPattern = Get-WhoisExpiryDateLabelRegex
-
-      foreach ($line in ($text -split "`r?`n")) {
-        $l = $line.Trim()
-        if (-not $l) { continue }
-
-        if (-not $creation -and $l -match $creationPattern) {
-          $val = $Matches[2].Trim()
-          if ($canConvertDates) {
-            try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
-          } else { $creation = $val }
-          continue
-        }
-
-        if (-not $expiry -and $l -match $expiryPattern) {
-          $val = $Matches[2].Trim()
-          if ($canConvertDates) {
-            try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
-          } else { $expiry = $val }
-          continue
-        }
-
-        if (-not $registrar -and $l -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
-          $registrar = $Matches[2].Trim()
-          continue
-        }
-
-        if (-not $registrant -and $l -match '(?i)^(Registrant Name|Registrant|Registrant Organisation|Registrant Organization):\s*(.+)$') {
-          $registrant = $Matches[2].Trim()
-          continue
-        }
-      }
+      # Parse registration fields using the same normalization as the other
+      # WHOIS providers so registry-specific labels stay consistent.
+      $parsed = Get-WhoisParsedRegistrationData -Text $text
+      $creation = $parsed.creationDate
+      $expiry = $parsed.expiryDate
+      $registrar = $parsed.registrar
+      $registrant = $parsed.registrant
 
       return [pscustomobject]@{
         creationDate = $creation
@@ -903,7 +888,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.44'
+$script:AppVersion = '2.0.47'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -2545,6 +2530,63 @@ function Get-RequestCookies {
     $dict[$name] = $val
   }
   return $dict
+}
+
+# Read a specific request header from either HttpListener or the TcpListener shim.
+function Get-RequestHeaderValue {
+  param(
+    $Context,
+    [string]$Name
+  )
+
+  if (-not $Context -or [string]::IsNullOrWhiteSpace($Name)) { return $null }
+  try {
+    $props = $Context.Request.PSObject.Properties
+    if ($props.Match('Headers').Count -gt 0 -and $Context.Request.Headers) {
+      if ($Context.Request.Headers.ContainsKey($Name)) { return [string]$Context.Request.Headers[$Name] }
+      $lower = $Name.ToLowerInvariant()
+      if ($Context.Request.Headers.ContainsKey($lower)) { return [string]$Context.Request.Headers[$lower] }
+    } elseif ($Context.Request -is [System.Net.HttpListenerRequest]) {
+      try { return [string]$Context.Request.Headers[$Name] } catch { return $null }
+    }
+  } catch { }
+  return $null
+}
+
+# Parse the consent header sent by the browser UI. Returns $true, $false, or $null
+# when the request did not explicitly include an analytics consent state.
+function Get-AnonymousAnalyticsConsentState {
+  param($Context)
+
+  $raw = Get-RequestHeaderValue -Context $Context -Name 'X-ACS-Cookie-Consent'
+  if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+
+  try {
+    foreach ($part in ($raw -split ';')) {
+      $segment = [string]$part
+      if ([string]::IsNullOrWhiteSpace($segment)) { continue }
+      $kv = $segment.Trim() -split '=', 2
+      if ($kv.Count -ne 2) { continue }
+      $name = ([string]$kv[0]).Trim().ToLowerInvariant()
+      $value = ([string]$kv[1]).Trim().ToLowerInvariant()
+      if ($name -ne 'analytics') { continue }
+      if ($value -in @('1', 'true', 'yes', 'on')) { return $true }
+      if ($value -in @('0', 'false', 'no', 'off')) { return $false }
+    }
+  } catch { }
+
+  return $null
+}
+
+# Remove the analytics session cookie when the user explicitly rejects analytics.
+function Clear-AnonymousSessionCookie {
+  param($Context)
+
+  try {
+    if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+      $Context.Response.Headers.Add('Set-Cookie', 'acs_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax; HttpOnly')
+    }
+  } catch { }
 }
 
 # Read the acs_session cookie from the request, or create a new one and set it on the response.
@@ -7193,6 +7235,11 @@ button.primary:disabled {
   margin-bottom: 10px;
   font-size: 12px;
   color: var(--fg-muted);
+  /* Stacking context so the search suggestions overlay the table below */
+  position: relative;
+  z-index: 1;
+  /* Prevent the grid from clipping absolutely-positioned suggestions */
+  overflow: visible;
 }
 
 .dns-records-toolbar-label {
@@ -7205,6 +7252,9 @@ button.primary:disabled {
 .dns-records-search-dropdown {
   position: relative;
   width: 100%;
+  /* Own stacking context so suggestions paint above sibling grid items */
+  z-index: 2;
+  overflow: visible;
 }
 
 input.dns-records-search-input,
@@ -7237,10 +7287,11 @@ input.dns-records-search-input {
 
 .dns-records-search-suggestions {
   position: absolute;
-  top: calc(100% + 4px);
+  top: 100%; /* Always below the dropdown container */
+  margin-top: 4px; /* Visual gap between input and suggestions */
   left: 0;
   right: 0;
-  z-index: 20;
+  z-index: 100;
   display: none;
   max-height: 180px;
   overflow-y: auto;
@@ -8154,6 +8205,223 @@ ul.guidance li {
     transform: none !important;
   }
 }
+
+/* ---- Cookie Consent Banner (EU GDPR / ePrivacy compliance) ---- */
+.cookie-consent-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 10000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 16px 24px 16px;
+  animation: cookieFadeIn 0.35s ease;
+}
+
+@keyframes cookieFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.cookie-consent-banner {
+  background: var(--card-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.18);
+  max-width: 620px;
+  width: 100%;
+  padding: 24px 28px 20px 28px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.cookie-consent-banner h2 {
+  margin: 0 0 8px 0;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.cookie-consent-banner p {
+  margin: 0 0 16px 0;
+  color: var(--status);
+  font-size: 13px;
+}
+
+.cookie-consent-banner a {
+  color: var(--button-bg);
+  text-decoration: underline;
+}
+
+/* Category toggle rows */
+.cookie-categories {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.cookie-category {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.cookie-category-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cookie-category-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cookie-category-desc {
+  font-size: 11px;
+  color: var(--status);
+  line-height: 1.4;
+}
+
+/* Toggle switch */
+.cookie-toggle {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 22px;
+}
+
+.cookie-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.cookie-toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--input-border);
+  border-radius: 22px;
+  cursor: pointer;
+  transition: background 0.25s ease;
+}
+
+.cookie-toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 3px;
+  bottom: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.25s ease;
+}
+
+.cookie-toggle input:checked + .cookie-toggle-slider {
+  background: var(--button-bg);
+}
+
+.cookie-toggle input:checked + .cookie-toggle-slider::before {
+  transform: translateX(18px);
+}
+
+.cookie-toggle input:disabled + .cookie-toggle-slider {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cookie-toggle input:focus-visible + .cookie-toggle-slider {
+  outline: 2px solid var(--button-bg);
+  outline-offset: 2px;
+}
+
+/* Action buttons row */
+.cookie-consent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.cookie-consent-actions button {
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.cookie-consent-actions button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+
+.cookie-btn-accept-all {
+  background: var(--button-bg);
+  color: var(--button-fg);
+  border: 1px solid var(--button-bg);
+}
+
+.cookie-btn-accept-all:hover {
+  filter: brightness(1.12);
+}
+
+.cookie-btn-save {
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  border: 1px solid var(--button-border-secondary);
+}
+
+.cookie-btn-save:hover {
+  background: var(--border);
+  border-color: var(--input-border);
+}
+
+.cookie-btn-reject {
+  background: transparent;
+  color: var(--status);
+  border: 1px solid var(--border);
+}
+
+.cookie-btn-reject:hover {
+  background: var(--bg);
+  border-color: var(--input-border);
+}
+
+/* Small footer link for re-opening preferences */
+.cookie-settings-link {
+  cursor: pointer;
+  text-decoration: underline;
+  color: inherit;
+  font-size: inherit;
+}
+
+.cookie-settings-link:hover {
+  color: var(--button-bg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cookie-consent-overlay { animation: none; }
+  .cookie-consent-actions button:hover { transform: none; box-shadow: none; }
+}
+
+@media (max-width: 480px) {
+  .cookie-consent-banner { padding: 18px 16px 16px 16px; }
+  .cookie-consent-actions { flex-direction: column; }
+  .cookie-consent-actions button { width: 100%; text-align: center; }
+}
 </style>
 '@
 # ===== HTML Body Structure & Script Setup =====
@@ -8208,7 +8476,9 @@ async function ensureMsalLoaded() {
 <script nonce="__CSP_NONCE__">
 (function() {
   try {
-    var local = localStorage.getItem('acsTheme');
+    var consentRaw = localStorage.getItem('acsCookieConsent');
+    var consent = consentRaw ? JSON.parse(consentRaw) : null;
+    var local = (consent && consent.functional) ? localStorage.getItem('acsTheme') : null;
     var support = window.matchMedia('(prefers-color-scheme: dark)').matches;
     if (local === 'dark' || (!local && support)) {
       document.documentElement.classList.add('dark');
@@ -8294,6 +8564,51 @@ async function ensureMsalLoaded() {
   ACS Email Domain Checker v__APP_VERSION__ &bull; Written by: <a href="https://blakedrumm.com/" style="color:inherit;">Blake Drumm</a> &bull; Generated by PowerShell &bull; <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Back to Top</a>
 </div>
 
+</div>
+
+<!-- Cookie Consent Banner (EU GDPR / ePrivacy compliance) -->
+<div id="cookieConsentOverlay" class="cookie-consent-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="cookieConsentTitle">
+  <div class="cookie-consent-banner">
+    <h2 id="cookieConsentTitle">Cookie Settings</h2>
+    <p id="cookieConsentDesc">This tool uses cookies and local storage to enhance your experience. Essential cookies are required for basic functionality. You can choose which optional categories to allow.</p>
+    <div class="cookie-categories">
+      <div class="cookie-category">
+        <div class="cookie-category-info">
+          <span class="cookie-category-name" id="cookieCatEssentialName">Essential</span>
+          <span class="cookie-category-desc" id="cookieCatEssentialDesc">Required for the tool to function. Cannot be disabled.</span>
+        </div>
+        <label class="cookie-toggle">
+          <input type="checkbox" checked disabled />
+          <span class="cookie-toggle-slider"></span>
+        </label>
+      </div>
+      <div class="cookie-category">
+        <div class="cookie-category-info">
+          <span class="cookie-category-name" id="cookieCatFunctionalName">Preferences</span>
+          <span class="cookie-category-desc" id="cookieCatFunctionalDesc">Theme, language, and domain lookup history.</span>
+        </div>
+        <label class="cookie-toggle">
+          <input type="checkbox" id="cookieToggleFunctional" checked />
+          <span class="cookie-toggle-slider"></span>
+        </label>
+      </div>
+      <div class="cookie-category">
+        <div class="cookie-category-info">
+          <span class="cookie-category-name" id="cookieCatAnalyticsName">Analytics</span>
+          <span class="cookie-category-desc" id="cookieCatAnalyticsDesc">Anonymous usage metrics to improve the tool.</span>
+        </div>
+        <label class="cookie-toggle">
+          <input type="checkbox" id="cookieToggleAnalytics" checked />
+          <span class="cookie-toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="cookie-consent-actions">
+      <button type="button" class="cookie-btn-reject" id="cookieBtnReject" onclick="saveCookieConsent('reject')">Reject non-essential</button>
+      <button type="button" class="cookie-btn-save" id="cookieBtnSave" onclick="saveCookieConsent('custom')">Save preferences</button>
+      <button type="button" class="cookie-btn-accept-all" id="cookieBtnAcceptAll" onclick="saveCookieConsent('acceptAll')">Accept all</button>
+    </div>
+  </div>
 </div>
 
 <script nonce="__CSP_NONCE__">
@@ -11753,7 +12068,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: 'Self',
     rdapLinkRelRelated: 'Related',
     rdapLinkRelAlternate: 'Alternate',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: 'Active',
+    eppInactive: 'Inactive',
+    eppOk: 'OK',
+    eppClientDeleteProhibited: 'Client Delete Prohibited',
+    eppClientHold: 'Client Hold',
+    eppClientRenewProhibited: 'Client Renew Prohibited',
+    eppClientTransferProhibited: 'Client Transfer Prohibited',
+    eppClientUpdateProhibited: 'Client Update Prohibited',
+    eppServerDeleteProhibited: 'Server Delete Prohibited',
+    eppServerHold: 'Server Hold',
+    eppServerRenewProhibited: 'Server Renew Prohibited',
+    eppServerTransferProhibited: 'Server Transfer Prohibited',
+    eppServerUpdateProhibited: 'Server Update Prohibited',
+    eppPendingCreate: 'Pending Create',
+    eppPendingDelete: 'Pending Delete',
+    eppPendingRenew: 'Pending Renew',
+    eppPendingTransfer: 'Pending Transfer',
+    eppPendingUpdate: 'Pending Update',
+    eppRedemptionPeriod: 'Redemption Period',
+    eppAutoRenewPeriod: 'Auto Renew Period',
+    eppAddPeriod: 'Add Period',
+    eppRenewPeriod: 'Renew Period',
+    eppTransferPeriod: 'Transfer Period',
+    rdapNoticeTermsOfService: 'Terms of Service',
+    rdapNoticeStatusCodes: 'Status Codes',
+    rdapNoticeRddsComplaint: 'RDDS Inaccuracy Complaint Form'
   },
   es: {
     dnsRecords: 'Registros DNS',
@@ -11811,7 +12152,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: 'Propio',
     rdapLinkRelRelated: 'Relacionado',
     rdapLinkRelAlternate: 'Alternativo',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: 'Activo',
+    eppInactive: 'Inactivo',
+    eppOk: 'OK',
+    eppClientDeleteProhibited: 'Eliminaci\u00F3n por cliente prohibida',
+    eppClientHold: 'Retenci\u00F3n por cliente',
+    eppClientRenewProhibited: 'Renovaci\u00F3n por cliente prohibida',
+    eppClientTransferProhibited: 'Transferencia por cliente prohibida',
+    eppClientUpdateProhibited: 'Actualizaci\u00F3n por cliente prohibida',
+    eppServerDeleteProhibited: 'Eliminaci\u00F3n por servidor prohibida',
+    eppServerHold: 'Retenci\u00F3n por servidor',
+    eppServerRenewProhibited: 'Renovaci\u00F3n por servidor prohibida',
+    eppServerTransferProhibited: 'Transferencia por servidor prohibida',
+    eppServerUpdateProhibited: 'Actualizaci\u00F3n por servidor prohibida',
+    eppPendingCreate: 'Creaci\u00F3n pendiente',
+    eppPendingDelete: 'Eliminaci\u00F3n pendiente',
+    eppPendingRenew: 'Renovaci\u00F3n pendiente',
+    eppPendingTransfer: 'Transferencia pendiente',
+    eppPendingUpdate: 'Actualizaci\u00F3n pendiente',
+    eppRedemptionPeriod: 'Per\u00EDodo de redenci\u00F3n',
+    eppAutoRenewPeriod: 'Per\u00EDodo de renovaci\u00F3n autom\u00E1tica',
+    eppAddPeriod: 'Per\u00EDodo de adici\u00F3n',
+    eppRenewPeriod: 'Per\u00EDodo de renovaci\u00F3n',
+    eppTransferPeriod: 'Per\u00EDodo de transferencia',
+    rdapNoticeTermsOfService: 'T\u00E9rminos de servicio',
+    rdapNoticeStatusCodes: 'C\u00F3digos de estado',
+    rdapNoticeRddsComplaint: 'Formulario de queja por inexactitud de RDDS'
   },
   fr: {
     dnsRecords: 'Enregistrements DNS',
@@ -11869,7 +12236,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: 'Propre',
     rdapLinkRelRelated: 'Associ\u00E9',
     rdapLinkRelAlternate: 'Autre',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: 'Actif',
+    eppInactive: 'Inactif',
+    eppOk: 'OK',
+    eppClientDeleteProhibited: 'Suppression par le client interdite',
+    eppClientHold: 'Suspension par le client',
+    eppClientRenewProhibited: 'Renouvellement par le client interdit',
+    eppClientTransferProhibited: 'Transfert par le client interdit',
+    eppClientUpdateProhibited: 'Mise \u00E0 jour par le client interdite',
+    eppServerDeleteProhibited: 'Suppression par le serveur interdite',
+    eppServerHold: 'Suspension par le serveur',
+    eppServerRenewProhibited: 'Renouvellement par le serveur interdit',
+    eppServerTransferProhibited: 'Transfert par le serveur interdit',
+    eppServerUpdateProhibited: 'Mise \u00E0 jour par le serveur interdite',
+    eppPendingCreate: 'Cr\u00E9ation en attente',
+    eppPendingDelete: 'Suppression en attente',
+    eppPendingRenew: 'Renouvellement en attente',
+    eppPendingTransfer: 'Transfert en attente',
+    eppPendingUpdate: 'Mise \u00E0 jour en attente',
+    eppRedemptionPeriod: 'P\u00E9riode de r\u00E9demption',
+    eppAutoRenewPeriod: 'P\u00E9riode de renouvellement automatique',
+    eppAddPeriod: 'P\u00E9riode d\u2019ajout',
+    eppRenewPeriod: 'P\u00E9riode de renouvellement',
+    eppTransferPeriod: 'P\u00E9riode de transfert',
+    rdapNoticeTermsOfService: 'Conditions d\u2019utilisation',
+    rdapNoticeStatusCodes: 'Codes de statut',
+    rdapNoticeRddsComplaint: 'Formulaire de plainte pour inexactitude RDDS'
   },
   de: {
     dnsRecords: 'DNS-Eintr\u00E4ge',
@@ -11927,7 +12320,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: 'Selbst',
     rdapLinkRelRelated: 'Verwandt',
     rdapLinkRelAlternate: 'Alternativ',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: 'Aktiv',
+    eppInactive: 'Inaktiv',
+    eppOk: 'OK',
+    eppClientDeleteProhibited: 'L\u00F6schung durch Client verboten',
+    eppClientHold: 'Sperrung durch Client',
+    eppClientRenewProhibited: 'Verl\u00E4ngerung durch Client verboten',
+    eppClientTransferProhibited: '\u00DCbertragung durch Client verboten',
+    eppClientUpdateProhibited: 'Aktualisierung durch Client verboten',
+    eppServerDeleteProhibited: 'L\u00F6schung durch Server verboten',
+    eppServerHold: 'Sperrung durch Server',
+    eppServerRenewProhibited: 'Verl\u00E4ngerung durch Server verboten',
+    eppServerTransferProhibited: '\u00DCbertragung durch Server verboten',
+    eppServerUpdateProhibited: 'Aktualisierung durch Server verboten',
+    eppPendingCreate: 'Erstellung ausstehend',
+    eppPendingDelete: 'L\u00F6schung ausstehend',
+    eppPendingRenew: 'Verl\u00E4ngerung ausstehend',
+    eppPendingTransfer: '\u00DCbertragung ausstehend',
+    eppPendingUpdate: 'Aktualisierung ausstehend',
+    eppRedemptionPeriod: 'R\u00FCckgewinnungsphase',
+    eppAutoRenewPeriod: 'Automatische Verl\u00E4ngerungsphase',
+    eppAddPeriod: 'Hinzuf\u00FCgungsphase',
+    eppRenewPeriod: 'Verl\u00E4ngerungsphase',
+    eppTransferPeriod: '\u00DCbertragungsphase',
+    rdapNoticeTermsOfService: 'Nutzungsbedingungen',
+    rdapNoticeStatusCodes: 'Statuscodes',
+    rdapNoticeRddsComplaint: 'RDDS-Beschwerdeformular bei Ungenauigkeit'
   },
   'pt-BR': {
     dnsRecords: 'Registros DNS',
@@ -11985,7 +12404,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: 'Pr\u00F3prio',
     rdapLinkRelRelated: 'Relacionado',
     rdapLinkRelAlternate: 'Alternativo',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: 'Ativo',
+    eppInactive: 'Inativo',
+    eppOk: 'OK',
+    eppClientDeleteProhibited: 'Exclus\u00E3o pelo cliente proibida',
+    eppClientHold: 'Reten\u00E7\u00E3o pelo cliente',
+    eppClientRenewProhibited: 'Renova\u00E7\u00E3o pelo cliente proibida',
+    eppClientTransferProhibited: 'Transfer\u00EAncia pelo cliente proibida',
+    eppClientUpdateProhibited: 'Atualiza\u00E7\u00E3o pelo cliente proibida',
+    eppServerDeleteProhibited: 'Exclus\u00E3o pelo servidor proibida',
+    eppServerHold: 'Reten\u00E7\u00E3o pelo servidor',
+    eppServerRenewProhibited: 'Renova\u00E7\u00E3o pelo servidor proibida',
+    eppServerTransferProhibited: 'Transfer\u00EAncia pelo servidor proibida',
+    eppServerUpdateProhibited: 'Atualiza\u00E7\u00E3o pelo servidor proibida',
+    eppPendingCreate: 'Cria\u00E7\u00E3o pendente',
+    eppPendingDelete: 'Exclus\u00E3o pendente',
+    eppPendingRenew: 'Renova\u00E7\u00E3o pendente',
+    eppPendingTransfer: 'Transfer\u00EAncia pendente',
+    eppPendingUpdate: 'Atualiza\u00E7\u00E3o pendente',
+    eppRedemptionPeriod: 'Per\u00EDodo de reden\u00E7\u00E3o',
+    eppAutoRenewPeriod: 'Per\u00EDodo de renova\u00E7\u00E3o autom\u00E1tica',
+    eppAddPeriod: 'Per\u00EDodo de adi\u00E7\u00E3o',
+    eppRenewPeriod: 'Per\u00EDodo de renova\u00E7\u00E3o',
+    eppTransferPeriod: 'Per\u00EDodo de transfer\u00EAncia',
+    rdapNoticeTermsOfService: 'Termos de servi\u00E7o',
+    rdapNoticeStatusCodes: 'C\u00F3digos de status',
+    rdapNoticeRddsComplaint: 'Formul\u00E1rio de reclama\u00E7\u00E3o de imprecis\u00E3o do RDDS'
   },
   ar: {
     dnsRecords: '\u0633\u062C\u0644\u0627\u062A DNS',
@@ -12043,7 +12488,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: '\u0630\u0627\u062A\u064A',
     rdapLinkRelRelated: '\u0645\u0631\u062A\u0628\u0637',
     rdapLinkRelAlternate: '\u0628\u062F\u064A\u0644',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: '\u0646\u0634\u0637',
+    eppInactive: '\u063A\u064A\u0631 \u0646\u0634\u0637',
+    eppOk: '\u0645\u0648\u0627\u0641\u0642',
+    eppClientDeleteProhibited: '\u062D\u0630\u0641 \u0627\u0644\u0639\u0645\u064A\u0644 \u0645\u062D\u0638\u0648\u0631',
+    eppClientHold: '\u062A\u0639\u0644\u064A\u0642 \u0627\u0644\u0639\u0645\u064A\u0644',
+    eppClientRenewProhibited: '\u062A\u062C\u062F\u064A\u062F \u0627\u0644\u0639\u0645\u064A\u0644 \u0645\u062D\u0638\u0648\u0631',
+    eppClientTransferProhibited: '\u0646\u0642\u0644 \u0627\u0644\u0639\u0645\u064A\u0644 \u0645\u062D\u0638\u0648\u0631',
+    eppClientUpdateProhibited: '\u062A\u062D\u062F\u064A\u062B \u0627\u0644\u0639\u0645\u064A\u0644 \u0645\u062D\u0638\u0648\u0631',
+    eppServerDeleteProhibited: '\u062D\u0630\u0641 \u0627\u0644\u062E\u0627\u062F\u0645 \u0645\u062D\u0638\u0648\u0631',
+    eppServerHold: '\u062A\u0639\u0644\u064A\u0642 \u0627\u0644\u062E\u0627\u062F\u0645',
+    eppServerRenewProhibited: '\u062A\u062C\u062F\u064A\u062F \u0627\u0644\u062E\u0627\u062F\u0645 \u0645\u062D\u0638\u0648\u0631',
+    eppServerTransferProhibited: '\u0646\u0642\u0644 \u0627\u0644\u062E\u0627\u062F\u0645 \u0645\u062D\u0638\u0648\u0631',
+    eppServerUpdateProhibited: '\u062A\u062D\u062F\u064A\u062B \u0627\u0644\u062E\u0627\u062F\u0645 \u0645\u062D\u0638\u0648\u0631',
+    eppPendingCreate: '\u0625\u0646\u0634\u0627\u0621 \u0642\u064A\u062F \u0627\u0644\u0627\u0646\u062A\u0638\u0627\u0631',
+    eppPendingDelete: '\u062D\u0630\u0641 \u0642\u064A\u062F \u0627\u0644\u0627\u0646\u062A\u0638\u0627\u0631',
+    eppPendingRenew: '\u062A\u062C\u062F\u064A\u062F \u0642\u064A\u062F \u0627\u0644\u0627\u0646\u062A\u0638\u0627\u0631',
+    eppPendingTransfer: '\u0646\u0642\u0644 \u0642\u064A\u062F \u0627\u0644\u0627\u0646\u062A\u0638\u0627\u0631',
+    eppPendingUpdate: '\u062A\u062D\u062F\u064A\u062B \u0642\u064A\u062F \u0627\u0644\u0627\u0646\u062A\u0638\u0627\u0631',
+    eppRedemptionPeriod: '\u0641\u062A\u0631\u0629 \u0627\u0644\u0627\u0633\u062A\u0631\u062F\u0627\u062F',
+    eppAutoRenewPeriod: '\u0641\u062A\u0631\u0629 \u0627\u0644\u062A\u062C\u062F\u064A\u062F \u0627\u0644\u062A\u0644\u0642\u0627\u0626\u064A',
+    eppAddPeriod: '\u0641\u062A\u0631\u0629 \u0627\u0644\u0625\u0636\u0627\u0641\u0629',
+    eppRenewPeriod: '\u0641\u062A\u0631\u0629 \u0627\u0644\u062A\u062C\u062F\u064A\u062F',
+    eppTransferPeriod: '\u0641\u062A\u0631\u0629 \u0627\u0644\u0646\u0642\u0644',
+    rdapNoticeTermsOfService: '\u0634\u0631\u0648\u0637 \u0627\u0644\u062E\u062F\u0645\u0629',
+    rdapNoticeStatusCodes: '\u0631\u0645\u0648\u0632 \u0627\u0644\u062D\u0627\u0644\u0629',
+    rdapNoticeRddsComplaint: '\u0646\u0645\u0648\u0630\u062C \u0627\u0644\u0634\u0643\u0648\u0649 \u0628\u0634\u0623\u0646 \u0639\u062F\u0645 \u062F\u0642\u0629 RDDS'
   },
   'zh-CN': {
     dnsRecords: 'DNS \u8BB0\u5F55',
@@ -12101,7 +12572,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: '\u81EA\u8EAB',
     rdapLinkRelRelated: '\u76F8\u5173',
     rdapLinkRelAlternate: '\u5907\u7528',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: '\u6D3B\u52A8',
+    eppInactive: '\u975E\u6D3B\u52A8',
+    eppOk: '\u6B63\u5E38',
+    eppClientDeleteProhibited: '\u5BA2\u6237\u7AEF\u7981\u6B62\u5220\u9664',
+    eppClientHold: '\u5BA2\u6237\u7AEF\u4FDD\u7559',
+    eppClientRenewProhibited: '\u5BA2\u6237\u7AEF\u7981\u6B62\u7EED\u671F',
+    eppClientTransferProhibited: '\u5BA2\u6237\u7AEF\u7981\u6B62\u8F6C\u79FB',
+    eppClientUpdateProhibited: '\u5BA2\u6237\u7AEF\u7981\u6B62\u66F4\u65B0',
+    eppServerDeleteProhibited: '\u670D\u52A1\u5668\u7981\u6B62\u5220\u9664',
+    eppServerHold: '\u670D\u52A1\u5668\u4FDD\u7559',
+    eppServerRenewProhibited: '\u670D\u52A1\u5668\u7981\u6B62\u7EED\u671F',
+    eppServerTransferProhibited: '\u670D\u52A1\u5668\u7981\u6B62\u8F6C\u79FB',
+    eppServerUpdateProhibited: '\u670D\u52A1\u5668\u7981\u6B62\u66F4\u65B0',
+    eppPendingCreate: '\u7B49\u5F85\u521B\u5EFA',
+    eppPendingDelete: '\u7B49\u5F85\u5220\u9664',
+    eppPendingRenew: '\u7B49\u5F85\u7EED\u671F',
+    eppPendingTransfer: '\u7B49\u5F85\u8F6C\u79FB',
+    eppPendingUpdate: '\u7B49\u5F85\u66F4\u65B0',
+    eppRedemptionPeriod: '\u8D4E\u56DE\u671F',
+    eppAutoRenewPeriod: '\u81EA\u52A8\u7EED\u671F\u671F\u95F4',
+    eppAddPeriod: '\u6DFB\u52A0\u671F\u95F4',
+    eppRenewPeriod: '\u7EED\u671F\u671F\u95F4',
+    eppTransferPeriod: '\u8F6C\u79FB\u671F\u95F4',
+    rdapNoticeTermsOfService: '\u670D\u52A1\u6761\u6B3E',
+    rdapNoticeStatusCodes: '\u72B6\u6001\u4EE3\u7801',
+    rdapNoticeRddsComplaint: 'RDDS \u4E0D\u51C6\u786E\u6295\u8BC9\u8868'
   },
   'hi-IN': {
     dnsRecords: 'DNS \u0930\u093F\u0915\u0949\u0930\u094D\u0921',
@@ -12159,7 +12656,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: '\u0938\u094D\u0935\u092F\u0902',
     rdapLinkRelRelated: '\u0938\u0902\u092C\u0902\u0927\u093F\u0924',
     rdapLinkRelAlternate: '\u0935\u0948\u0915\u0932\u094D\u092A\u093F\u0915',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: '\u0938\u0915\u094D\u0930\u093F\u092F',
+    eppInactive: '\u0928\u093F\u0937\u094D\u0915\u094D\u0930\u093F\u092F',
+    eppOk: '\u0920\u0940\u0915',
+    eppClientDeleteProhibited: '\u0915\u094D\u0932\u093E\u0907\u0902\u091F \u0926\u094D\u0935\u093E\u0930\u093E \u0939\u091F\u093E\u0928\u093E \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppClientHold: '\u0915\u094D\u0932\u093E\u0907\u0902\u091F \u0926\u094D\u0935\u093E\u0930\u093E \u0930\u094B\u0915',
+    eppClientRenewProhibited: '\u0915\u094D\u0932\u093E\u0907\u0902\u091F \u0926\u094D\u0935\u093E\u0930\u093E \u0928\u0935\u0940\u0928\u0940\u0915\u0930\u0923 \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppClientTransferProhibited: '\u0915\u094D\u0932\u093E\u0907\u0902\u091F \u0926\u094D\u0935\u093E\u0930\u093E \u0938\u094D\u0925\u093E\u0928\u093E\u0902\u0924\u0930\u0923 \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppClientUpdateProhibited: '\u0915\u094D\u0932\u093E\u0907\u0902\u091F \u0926\u094D\u0935\u093E\u0930\u093E \u0905\u092A\u0921\u0947\u091F \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppServerDeleteProhibited: '\u0938\u0930\u094D\u0935\u0930 \u0926\u094D\u0935\u093E\u0930\u093E \u0939\u091F\u093E\u0928\u093E \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppServerHold: '\u0938\u0930\u094D\u0935\u0930 \u0926\u094D\u0935\u093E\u0930\u093E \u0930\u094B\u0915',
+    eppServerRenewProhibited: '\u0938\u0930\u094D\u0935\u0930 \u0926\u094D\u0935\u093E\u0930\u093E \u0928\u0935\u0940\u0928\u0940\u0915\u0930\u0923 \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppServerTransferProhibited: '\u0938\u0930\u094D\u0935\u0930 \u0926\u094D\u0935\u093E\u0930\u093E \u0938\u094D\u0925\u093E\u0928\u093E\u0902\u0924\u0930\u0923 \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppServerUpdateProhibited: '\u0938\u0930\u094D\u0935\u0930 \u0926\u094D\u0935\u093E\u0930\u093E \u0905\u092A\u0921\u0947\u091F \u092A\u094D\u0930\u0924\u093F\u092C\u0902\u0927\u093F\u0924',
+    eppPendingCreate: '\u0928\u093F\u0930\u094D\u092E\u093E\u0923 \u0932\u0902\u092C\u093F\u0924',
+    eppPendingDelete: '\u0939\u091F\u093E\u0928\u093E \u0932\u0902\u092C\u093F\u0924',
+    eppPendingRenew: '\u0928\u0935\u0940\u0928\u0940\u0915\u0930\u0923 \u0932\u0902\u092C\u093F\u0924',
+    eppPendingTransfer: '\u0938\u094D\u0925\u093E\u0928\u093E\u0902\u0924\u0930\u0923 \u0932\u0902\u092C\u093F\u0924',
+    eppPendingUpdate: '\u0905\u092A\u0921\u0947\u091F \u0932\u0902\u092C\u093F\u0924',
+    eppRedemptionPeriod: '\u092A\u0941\u0928\u0930\u094D\u092A\u094D\u0930\u093E\u092A\u094D\u0924\u093F \u0905\u0935\u0927\u093F',
+    eppAutoRenewPeriod: '\u0938\u094D\u0935\u0924\u0903 \u0928\u0935\u0940\u0928\u0940\u0915\u0930\u0923 \u0905\u0935\u0927\u093F',
+    eppAddPeriod: '\u091C\u094B\u0921\u093C\u0928\u0947 \u0915\u0940 \u0905\u0935\u0927\u093F',
+    eppRenewPeriod: '\u0928\u0935\u0940\u0928\u0940\u0915\u0930\u0923 \u0905\u0935\u0927\u093F',
+    eppTransferPeriod: '\u0938\u094D\u0925\u093E\u0928\u093E\u0902\u0924\u0930\u0923 \u0905\u0935\u0927\u093F',
+    rdapNoticeTermsOfService: '\u0938\u0947\u0935\u093E \u0915\u0940 \u0936\u0930\u094D\u0924\u0947\u0902',
+    rdapNoticeStatusCodes: '\u0938\u094D\u0925\u093F\u0924\u093F \u0915\u094B\u0921',
+    rdapNoticeRddsComplaint: 'RDDS \u0905\u0936\u0941\u0926\u094D\u0927\u0924\u093E \u0936\u093F\u0915\u093E\u092F\u0924 \u092A\u094D\u0930\u092A\u0924\u094D\u0930'
   },
   'ja-JP': {
     dnsRecords: 'DNS \u30EC\u30B3\u30FC\u30C9',
@@ -12217,7 +12740,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: '\u81EA\u8EAB',
     rdapLinkRelRelated: '\u95A2\u9023',
     rdapLinkRelAlternate: '\u4EE3\u66FF',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: '\u6709\u52B9',
+    eppInactive: '\u7121\u52B9',
+    eppOk: 'OK',
+    eppClientDeleteProhibited: '\u30AF\u30E9\u30A4\u30A2\u30F3\u30C8\u306B\u3088\u308B\u524A\u9664\u7981\u6B62',
+    eppClientHold: '\u30AF\u30E9\u30A4\u30A2\u30F3\u30C8\u306B\u3088\u308B\u4FDD\u7559',
+    eppClientRenewProhibited: '\u30AF\u30E9\u30A4\u30A2\u30F3\u30C8\u306B\u3088\u308B\u66F4\u65B0\u7981\u6B62',
+    eppClientTransferProhibited: '\u30AF\u30E9\u30A4\u30A2\u30F3\u30C8\u306B\u3088\u308B\u79FB\u7BA1\u7981\u6B62',
+    eppClientUpdateProhibited: '\u30AF\u30E9\u30A4\u30A2\u30F3\u30C8\u306B\u3088\u308B\u5909\u66F4\u7981\u6B62',
+    eppServerDeleteProhibited: '\u30B5\u30FC\u30D0\u30FC\u306B\u3088\u308B\u524A\u9664\u7981\u6B62',
+    eppServerHold: '\u30B5\u30FC\u30D0\u30FC\u306B\u3088\u308B\u4FDD\u7559',
+    eppServerRenewProhibited: '\u30B5\u30FC\u30D0\u30FC\u306B\u3088\u308B\u66F4\u65B0\u7981\u6B62',
+    eppServerTransferProhibited: '\u30B5\u30FC\u30D0\u30FC\u306B\u3088\u308B\u79FB\u7BA1\u7981\u6B62',
+    eppServerUpdateProhibited: '\u30B5\u30FC\u30D0\u30FC\u306B\u3088\u308B\u5909\u66F4\u7981\u6B62',
+    eppPendingCreate: '\u4F5C\u6210\u4FDD\u7559\u4E2D',
+    eppPendingDelete: '\u524A\u9664\u4FDD\u7559\u4E2D',
+    eppPendingRenew: '\u66F4\u65B0\u4FDD\u7559\u4E2D',
+    eppPendingTransfer: '\u79FB\u7BA1\u4FDD\u7559\u4E2D',
+    eppPendingUpdate: '\u5909\u66F4\u4FDD\u7559\u4E2D',
+    eppRedemptionPeriod: '\u5FA9\u65E7\u671F\u9593',
+    eppAutoRenewPeriod: '\u81EA\u52D5\u66F4\u65B0\u671F\u9593',
+    eppAddPeriod: '\u8FFD\u52A0\u671F\u9593',
+    eppRenewPeriod: '\u66F4\u65B0\u671F\u9593',
+    eppTransferPeriod: '\u79FB\u7BA1\u671F\u9593',
+    rdapNoticeTermsOfService: '\u5229\u7528\u898F\u7D04',
+    rdapNoticeStatusCodes: '\u30B9\u30C6\u30FC\u30BF\u30B9 \u30B3\u30FC\u30C9',
+    rdapNoticeRddsComplaint: 'RDDS \u4E0D\u6B63\u78BA\u60C5\u5831\u82E6\u60C5\u30D5\u30A9\u30FC\u30E0'
   },
   'ru-RU': {
     dnsRecords: 'DNS-\u0437\u0430\u043F\u0438\u0441\u0438',
@@ -12275,7 +12824,33 @@ const DNS_RECORD_TRANSLATION_OVERRIDES = {
     rdapLinkRelSelf: '\u0421\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439',
     rdapLinkRelRelated: '\u0421\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u0439',
     rdapLinkRelAlternate: '\u0410\u043B\u044C\u0442\u0435\u0440\u043D\u0430\u0442\u0438\u0432\u043D\u044B\u0439',
-    rdapLinkTypeRdapJson: 'Application/Rdap+Json'
+    rdapLinkTypeRdapJson: 'Application/Rdap+Json',
+    eppActive: '\u0410\u043A\u0442\u0438\u0432\u043D\u044B\u0439',
+    eppInactive: '\u041D\u0435\u0430\u043A\u0442\u0438\u0432\u043D\u044B\u0439',
+    eppOk: 'OK',
+    eppClientDeleteProhibited: '\u0423\u0434\u0430\u043B\u0435\u043D\u0438\u0435 \u043A\u043B\u0438\u0435\u043D\u0442\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0435\u043D\u043E',
+    eppClientHold: '\u0411\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0430 \u043A\u043B\u0438\u0435\u043D\u0442\u043E\u043C',
+    eppClientRenewProhibited: '\u041F\u0440\u043E\u0434\u043B\u0435\u043D\u0438\u0435 \u043A\u043B\u0438\u0435\u043D\u0442\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0435\u043D\u043E',
+    eppClientTransferProhibited: '\u041F\u0435\u0440\u0435\u043D\u043E\u0441 \u043A\u043B\u0438\u0435\u043D\u0442\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0451\u043D',
+    eppClientUpdateProhibited: '\u041E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435 \u043A\u043B\u0438\u0435\u043D\u0442\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0435\u043D\u043E',
+    eppServerDeleteProhibited: '\u0423\u0434\u0430\u043B\u0435\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0435\u043D\u043E',
+    eppServerHold: '\u0411\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u043E\u043C',
+    eppServerRenewProhibited: '\u041F\u0440\u043E\u0434\u043B\u0435\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0435\u043D\u043E',
+    eppServerTransferProhibited: '\u041F\u0435\u0440\u0435\u043D\u043E\u0441 \u0441\u0435\u0440\u0432\u0435\u0440\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0451\u043D',
+    eppServerUpdateProhibited: '\u041E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u043E\u043C \u0437\u0430\u043F\u0440\u0435\u0449\u0435\u043D\u043E',
+    eppPendingCreate: '\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435 \u0441\u043E\u0437\u0434\u0430\u043D\u0438\u044F',
+    eppPendingDelete: '\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435 \u0443\u0434\u0430\u043B\u0435\u043D\u0438\u044F',
+    eppPendingRenew: '\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435 \u043F\u0440\u043E\u0434\u043B\u0435\u043D\u0438\u044F',
+    eppPendingTransfer: '\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435 \u043F\u0435\u0440\u0435\u043D\u043E\u0441\u0430',
+    eppPendingUpdate: '\u041E\u0436\u0438\u0434\u0430\u043D\u0438\u0435 \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F',
+    eppRedemptionPeriod: '\u041F\u0435\u0440\u0438\u043E\u0434 \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F',
+    eppAutoRenewPeriod: '\u041F\u0435\u0440\u0438\u043E\u0434 \u0430\u0432\u0442\u043E\u043F\u0440\u043E\u0434\u043B\u0435\u043D\u0438\u044F',
+    eppAddPeriod: '\u041F\u0435\u0440\u0438\u043E\u0434 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u044F',
+    eppRenewPeriod: '\u041F\u0435\u0440\u0438\u043E\u0434 \u043F\u0440\u043E\u0434\u043B\u0435\u043D\u0438\u044F',
+    eppTransferPeriod: '\u041F\u0435\u0440\u0438\u043E\u0434 \u043F\u0435\u0440\u0435\u043D\u043E\u0441\u0430',
+    rdapNoticeTermsOfService: '\u0423\u0441\u043B\u043E\u0432\u0438\u044F \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u044F',
+    rdapNoticeStatusCodes: '\u041A\u043E\u0434\u044B \u0441\u0442\u0430\u0442\u0443\u0441\u043E\u0432',
+    rdapNoticeRddsComplaint: '\u0424\u043E\u0440\u043C\u0430 \u0436\u0430\u043B\u043E\u0431\u044B \u043D\u0430 \u043D\u0435\u0442\u043E\u0447\u043D\u043E\u0441\u0442\u044C RDDS'
   }
 };
 
@@ -12283,20 +12858,169 @@ Object.keys(DNS_RECORD_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, DNS_RECORD_TRANSLATION_OVERRIDES[code]);
 });
 
+// Cookie consent strings intentionally use ASCII-only text so they remain safe
+// across PowerShell concatenation and non-UTF-8 host environments.
+const COOKIE_CONSENT_TRANSLATION_OVERRIDES = {
+  en: {
+    cookieSettings: 'Cookie settings',
+    cookieConsentTitle: 'Cookie settings',
+    cookieConsentDescription: 'This tool uses essential browser storage for core functionality and offers optional preferences and anonymous analytics storage. You can choose which optional categories to allow.',
+    cookieCatEssential: 'Essential',
+    cookieCatEssentialDesc: 'Required for the tool to function. These items cannot be disabled.',
+    cookieCatFunctional: 'Preferences',
+    cookieCatFunctionalDesc: 'Stores theme, language, and recent domain history in your browser.',
+    cookieCatAnalytics: 'Analytics',
+    cookieCatAnalyticsDesc: 'Allows anonymous metrics and the temporary analytics session cookie used for aggregate usage counts.',
+    cookieBtnReject: 'Reject non-essential',
+    cookieBtnSave: 'Save preferences',
+    cookieBtnAcceptAll: 'Accept all'
+  },
+  es: {
+    cookieSettings: 'Configuraci�n de cookies',
+    cookieConsentTitle: 'Configuraci�n de cookies',
+    cookieConsentDescription: 'Esta herramienta usa almacenamiento esencial del navegador para la funcionalidad principal y ofrece almacenamiento opcional para preferencias y an�lisis an�nimos. Puede elegir qu� categor�as opcionales permitir.',
+    cookieCatEssential: 'Esenciales',
+    cookieCatEssentialDesc: 'Necesarias para que la herramienta funcione. No se pueden desactivar.',
+    cookieCatFunctional: 'Preferencias',
+    cookieCatFunctionalDesc: 'Guarda el tema, el idioma y el historial reciente de dominios en su navegador.',
+    cookieCatAnalytics: 'Anal�tica',
+    cookieCatAnalyticsDesc: 'Permite m�tricas an�nimas y la cookie temporal de sesi�n anal�tica usada para recuentos agregados.',
+    cookieBtnReject: 'Rechazar no esenciales',
+    cookieBtnSave: 'Guardar preferencias',
+    cookieBtnAcceptAll: 'Aceptar todo'
+  },
+  fr: {
+    cookieSettings: 'Param�tres des cookies',
+    cookieConsentTitle: 'Param�tres des cookies',
+    cookieConsentDescription: 'Cet outil utilise le stockage essentiel du navigateur pour les fonctions de base et propose un stockage facultatif pour les pr�f�rences et les analyses anonymes. Vous pouvez choisir les cat�gories facultatives � autoriser.',
+    cookieCatEssential: 'Essentiels',
+    cookieCatEssentialDesc: 'N�cessaires au fonctionnement de l�outil. Ils ne peuvent pas �tre d�sactiv�s.',
+    cookieCatFunctional: 'Pr�f�rences',
+    cookieCatFunctionalDesc: 'Enregistre le th�me, la langue et l�historique r�cent des domaines dans votre navigateur.',
+    cookieCatAnalytics: 'Analyses',
+    cookieCatAnalyticsDesc: 'Autorise les m�triques anonymes et le cookie temporaire de session analytique utilis� pour les comptes agr�g�s.',
+    cookieBtnReject: 'Refuser le non essentiel',
+    cookieBtnSave: 'Enregistrer les pr�f�rences',
+    cookieBtnAcceptAll: 'Tout accepter'
+  },
+  de: {
+    cookieSettings: 'Cookie-Einstellungen',
+    cookieConsentTitle: 'Cookie-Einstellungen',
+    cookieConsentDescription: 'Dieses Tool verwendet essenziellen Browserspeicher f�r Kernfunktionen und bietet optionalen Speicher f�r Einstellungen und anonyme Analysen. Sie k�nnen w�hlen, welche optionalen Kategorien zugelassen werden.',
+    cookieCatEssential: 'Essenziell',
+    cookieCatEssentialDesc: 'Erforderlich, damit das Tool funktioniert. Diese Elemente k�nnen nicht deaktiviert werden.',
+    cookieCatFunctional: 'Einstellungen',
+    cookieCatFunctionalDesc: 'Speichert Design, Sprache und den j�ngsten Dom�nenverlauf in Ihrem Browser.',
+    cookieCatAnalytics: 'Analytik',
+    cookieCatAnalyticsDesc: 'Erlaubt anonyme Metriken und das tempor�re Analyse-Sitzungscookie f�r aggregierte Z�hlungen.',
+    cookieBtnReject: 'Nicht essenzielle ablehnen',
+    cookieBtnSave: 'Einstellungen speichern',
+    cookieBtnAcceptAll: 'Alle akzeptieren'
+  },
+  'pt-BR': {
+    cookieSettings: 'Configura��es de cookies',
+    cookieConsentTitle: 'Configura��es de cookies',
+    cookieConsentDescription: 'Esta ferramenta usa armazenamento essencial do navegador para a funcionalidade principal e oferece armazenamento opcional para prefer�ncias e an�lises an�nimas. Voc� pode escolher quais categorias opcionais permitir.',
+    cookieCatEssential: 'Essenciais',
+    cookieCatEssentialDesc: 'Necess�rios para o funcionamento da ferramenta. N�o podem ser desativados.',
+    cookieCatFunctional: 'Prefer�ncias',
+    cookieCatFunctionalDesc: 'Armazena tema, idioma e hist�rico recente de dom�nios no seu navegador.',
+    cookieCatAnalytics: 'An�lises',
+    cookieCatAnalyticsDesc: 'Permite m�tricas an�nimas e o cookie tempor�rio de sess�o anal�tica usado para contagens agregadas.',
+    cookieBtnReject: 'Rejeitar n�o essenciais',
+    cookieBtnSave: 'Salvar prefer�ncias',
+    cookieBtnAcceptAll: 'Aceitar tudo'
+  },
+  ar: {
+    cookieSettings: '??????? ????? ????? ????????',
+    cookieConsentTitle: '??????? ????? ????? ????????',
+    cookieConsentDescription: '?????? ??? ?????? ????? ??????? ??????? ??????? ????????? ????? ??????? ????????? ????????? ?????????? ????????. ????? ?????? ?????? ?????????? ???? ???? ?????? ???.',
+    cookieCatEssential: '??????',
+    cookieCatEssentialDesc: '?????? ??? ???? ??????. ?? ???? ???????.',
+    cookieCatFunctional: '?????????',
+    cookieCatFunctionalDesc: '???? ?????? ?????? ???? ???????? ?????? ?? ??????.',
+    cookieCatAnalytics: '?????????',
+    cookieCatAnalyticsDesc: '???? ????????? ???????? ???? ????? ?????? ???? ????????? ?????? ???????? ????? ??????.',
+    cookieBtnReject: '??? ??? ????????',
+    cookieBtnSave: '??? ?????????',
+    cookieBtnAcceptAll: '???? ????'
+  },
+  'zh-CN': {
+    cookieSettings: 'Cookie ??',
+    cookieConsentTitle: 'Cookie ??',
+    cookieConsentDescription: '??????????????????????????????????????????????????????',
+    cookieCatEssential: '???',
+    cookieCatEssentialDesc: '?????????????',
+    cookieCatFunctional: '????',
+    cookieCatFunctionalDesc: '????????????????????????',
+    cookieCatAnalytics: '??',
+    cookieCatAnalyticsDesc: '????????????????????? Cookie?',
+    cookieBtnReject: '??????',
+    cookieBtnSave: '??????',
+    cookieBtnAcceptAll: '????'
+  },
+  'hi-IN': {
+    cookieSettings: '???? ????????',
+    cookieConsentTitle: '???? ????????',
+    cookieConsentDescription: '?? ??? ????? ??????????? ?? ??? ?????? ???????? ??????? ?? ????? ???? ?? ?? ???????????? ??? ?????? ???????? ?? ??? ???????? ??????? ?????? ???? ??? ?? ??? ???? ??? ?? ??? ???????? ????????? ?? ?????? ???? ???',
+    cookieCatEssential: '??????',
+    cookieCatEssentialDesc: '??? ?? ??? ???? ?? ??? ??????? ?????? ??? ???? ???? ?? ?????',
+    cookieCatFunctional: '????????????',
+    cookieCatFunctionalDesc: '???? ???????? ??? ???, ???? ?? ??? ?? ????? ?????? ?????? ???',
+    cookieCatAnalytics: '????????',
+    cookieCatAnalyticsDesc: '?????? ??????? ?? ??? ?????? ?? ??? ????? ?? ???? ???? ??????? ???????? ???? ???? ?? ?????? ???? ???',
+    cookieBtnReject: '???-?????? ???????? ????',
+    cookieBtnSave: '???????????? ??????',
+    cookieBtnAcceptAll: '??? ??????? ????'
+  },
+  'ja-JP': {
+    cookieSettings: 'Cookie??',
+    cookieConsentTitle: 'Cookie??',
+    cookieConsentDescription: '??????????????????????????????????????????????????????????????????????????',
+    cookieCatEssential: '??',
+    cookieCatEssentialDesc: '?????????????????????',
+    cookieCatFunctional: '??',
+    cookieCatFunctionalDesc: '?????????????????????????????',
+    cookieCatAnalytics: '??',
+    cookieCatAnalyticsDesc: '?????????????????????????????? Cookie ???????',
+    cookieBtnReject: '???????',
+    cookieBtnSave: '?????',
+    cookieBtnAcceptAll: '?????'
+  },
+  'ru-RU': {
+    cookieSettings: '????????? cookie',
+    cookieConsentTitle: '????????? cookie',
+    cookieConsentDescription: '???? ?????????? ?????????? ???????????? ????????? ???????? ??? ??????? ?????? ? ?????????? ?????????????? ????????? ??? ???????????? ? ????????? ?????????. ?? ?????? ???????, ????? ?????????????? ????????? ?????????.',
+    cookieCatEssential: '????????????',
+    cookieCatEssentialDesc: '?????????? ??? ?????? ???????????. ?? ?????? ?????????.',
+    cookieCatFunctional: '????????????',
+    cookieCatFunctionalDesc: '????????? ????, ???? ? ???????? ??????? ??????? ? ????? ????????.',
+    cookieCatAnalytics: '?????????',
+    cookieCatAnalyticsDesc: '????????? ????????? ??????? ? ????????? cookie ????????????? ?????? ??? ?????????????? ?????????.',
+    cookieBtnReject: '????????? ??????????????',
+    cookieBtnSave: '????????? ?????????',
+    cookieBtnAcceptAll: '??????? ???'
+  }
+};
+
+Object.keys(COOKIE_CONSENT_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, COOKIE_CONSENT_TRANSLATION_OVERRIDES[code]);
+});
+
 const LANG_PARAM = 'lang';
 const LANGUAGE_OPTIONS = ['en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'];
 const RTL_LANGUAGES = new Set(['ar']);
 const LANGUAGE_FLAG_URLS = {
-  en: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/us.svg',
-  es: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/es.svg',
-  fr: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/fr.svg',
-  de: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/de.svg',
-  'pt-BR': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/br.svg',
-  ar: 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/sa.svg',
-  'zh-CN': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/cn.svg',
-  'hi-IN': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/in.svg',
-  'ja-JP': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/jp.svg',
-  'ru-RU': 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3/ru.svg'
+  en: '/assets/vendor/flag-icons/flags/4x3/us.svg',
+  es: '/assets/vendor/flag-icons/flags/4x3/es.svg',
+  fr: '/assets/vendor/flag-icons/flags/4x3/fr.svg',
+  de: '/assets/vendor/flag-icons/flags/4x3/de.svg',
+  'pt-BR': '/assets/vendor/flag-icons/flags/4x3/br.svg',
+  ar: '/assets/vendor/flag-icons/flags/4x3/sa.svg',
+  'zh-CN': '/assets/vendor/flag-icons/flags/4x3/cn.svg',
+  'hi-IN': '/assets/vendor/flag-icons/flags/4x3/in.svg',
+  'ja-JP': '/assets/vendor/flag-icons/flags/4x3/jp.svg',
+  'ru-RU': '/assets/vendor/flag-icons/flags/4x3/ru.svg'
 };
 
 const LANGUAGE_DISPLAY_NAMES = {
@@ -12323,6 +13047,231 @@ let activeLookup = { runId: 0, controllers: [] };
 '@
 # ===== JavaScript Utility Functions =====
 $htmlPage += @'
+
+// ---- Cookie Consent Manager (EU GDPR / ePrivacy compliance) ----
+// Consent state is stored in localStorage under 'acsCookieConsent'.
+// Three categories: essential (always on), functional (theme/lang/history), analytics (metrics).
+// All localStorage/cookie writes for non-essential purposes are gated behind these checks.
+const COOKIE_CONSENT_KEY = 'acsCookieConsent';
+
+// Returns the current consent state, or null if consent has not been given yet.
+function getCookieConsent() {
+  try {
+    const raw = localStorage.getItem(COOKIE_CONSENT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && typeof parsed.functional === 'boolean') {
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+// Check whether a specific cookie category has been consented to.
+// 'essential' always returns true. 'functional' and 'analytics' depend on user choice.
+function hasConsentFor(category) {
+  if (category === 'essential') return true;
+  const consent = getCookieConsent();
+  if (!consent) return false;
+  return !!consent[category];
+}
+
+// Persist the consent choices to localStorage with a timestamp.
+function persistCookieConsent(functional, analytics) {
+  const consent = {
+    essential: true,
+    functional: !!functional,
+    analytics: !!analytics,
+    timestamp: new Date().toISOString()
+  };
+  try {
+    localStorage.setItem(COOKIE_CONSENT_KEY, JSON.stringify(consent));
+  } catch {}
+  return consent;
+}
+
+// Build the compact consent header value sent to same-origin API routes.
+// This lets the PowerShell server distinguish essential-only requests from
+// requests where the user explicitly granted analytics consent.
+function buildCookieConsentHeaderValue(consent) {
+  const state = consent || getCookieConsent() || { essential: true, functional: false, analytics: false };
+  return `essential=${state.essential ? '1' : '0'};functional=${state.functional ? '1' : '0'};analytics=${state.analytics ? '1' : '0'}`;
+}
+
+function buildConsentRequestHeaders(headers = {}, consent) {
+  const next = Object.assign({}, headers || {});
+  next['X-ACS-Cookie-Consent'] = buildCookieConsentHeaderValue(consent);
+  return next;
+}
+
+// Notify the server whenever consent changes so it can clear previously issued
+// analytics cookies immediately when the user rejects analytics storage.
+async function syncCookieConsentWithServer(consent) {
+  try {
+    await fetch('/api/consent', {
+      method: 'POST',
+      headers: buildConsentRequestHeaders({ 'Content-Type': 'application/json' }, consent),
+      body: JSON.stringify({
+        essential: true,
+        functional: !!(consent && consent.functional),
+        analytics: !!(consent && consent.analytics)
+      })
+    });
+  } catch {}
+}
+
+// Show the cookie consent banner.
+function showCookieConsentBanner() {
+  const overlay = document.getElementById('cookieConsentOverlay');
+  if (overlay) {
+    // Restore toggle states from any previously saved consent
+    const existing = getCookieConsent();
+    const funcToggle = document.getElementById('cookieToggleFunctional');
+    const analyticsToggle = document.getElementById('cookieToggleAnalytics');
+    if (existing) {
+      if (funcToggle) funcToggle.checked = !!existing.functional;
+      if (analyticsToggle) analyticsToggle.checked = !!existing.analytics;
+    } else {
+      // Default to checked for first-time visitors (opt-in UI)
+      if (funcToggle) funcToggle.checked = true;
+      if (analyticsToggle) analyticsToggle.checked = true;
+    }
+    overlay.style.display = '';
+    // Trap focus inside the banner for accessibility
+    const firstBtn = overlay.querySelector('button');
+    if (firstBtn) firstBtn.focus();
+  }
+}
+
+// Hide the cookie consent banner.
+function hideCookieConsentBanner() {
+  const overlay = document.getElementById('cookieConsentOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+// Handle cookie consent save action.
+// mode: 'acceptAll' | 'reject' | 'custom'
+async function saveCookieConsent(mode) {
+  let functional = false;
+  let analytics = false;
+
+  if (mode === 'acceptAll') {
+    functional = true;
+    analytics = true;
+  } else if (mode === 'reject') {
+    functional = false;
+    analytics = false;
+  } else {
+    // Custom: read toggle states
+    const funcToggle = document.getElementById('cookieToggleFunctional');
+    const analyticsToggle = document.getElementById('cookieToggleAnalytics');
+    functional = funcToggle ? funcToggle.checked : false;
+    analytics = analyticsToggle ? analyticsToggle.checked : false;
+  }
+
+  const consent = persistCookieConsent(functional, analytics);
+
+  // Apply the consent: if functional was just granted, persist any pending
+  // preferences that were held back (theme, language, history).
+  if (consent.functional) {
+    const theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+    consentAwareSetItem('acsTheme', theme, 'functional');
+    if (typeof currentLanguage !== 'undefined' && currentLanguage) {
+      consentAwareSetItem(LANG_KEY, currentLanguage, 'functional');
+    }
+  } else {
+    // Functional cookies rejected: remove stored preferences
+    clearNonEssentialStorage('functional');
+  }
+
+  if (!consent.analytics) {
+    // Analytics rejected: clear any analytics-related storage
+    clearNonEssentialStorage('analytics');
+  }
+
+  await syncCookieConsentWithServer(consent);
+  hideCookieConsentBanner();
+}
+
+// Remove stored data for a rejected cookie category.
+function clearNonEssentialStorage(category) {
+  try {
+    if (category === 'functional') {
+      localStorage.removeItem('acsTheme');
+      localStorage.removeItem(LANG_KEY);
+      localStorage.removeItem(HISTORY_KEY);
+    }
+    // Analytics data is server-side; no client-side cleanup needed.
+  } catch {}
+}
+
+// Re-open the cookie preferences banner (called from footer link).
+function openCookieSettings() {
+  showCookieConsentBanner();
+}
+
+// Check if the consent banner should be shown (first visit or no consent stored).
+function shouldShowCookieConsent() {
+  return getCookieConsent() === null;
+}
+
+// Gate-aware wrapper for localStorage.setItem � only writes if the category is consented.
+// category: 'functional' | 'analytics' | 'essential'
+function consentAwareSetItem(key, value, category) {
+  if (!hasConsentFor(category || 'functional')) return false;
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {}
+  return false;
+}
+
+// Gate-aware wrapper for localStorage.getItem � reads are allowed for essential,
+// but functional/analytics reads return null if consent was not given.
+function consentAwareGetItem(key, category) {
+  if (!hasConsentFor(category || 'functional')) return null;
+  try {
+    return localStorage.getItem(key);
+  } catch {}
+  return null;
+}
+
+// Update cookie consent banner text to match the current language.
+function applyCookieConsentLanguage() {
+  const title = document.getElementById('cookieConsentTitle');
+  if (title) title.textContent = t('cookieConsentTitle');
+
+  const desc = document.getElementById('cookieConsentDesc');
+  if (desc) desc.textContent = t('cookieConsentDescription');
+
+  const essName = document.getElementById('cookieCatEssentialName');
+  if (essName) essName.textContent = t('cookieCatEssential');
+
+  const essDesc = document.getElementById('cookieCatEssentialDesc');
+  if (essDesc) essDesc.textContent = t('cookieCatEssentialDesc');
+
+  const funcName = document.getElementById('cookieCatFunctionalName');
+  if (funcName) funcName.textContent = t('cookieCatFunctional');
+
+  const funcDesc = document.getElementById('cookieCatFunctionalDesc');
+  if (funcDesc) funcDesc.textContent = t('cookieCatFunctionalDesc');
+
+  const analName = document.getElementById('cookieCatAnalyticsName');
+  if (analName) analName.textContent = t('cookieCatAnalytics');
+
+  const analDesc = document.getElementById('cookieCatAnalyticsDesc');
+  if (analDesc) analDesc.textContent = t('cookieCatAnalyticsDesc');
+
+  const rejectBtn = document.getElementById('cookieBtnReject');
+  if (rejectBtn) rejectBtn.textContent = t('cookieBtnReject');
+
+  const saveBtn = document.getElementById('cookieBtnSave');
+  if (saveBtn) saveBtn.textContent = t('cookieBtnSave');
+
+  const acceptBtn = document.getElementById('cookieBtnAcceptAll');
+  if (acceptBtn) acceptBtn.textContent = t('cookieBtnAcceptAll');
+}
+
 function normalizeLanguageCode(lang) {
   const value = String(lang || '').trim().toLowerCase();
   if (!value) return 'en';
@@ -12360,9 +13309,26 @@ function updateLanguageUrlParameter() {
   } catch {}
 }
 
+// Allow static pages such as /privacy and /terms to deep-link back into the SPA
+// and immediately reopen the cookie preferences dialog.
+function consumeOpenCookieSettingsRequest() {
+  try {
+    const url = new URL(window.location.href);
+    const raw = String(url.searchParams.get('openCookieSettings') || '').trim().toLowerCase();
+    const shouldOpen = raw === '1' || raw === 'true' || raw === 'yes';
+    if (!shouldOpen) return false;
+    url.searchParams.delete('openCookieSettings');
+    window.history.replaceState({}, '', url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function getSavedLanguage() {
   try {
-    return localStorage.getItem(LANG_KEY);
+    // Language preference requires functional cookie consent
+    return consentAwareGetItem(LANG_KEY, 'functional');
   } catch {
     return null;
   }
@@ -12447,7 +13413,7 @@ const UI_LABEL_ICONS = {
 };
 
 function getLucideIconUrl(iconName) {
-  return `https://cdn.jsdelivr.net/npm/lucide-static/icons/${iconName}.svg`;
+  return `/assets/vendor/lucide-static/icons/${iconName}.svg`;
 }
 
 function renderLabelWithIcon(key) {
@@ -12606,6 +13572,7 @@ function applyLanguageToStaticUi() {
     const langSuffix = currentLanguage ? '?lang=' + encodeURIComponent(currentLanguage) : '';
     footerHtml += ' &bull; <a href="/terms' + langSuffix + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('termsOfService')) + '</a>';
     footerHtml += ' &bull; <a href="/privacy' + langSuffix + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('privacyStatement')) + '</a>';
+    footerHtml += ' &bull; <a href="#" class="cookie-settings-link" onclick="openCookieSettings(); return false;" style="color:inherit;">' + escapeHtml(t('cookieSettings')) + '</a>';
     footer.innerHTML = footerHtml;
   }
 
@@ -12621,10 +13588,13 @@ function applyLanguageToStaticUi() {
 function applyLanguage(language, persist = true) {
   currentLanguage = normalizeLanguageCode(language);
   if (persist) {
-    try { localStorage.setItem(LANG_KEY, currentLanguage); } catch {}
+    // Only persist language preference if functional cookies are consented
+    consentAwareSetItem(LANG_KEY, currentLanguage, 'functional');
   }
   updateLanguageUrlParameter();
   applyLanguageToStaticUi();
+  // Update cookie consent banner text when language changes
+  applyCookieConsentLanguage();
   closeLanguageMenu();
   if (lastResult) {
     // Rebuild derived, language-sensitive strings before rendering cached results again.
@@ -12706,7 +13676,8 @@ function clearInput() {
 
 function readHistoryItems() {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
+    // History requires functional cookie consent
+    const raw = consentAwareGetItem(HISTORY_KEY, 'functional');
     const items = raw ? JSON.parse(raw) : [];
     return Array.isArray(items) ? items.map(String) : [];
   } catch {
@@ -12715,7 +13686,8 @@ function readHistoryItems() {
 }
 
 function writeHistoryItems(items) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
+  // Only persist history if functional cookies are consented
+  consentAwareSetItem(HISTORY_KEY, JSON.stringify(items), 'functional');
 }
 
 function captureHistoryChipRects(container) {
@@ -12824,11 +13796,11 @@ function renderHistory(items) {
 function removeHistory(domain) {
   const d = (domain === null || domain === undefined) ? "" : String(domain);
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
+    const raw = consentAwareGetItem(HISTORY_KEY, 'functional');
     if (!raw) return;
     let items = JSON.parse(raw);
     items = (items || []).filter(i => String(i).toLowerCase() !== d.toLowerCase());
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
+    consentAwareSetItem(HISTORY_KEY, JSON.stringify(items), 'functional');
     renderHistory(items);
   } catch (e) { console.error(e); }
 }
@@ -13416,7 +14388,8 @@ function applyTheme(theme) {
     root.classList.remove("dark");
     if (btn) btn.innerHTML = renderLabelWithIcon('themeDark');
   }
-  localStorage.setItem("acsTheme", theme);
+  // Only persist theme preference if functional cookies are consented
+  consentAwareSetItem("acsTheme", theme, 'functional');
 }
 
 function toggleTheme() {
@@ -13734,11 +14707,12 @@ function lookup(options = {}) {
     const controller = new AbortController();
     activeLookup.controllers.push(controller);
     try {
-      const headers = {};
+      let headers = {};
       const apiKey = (acsApiKey || '').trim();
       if (apiKey && !apiKey.startsWith('__')) {
         headers['X-Api-Key'] = apiKey;
       }
+      headers = buildConsentRequestHeaders(headers);
       const r = await fetch(path + "?domain=" + encodeURIComponent(domain), { signal: controller.signal, headers: headers });
       if (!r.ok) {
         let body = "";
@@ -14206,9 +15180,11 @@ function formatRdapLabel(label) {
     .replace(/\b\w/g, letter => letter.toUpperCase());
 }
 
-// Map well-known RDAP event actions and entity roles to translation keys so
-// they can be localized.  Values that don't match fall back to formatRdapLabel.
+// Map well-known RDAP event actions, entity roles, EPP status codes, and
+// common notice titles to translation keys so they can be localized.  Values
+// that don't match fall back to formatRdapLabel.
 const RDAP_LABEL_KEYS = {
+  // Event actions
   'registration':                   'rdapActionRegistration',
   'expiration':                     'rdapActionExpiration',
   'last changed':                   'rdapActionLastChanged',
@@ -14216,6 +15192,7 @@ const RDAP_LABEL_KEYS = {
   'transfer':                       'rdapActionTransfer',
   'locked':                         'rdapActionLocked',
   'unlocked':                       'rdapActionUnlocked',
+  // Entity roles
   'registrar':                      'rdapRoleRegistrar',
   'registrant':                     'rdapRoleRegistrant',
   'administrative':                 'rdapRoleAdministrative',
@@ -14223,10 +15200,39 @@ const RDAP_LABEL_KEYS = {
   'abuse':                          'rdapRoleAbuse',
   'billing':                        'rdapRoleBilling',
   'noc':                            'rdapRoleNoc',
+  // Link attributes
   'self':                           'rdapLinkRelSelf',
   'related':                        'rdapLinkRelRelated',
   'alternate':                      'rdapLinkRelAlternate',
-  'application/rdap+json':          'rdapLinkTypeRdapJson'
+  'application/rdap+json':          'rdapLinkTypeRdapJson',
+  // Common EPP / RDAP domain status codes (ICANN-defined)
+  'active':                         'eppActive',
+  'inactive':                       'eppInactive',
+  'ok':                             'eppOk',
+  'client delete prohibited':       'eppClientDeleteProhibited',
+  'client hold':                    'eppClientHold',
+  'client renew prohibited':        'eppClientRenewProhibited',
+  'client transfer prohibited':     'eppClientTransferProhibited',
+  'client update prohibited':       'eppClientUpdateProhibited',
+  'server delete prohibited':       'eppServerDeleteProhibited',
+  'server hold':                    'eppServerHold',
+  'server renew prohibited':        'eppServerRenewProhibited',
+  'server transfer prohibited':     'eppServerTransferProhibited',
+  'server update prohibited':       'eppServerUpdateProhibited',
+  'pending create':                 'eppPendingCreate',
+  'pending delete':                 'eppPendingDelete',
+  'pending renew':                  'eppPendingRenew',
+  'pending transfer':               'eppPendingTransfer',
+  'pending update':                 'eppPendingUpdate',
+  'redemption period':              'eppRedemptionPeriod',
+  'auto renew period':              'eppAutoRenewPeriod',
+  'add period':                     'eppAddPeriod',
+  'renew period':                   'eppRenewPeriod',
+  'transfer period':                'eppTransferPeriod',
+  // Common RDAP notice titles returned by most registries
+  'terms of service':               'rdapNoticeTermsOfService',
+  'status codes':                   'rdapNoticeStatusCodes',
+  'rdds inaccuracy complaint form': 'rdapNoticeRddsComplaint'
 };
 
 function translateRdapLabel(rawLabel) {
@@ -14335,7 +15341,10 @@ function renderRdapDigest(rawRdapText) {
   const linkCount = Array.isArray(rdap.links) ? rdap.links.filter(Boolean).length : 0;
   const noticeCount = ([...(Array.isArray(rdap.notices) ? rdap.notices : []), ...(Array.isArray(rdap.remarks) ? rdap.remarks : [])]).filter(Boolean).length;
 
-  const statusHtml = renderRdapDigestPills(rdap.status, status => escapeHtml(formatRdapLabel(status)));
+  // Use translateRdapLabel so EPP status codes (e.g. "client delete prohibited")
+  // are localized when a translation key exists; otherwise falls back to
+  // formatRdapLabel for readable title-casing.
+  const statusHtml = renderRdapDigestPills(rdap.status, status => escapeHtml(translateRdapLabel(status)));
   const eventHtml = renderRdapDigestTimeline(sortedEvents, event => {
     if (!event || typeof event !== 'object') {
       return '';
@@ -14400,7 +15409,10 @@ function renderRdapDigest(rawRdapText) {
       return '';
     }
 
-    const title = String(notice.title || '').trim();
+    const rawTitle = String(notice.title || '').trim();
+    // Translate well-known RDAP notice titles (e.g. "Terms of Service",
+    // "Status Codes") when a translation key exists.
+    const title = rawTitle ? translateRdapLabel(rawTitle) : '';
     const description = Array.isArray(notice.description) ? notice.description.filter(Boolean).join(' ') : '';
     return `
       <div class="rdap-notice-card">
@@ -16028,20 +17040,20 @@ function render(r) {
     }
 
     let iconClass = 'icon-info';
-    let iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg';
+    let iconSrc = getLucideIconUrl('info');
     let iconTitle = t('guidanceIconInformational');
 
     if (type === 'error') {
       iconClass = 'icon-error';
-      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/alert-circle.svg';
+      iconSrc = getLucideIconUrl('alert-circle');
       iconTitle = t('guidanceIconError');
     } else if (type === 'attention') {
       iconClass = 'icon-warning';
-      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg';
+      iconSrc = getLucideIconUrl('triangle-alert');
       iconTitle = t('guidanceIconAttention');
     } else if (type === 'success') {
       iconClass = 'icon-success';
-      iconSrc = 'https://cdn.jsdelivr.net/npm/lucide-static/icons/check-circle.svg';
+      iconSrc = getLucideIconUrl('check-circle');
       iconTitle = t('guidanceIconSuccess');
     }
 
@@ -16056,8 +17068,8 @@ function render(r) {
         <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
         <strong>${renderLabelWithIcon('guidance')}</strong>
         <div class="card-icons" style="margin-left: auto; font-size: 0.8em; display: flex; align-items: center; gap: 6px;">
-           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/triangle-alert.svg" class="status-icon icon-warning" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendAttention'))}"/> <span style="margin-right: 8px;">${escapeHtml(t('guidanceLegendAttention'))}</span>
-           <img src="https://cdn.jsdelivr.net/npm/lucide-static/icons/info.svg" class="status-icon icon-info" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendInformational'))}"/> <span>${escapeHtml(t('guidanceLegendInformational'))}</span>
+           <img src="${getLucideIconUrl('triangle-alert')}" class="status-icon icon-warning" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendAttention'))}"/> <span style="margin-right: 8px;">${escapeHtml(t('guidanceLegendAttention'))}</span>
+           <img src="${getLucideIconUrl('info')}" class="status-icon icon-info" style="width: 14px; height: 14px; margin-right: 0;" alt="${escapeHtml(t('guidanceLegendInformational'))}"/> <span>${escapeHtml(t('guidanceLegendInformational'))}</span>
         </div>
       </div>
       <div id="field-guidance" class="card-content">
@@ -16166,6 +17178,9 @@ document.getElementById('azureResourceSelect').addEventListener('change', functi
 function initializePage() {
   const params = new URLSearchParams(window.location.search);
   const bootstrapDomain = normalizeDomain(params.get("domain") || '');
+  const openCookieSettingsRequested = typeof consumeOpenCookieSettingsRequest === 'function'
+    ? consumeOpenCookieSettingsRequest()
+    : false;
   currentLanguage = detectLanguage();
 
   // 1. Check for saved theme
@@ -16173,7 +17188,8 @@ function initializePage() {
   const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   const defaultTheme = systemPrefersDark ? "dark" : "light";
 
-  const savedTheme = localStorage.getItem("acsTheme") || defaultTheme;
+  // Read saved theme only if functional cookies are consented
+  const savedTheme = consentAwareGetItem("acsTheme", 'functional') || defaultTheme;
 
   applyTheme(savedTheme);
   applyLanguage(currentLanguage, false);
@@ -16194,6 +17210,12 @@ function initializePage() {
   // Initialize Microsoft Entra ID authentication
   if (typeof initMsAuth === 'function') {
     initMsAuth();
+  }
+
+  // Show cookie consent banner if no consent has been given yet (EU GDPR / ePrivacy)
+  if (shouldShowCookieConsent() || openCookieSettingsRequested) {
+    applyCookieConsentLanguage();
+    showCookieConsentBanner();
   }
 
   scheduleInitialLookup(bootstrapDomain);
@@ -17279,6 +18301,7 @@ $script:TosPageHtml = @'
 
 <h2 id="tosSection6Title">6. Data &amp; Privacy</h2>
 <p id="tosSection6Body">The Tool does not collect personally identifiable information. Optional anonymous usage metrics (when enabled) contain only HMAC-hashed domain names and aggregate counters. See the <a id="privacyLink" href="/privacy">Privacy Statement</a> for details.</p>
+<p><a id="tosManageCookiesLink" href="/?openCookieSettings=1">Manage cookie settings</a></p>
 
 <h2 id="tosSection7Title">7. Third-Party Services</h2>
 <p id="tosSection7Body">The Tool may interact with third-party DNS resolvers, WHOIS providers, and Azure APIs. Your use of those services is subject to their respective terms.</p>
@@ -17430,6 +18453,23 @@ $script:TosPageHtml = @'
     }
   };
 
+  const TERMS_CONSENT_OVERRIDES = {
+    en: { manageCookies: 'Manage cookie settings' },
+    es: { manageCookies: 'Administrar configuración de cookies' },
+    fr: { manageCookies: 'Gérer les paramètres des cookies' },
+    de: { manageCookies: 'Cookie-Einstellungen verwalten' },
+    'pt-BR': { manageCookies: 'Gerenciar configurações de cookies' },
+    ar: { manageCookies: 'إدارة إعدادات ملفات تعريف الارتباط' },
+    'zh-CN': { manageCookies: '管理 Cookie 设置' },
+    'hi-IN': { manageCookies: 'कुकी सेटिंग्स प्रबंधित करें' },
+    'ja-JP': { manageCookies: 'Cookie設定を管理' },
+    'ru-RU': { manageCookies: 'Управление настройками cookie' }
+  };
+
+  Object.keys(TERMS_CONSENT_OVERRIDES).forEach(code => {
+    TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, TERMS_CONSENT_OVERRIDES[code]);
+  });
+
   function normalizeLanguageCode(lang) {
     const value = String(lang || '').trim().toLowerCase();
     if (!value) return 'en';
@@ -17479,6 +18519,11 @@ $script:TosPageHtml = @'
 
   const privacyLink = document.getElementById('privacyLink');
   if (privacyLink) privacyLink.href = '/privacy?lang=' + encodeURIComponent(lang);
+  const tosManageCookiesLink = document.getElementById('tosManageCookiesLink');
+  if (tosManageCookiesLink) {
+    tosManageCookiesLink.textContent = t.manageCookies || 'Manage cookie settings';
+    tosManageCookiesLink.href = '/?lang=' + encodeURIComponent(lang) + '&openCookieSettings=1';
+  }
 })();
 </script>
 </body>
@@ -17538,8 +18583,14 @@ $script:PrivacyPageHtml = @'
 <h2 id="privacySection6Title">6. DNS Lookups</h2>
 <p id="privacySection6Body">DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.</p>
 
-<h2 id="privacySection7Title">7. Local Storage</h2>
-<p id="privacySection7Body">The Tool uses your browser&rsquo;s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.</p>
+<h2 id="privacySection7Title">7. Browser Storage and Cookie Consent</h2>
+<p id="privacySection7Body">The Tool uses your browser&rsquo;s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.</p>
+<ul>
+  <li id="privacySection7Item1">Essential storage keeps your consent choice so the Tool can respect it.</li>
+  <li id="privacySection7Item2">Preference storage is optional and only keeps theme, language, and recent lookup history in your browser.</li>
+  <li id="privacySection7Item3">Analytics storage is optional and, when enabled, may include a temporary first-party session cookie plus anonymous aggregate counters.</li>
+</ul>
+<p><a id="privacyManageCookiesLink" href="/?openCookieSettings=1">Manage cookie settings</a></p>
 
 <h2 id="privacySection8Title">8. Third-Party Services</h2>
 <p id="privacySection8Body">The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.</p>
@@ -17560,7 +18611,7 @@ $script:PrivacyPageHtml = @'
       s4t: '4. Microsoft Entra ID Authentication', s4b: 'If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser\u2019s session storage and are never sent to the Tool\u2019s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.',
       s5t: '5. Azure Resource Queries', s5b: 'When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool\u2019s server does not proxy, log, or store any Azure data.',
       s6t: '6. DNS Lookups', s6b: 'DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.',
-      s7t: '7. Local Storage', s7b: 'The Tool uses your browser\u2019s <code>localStorage</code> to persist your theme preference and recent domain history. This data never leaves your browser.',
+      s7t: '7. Browser Storage and Cookie Consent', s7b: 'The Tool uses your browser\u2019s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.',
       s8t: '8. Third-Party Services', s8b: 'The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.',
       s9t: '9. Changes to This Statement', s9b: 'This privacy statement may be updated from time to time. Changes take effect when published in the Tool.',
       s10t: '10. Contact', s10b: 'For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.'
@@ -17575,6 +18626,93 @@ $script:PrivacyPageHtml = @'
     'ja-JP': { pageTitle: '\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8 - ACS Email Domain Checker', back: '\u2190 ACS Email Domain Checker \u306B\u623B\u308B', title: '\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8', updatedLabel: '\u6700\u7D42\u66F4\u65B0:', updatedValue: '2026\u5E743\u6708', s1t: '1. \u6982\u8981', s1b: 'ACS Email Domain Checker\uFF08\u300C\u672C\u30C4\u30FC\u30EB\u300D\uFF09\u306F\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC\u3092\u8003\u616E\u3057\u3066\u8A2D\u8A08\u3055\u308C\u3066\u3044\u307E\u3059\u3002\u3053\u306E\u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8\u3067\u306F\u3001\u672C\u30C4\u30FC\u30EB\u304C\u53CE\u96C6\u3059\u308B\u30C7\u30FC\u30BF\u3068\u53CE\u96C6\u3057\u306A\u3044\u30C7\u30FC\u30BF\u306B\u3064\u3044\u3066\u8AAC\u660E\u3057\u307E\u3059\u3002', s2t: '2. \u53CE\u96C6\u3057\u306A\u3044\u30C7\u30FC\u30BF', s2l1: '<strong>\u500B\u4EBA\u60C5\u5831\u306A\u3057</strong> \u2014 \u672C\u30C4\u30FC\u30EB\u306F\u3001\u6C0F\u540D\u3001\u30E1\u30FC\u30EB \u30A2\u30C9\u30EC\u30B9\u3001IP \u30A2\u30C9\u30EC\u30B9\u3001\u30CF\u30FC\u30C9\u30A6\u30A7\u30A2\u8B58\u5225\u5B50\u3092\u53CE\u96C6\u3057\u307E\u305B\u3093\u3002', s2l2: '<strong>\u30C8\u30E9\u30C3\u30AD\u30F3\u30B0 Cookie \u306A\u3057</strong> \u2014 \u672C\u30C4\u30FC\u30EB\u306F\u5E83\u544A\u307E\u305F\u306F\u5206\u6790\u7528\u306E\u30C8\u30E9\u30C3\u30AD\u30F3\u30B0 Cookie \u3092\u4F7F\u7528\u3057\u307E\u305B\u3093\u3002', s2l3: '<strong>\u30AF\u30A8\u30EA \u30ED\u30B0\u306A\u3057</strong> \u2014 \u691C\u7D22\u3057\u305F\u30C9\u30E1\u30A4\u30F3\u540D\u306F\u30B5\u30FC\u30D0\u30FC\u306B\u4FDD\u5B58\u3055\u308C\u307E\u305B\u3093\u3002', s3t: '3. \u533F\u540D\u5229\u7528\u30E1\u30C8\u30EA\u30C3\u30AF\uFF08\u4EFB\u610F\uFF09', s3i: '\u533F\u540D\u30E1\u30C8\u30EA\u30C3\u30AF\u304C\u6709\u52B9\u306A\u5834\u5408\u3001\u672C\u30C4\u30FC\u30EB\u306F\u6B21\u3092\u53CE\u96C6\u3057\u307E\u3059\u3002', s3l1: 'HMAC \u30CF\u30C3\u30B7\u30E5\u5316\u3055\u308C\u305F\u30C9\u30E1\u30A4\u30F3\u540D\uFF08\u4E0D\u53EF\u9006\u3067\u3042\u308A\u3001\u5143\u306E\u30C9\u30E1\u30A4\u30F3\u306F\u5FA9\u5143\u3067\u304D\u307E\u305B\u3093\uFF09\u3002', s3l2: '\u96C6\u8A08\u3055\u308C\u305F\u53C2\u7167\u30AB\u30A6\u30F3\u30BF\u30FC\u3068\u521D\u56DE\u691C\u51FA\u30BF\u30A4\u30E0\u30B9\u30BF\u30F3\u30D7\u3002', s3l3: '\u30E9\u30F3\u30C0\u30E0\u306A\u30BB\u30C3\u30B7\u30E7\u30F3\u8B58\u5225\u5B50\uFF08\u518D\u8D77\u52D5\u5F8C\u306B\u4FDD\u6301\u3055\u308C\u307E\u305B\u3093\uFF09\u3002', s3b: '\u533F\u540D\u30E1\u30C8\u30EA\u30C3\u30AF\u306F <code>-DisableAnonymousMetrics</code> \u30D5\u30E9\u30B0\u3067\u5B8C\u5168\u306B\u7121\u52B9\u306B\u3067\u304D\u307E\u3059\u3002', s4t: '4. Microsoft Entra ID \u8A8D\u8A3C', s4b: 'Microsoft \u3067\u30B5\u30A4\u30F3\u30A4\u30F3\u3059\u308B\u5834\u5408\u3001\u672C\u30C4\u30FC\u30EB\u306F Authorization Code + PKCE \u30D5\u30ED\u30FC\u3067 MSAL.js \u3092\u4F7F\u7528\u3057\u307E\u3059\u3002\u30C8\u30FC\u30AF\u30F3\u306F\u30D6\u30E9\u30A6\u30B6\u30FC\u306E\u30BB\u30C3\u30B7\u30E7\u30F3 \u30B9\u30C8\u30EC\u30FC\u30B8\u306B\u4FDD\u5B58\u3055\u308C\u3001\u672C\u30C4\u30FC\u30EB\u306E\u30B5\u30FC\u30D0\u30FC\u306B\u9001\u4FE1\u3055\u308C\u308B\u3053\u3068\u306F\u3042\u308A\u307E\u305B\u3093\u3002\u672C\u30C4\u30FC\u30EB\u306F UI \u306B\u672C\u4EBA\u78BA\u8A8D\u60C5\u5831\u3092\u8868\u793A\u3059\u308B\u305F\u3081\u306B\u3001Microsoft Graph \u304B\u3089\u8868\u793A\u540D\u3068\u30E1\u30FC\u30EB \u30A2\u30C9\u30EC\u30B9\u306E\u307F\u3092\u8AAD\u307F\u53D6\u308A\u307E\u3059\u3002', s5t: '5. Azure \u30EA\u30BD\u30FC\u30B9 \u30AF\u30A8\u30EA', s5b: 'Azure Workspace Diagnostics \u3092\u4F7F\u7528\u3059\u308B\u5834\u5408\u3001\u3059\u3079\u3066\u306E API \u547C\u3073\u51FA\u3057\u306F\u304A\u5BA2\u69D8\u81EA\u8EAB\u306E\u30A2\u30AF\u30BB\u30B9 \u30C8\u30FC\u30AF\u30F3\u3092\u4F7F\u7528\u3057\u3066\u30D6\u30E9\u30A6\u30B6\u30FC\u304B\u3089 Azure Resource Manager \u3068 Log Analytics \u306B\u76F4\u63A5\u9001\u4FE1\u3055\u308C\u307E\u3059\u3002\u672C\u30C4\u30FC\u30EB\u306E\u30B5\u30FC\u30D0\u30FC\u306F Azure \u30C7\u30FC\u30BF\u3092\u30D7\u30ED\u30AD\u30B7\u3001\u8A18\u9332\u3001\u4FDD\u5B58\u3057\u307E\u305B\u3093\u3002', s6t: '6. DNS \u53C2\u7167', s6b: 'DNS \u30AF\u30A8\u30EA\u306F\u3001\u69CB\u6210\u3055\u308C\u305F\u30EA\u30BE\u30EB\u30D0\u30FC\uFF08\u30B7\u30B9\u30C6\u30E0 DNS \u307E\u305F\u306F DNS-over-HTTPS\uFF09\u3092\u4F7F\u7528\u3057\u3066\u30B5\u30FC\u30D0\u30FC\u5074\u3067\u5B9F\u884C\u3055\u308C\u307E\u3059\u3002\u7D50\u679C\u306F\u30D6\u30E9\u30A6\u30B6\u30FC\u306B\u8FD4\u3055\u308C\u3001\u4FDD\u5B58\u3055\u308C\u307E\u305B\u3093\u3002', s7t: '7. \u30ED\u30FC\u30AB\u30EB \u30B9\u30C8\u30EC\u30FC\u30B8', s7b: '\u672C\u30C4\u30FC\u30EB\u306F\u3001\u30C6\u30FC\u30DE\u8A2D\u5B9A\u3068\u6700\u8FD1\u306E\u30C9\u30E1\u30A4\u30F3\u5C65\u6B74\u3092\u4FDD\u6301\u3059\u308B\u305F\u3081\u306B\u3001\u30D6\u30E9\u30A6\u30B6\u30FC\u306E <code>localStorage</code> \u3092\u4F7F\u7528\u3057\u307E\u3059\u3002\u3053\u306E\u30C7\u30FC\u30BF\u304C\u30D6\u30E9\u30A6\u30B6\u30FC\u5916\u306B\u9001\u4FE1\u3055\u308C\u308B\u3053\u3068\u306F\u3042\u308A\u307E\u305B\u3093\u3002', s8t: '8. \u30B5\u30FC\u30C9\u30D1\u30FC\u30C6\u30A3 \u30B5\u30FC\u30D3\u30B9', s8b: '\u672C\u30C4\u30FC\u30EB\u306F DNS \u89E3\u6C7A\uFF08DNS-over-HTTPS \u30D7\u30ED\u30D0\u30A4\u30C0\u30FC\u306A\u3069\uFF09\u3001WHOIS \u53C2\u7167\u3001\u304A\u3088\u3073 DNSBL \u8A55\u5224\u30C1\u30A7\u30C3\u30AF\u306B\u30B5\u30FC\u30C9\u30D1\u30FC\u30C6\u30A3 \u30B5\u30FC\u30D3\u30B9\u3092\u4F7F\u7528\u3059\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u3053\u308C\u3089\u306E\u30B5\u30FC\u30D3\u30B9\u306B\u306F\u72EC\u81EA\u306E\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30DD\u30EA\u30B7\u30FC\u304C\u3042\u308A\u307E\u3059\u3002', s9t: '9. \u672C\u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8\u306E\u5909\u66F4', s9b: '\u3053\u306E\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC \u30B9\u30C6\u30FC\u30C8\u30E1\u30F3\u30C8\u306F\u968F\u6642\u66F4\u65B0\u3055\u308C\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u5909\u66F4\u306F\u672C\u30C4\u30FC\u30EB\u3067\u516C\u958B\u3055\u308C\u305F\u6642\u70B9\u3067\u6709\u52B9\u306B\u306A\u308A\u307E\u3059\u3002', s10t: '10. \u304A\u554F\u3044\u5408\u308F\u305B', s10b: '\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC\u306B\u95A2\u3059\u308B\u3054\u8CEA\u554F\u306F\u3001<a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a> \u3092\u3054\u89A7\u304F\u3060\u3055\u3044\u3002' },
     'ru-RU': { pageTitle: '\u0417\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0435 \u043E \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438 - ACS Email Domain Checker', back: '\u2190 \u041D\u0430\u0437\u0430\u0434 \u043A ACS Email Domain Checker', title: '\u0417\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0435 \u043E \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438', updatedLabel: '\u041F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0435 \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435:', updatedValue: '\u041C\u0430\u0440\u0442 2026', s1t: '1. \u041E\u0431\u0437\u043E\u0440', s1b: 'ACS Email Domain Checker (\u00AB\u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u00BB) \u0440\u0430\u0437\u0440\u0430\u0431\u043E\u0442\u0430\u043D \u0441 \u0443\u0447\u0435\u0442\u043E\u043C \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438. \u0412 \u044D\u0442\u043E\u043C \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0438 \u043E\u0431\u044A\u044F\u0441\u043D\u044F\u0435\u0442\u0441\u044F, \u043A\u0430\u043A\u0438\u0435 \u0434\u0430\u043D\u043D\u044B\u0435 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442, \u0430 \u043A\u0430\u043A\u0438\u0435 \u2014 \u043D\u0435\u0442.', s2t: '2. \u0414\u0430\u043D\u043D\u044B\u0435, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u043C\u044B \u043D\u0435 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u043C', s2l1: '<strong>\u041D\u0435\u0442 \u043B\u0438\u0447\u043D\u043E\u0439 \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u0438</strong> \u2014 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u043D\u0435 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442 \u0438\u043C\u0435\u043D\u0430, \u0430\u0434\u0440\u0435\u0441\u0430 \u044D\u043B\u0435\u043A\u0442\u0440\u043E\u043D\u043D\u043E\u0439 \u043F\u043E\u0447\u0442\u044B, IP-\u0430\u0434\u0440\u0435\u0441\u0430 \u0438\u043B\u0438 \u0430\u043F\u043F\u0430\u0440\u0430\u0442\u043D\u044B\u0435 \u0438\u0434\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0442\u043E\u0440\u044B.', s2l2: '<strong>\u041D\u0435\u0442 \u0444\u0430\u0439\u043B\u043E\u0432 cookie \u043E\u0442\u0441\u043B\u0435\u0436\u0438\u0432\u0430\u043D\u0438\u044F</strong> \u2014 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u043D\u0435 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442 \u0440\u0435\u043A\u043B\u0430\u043C\u043D\u044B\u0435 \u0438\u043B\u0438 \u0430\u043D\u0430\u043B\u0438\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0435 cookie \u043E\u0442\u0441\u043B\u0435\u0436\u0438\u0432\u0430\u043D\u0438\u044F.', s2l3: '<strong>\u041D\u0435\u0442 \u0436\u0443\u0440\u043D\u0430\u043B\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432</strong> \u2014 \u0434\u043E\u043C\u0435\u043D\u043D\u044B\u0435 \u0438\u043C\u0435\u043D\u0430, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 \u0432\u044B \u0438\u0449\u0435\u0442\u0435, \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435.', s3t: '3. \u0410\u043D\u043E\u043D\u0438\u043C\u043D\u044B\u0435 \u043C\u0435\u0442\u0440\u0438\u043A\u0438 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u044F (\u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E)', s3i: '\u0415\u0441\u043B\u0438 \u0432\u043A\u043B\u044E\u0447\u0435\u043D\u044B \u0430\u043D\u043E\u043D\u0438\u043C\u043D\u044B\u0435 \u043C\u0435\u0442\u0440\u0438\u043A\u0438, \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442:', s3l1: '\u0414\u043E\u043C\u0435\u043D\u043D\u044B\u0435 \u0438\u043C\u0435\u043D\u0430, \u0445\u044D\u0448\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u0441 \u043F\u043E\u043C\u043E\u0449\u044C\u044E HMAC (\u043D\u0435\u043E\u0431\u0440\u0430\u0442\u0438\u043C\u043E; \u0438\u0441\u0445\u043E\u0434\u043D\u044B\u0439 \u0434\u043E\u043C\u0435\u043D \u043D\u0435\u0432\u043E\u0437\u043C\u043E\u0436\u043D\u043E \u0432\u043E\u0441\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C).', s3l2: '\u0410\u0433\u0440\u0435\u0433\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u0441\u0447\u0435\u0442\u0447\u0438\u043A\u0438 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u0438 \u043E\u0442\u043C\u0435\u0442\u043A\u0438 \u0432\u0440\u0435\u043C\u0435\u043D\u0438 \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u043F\u043E\u044F\u0432\u043B\u0435\u043D\u0438\u044F.', s3l3: '\u0421\u043B\u0443\u0447\u0430\u0439\u043D\u044B\u0439 \u0438\u0434\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0442\u043E\u0440 \u0441\u0435\u0430\u043D\u0441\u0430 (\u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u043F\u0435\u0440\u0435\u0437\u0430\u043F\u0443\u0441\u043A\u0430).', s3b: '\u0410\u043D\u043E\u043D\u0438\u043C\u043D\u044B\u0435 \u043C\u0435\u0442\u0440\u0438\u043A\u0438 \u043C\u043E\u0436\u043D\u043E \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u043E\u0442\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0441 \u043F\u043E\u043C\u043E\u0449\u044C\u044E \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u0430 <code>-DisableAnonymousMetrics</code>.', s4t: '4. \u0410\u0443\u0442\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0446\u0438\u044F Microsoft Entra ID', s4b: '\u0415\u0441\u043B\u0438 \u0432\u044B \u0440\u0435\u0448\u0438\u0442\u0435 \u0432\u043E\u0439\u0442\u0438 \u0441 \u043F\u043E\u043C\u043E\u0449\u044C\u044E Microsoft, \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442 MSAL.js \u0441 \u043F\u043E\u0442\u043E\u043A\u043E\u043C Authorization Code + PKCE. \u0422\u043E\u043A\u0435\u043D\u044B \u0445\u0440\u0430\u043D\u044F\u0442\u0441\u044F \u0432 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435 \u0441\u0435\u0430\u043D\u0441\u0430 \u0432\u0430\u0448\u0435\u0433\u043E \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u0438 \u043D\u0438\u043A\u043E\u0433\u0434\u0430 \u043D\u0435 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0442\u0441\u044F \u043D\u0430 \u0441\u0435\u0440\u0432\u0435\u0440 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430. \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0441\u0447\u0438\u0442\u044B\u0432\u0430\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0432\u0430\u0448\u0435 \u043E\u0442\u043E\u0431\u0440\u0430\u0436\u0430\u0435\u043C\u043E\u0435 \u0438\u043C\u044F \u0438 \u0430\u0434\u0440\u0435\u0441 \u044D\u043B\u0435\u043A\u0442\u0440\u043E\u043D\u043D\u043E\u0439 \u043F\u043E\u0447\u0442\u044B \u0438\u0437 Microsoft Graph, \u0447\u0442\u043E\u0431\u044B \u043F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0432\u0430\u0448\u0443 \u043B\u0438\u0447\u043D\u043E\u0441\u0442\u044C \u0432 \u0438\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0435.', s5t: '5. \u0417\u0430\u043F\u0440\u043E\u0441\u044B \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 Azure', s5b: '\u041F\u0440\u0438 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0438 Azure Workspace Diagnostics \u0432\u0441\u0435 \u0432\u044B\u0437\u043E\u0432\u044B API \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u044E\u0442\u0441\u044F \u043D\u0430\u043F\u0440\u044F\u043C\u0443\u044E \u0438\u0437 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u0432 Azure Resource Manager \u0438 Log Analytics \u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0435\u043C \u0432\u0430\u0448\u0435\u0433\u043E \u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0433\u043E \u0442\u043E\u043A\u0435\u043D\u0430 \u0434\u043E\u0441\u0442\u0443\u043F\u0430. \u0421\u0435\u0440\u0432\u0435\u0440 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435 \u0432\u044B\u0441\u0442\u0443\u043F\u0430\u0435\u0442 \u0432 \u0440\u043E\u043B\u0438 \u043F\u0440\u043E\u043A\u0441\u0438, \u043D\u0435 \u0436\u0443\u0440\u043D\u0430\u043B\u0438\u0440\u0443\u0435\u0442 \u0438 \u043D\u0435 \u0445\u0440\u0430\u043D\u0438\u0442 \u0434\u0430\u043D\u043D\u044B\u0435 Azure.', s6t: '6. DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B', s6b: 'DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u044E\u0442\u0441\u044F \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0435\u043C \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043D\u043D\u043E\u0433\u043E \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u0430 (\u0441\u0438\u0441\u0442\u0435\u043C\u043D\u044B\u0439 DNS \u0438\u043B\u0438 DNS-over-HTTPS). \u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u044B \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u044E\u0442\u0441\u044F \u0432 \u0432\u0430\u0448 \u0431\u0440\u0430\u0443\u0437\u0435\u0440 \u0438 \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F.', s7t: '7. \u041B\u043E\u043A\u0430\u043B\u044C\u043D\u043E\u0435 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435', s7b: '\u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442 <code>localStorage</code> \u0432\u0430\u0448\u0435\u0433\u043E \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u0434\u043B\u044F \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u044F \u043D\u0430\u0441\u0442\u0440\u043E\u0435\u043A \u0442\u0435\u043C\u044B \u0438 \u0438\u0441\u0442\u043E\u0440\u0438\u0438 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0445 \u0434\u043E\u043C\u0435\u043D\u043E\u0432. \u042D\u0442\u0438 \u0434\u0430\u043D\u043D\u044B\u0435 \u043D\u0438\u043A\u043E\u0433\u0434\u0430 \u043D\u0435 \u043F\u043E\u043A\u0438\u0434\u0430\u044E\u0442 \u0432\u0430\u0448 \u0431\u0440\u0430\u0443\u0437\u0435\u0440.', s8t: '8. \u0421\u0442\u043E\u0440\u043E\u043D\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044B', s8b: '\u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u043C\u043E\u0436\u0435\u0442 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u0441\u0442\u043E\u0440\u043E\u043D\u043D\u0438\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044B \u0434\u043B\u044F \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u044F DNS (\u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440, \u043F\u043E\u0441\u0442\u0430\u0432\u0449\u0438\u043A\u043E\u0432 DNS-over-HTTPS), WHOIS-\u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u043E\u043A \u0440\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u0438 DNSBL. \u0423 \u044D\u0442\u0438\u0445 \u0441\u0435\u0440\u0432\u0438\u0441\u043E\u0432 \u0435\u0441\u0442\u044C \u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0435 \u043F\u043E\u043B\u0438\u0442\u0438\u043A\u0438 \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438.', s9t: '9. \u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0432 \u044D\u0442\u043E\u043C \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0438', s9b: '\u042D\u0442\u043E \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0435 \u043E \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438 \u043C\u043E\u0436\u0435\u0442 \u0432\u0440\u0435\u043C\u044F \u043E\u0442 \u0432\u0440\u0435\u043C\u0435\u043D\u0438 \u043E\u0431\u043D\u043E\u0432\u043B\u044F\u0442\u044C\u0441\u044F. \u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0432\u0441\u0442\u0443\u043F\u0430\u044E\u0442 \u0432 \u0441\u0438\u043B\u0443 \u043F\u043E\u0441\u043B\u0435 \u043F\u0443\u0431\u043B\u0438\u043A\u0430\u0446\u0438\u0438 \u0432 \u0418\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0435.', s10t: '10. \u041A\u043E\u043D\u0442\u0430\u043A\u0442\u044B', s10b: '\u041F\u043E \u0432\u043E\u043F\u0440\u043E\u0441\u0430\u043C, \u0441\u0432\u044F\u0437\u0430\u043D\u043D\u044B\u043C \u0441 \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u044C\u044E, \u043F\u043E\u0441\u0435\u0442\u0438\u0442\u0435 <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.' }
   };
+
+  const PRIVACY_CONSENT_OVERRIDES = {
+    en: {
+      s7t: '7. Browser Storage and Cookie Consent',
+      s7b: 'The Tool uses your browser\'s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.',
+      s7l1: 'Essential storage keeps your consent choice so the Tool can respect it.',
+      s7l2: 'Preference storage is optional and only keeps theme, language, and recent lookup history in your browser.',
+      s7l3: 'Analytics storage is optional and, when enabled, may include a temporary first-party session cookie plus anonymous aggregate counters.',
+      manageCookies: 'Manage cookie settings'
+    },
+    es: {
+      s7t: '7. Almacenamiento del navegador y consentimiento de cookies',
+      s7b: 'La Herramienta usa <code>localStorage</code> del navegador para guardar el estado del consentimiento y, si usted lo permite, sus preferencias de tema, idioma e historial reciente de dominios. Si permite el análisis anónimo, la Herramienta también puede emitir una cookie temporal de sesión propia usada solo para recuentos agregados.',
+      s7l1: 'El almacenamiento esencial conserva su elección de consentimiento para que la Herramienta pueda respetarla.',
+      s7l2: 'El almacenamiento de preferencias es opcional y solo mantiene tema, idioma e historial reciente de búsquedas en su navegador.',
+      s7l3: 'El almacenamiento analítico es opcional y, cuando está habilitado, puede incluir una cookie temporal de sesión propia y contadores agregados anónimos.',
+      manageCookies: 'Administrar configuración de cookies'
+    },
+    fr: {
+      s7t: '7. Stockage du navigateur et consentement aux cookies',
+      s7b: 'L’Outil utilise le <code>localStorage</code> du navigateur pour mémoriser l’état du consentement et, si vous l’autorisez, vos préférences de thème, de langue et l’historique récent des domaines. Si vous autorisez les analyses anonymes, l’Outil peut aussi émettre un cookie de session propriétaire temporaire utilisé uniquement pour des comptages agrégés.',
+      s7l1: 'Le stockage essentiel conserve votre choix de consentement afin que l’Outil puisse le respecter.',
+      s7l2: 'Le stockage des préférences est facultatif et conserve uniquement le thème, la langue et l’historique récent des recherches dans votre navigateur.',
+      s7l3: 'Le stockage analytique est facultatif et, lorsqu’il est activé, peut inclure un cookie de session propriétaire temporaire ainsi que des compteurs agrégés anonymes.',
+      manageCookies: 'Gérer les paramètres des cookies'
+    },
+    de: {
+      s7t: '7. Browserspeicher und Cookie-Einwilligung',
+      s7b: 'Das Tool verwendet <code>localStorage</code> des Browsers für den Einwilligungsstatus und, wenn Sie es erlauben, für Design-, Sprach- und jüngste Domänenverlaufseinstellungen. Wenn Sie anonyme Analytik zulassen, kann das Tool außerdem ein temporäres eigenes Sitzungscookie nur für aggregierte Zählungen setzen.',
+      s7l1: 'Der essenzielle Speicher bewahrt Ihre Einwilligungsentscheidung auf, damit das Tool sie beachten kann.',
+      s7l2: 'Der Präferenzspeicher ist optional und hält nur Design, Sprache und den jüngsten Suchverlauf in Ihrem Browser fest.',
+      s7l3: 'Der Analytikspeicher ist optional und kann, wenn aktiviert, ein temporäres eigenes Sitzungscookie sowie anonyme aggregierte Zähler enthalten.',
+      manageCookies: 'Cookie-Einstellungen verwalten'
+    },
+    'pt-BR': {
+      s7t: '7. Armazenamento do navegador e consentimento de cookies',
+      s7b: 'A Ferramenta usa o <code>localStorage</code> do navegador para armazenar o estado do consentimento e, se você permitir, suas preferências de tema, idioma e histórico recente de domínios. Se você permitir análises anônimas, a Ferramenta também poderá emitir um cookie temporário de sessão própria usado apenas para contagens agregadas.',
+      s7l1: 'O armazenamento essencial mantém sua escolha de consentimento para que a Ferramenta possa respeitá-la.',
+      s7l2: 'O armazenamento de preferências é opcional e mantém apenas tema, idioma e histórico recente de consultas no seu navegador.',
+      s7l3: 'O armazenamento analítico é opcional e, quando habilitado, pode incluir um cookie temporário de sessão própria e contadores agregados anônimos.',
+      manageCookies: 'Gerenciar configurações de cookies'
+    },
+    ar: {
+      s7t: '7. تخزين المتصفح وموافقة ملفات تعريف الارتباط',
+      s7b: 'تستخدم الأداة <code>localStorage</code> في المتصفح لتخزين حالة الموافقة، وإذا سمحت بذلك، لتخزين تفضيلات المظهر واللغة وسجل النطاقات الأخير. وإذا سمحت بالتحليلات المجهولة، فقد تصدر الأداة أيضًا ملف تعريف ارتباط مؤقتًا للجلسة من الطرف الأول لاستخدامه فقط في العدّ المجمّع.',
+      s7l1: 'يحفظ التخزين الأساسي اختيارك للموافقة حتى تتمكن الأداة من احترامه.',
+      s7l2: 'تخزين التفضيلات اختياري ويحتفظ فقط بالمظهر واللغة وسجل البحث الأخير داخل متصفحك.',
+      s7l3: 'تخزين التحليلات اختياري، وعند تمكينه قد يتضمن ملف تعريف ارتباط مؤقتًا للجلسة ومقاييس مجمعة مجهولة.',
+      manageCookies: 'إدارة إعدادات ملفات تعريف الارتباط'
+    },
+    'zh-CN': {
+      s7t: '7. 浏览器存储与 Cookie 同意',
+      s7b: '本工具使用浏览器中的 <code>localStorage</code> 保存同意状态；如果您允许，还会保存主题、语言和最近的域历史记录。如果您允许匿名分析，本工具还可能设置一个临时的第一方会话 Cookie，仅用于聚合计数。',
+      s7l1: '必要存储会保留您的同意选择，以便本工具能够遵循该选择。',
+      s7l2: '偏好设置存储是可选的，仅在您的浏览器中保存主题、语言和最近的查询历史。',
+      s7l3: '分析存储是可选的，启用后可能包括临时的第一方会话 Cookie 和匿名聚合计数器。',
+      manageCookies: '管理 Cookie 设置'
+    },
+    'hi-IN': {
+      s7t: '7. ब्राउज़र संग्रहण और कुकी सहमति',
+      s7b: 'यह टूल सहमति की स्थिति के लिए आपके ब्राउज़र के <code>localStorage</code> का उपयोग करता है और, यदि आप अनुमति दें, तो थीम, भाषा और हाल का डोमेन इतिहास भी वहीं रखता है। यदि आप गुमनाम विश्लेषण की अनुमति देते हैं, तो यह टूल केवल कुल गणना के लिए एक अस्थायी प्रथम-पक्ष सत्र कुकी भी जारी कर सकता है।',
+      s7l1: 'आवश्यक संग्रहण आपकी सहमति पसंद को सुरक्षित रखता है ताकि टूल उसका सम्मान कर सके।',
+      s7l2: 'प्राथमिकता संग्रहण वैकल्पिक है और केवल थीम, भाषा और हाल की खोज इतिहास को आपके ब्राउज़र में रखता है।',
+      s7l3: 'विश्लेषण संग्रहण वैकल्पिक है और सक्षम होने पर इसमें एक अस्थायी प्रथम-पक्ष सत्र कुकी और गुमनाम कुल काउंटर शामिल हो सकते हैं।',
+      manageCookies: 'कुकी सेटिंग्स प्रबंधित करें'
+    },
+    'ja-JP': {
+      s7t: '7. ブラウザー保存領域とCookie同意',
+      s7b: '本ツールは同意状態の保存にブラウザーの <code>localStorage</code> を使用し、許可された場合はテーマ、言語、最近のドメイン履歴も保存します。匿名分析を許可した場合は、集計カウント専用の一時的なファーストパーティ セッション Cookie を発行することがあります。',
+      s7l1: '必須保存領域は、ツールが同意内容を尊重できるように、あなたの選択を保持します。',
+      s7l2: '設定保存は任意であり、テーマ、言語、最近の検索履歴のみをブラウザーに保持します。',
+      s7l3: '分析保存は任意であり、有効な場合は一時的なファーストパーティ セッション Cookie と匿名の集計カウンターを含むことがあります。',
+      manageCookies: 'Cookie設定を管理'
+    },
+    'ru-RU': {
+      s7t: '7. Хранилище браузера и согласие на cookie',
+      s7b: 'Инструмент использует <code>localStorage</code> браузера для хранения состояния согласия и, если вы это разрешите, для сохранения темы, языка и недавней истории доменов. Если вы разрешаете анонимную аналитику, инструмент также может установить временный собственный cookie сессии только для агрегированных подсчетов.',
+      s7l1: 'Обязательное хранилище сохраняет ваш выбор согласия, чтобы инструмент мог его соблюдать.',
+      s7l2: 'Хранилище предпочтений является необязательным и сохраняет только тему, язык и недавнюю историю запросов в вашем браузере.',
+      s7l3: 'Хранилище аналитики является необязательным и при включении может включать временный собственный cookie сессии и анонимные агрегированные счетчики.',
+      manageCookies: 'Управление настройками cookie'
+    }
+  };
+
+  Object.keys(PRIVACY_CONSENT_OVERRIDES).forEach(code => {
+    TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, PRIVACY_CONSENT_OVERRIDES[code]);
+  });
 
   function normalizeLanguageCode(lang) {
     const value = String(lang || '').trim().toLowerCase();
@@ -17613,9 +18751,17 @@ $script:PrivacyPageHtml = @'
   setText('privacySection5Title', t.s5t); setText('privacySection5Body', t.s5b);
   setText('privacySection6Title', t.s6t); setText('privacySection6Body', t.s6b);
   setText('privacySection7Title', t.s7t); setHtml('privacySection7Body', t.s7b);
+  setText('privacySection7Item1', t.s7l1);
+  setText('privacySection7Item2', t.s7l2);
+  setText('privacySection7Item3', t.s7l3);
   setText('privacySection8Title', t.s8t); setText('privacySection8Body', t.s8b);
   setText('privacySection9Title', t.s9t); setText('privacySection9Body', t.s9b);
   setText('privacySection10Title', t.s10t); setHtml('privacySection10Body', t.s10b);
+  const privacyManageCookiesLink = document.getElementById('privacyManageCookiesLink');
+  if (privacyManageCookiesLink) {
+    privacyManageCookiesLink.textContent = t.manageCookies || 'Manage cookie settings';
+    privacyManageCookiesLink.href = '/?lang=' + encodeURIComponent(lang) + '&openCookieSettings=1';
+  }
 })();
 </script>
 </body>
@@ -17686,6 +18832,11 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
   }
 }
 
+# Local static asset root used for same-origin UI assets such as Lucide SVG icons
+# and language flag SVGs. These are optional but avoid third-party CDN fetches
+# that can trigger browser tracking-prevention warnings.
+$script:AssetsRoot = Join-Path -Path $PSScriptRoot -ChildPath 'assets'
+
 if (Test-Path -LiteralPath $msalLocalPath) {
   Write-Information -InformationAction Continue -MessageData "MSAL local script detected at: $msalLocalPath"
 } else {
@@ -17725,11 +18876,11 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
   'Set-SecurityHeaders','Write-Json','Write-Html','Write-FileResponse',
-  'New-AnonSessionId','Get-RequestCookies','Get-OrCreate-AnonymousSessionId',
+  'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain',
   'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-FirstNonEmptyPropertyValue',
+  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
   'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
@@ -17843,7 +18994,7 @@ function Invoke-InflightCleanup {
 # for every incoming HTTP request. It receives the request context, routes by URL path,
 # and dispatches to the appropriate DNS check function or serves the HTML UI.
 $handlerScript = @'
-param($ctx, $htmlPage, $domainLocks, $msalLocalPath, $tosPageHtml, $privacyPageHtml)
+param($ctx, $htmlPage, $domainLocks, $msalLocalPath, $tosPageHtml, $privacyPageHtml, $assetsRoot)
 
 # TcpListener shim may not always provide a fully populated Url object.
 $path = $null
@@ -17894,10 +19045,16 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
 }
 
 try {
-# Anonymous metrics: create / track an anonymous session id via cookie (no PII).
+# Anonymous metrics are only allowed after the browser explicitly sends
+# analytics consent in the consent header. This prevents non-essential
+# analytics cookies from being issued before the user opts in.
 $metricsEnabled = ($env:ACS_ENABLE_ANON_METRICS -eq '1') -or ($true -eq $AcsAnonMetricsEnabled)
+$analyticsConsentState = $null
 if ($metricsEnabled) {
-  $null = Get-OrCreate-AnonymousSessionId -Context $ctx
+  $analyticsConsentState = Get-AnonymousAnalyticsConsentState -Context $ctx
+  if ($false -eq $analyticsConsentState) {
+    Clear-AnonymousSessionCookie -Context $ctx
+  }
 }
 
   # 1) Serve the UI
@@ -17936,9 +19093,58 @@ if ($metricsEnabled) {
     return
   }
 
+  # 1a-assets) Serve local static assets from the repository assets folder.
+  # Restrict responses to files beneath the configured assets root to prevent
+  # path traversal from exposing arbitrary content on disk.
+  if ($path.StartsWith('/assets/', [System.StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrWhiteSpace($assetsRoot)) {
+    try {
+      $relativeAssetPath = $path.Substring(8) -replace '/', [System.IO.Path]::DirectorySeparatorChar
+      $rootFullPath = [System.IO.Path]::GetFullPath($assetsRoot)
+      $assetFullPath = [System.IO.Path]::GetFullPath((Join-Path -Path $rootFullPath -ChildPath $relativeAssetPath))
+
+      if (-not $assetFullPath.StartsWith($rootFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Json -Context $ctx -Object @{ error = 'Invalid asset path.' } -StatusCode 400
+        return
+      }
+
+      $contentType = 'application/octet-stream'
+      switch ([System.IO.Path]::GetExtension($assetFullPath).ToLowerInvariant()) {
+        '.svg' { $contentType = 'image/svg+xml; charset=utf-8' }
+        '.png' { $contentType = 'image/png' }
+        '.jpg' { $contentType = 'image/jpeg' }
+        '.jpeg' { $contentType = 'image/jpeg' }
+        '.gif' { $contentType = 'image/gif' }
+        '.webp' { $contentType = 'image/webp' }
+        '.ico' { $contentType = 'image/x-icon' }
+        '.js' { $contentType = 'application/javascript; charset=utf-8' }
+        '.css' { $contentType = 'text/css; charset=utf-8' }
+      }
+
+      Write-FileResponse -Context $ctx -Path $assetFullPath -ContentType $contentType
+      return
+    } catch {
+      Write-Json -Context $ctx -Object @{ error = 'Failed to load requested asset.' } -StatusCode 500
+      return
+    }
+  }
+
   # 1b) Metrics endpoint handled by caller (fast-path in main loop). Keep here as safety net only.
   if ($path -eq "/api/metrics") {
     Handle-MetricsRequest -Context $ctx -MetricsEnabled $metricsEnabled
+    return
+  }
+
+  # 1c) Consent sync endpoint. This is called by the SPA after the user saves
+  # cookie preferences so the server can immediately clear any existing
+  # analytics session cookie when analytics consent is rejected.
+  if ($path -eq '/api/consent') {
+    if ($false -eq $analyticsConsentState) {
+      Clear-AnonymousSessionCookie -Context $ctx
+    }
+    Write-Json -Context $ctx -Object @{
+      ok = $true
+      analyticsConsent = $(if ($null -eq $analyticsConsentState) { $null } else { [bool]$analyticsConsentState })
+    }
     return
   }
 
@@ -17982,9 +19188,12 @@ if ($metricsEnabled) {
     try {
       switch ($path) {
         "/api/base"  {
-          if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Started }
+          if ($metricsEnabled -and ($true -eq $analyticsConsentState)) {
+            $null = Get-OrCreate-AnonymousSessionId -Context $ctx
+            Update-AnonymousMetrics -Domain $domain -Started
+          }
           Write-Json -Context $ctx -Object (Get-DnsBaseStatus  -Domain $domain)
-          if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Completed }
+          if ($metricsEnabled -and ($true -eq $analyticsConsentState)) { Update-AnonymousMetrics -Domain $domain -Completed }
         }
         "/api/mx"    { Write-Json -Context $ctx -Object (Get-DnsMxStatus    -Domain $domain) }
         "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain) }
@@ -18414,7 +19623,7 @@ try {
         # Run the handler in the RunspacePool so multiple requests can be processed concurrently.
         $ps = [PowerShell]::Create()
         $ps.RunspacePool = $pool
-        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
+        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml).AddArgument($script:AssetsRoot)
 
         $async = $ps.BeginInvoke()
         $null = Register-InflightInvocation -PowerShellInstance $ps -AsyncResult $async
@@ -18467,7 +19676,7 @@ try {
         # Run the same handler script used by HttpListener.
         $ps = [PowerShell]::Create()
         $ps.RunspacePool = $pool
-        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
+        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml).AddArgument($script:AssetsRoot)
 
         $async = $ps.BeginInvoke()
         $null = Register-InflightInvocation -PowerShellInstance $ps -AsyncResult $async

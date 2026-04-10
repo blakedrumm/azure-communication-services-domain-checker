@@ -171,7 +171,7 @@ try {
         # Run the handler in the RunspacePool so multiple requests can be processed concurrently.
         $ps = [PowerShell]::Create()
         $ps.RunspacePool = $pool
-        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
+        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml).AddArgument($script:AssetsRoot)
 
         $async = $ps.BeginInvoke()
         $null = Register-InflightInvocation -PowerShellInstance $ps -AsyncResult $async
@@ -224,7 +224,7 @@ try {
         # Run the same handler script used by HttpListener.
         $ps = [PowerShell]::Create()
         $ps.RunspacePool = $pool
-        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml)
+        $null = $ps.AddScript($handlerScript).AddArgument($ctx).AddArgument($htmlPage).AddArgument($domainLocks).AddArgument($msalLocalPath).AddArgument($script:TosPageHtml).AddArgument($script:PrivacyPageHtml).AddArgument($script:AssetsRoot)
 
         $async = $ps.BeginInvoke()
         $null = Register-InflightInvocation -PowerShellInstance $ps -AsyncResult $async

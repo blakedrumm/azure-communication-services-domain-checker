@@ -17,6 +17,9 @@
 .PARAMETER Force
   Overwrite the output file without prompting.
 
+.PARAMETER SkipUiAssetDownload
+  Skip the automatic `Download-UiAssets.ps1` step before bundling.
+
 .EXAMPLE
   # Rebuild the release file from source modules
   .\Build-Release.ps1
@@ -25,26 +28,49 @@
   # Rebuild to a custom path
   .\Build-Release.ps1 -OutputPath ./dist/acs-domain-checker.ps1
 
+.EXAMPLE
+  # Rebuild without refreshing local UI assets first
+  .\Build-Release.ps1 -SkipUiAssetDownload
+
 .NOTES
   Author: Blake Drumm (blakedrumm@microsoft.com)
   This script is part of the development workflow. It is NOT needed at runtime.
 #>
 param(
   [string]$OutputPath = (Join-Path -Path $PSScriptRoot -ChildPath 'acs-domain-checker.ps1'),
-  [switch]$Force
+  [switch]$Force,
+  [switch]$SkipUiAssetDownload
 )
 
 $ErrorActionPreference = 'Stop'
 
 $srcDir = Join-Path -Path $PSScriptRoot -ChildPath 'src'
+$uiAssetDownloaderPath = Join-Path -Path $PSScriptRoot -ChildPath 'Download-UiAssets.ps1'
 
 if (-not (Test-Path -LiteralPath $srcDir -PathType Container)) {
   Write-Error "Source directory not found: $srcDir"
   return
 }
 
-# Collect all .ps1 files sorted by name (the NN- prefix controls order).
-$sourceFiles = Get-ChildItem -Path $srcDir -Filter '*.ps1' | Sort-Object Name
+# Refresh local UI assets before bundling so same-origin SVG files are available
+# for the SPA after a local rebuild. The downloader skips files that already
+# exist, so this remains fast for normal development loops.
+if (-not $SkipUiAssetDownload -and (Test-Path -LiteralPath $uiAssetDownloaderPath -PathType Leaf)) {
+  Write-Host "Refreshing local UI assets via $uiAssetDownloaderPath ..." -ForegroundColor Cyan
+  & $uiAssetDownloaderPath
+}
+
+# Collect all .ps1 files sorted by numeric prefix + optional letter suffix.
+# PowerShell's default Sort-Object uses culture-sensitive comparison where hyphens
+# are often treated as ignorable, causing "20a-*" to sort before "20-*".
+# This custom sort key ensures "20-*" always precedes "20a-*", "20b-*", etc.
+$sourceFiles = Get-ChildItem -Path $srcDir -Filter '*.ps1' | Sort-Object {
+  if ($_.Name -match '^(\d+)([a-z]?)[-.]') {
+    '{0:D4}{1}' -f [int]$Matches[1], $Matches[2]
+  } else {
+    $_.Name
+  }
+}
 if ($sourceFiles.Count -eq 0) {
   Write-Error "No .ps1 files found in $srcDir"
   return

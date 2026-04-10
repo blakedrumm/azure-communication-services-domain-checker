@@ -19,11 +19,11 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
   'Set-SecurityHeaders','Write-Json','Write-Html','Write-FileResponse',
-  'New-AnonSessionId','Get-RequestCookies','Get-OrCreate-AnonymousSessionId',
+  'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain',
   'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-FirstNonEmptyPropertyValue',
+  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
   'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',

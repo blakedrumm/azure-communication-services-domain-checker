@@ -16,11 +16,102 @@ function Test-WhoisRawTextHasUsableData {
 }
 
 function Get-WhoisCreationDateLabelRegex {
-  '(?i)^(Creation Date|Created On|Registered On|Registered on|Registration Date|Registered|Domain Create Date|Creation date):\s*(.+)$'
+  '(?im)^(Creation Date|Created On|Registered On|Registered on|Registration Date|Registered|Domain Create Date|Creation date|Domain record activated):\s*(.+)$'
 }
 
 function Get-WhoisExpiryDateLabelRegex {
-  '(?i)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date):\s*(.+)$'
+  '(?im)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date|Domain expires):\s*(.+)$'
+}
+
+# Keep WHOIS field extraction in one place so all fallback providers recognize
+# the same registry-specific labels and block-style sections such as EDUCAUSE's
+# multi-line "Registrant:" blocks for .edu domains.
+function Get-WhoisParsedRegistrationData {
+  param([string]$Text)
+
+  $creation = $null
+  $expiry = $null
+  $registrar = $null
+  $registrant = $null
+
+  if ([string]::IsNullOrWhiteSpace($Text)) {
+    return [pscustomobject]@{
+      creationDate = $creation
+      expiryDate   = $expiry
+      registrar    = $registrar
+      registrant   = $registrant
+    }
+  }
+
+  $canConvertDates = $true
+  if (-not (Get-Command -Name ConvertTo-NullableUtcIso8601 -ErrorAction SilentlyContinue)) {
+    $canConvertDates = $false
+  }
+
+  $creationPattern = Get-WhoisCreationDateLabelRegex
+  $expiryPattern = Get-WhoisExpiryDateLabelRegex
+  $lines = $Text -split "`r?`n"
+
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    $l = [string]$lines[$i]
+    $trimmed = $l.Trim()
+    if (-not $trimmed) { continue }
+
+    if (-not $creation -and $trimmed -match $creationPattern) {
+      $val = $Matches[2].Trim()
+      if ($canConvertDates) {
+        try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
+      } else {
+        $creation = $val
+      }
+      continue
+    }
+
+    if (-not $expiry -and $trimmed -match $expiryPattern) {
+      $val = $Matches[2].Trim()
+      if ($canConvertDates) {
+        try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
+      } else {
+        $expiry = $val
+      }
+      continue
+    }
+
+    if (-not $registrar -and $trimmed -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
+      $registrar = $Matches[2].Trim()
+      continue
+    }
+
+    if (-not $registrant -and $trimmed -match '(?i)^(Registrant Name|Registrant Organisation|Registrant Organization):\s*(.+)$') {
+      $registrant = $Matches[2].Trim()
+      continue
+    }
+
+    if (-not $registrant -and $trimmed -match '(?i)^Registrant:\s*$') {
+      for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+        $candidate = [string]$lines[$j]
+        $candidateTrimmed = $candidate.Trim()
+        if (-not $candidateTrimmed) {
+          if ($j -gt ($i + 1)) { break }
+          continue
+        }
+
+        if ($candidateTrimmed -match '^[A-Za-z][A-Za-z0-9 .''()&,/+-]{0,80}:\s*') {
+          break
+        }
+
+        $registrant = $candidateTrimmed
+        break
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    creationDate = $creation
+    expiryDate   = $expiry
+    registrar    = $registrar
+    registrant   = $registrant
+  }
 }
 
 # Windows-only WHOIS lookup using the Sysinternals whois.exe tool.
@@ -111,49 +202,12 @@ function Invoke-SysinternalsWhoisLookup {
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
 
-    # Parse what we can (never fail the whole lookup on parse issues)
-    $creation   = $null
-    $expiry     = $null
-    $registrar  = $null
-    $registrant = $null
-
-    $creationPattern = Get-WhoisCreationDateLabelRegex
-    $expiryPattern = Get-WhoisExpiryDateLabelRegex
-
-    foreach ($line in ($text -split "`r?`n")) {
-      $l = $line.Trim()
-      if (-not $l) { continue }
-
-      if (-not $creation -and $l -match $creationPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
-        } else {
-          $creation = $val
-        }
-        continue
-      }
-
-      if (-not $expiry -and $l -match $expiryPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
-        } else {
-          $expiry = $val
-        }
-        continue
-      }
-
-      if (-not $registrar -and $l -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
-        $registrar = $Matches[2].Trim()
-        continue
-      }
-
-      if (-not $registrant -and $l -match '(?i)^Registrant (Organization|Organisation|Name):\s*(.+)$') {
-        $registrant = $Matches[2].Trim()
-        continue
-      }
-    }
+    # Parse what we can (never fail the whole lookup on parse issues).
+    $parsed = Get-WhoisParsedRegistrationData -Text $text
+    $creation = $parsed.creationDate
+    $expiry = $parsed.expiryDate
+    $registrar = $parsed.registrar
+    $registrant = $parsed.registrant
 
     return [pscustomobject]@{
       creationDate = $creation
@@ -375,48 +429,11 @@ function Invoke-LinuxWhoisLookup {
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
 
-    $creation   = $null
-    $expiry     = $null
-    $registrar  = $null
-    $registrant = $null
-
-    $creationPattern = Get-WhoisCreationDateLabelRegex
-    $expiryPattern = Get-WhoisExpiryDateLabelRegex
-
-    foreach ($line in ($text -split "`r?`n")) {
-      $l = $line.Trim()
-      if (-not $l) { continue }
-
-      if (-not $creation -and $l -match $creationPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
-        } else {
-          $creation = $val
-        }
-        continue
-      }
-
-      if (-not $expiry -and $l -match $expiryPattern) {
-        $val = $Matches[2].Trim()
-        if ($canConvertDates) {
-          try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
-        } else {
-          $expiry = $val
-        }
-        continue
-      }
-
-      if (-not $registrar -and $l -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
-        $registrar = $Matches[2].Trim()
-        continue
-      }
-
-      if (-not $registrant -and $l -match '(?i)^(Registrant Name|Registrant|Registrant Organisation|Registrant Organization):\s*(.+)$') {
-        $registrant = $Matches[2].Trim()
-        continue
-      }
-    }
+    $parsed = Get-WhoisParsedRegistrationData -Text $text
+    $creation = $parsed.creationDate
+    $expiry = $parsed.expiryDate
+    $registrar = $parsed.registrar
+    $registrant = $parsed.registrant
 
     return [pscustomobject]@{
       creationDate = $creation
@@ -555,45 +572,13 @@ function Invoke-TcpWhoisLookup {
       # Skip responses that indicate no data or invalid queries / malformed subdomain lookups.
       if ($text -match '(?im)\b(No Data Found|No match for|NOT FOUND|Status:\s*AVAILABLE|Malformed request\.?|Invalid query|Invalid domain name|This query returned 0 objects)\b') { continue }
 
-      # Parse registration fields (same patterns as Invoke-LinuxWhoisLookup).
-      $creation   = $null
-      $expiry     = $null
-      $registrar  = $null
-      $registrant = $null
-
-      $creationPattern = Get-WhoisCreationDateLabelRegex
-      $expiryPattern = Get-WhoisExpiryDateLabelRegex
-
-      foreach ($line in ($text -split "`r?`n")) {
-        $l = $line.Trim()
-        if (-not $l) { continue }
-
-        if (-not $creation -and $l -match $creationPattern) {
-          $val = $Matches[2].Trim()
-          if ($canConvertDates) {
-            try { $creation = ConvertTo-NullableUtcIso8601 $val } catch { $creation = $val }
-          } else { $creation = $val }
-          continue
-        }
-
-        if (-not $expiry -and $l -match $expiryPattern) {
-          $val = $Matches[2].Trim()
-          if ($canConvertDates) {
-            try { $expiry = ConvertTo-NullableUtcIso8601 $val } catch { $expiry = $val }
-          } else { $expiry = $val }
-          continue
-        }
-
-        if (-not $registrar -and $l -match '(?i)^(Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$') {
-          $registrar = $Matches[2].Trim()
-          continue
-        }
-
-        if (-not $registrant -and $l -match '(?i)^(Registrant Name|Registrant|Registrant Organisation|Registrant Organization):\s*(.+)$') {
-          $registrant = $Matches[2].Trim()
-          continue
-        }
-      }
+      # Parse registration fields using the same normalization as the other
+      # WHOIS providers so registry-specific labels stay consistent.
+      $parsed = Get-WhoisParsedRegistrationData -Text $text
+      $creation = $parsed.creationDate
+      $expiry = $parsed.expiryDate
+      $registrar = $parsed.registrar
+      $registrant = $parsed.registrant
 
       return [pscustomobject]@{
         creationDate = $creation

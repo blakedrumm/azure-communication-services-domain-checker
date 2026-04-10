@@ -1,5 +1,230 @@
 # ===== JavaScript Utility Functions =====
 $htmlPage += @'
+
+// ---- Cookie Consent Manager (EU GDPR / ePrivacy compliance) ----
+// Consent state is stored in localStorage under 'acsCookieConsent'.
+// Three categories: essential (always on), functional (theme/lang/history), analytics (metrics).
+// All localStorage/cookie writes for non-essential purposes are gated behind these checks.
+const COOKIE_CONSENT_KEY = 'acsCookieConsent';
+
+// Returns the current consent state, or null if consent has not been given yet.
+function getCookieConsent() {
+  try {
+    const raw = localStorage.getItem(COOKIE_CONSENT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && typeof parsed.functional === 'boolean') {
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+// Check whether a specific cookie category has been consented to.
+// 'essential' always returns true. 'functional' and 'analytics' depend on user choice.
+function hasConsentFor(category) {
+  if (category === 'essential') return true;
+  const consent = getCookieConsent();
+  if (!consent) return false;
+  return !!consent[category];
+}
+
+// Persist the consent choices to localStorage with a timestamp.
+function persistCookieConsent(functional, analytics) {
+  const consent = {
+    essential: true,
+    functional: !!functional,
+    analytics: !!analytics,
+    timestamp: new Date().toISOString()
+  };
+  try {
+    localStorage.setItem(COOKIE_CONSENT_KEY, JSON.stringify(consent));
+  } catch {}
+  return consent;
+}
+
+// Build the compact consent header value sent to same-origin API routes.
+// This lets the PowerShell server distinguish essential-only requests from
+// requests where the user explicitly granted analytics consent.
+function buildCookieConsentHeaderValue(consent) {
+  const state = consent || getCookieConsent() || { essential: true, functional: false, analytics: false };
+  return `essential=${state.essential ? '1' : '0'};functional=${state.functional ? '1' : '0'};analytics=${state.analytics ? '1' : '0'}`;
+}
+
+function buildConsentRequestHeaders(headers = {}, consent) {
+  const next = Object.assign({}, headers || {});
+  next['X-ACS-Cookie-Consent'] = buildCookieConsentHeaderValue(consent);
+  return next;
+}
+
+// Notify the server whenever consent changes so it can clear previously issued
+// analytics cookies immediately when the user rejects analytics storage.
+async function syncCookieConsentWithServer(consent) {
+  try {
+    await fetch('/api/consent', {
+      method: 'POST',
+      headers: buildConsentRequestHeaders({ 'Content-Type': 'application/json' }, consent),
+      body: JSON.stringify({
+        essential: true,
+        functional: !!(consent && consent.functional),
+        analytics: !!(consent && consent.analytics)
+      })
+    });
+  } catch {}
+}
+
+// Show the cookie consent banner.
+function showCookieConsentBanner() {
+  const overlay = document.getElementById('cookieConsentOverlay');
+  if (overlay) {
+    // Restore toggle states from any previously saved consent
+    const existing = getCookieConsent();
+    const funcToggle = document.getElementById('cookieToggleFunctional');
+    const analyticsToggle = document.getElementById('cookieToggleAnalytics');
+    if (existing) {
+      if (funcToggle) funcToggle.checked = !!existing.functional;
+      if (analyticsToggle) analyticsToggle.checked = !!existing.analytics;
+    } else {
+      // Default to checked for first-time visitors (opt-in UI)
+      if (funcToggle) funcToggle.checked = true;
+      if (analyticsToggle) analyticsToggle.checked = true;
+    }
+    overlay.style.display = '';
+    // Trap focus inside the banner for accessibility
+    const firstBtn = overlay.querySelector('button');
+    if (firstBtn) firstBtn.focus();
+  }
+}
+
+// Hide the cookie consent banner.
+function hideCookieConsentBanner() {
+  const overlay = document.getElementById('cookieConsentOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+// Handle cookie consent save action.
+// mode: 'acceptAll' | 'reject' | 'custom'
+async function saveCookieConsent(mode) {
+  let functional = false;
+  let analytics = false;
+
+  if (mode === 'acceptAll') {
+    functional = true;
+    analytics = true;
+  } else if (mode === 'reject') {
+    functional = false;
+    analytics = false;
+  } else {
+    // Custom: read toggle states
+    const funcToggle = document.getElementById('cookieToggleFunctional');
+    const analyticsToggle = document.getElementById('cookieToggleAnalytics');
+    functional = funcToggle ? funcToggle.checked : false;
+    analytics = analyticsToggle ? analyticsToggle.checked : false;
+  }
+
+  const consent = persistCookieConsent(functional, analytics);
+
+  // Apply the consent: if functional was just granted, persist any pending
+  // preferences that were held back (theme, language, history).
+  if (consent.functional) {
+    const theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+    consentAwareSetItem('acsTheme', theme, 'functional');
+    if (typeof currentLanguage !== 'undefined' && currentLanguage) {
+      consentAwareSetItem(LANG_KEY, currentLanguage, 'functional');
+    }
+  } else {
+    // Functional cookies rejected: remove stored preferences
+    clearNonEssentialStorage('functional');
+  }
+
+  if (!consent.analytics) {
+    // Analytics rejected: clear any analytics-related storage
+    clearNonEssentialStorage('analytics');
+  }
+
+  await syncCookieConsentWithServer(consent);
+  hideCookieConsentBanner();
+}
+
+// Remove stored data for a rejected cookie category.
+function clearNonEssentialStorage(category) {
+  try {
+    if (category === 'functional') {
+      localStorage.removeItem('acsTheme');
+      localStorage.removeItem(LANG_KEY);
+      localStorage.removeItem(HISTORY_KEY);
+    }
+    // Analytics data is server-side; no client-side cleanup needed.
+  } catch {}
+}
+
+// Re-open the cookie preferences banner (called from footer link).
+function openCookieSettings() {
+  showCookieConsentBanner();
+}
+
+// Check if the consent banner should be shown (first visit or no consent stored).
+function shouldShowCookieConsent() {
+  return getCookieConsent() === null;
+}
+
+// Gate-aware wrapper for localStorage.setItem — only writes if the category is consented.
+// category: 'functional' | 'analytics' | 'essential'
+function consentAwareSetItem(key, value, category) {
+  if (!hasConsentFor(category || 'functional')) return false;
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {}
+  return false;
+}
+
+// Gate-aware wrapper for localStorage.getItem — reads are allowed for essential,
+// but functional/analytics reads return null if consent was not given.
+function consentAwareGetItem(key, category) {
+  if (!hasConsentFor(category || 'functional')) return null;
+  try {
+    return localStorage.getItem(key);
+  } catch {}
+  return null;
+}
+
+// Update cookie consent banner text to match the current language.
+function applyCookieConsentLanguage() {
+  const title = document.getElementById('cookieConsentTitle');
+  if (title) title.textContent = t('cookieConsentTitle');
+
+  const desc = document.getElementById('cookieConsentDesc');
+  if (desc) desc.textContent = t('cookieConsentDescription');
+
+  const essName = document.getElementById('cookieCatEssentialName');
+  if (essName) essName.textContent = t('cookieCatEssential');
+
+  const essDesc = document.getElementById('cookieCatEssentialDesc');
+  if (essDesc) essDesc.textContent = t('cookieCatEssentialDesc');
+
+  const funcName = document.getElementById('cookieCatFunctionalName');
+  if (funcName) funcName.textContent = t('cookieCatFunctional');
+
+  const funcDesc = document.getElementById('cookieCatFunctionalDesc');
+  if (funcDesc) funcDesc.textContent = t('cookieCatFunctionalDesc');
+
+  const analName = document.getElementById('cookieCatAnalyticsName');
+  if (analName) analName.textContent = t('cookieCatAnalytics');
+
+  const analDesc = document.getElementById('cookieCatAnalyticsDesc');
+  if (analDesc) analDesc.textContent = t('cookieCatAnalyticsDesc');
+
+  const rejectBtn = document.getElementById('cookieBtnReject');
+  if (rejectBtn) rejectBtn.textContent = t('cookieBtnReject');
+
+  const saveBtn = document.getElementById('cookieBtnSave');
+  if (saveBtn) saveBtn.textContent = t('cookieBtnSave');
+
+  const acceptBtn = document.getElementById('cookieBtnAcceptAll');
+  if (acceptBtn) acceptBtn.textContent = t('cookieBtnAcceptAll');
+}
+
 function normalizeLanguageCode(lang) {
   const value = String(lang || '').trim().toLowerCase();
   if (!value) return 'en';
@@ -37,9 +262,26 @@ function updateLanguageUrlParameter() {
   } catch {}
 }
 
+// Allow static pages such as /privacy and /terms to deep-link back into the SPA
+// and immediately reopen the cookie preferences dialog.
+function consumeOpenCookieSettingsRequest() {
+  try {
+    const url = new URL(window.location.href);
+    const raw = String(url.searchParams.get('openCookieSettings') || '').trim().toLowerCase();
+    const shouldOpen = raw === '1' || raw === 'true' || raw === 'yes';
+    if (!shouldOpen) return false;
+    url.searchParams.delete('openCookieSettings');
+    window.history.replaceState({}, '', url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function getSavedLanguage() {
   try {
-    return localStorage.getItem(LANG_KEY);
+    // Language preference requires functional cookie consent
+    return consentAwareGetItem(LANG_KEY, 'functional');
   } catch {
     return null;
   }
@@ -124,7 +366,7 @@ const UI_LABEL_ICONS = {
 };
 
 function getLucideIconUrl(iconName) {
-  return `https://cdn.jsdelivr.net/npm/lucide-static/icons/${iconName}.svg`;
+  return `/assets/vendor/lucide-static/icons/${iconName}.svg`;
 }
 
 function renderLabelWithIcon(key) {
@@ -283,6 +525,7 @@ function applyLanguageToStaticUi() {
     const langSuffix = currentLanguage ? '?lang=' + encodeURIComponent(currentLanguage) : '';
     footerHtml += ' &bull; <a href="/terms' + langSuffix + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('termsOfService')) + '</a>';
     footerHtml += ' &bull; <a href="/privacy' + langSuffix + '" target="_blank" rel="noopener" style="color:inherit;">' + escapeHtml(t('privacyStatement')) + '</a>';
+    footerHtml += ' &bull; <a href="#" class="cookie-settings-link" onclick="openCookieSettings(); return false;" style="color:inherit;">' + escapeHtml(t('cookieSettings')) + '</a>';
     footer.innerHTML = footerHtml;
   }
 
@@ -298,10 +541,13 @@ function applyLanguageToStaticUi() {
 function applyLanguage(language, persist = true) {
   currentLanguage = normalizeLanguageCode(language);
   if (persist) {
-    try { localStorage.setItem(LANG_KEY, currentLanguage); } catch {}
+    // Only persist language preference if functional cookies are consented
+    consentAwareSetItem(LANG_KEY, currentLanguage, 'functional');
   }
   updateLanguageUrlParameter();
   applyLanguageToStaticUi();
+  // Update cookie consent banner text when language changes
+  applyCookieConsentLanguage();
   closeLanguageMenu();
   if (lastResult) {
     // Rebuild derived, language-sensitive strings before rendering cached results again.
@@ -383,7 +629,8 @@ function clearInput() {
 
 function readHistoryItems() {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
+    // History requires functional cookie consent
+    const raw = consentAwareGetItem(HISTORY_KEY, 'functional');
     const items = raw ? JSON.parse(raw) : [];
     return Array.isArray(items) ? items.map(String) : [];
   } catch {
@@ -392,7 +639,8 @@ function readHistoryItems() {
 }
 
 function writeHistoryItems(items) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
+  // Only persist history if functional cookies are consented
+  consentAwareSetItem(HISTORY_KEY, JSON.stringify(items), 'functional');
 }
 
 function captureHistoryChipRects(container) {
@@ -501,11 +749,11 @@ function renderHistory(items) {
 function removeHistory(domain) {
   const d = (domain === null || domain === undefined) ? "" : String(domain);
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
+    const raw = consentAwareGetItem(HISTORY_KEY, 'functional');
     if (!raw) return;
     let items = JSON.parse(raw);
     items = (items || []).filter(i => String(i).toLowerCase() !== d.toLowerCase());
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
+    consentAwareSetItem(HISTORY_KEY, JSON.stringify(items), 'functional');
     renderHistory(items);
   } catch (e) { console.error(e); }
 }
@@ -1093,7 +1341,8 @@ function applyTheme(theme) {
     root.classList.remove("dark");
     if (btn) btn.innerHTML = renderLabelWithIcon('themeDark');
   }
-  localStorage.setItem("acsTheme", theme);
+  // Only persist theme preference if functional cookies are consented
+  consentAwareSetItem("acsTheme", theme, 'functional');
 }
 
 function toggleTheme() {
