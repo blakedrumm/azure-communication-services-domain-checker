@@ -156,6 +156,7 @@ function hideTopBarItem(element) {
         lastResult.whoisExpiryDays = data.expiryDays;
         lastResult.whoisIsExpired = data.isExpired;
         lastResult.whoisExpiryHuman = data.expiryHuman;
+        lastResult.whoisExpiryUnavailableReason = data.expiryUnavailableReason || null;
         lastResult.whoisNewDomainThresholdDays = data.newDomainThresholdDays;
         lastResult.whoisNewDomainWarnThresholdDays = data.newDomainWarnThresholdDays;
         lastResult.whoisNewDomainErrorThresholdDays = data.newDomainErrorThresholdDays;
@@ -1923,6 +1924,16 @@ function render(r) {
     addWhoisRow(t('source'), r.whoisSource, { italic: true });
     addWhoisRow(t('creationDate'), r.whoisCreationDateUtc, { html: formatWhoisDateValueHtml(r.whoisCreationDateUtc) });
     addWhoisRow(t('registryExpiryDate'), r.whoisExpiryDateUtc, { html: formatWhoisDateValueHtml(r.whoisExpiryDateUtc) });
+    // When the registry deliberately does not publish expiry (e.g. SWITCH for
+    // .ch/.li, DENIC for .de, EURid for .eu), surface a short explanatory note
+    // so users do not interpret the missing date as a lookup failure.
+    if (!r.whoisExpiryDateUtc && r.whoisExpiryUnavailableReason && r.whoisExpiryUnavailableReason.message) {
+      const reason = r.whoisExpiryUnavailableReason;
+      const reasonHtml = `<div class="kv-value-secondary">${escapeHtml(reason.message)}</div>`;
+      // `addWhoisRow()` renders `html` values directly, so text-only style flags
+      // like `italic` would be ignored here and would only make the call misleading.
+      addWhoisRow(t('registryExpiryDate'), reason.message, { html: reasonHtml });
+    }
     addWhoisRow(t('registrarLabel'), r.whoisRegistrar);
     addWhoisRow(t('registrantLabel'), r.whoisRegistrant);
     if (r.whoisAgeHuman) {
@@ -1953,6 +1964,7 @@ function render(r) {
       r.whoisExpiryHuman ||
       (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) ||
       (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) ||
+      (r.whoisExpiryUnavailableReason && r.whoisExpiryUnavailableReason.message) ||
       isExpired ||
       isYoung ||
       isVeryYoung

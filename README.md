@@ -22,6 +22,7 @@
 - [Issue Reporting](#-issue-reporting)
 - [MSAL Browser Library Updates](#-msal-browser-library-updates)
 - [Docker Hub Deployment](#-docker-hub-deployment)
+- [External Repository Sync](#-external-repository-sync)
 - [Terms of Service & Privacy Pages](#-terms-of-service--privacy-pages)
 - [Security Notes](#-security-notes)
 - [Troubleshooting](#-troubleshooting)
@@ -291,7 +292,7 @@ The tool enriches results with domain registration metadata (creation date, expi
 
 | Priority | Provider | Requires |
 |----------|----------|---------|
-| 1 | **RDAP** _(preferred)_ | None (uses IANA bootstrap + rdap.org fallback) |
+| 1 | **RDAP** _(preferred)_ | None (uses IANA bootstrap + built-in TLD map for restrictive registries such as `.ch`/`.li`/`.de`/`.fr`/`.nl`/`.eu` + rdap.org fallback) |
 | 2 | **GoDaddy API** | `GODADDY_API_KEY` + `GODADDY_API_SECRET` |
 | 3 | **Linux whois CLI** | `LINUX_WHOIS_PATH` (Linux/macOS only) |
 | 4 | **Sysinternals whois.exe** | `SYSINTERNALS_WHOIS_PATH` (Windows only) |
@@ -299,6 +300,10 @@ The tool enriches results with domain registration metadata (creation date, expi
 | 6 | **WhoisXML API** | `ACS_WHOISXML_API_KEY` |
 
 WHOIS data is used to populate the **Email Quota** checklist and to surface warnings for expired or newly-registered domains.
+
+Registry refusal/rate-limit responses (for example SWITCH's `Requests of this client are not permitted` message for `.ch`/`.li`, or DENIC/AFNIC excessive-query notices) are detected and treated as a hard provider failure so the lookup chain continues to the next provider instead of presenting the block text as the registration record.
+
+Several country-code registries deliberately omit domain expiry dates from public lookups (SWITCH for `.ch`/`.li`, DENIC for `.de`, EURid for `.eu`, SIDN for `.nl`, AFNIC for `.fr` and its overseas TLDs, auDA for `.au`). When the lookup succeeds but expiry is unavailable for one of these TLDs, the response includes a structured `expiryUnavailableReason` field and the Domain Registration card surfaces a short explanatory note so the missing date is not misread as a lookup failure.
 
 The WHOIS normalization layer also recognizes registry-specific labels used by providers such as EDUCAUSE for `.edu` domains, including `Domain record activated`, `Domain expires`, and block-style `Registrant:` sections.
 
@@ -631,6 +636,38 @@ For local multi-platform builds and testing, use the included PowerShell script:
 - Authenticated to Docker Hub (`docker login`)
 - PowerShell 5.1 or later
 
+## 🔄 External Repository Sync
+
+This repository includes an automated workflow to sync code changes to:
+
+- `https://github.com/blakedrumm/azure-communication-services-domain-checker`
+
+Workflow file:
+
+- `.github/workflows/sync-external-repo.yml`
+
+### Trigger behavior
+
+- Runs automatically on pushes to `main`
+- Supports manual runs via **workflow_dispatch**
+
+### Required setup
+
+Configure these repository settings under **Settings → Secrets and variables → Actions**:
+
+- `EXTERNAL_REPO_DEPLOY_KEY` (secret): private SSH key for a deploy key with **write** access on the external repository
+- `EXTERNAL_SYNC_BRANCH` (variable, optional): target branch in the external repo (defaults to `main`)
+
+### Excluded from sync
+
+The workflow intentionally excludes MCAPS/internal-only files:
+
+- `.github/acl/**`
+- `.github/compliance/**`
+- `.github/policies/**`
+- `.github/ISSUE_TEMPLATE/JitAccess.yml`
+- `.github/workflows/sync-external-repo.yml`
+
 ## 📄 Terms of Service & Privacy Pages
 
 The application serves embedded **Terms of Service** (`/terms`) and **Privacy Statement** (`/privacy`) pages directly from the web server. Both pages are:
@@ -772,5 +809,3 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 [Report Bug](https://github.com/blakedrumm/azure-communication-services-domain-checker/issues) · [Request Feature](https://github.com/blakedrumm/azure-communication-services-domain-checker/issues) · [Documentation](#-table-of-contents)
 
 </div>
-
-

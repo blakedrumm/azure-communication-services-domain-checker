@@ -456,6 +456,44 @@ function Get-DomainRegistrationStatus {
     }
   }
 
+  # Several country-code registries deliberately do NOT publish domain expiry
+  # dates through any public lookup channel (RDAP or WHOIS) for privacy /
+  # anti-abuse reasons. When we have a creation date but no expiry, surface
+  # this as a structured "reason" object so the UI can render an explanatory
+  # note instead of leaving the user wondering why expiry is blank. The map
+  # below uses the registrable-domain TLD and lists the registry operator.
+  $expiryUnavailableReason = $null
+  if ([string]::IsNullOrWhiteSpace([string]$expiry) -and -not [string]::IsNullOrWhiteSpace([string]$creation)) {
+    $tldKey = $null
+    try {
+      $domainParts = ([string]$whoisDomain).Trim().TrimEnd('.').ToLowerInvariant().Split('.')
+      if ($domainParts.Count -ge 2) { $tldKey = $domainParts[$domainParts.Count - 1] }
+    } catch { $tldKey = $null }
+
+    $noExpiryRegistries = @{
+      'ch' = 'SWITCH'
+      'li' = 'SWITCH'
+      'de' = 'DENIC'
+      'eu' = 'EURid'
+      'nl' = 'SIDN'
+      'fr' = 'AFNIC'
+      're' = 'AFNIC'
+      'pm' = 'AFNIC'
+      'tf' = 'AFNIC'
+      'wf' = 'AFNIC'
+      'yt' = 'AFNIC'
+      'au' = 'auDA'
+    }
+
+    if ($tldKey -and $noExpiryRegistries.ContainsKey($tldKey)) {
+      $expiryUnavailableReason = [pscustomobject]@{
+        tld      = $tldKey
+        registry = $noExpiryRegistries[$tldKey]
+        message  = "The .$tldKey registry ($($noExpiryRegistries[$tldKey])) does not publish domain expiry dates through public WHOIS or RDAP. This is a registry policy, not a lookup failure."
+      }
+    }
+  }
+
   # If we obtained a source (success from any provider), suppress earlier fallback errors to avoid misleading UI.
   if ($source) {
     $rdapError = $null
@@ -472,6 +510,34 @@ function Get-DomainRegistrationStatus {
   if ($whoisXmlError -and -not $whoisError) { $whoisError = $whoisXmlError }
   if ($rdapError -and -not $whoisError) { $whoisError = $rdapError }
 
+  # When no provider produced usable data, don't surface a registry refusal/rate-limit
+  # banner (e.g. SWITCH's "Requests of this client are not permitted" message) as if it
+  # were the registration record. The successful providers above have already harvested
+  # any structured fields they could, so the raw text is only useful when it actually
+  # contains data; otherwise replace it with a friendlier explanatory message.
+  if (-not $source -and -not [string]::IsNullOrWhiteSpace([string]$rawWhoisText)) {
+    $isBlockText = $false
+
+    # This helper is a required part of the registration-provider pipeline and is
+    # imported into the request runspaces. Call it directly so missing-function or
+    # runspace wiring problems fail loudly instead of silently disabling block detection.
+    $isBlockText = Test-WhoisResponseIsRegistryBlock -Text $rawWhoisText
+    if ($isBlockText) {
+      $rawWhoisText = $null
+
+      # If an earlier provider (for example RDAP) already populated $whoisError, keep that
+      # context but append the more actionable registry refusal/rate-limit explanation so
+      # callers understand why raw WHOIS data is unavailable.
+      $registryBlockError = "The registry for '$whoisDomain' refused our WHOIS query (rate limit or access policy). RDAP returned no data either; no further self-contained lookup options are available for this TLD."
+      if (-not $whoisError) {
+        $whoisError = $registryBlockError
+      }
+      elseif ($whoisError -notlike "*$registryBlockError*") {
+        $whoisError = "$whoisError $registryBlockError"
+      }
+    }
+  }
+
   [pscustomobject]@{
     domain = $d
     lookupDomain = $whoisDomain
@@ -487,6 +553,7 @@ function Get-DomainRegistrationStatus {
     expiryDays = $expiryDays
     isExpired = $isExpired
     expiryHuman = $expiryHuman
+    expiryUnavailableReason = $expiryUnavailableReason
     newDomainThresholdDays = $NewDomainWarnThresholdDays
     newDomainWarnThresholdDays = $NewDomainWarnThresholdDays
     newDomainErrorThresholdDays = $NewDomainErrorThresholdDays

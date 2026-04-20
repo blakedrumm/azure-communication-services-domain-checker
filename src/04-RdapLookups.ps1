@@ -47,6 +47,45 @@ function Get-RdapBootstrapData {
   }
 }
 
+# Built-in TLD -> RDAP base URL map used as a safety net when the IANA bootstrap
+# fetch is unavailable (offline / proxy / first-run) or when a registry has not
+# yet been added to the published bootstrap file. Keeping these inline preserves
+# the project's "no third-party data providers required" goal: the URLs below
+# are the registries' own RDAP endpoints, not third-party WHOIS aggregators.
+function Get-RdapBuiltInTldMap {
+  # Returned as a fresh hashtable so callers in any runspace can use it without
+  # depending on script-scoped state (worker runspaces only inherit function
+  # definitions, not script-scope variables, so a $script: hashtable is invisible
+  # to them).
+  return @{
+    'ch'  = 'https://rdap.nic.ch/'
+    'li'  = 'https://rdap.nic.ch/'
+    'de'  = 'https://rdap.denic.de/'
+    'nl'  = 'https://rdap.dns.nl/'
+    'eu'  = 'https://rdap.eu.org/'
+    'fr'  = 'https://rdap.nic.fr/'
+    're'  = 'https://rdap.nic.fr/'
+    'pm'  = 'https://rdap.nic.fr/'
+    'tf'  = 'https://rdap.nic.fr/'
+    'wf'  = 'https://rdap.nic.fr/'
+    'yt'  = 'https://rdap.nic.fr/'
+    'be'  = 'https://rdap.dnsbelgium.be/'
+    'cz'  = 'https://rdap.nic.cz/'
+    'se'  = 'https://rdap.iis.se/'
+    'nu'  = 'https://rdap.iis.se/'
+    'br'  = 'https://rdap.registro.br/'
+    'pt'  = 'https://rdap.dns.pt/'
+    'fi'  = 'https://rdap.traficom.fi/'
+    'au'  = 'https://rdap.auda.org.au/'
+    'us'  = 'https://rdap.nic.us/'
+    'co'  = 'https://rdap.nic.co/'
+    'io'  = 'https://rdap.nic.io/'
+    'ai'  = 'https://rdap.nic.ai/'
+    'app' = 'https://rdap.nic.google/'
+    'dev' = 'https://rdap.nic.google/'
+  }
+}
+
 function Get-RdapBaseUrlForDomain {
   [CmdletBinding()]
   param(
@@ -63,28 +102,39 @@ function Get-RdapBaseUrlForDomain {
   $tld = $parts[$parts.Count - 1]
   if ([string]::IsNullOrWhiteSpace($tld)) { return $null }
 
+  # 1) Prefer the IANA bootstrap mapping when available.
   $bootstrap = $null
   try { $bootstrap = Get-RdapBootstrapData } catch { $bootstrap = $null }
-  if (-not $bootstrap -or -not $bootstrap.services) { return $null }
+  if ($bootstrap -and $bootstrap.services) {
+    foreach ($svc in @($bootstrap.services)) {
+      # Each service entry is typically: [ [ "tld1","tld2"... ], [ "https://rdap.server/", ... ] ]
+      if ($null -eq $svc -or $svc.Count -lt 2) { continue }
 
-  foreach ($svc in @($bootstrap.services)) {
-    # Each service entry is typically: [ [ "tld1","tld2"... ], [ "https://rdap.server/", ... ] ]
-    if ($null -eq $svc -or $svc.Count -lt 2) { continue }
+      $tlds = @($svc[0])
+      $urls = @($svc[1])
 
-    $tlds = @($svc[0])
-    $urls = @($svc[1])
-
-    if ($tlds -contains $tld) {
-      foreach ($candidate in $urls) {
-        $s = [string]$candidate
-        if (-not [string]::IsNullOrWhiteSpace($s)) {
-          # Ensure trailing slash for URI base
-          return ($s.TrimEnd('/') + '/')
+      if ($tlds -contains $tld) {
+        foreach ($candidate in $urls) {
+          $s = [string]$candidate
+          if (-not [string]::IsNullOrWhiteSpace($s)) {
+            # Ensure trailing slash for URI base
+            return ($s.TrimEnd('/') + '/')
+          }
         }
-      }
 
-      return $null
+        break
+      }
     }
+  }
+
+  # 2) Fall back to the built-in map for restrictive registries that refuse
+  # port-43 WHOIS but operate their own RDAP service. This keeps lookups
+  # working even when the bootstrap file cannot be downloaded or when the
+  # function is being invoked from a worker runspace that does not inherit
+  # script-scoped variables from the parent process.
+  $builtIn = Get-RdapBuiltInTldMap
+  if ($builtIn -and $builtIn.ContainsKey($tld)) {
+    return $builtIn[$tld]
   }
 
   return $null

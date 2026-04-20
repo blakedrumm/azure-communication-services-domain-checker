@@ -1,4 +1,26 @@
 # ===== WHOIS Lookup Providers =====
+# Registries such as SWITCH (.ch / .li), DENIC (.de) and AFNIC (.fr) aggressively
+# block port-43 WHOIS queries from datacenter or repeat-offender IP ranges and
+# return a short refusal message instead of registration data. Detect those
+# refusals here so Get-DomainRegistrationStatus can keep walking the provider
+# chain (RDAP -> alternate WHOIS hosts -> APIs) instead of surfacing the block
+# text to the user as if it were the registration record.
+function Test-WhoisResponseIsRegistryBlock {
+  param([string]$Text)
+
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+
+  # SWITCH (.ch / .li): "Requests of this client are not permitted. Please use https://www.nic.ch/whois/ for queries."
+  # DENIC (.de):        "Your queries are too fast. Please slow down ..." / "% Excessive querying, blocked."
+  # AFNIC (.fr):        "%% Excessive number of queries."
+  # ARIN/RIPE generic:  "Query rate of your IP exceeded the maximum ..." / "AUTHENTICATION_REQUIRED"
+  if ($Text -match '(?im)(Requests of this client are not permitted|Excessive (?:number of )?quer(?:y|ies|ying)|Query rate of your IP|queries are too fast|rate[- ]?limit(?:ed|ing)?|too many requests|temporarily blocked|access (?:has been )?(?:denied|blocked)|AUTHENTICATION_REQUIRED|please use https?://[^\s]+/whois)') {
+    return $true
+  }
+
+  return $false
+}
+
 function Test-WhoisRawTextHasUsableData {
   param([string]$Text)
 
@@ -9,6 +31,11 @@ function Test-WhoisRawTextHasUsableData {
   }
 
   if ($Text -match '(?im)\b(getaddrinfo\(|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|Servname not supported for ai_socktype|socket error|connect\s+failed|No such host is known|The remote name could not be resolved|Unable to connect)\b') {
+    return $false
+  }
+
+  # Treat registry refusal/rate-limit responses as not-usable so the chain continues.
+  if (Test-WhoisResponseIsRegistryBlock -Text $Text) {
     return $false
   }
 

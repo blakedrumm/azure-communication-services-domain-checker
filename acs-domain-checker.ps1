@@ -237,6 +237,28 @@ function Get-ParentDomains {
 # Quick check: does the raw whois text contain actual registration data,
 # or is it an error/"not found" response from the whois server?
 # ===== WHOIS Lookup Providers =====
+# Registries such as SWITCH (.ch / .li), DENIC (.de) and AFNIC (.fr) aggressively
+# block port-43 WHOIS queries from datacenter or repeat-offender IP ranges and
+# return a short refusal message instead of registration data. Detect those
+# refusals here so Get-DomainRegistrationStatus can keep walking the provider
+# chain (RDAP -> alternate WHOIS hosts -> APIs) instead of surfacing the block
+# text to the user as if it were the registration record.
+function Test-WhoisResponseIsRegistryBlock {
+  param([string]$Text)
+
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+
+  # SWITCH (.ch / .li): "Requests of this client are not permitted. Please use https://www.nic.ch/whois/ for queries."
+  # DENIC (.de):        "Your queries are too fast. Please slow down ..." / "% Excessive querying, blocked."
+  # AFNIC (.fr):        "%% Excessive number of queries."
+  # ARIN/RIPE generic:  "Query rate of your IP exceeded the maximum ..." / "AUTHENTICATION_REQUIRED"
+  if ($Text -match '(?im)(Requests of this client are not permitted|Excessive (?:number of )?quer(?:y|ies|ying)|Query rate of your IP|queries are too fast|rate[- ]?limit(?:ed|ing)?|too many requests|temporarily blocked|access (?:has been )?(?:denied|blocked)|AUTHENTICATION_REQUIRED|please use https?://[^\s]+/whois)') {
+    return $true
+  }
+
+  return $false
+}
+
 function Test-WhoisRawTextHasUsableData {
   param([string]$Text)
 
@@ -247,6 +269,11 @@ function Test-WhoisRawTextHasUsableData {
   }
 
   if ($Text -match '(?im)\b(getaddrinfo\(|Name or service not known|Temporary failure in name resolution|Connection timed out|Network is unreachable|No route to host|Connection refused|Servname not supported for ai_socktype|socket error|connect\s+failed|No such host is known|The remote name could not be resolved|Unable to connect)\b') {
+    return $false
+  }
+
+  # Treat registry refusal/rate-limit responses as not-usable so the chain continues.
+  if (Test-WhoisResponseIsRegistryBlock -Text $Text) {
     return $false
   }
 
@@ -888,7 +915,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.47'
+$script:AppVersion = '2.0.50'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1020,6 +1047,45 @@ function Get-RdapBootstrapData {
   }
 }
 
+# Built-in TLD -> RDAP base URL map used as a safety net when the IANA bootstrap
+# fetch is unavailable (offline / proxy / first-run) or when a registry has not
+# yet been added to the published bootstrap file. Keeping these inline preserves
+# the project's "no third-party data providers required" goal: the URLs below
+# are the registries' own RDAP endpoints, not third-party WHOIS aggregators.
+function Get-RdapBuiltInTldMap {
+  # Returned as a fresh hashtable so callers in any runspace can use it without
+  # depending on script-scoped state (worker runspaces only inherit function
+  # definitions, not script-scope variables, so a $script: hashtable is invisible
+  # to them).
+  return @{
+    'ch'  = 'https://rdap.nic.ch/'
+    'li'  = 'https://rdap.nic.ch/'
+    'de'  = 'https://rdap.denic.de/'
+    'nl'  = 'https://rdap.dns.nl/'
+    'eu'  = 'https://rdap.eu.org/'
+    'fr'  = 'https://rdap.nic.fr/'
+    're'  = 'https://rdap.nic.fr/'
+    'pm'  = 'https://rdap.nic.fr/'
+    'tf'  = 'https://rdap.nic.fr/'
+    'wf'  = 'https://rdap.nic.fr/'
+    'yt'  = 'https://rdap.nic.fr/'
+    'be'  = 'https://rdap.dnsbelgium.be/'
+    'cz'  = 'https://rdap.nic.cz/'
+    'se'  = 'https://rdap.iis.se/'
+    'nu'  = 'https://rdap.iis.se/'
+    'br'  = 'https://rdap.registro.br/'
+    'pt'  = 'https://rdap.dns.pt/'
+    'fi'  = 'https://rdap.traficom.fi/'
+    'au'  = 'https://rdap.auda.org.au/'
+    'us'  = 'https://rdap.nic.us/'
+    'co'  = 'https://rdap.nic.co/'
+    'io'  = 'https://rdap.nic.io/'
+    'ai'  = 'https://rdap.nic.ai/'
+    'app' = 'https://rdap.nic.google/'
+    'dev' = 'https://rdap.nic.google/'
+  }
+}
+
 function Get-RdapBaseUrlForDomain {
   [CmdletBinding()]
   param(
@@ -1036,28 +1102,39 @@ function Get-RdapBaseUrlForDomain {
   $tld = $parts[$parts.Count - 1]
   if ([string]::IsNullOrWhiteSpace($tld)) { return $null }
 
+  # 1) Prefer the IANA bootstrap mapping when available.
   $bootstrap = $null
   try { $bootstrap = Get-RdapBootstrapData } catch { $bootstrap = $null }
-  if (-not $bootstrap -or -not $bootstrap.services) { return $null }
+  if ($bootstrap -and $bootstrap.services) {
+    foreach ($svc in @($bootstrap.services)) {
+      # Each service entry is typically: [ [ "tld1","tld2"... ], [ "https://rdap.server/", ... ] ]
+      if ($null -eq $svc -or $svc.Count -lt 2) { continue }
 
-  foreach ($svc in @($bootstrap.services)) {
-    # Each service entry is typically: [ [ "tld1","tld2"... ], [ "https://rdap.server/", ... ] ]
-    if ($null -eq $svc -or $svc.Count -lt 2) { continue }
+      $tlds = @($svc[0])
+      $urls = @($svc[1])
 
-    $tlds = @($svc[0])
-    $urls = @($svc[1])
-
-    if ($tlds -contains $tld) {
-      foreach ($candidate in $urls) {
-        $s = [string]$candidate
-        if (-not [string]::IsNullOrWhiteSpace($s)) {
-          # Ensure trailing slash for URI base
-          return ($s.TrimEnd('/') + '/')
+      if ($tlds -contains $tld) {
+        foreach ($candidate in $urls) {
+          $s = [string]$candidate
+          if (-not [string]::IsNullOrWhiteSpace($s)) {
+            # Ensure trailing slash for URI base
+            return ($s.TrimEnd('/') + '/')
+          }
         }
-      }
 
-      return $null
+        break
+      }
     }
+  }
+
+  # 2) Fall back to the built-in map for restrictive registries that refuse
+  # port-43 WHOIS but operate their own RDAP service. This keeps lookups
+  # working even when the bootstrap file cannot be downloaded or when the
+  # function is being invoked from a worker runspace that does not inherit
+  # script-scoped variables from the parent process.
+  $builtIn = Get-RdapBuiltInTldMap
+  if ($builtIn -and $builtIn.ContainsKey($tld)) {
+    return $builtIn[$tld]
   }
 
   return $null
@@ -1884,6 +1961,44 @@ function Get-DomainRegistrationStatus {
     }
   }
 
+  # Several country-code registries deliberately do NOT publish domain expiry
+  # dates through any public lookup channel (RDAP or WHOIS) for privacy /
+  # anti-abuse reasons. When we have a creation date but no expiry, surface
+  # this as a structured "reason" object so the UI can render an explanatory
+  # note instead of leaving the user wondering why expiry is blank. The map
+  # below uses the registrable-domain TLD and lists the registry operator.
+  $expiryUnavailableReason = $null
+  if ([string]::IsNullOrWhiteSpace([string]$expiry) -and -not [string]::IsNullOrWhiteSpace([string]$creation)) {
+    $tldKey = $null
+    try {
+      $domainParts = ([string]$whoisDomain).Trim().TrimEnd('.').ToLowerInvariant().Split('.')
+      if ($domainParts.Count -ge 2) { $tldKey = $domainParts[$domainParts.Count - 1] }
+    } catch { $tldKey = $null }
+
+    $noExpiryRegistries = @{
+      'ch' = 'SWITCH'
+      'li' = 'SWITCH'
+      'de' = 'DENIC'
+      'eu' = 'EURid'
+      'nl' = 'SIDN'
+      'fr' = 'AFNIC'
+      're' = 'AFNIC'
+      'pm' = 'AFNIC'
+      'tf' = 'AFNIC'
+      'wf' = 'AFNIC'
+      'yt' = 'AFNIC'
+      'au' = 'auDA'
+    }
+
+    if ($tldKey -and $noExpiryRegistries.ContainsKey($tldKey)) {
+      $expiryUnavailableReason = [pscustomobject]@{
+        tld      = $tldKey
+        registry = $noExpiryRegistries[$tldKey]
+        message  = "The .$tldKey registry ($($noExpiryRegistries[$tldKey])) does not publish domain expiry dates through public WHOIS or RDAP. This is a registry policy, not a lookup failure."
+      }
+    }
+  }
+
   # If we obtained a source (success from any provider), suppress earlier fallback errors to avoid misleading UI.
   if ($source) {
     $rdapError = $null
@@ -1900,6 +2015,24 @@ function Get-DomainRegistrationStatus {
   if ($whoisXmlError -and -not $whoisError) { $whoisError = $whoisXmlError }
   if ($rdapError -and -not $whoisError) { $whoisError = $rdapError }
 
+  # When no provider produced usable data, don't surface a registry refusal/rate-limit
+  # banner (e.g. SWITCH's "Requests of this client are not permitted" message) as if it
+  # were the registration record. The successful providers above have already harvested
+  # any structured fields they could, so the raw text is only useful when it actually
+  # contains data; otherwise replace it with a friendlier explanatory message.
+  if (-not $source -and -not [string]::IsNullOrWhiteSpace([string]$rawWhoisText)) {
+    $isBlockText = $false
+    if (Get-Command -Name Test-WhoisResponseIsRegistryBlock -ErrorAction SilentlyContinue) {
+      try { $isBlockText = Test-WhoisResponseIsRegistryBlock -Text $rawWhoisText } catch { $isBlockText = $false }
+    }
+    if ($isBlockText) {
+      $rawWhoisText = $null
+      if (-not $whoisError) {
+        $whoisError = "The registry for '$whoisDomain' refused our WHOIS query (rate limit or access policy). RDAP returned no data either; no further self-contained lookup options are available for this TLD."
+      }
+    }
+  }
+
   [pscustomobject]@{
     domain = $d
     lookupDomain = $whoisDomain
@@ -1915,6 +2048,7 @@ function Get-DomainRegistrationStatus {
     expiryDays = $expiryDays
     isExpired = $isExpired
     expiryHuman = $expiryHuman
+    expiryUnavailableReason = $expiryUnavailableReason
     newDomainThresholdDays = $NewDomainWarnThresholdDays
     newDomainWarnThresholdDays = $NewDomainWarnThresholdDays
     newDomainErrorThresholdDays = $NewDomainErrorThresholdDays
@@ -6571,6 +6705,7 @@ function Get-AcsDnsStatus {
         whoisExpiryDays    = $whois.expiryDays
         whoisIsExpired     = $whois.isExpired
         whoisExpiryHuman   = $whois.expiryHuman
+        whoisExpiryUnavailableReason = $whois.expiryUnavailableReason
         whoisNewDomainWarnThresholdDays = $whois.newDomainWarnThresholdDays
         whoisNewDomainErrorThresholdDays = $whois.newDomainErrorThresholdDays
         whoisError         = $whois.error
@@ -14801,6 +14936,7 @@ function hideTopBarItem(element) {
         lastResult.whoisExpiryDays = data.expiryDays;
         lastResult.whoisIsExpired = data.isExpired;
         lastResult.whoisExpiryHuman = data.expiryHuman;
+        lastResult.whoisExpiryUnavailableReason = data.expiryUnavailableReason || null;
         lastResult.whoisNewDomainThresholdDays = data.newDomainThresholdDays;
         lastResult.whoisNewDomainWarnThresholdDays = data.newDomainWarnThresholdDays;
         lastResult.whoisNewDomainErrorThresholdDays = data.newDomainErrorThresholdDays;
@@ -16568,6 +16704,14 @@ function render(r) {
     addWhoisRow(t('source'), r.whoisSource, { italic: true });
     addWhoisRow(t('creationDate'), r.whoisCreationDateUtc, { html: formatWhoisDateValueHtml(r.whoisCreationDateUtc) });
     addWhoisRow(t('registryExpiryDate'), r.whoisExpiryDateUtc, { html: formatWhoisDateValueHtml(r.whoisExpiryDateUtc) });
+    // When the registry deliberately does not publish expiry (e.g. SWITCH for
+    // .ch/.li, DENIC for .de, EURid for .eu), surface a short explanatory note
+    // so users do not interpret the missing date as a lookup failure.
+    if (!r.whoisExpiryDateUtc && r.whoisExpiryUnavailableReason && r.whoisExpiryUnavailableReason.message) {
+      const reason = r.whoisExpiryUnavailableReason;
+      const reasonHtml = `<div class="kv-value-secondary">${escapeHtml(reason.message)}</div>`;
+      addWhoisRow(t('registryExpiryDate'), reason.message, { html: reasonHtml, italic: true });
+    }
     addWhoisRow(t('registrarLabel'), r.whoisRegistrar);
     addWhoisRow(t('registrantLabel'), r.whoisRegistrant);
     if (r.whoisAgeHuman) {
@@ -16598,6 +16742,7 @@ function render(r) {
       r.whoisExpiryHuman ||
       (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) ||
       (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) ||
+      (r.whoisExpiryUnavailableReason && r.whoisExpiryUnavailableReason.message) ||
       isExpired ||
       isYoung ||
       isVeryYoung
@@ -18880,13 +19025,13 @@ $functionNames = @(
   'Get-HashedDomain',
   'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
+  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
   'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
-  'Get-RdapBootstrapData','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-DomainRegistrationStatus',
+  'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
   'Get-AcsDnsStatus'
