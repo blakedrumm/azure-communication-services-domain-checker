@@ -915,7 +915,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.50'
+$script:AppVersion = '2.0.57'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -2022,13 +2022,23 @@ function Get-DomainRegistrationStatus {
   # contains data; otherwise replace it with a friendlier explanatory message.
   if (-not $source -and -not [string]::IsNullOrWhiteSpace([string]$rawWhoisText)) {
     $isBlockText = $false
-    if (Get-Command -Name Test-WhoisResponseIsRegistryBlock -ErrorAction SilentlyContinue) {
-      try { $isBlockText = Test-WhoisResponseIsRegistryBlock -Text $rawWhoisText } catch { $isBlockText = $false }
-    }
+
+    # This helper is a required part of the registration-provider pipeline and is
+    # imported into the request runspaces. Call it directly so missing-function or
+    # runspace wiring problems fail loudly instead of silently disabling block detection.
+    $isBlockText = Test-WhoisResponseIsRegistryBlock -Text $rawWhoisText
     if ($isBlockText) {
       $rawWhoisText = $null
+
+      # If an earlier provider (for example RDAP) already populated $whoisError, keep that
+      # context but append the more actionable registry refusal/rate-limit explanation so
+      # callers understand why raw WHOIS data is unavailable.
+      $registryBlockError = "The registry for '$whoisDomain' refused our WHOIS query (rate limit or access policy). RDAP returned no data either; no further self-contained lookup options are available for this TLD."
       if (-not $whoisError) {
-        $whoisError = "The registry for '$whoisDomain' refused our WHOIS query (rate limit or access policy). RDAP returned no data either; no further self-contained lookup options are available for this TLD."
+        $whoisError = $registryBlockError
+      }
+      elseif ($whoisError -notlike "*$registryBlockError*") {
+        $whoisError = "$whoisError $registryBlockError"
       }
     }
   }
@@ -3040,7 +3050,10 @@ function Write-Json {
     # The script can run in 2 server modes:
     # - HttpListener: native `HttpListenerContext`/`HttpListenerResponse` objects
     # - TcpListener : a minimal compatibility layer that mimics a subset of those APIs
-    $json  = $Object | ConvertTo-Json -Depth 8
+    # Depth 16 is needed because nested SPF expansion analysis (Get-SpfNestedAnalysis)
+    # can produce trees deeper than the default ConvertTo-Json depth of 2 and the
+    # earlier conservative limit of 8 — anything deeper was silently truncated to null.
+    $json  = $Object | ConvertTo-Json -Depth 16
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
 
   Set-SecurityHeaders -Context $Context
@@ -4856,10 +4869,14 @@ function Get-SpfNestedAnalysis {
         $errors.Add($mxError)
       }
 
+      # PowerShell 7.6 regression: @($genericList[object]) throws
+      # "Argument types do not match". Use .ToArray() to materialize the
+      # List[object] into a plain object[] that the pscustomobject literal
+      # can safely embed.
       $mxTerms.Add([pscustomobject]@{
         target = $target
         status = $analysisStatus
-        resolvedHosts = @($resolvedHosts)
+        resolvedHosts = $resolvedHosts.ToArray()
         error = $mxError
       })
       continue
@@ -4898,15 +4915,23 @@ function Get-SpfNestedAnalysis {
     $warnings.Add("SPF record for $Domain includes mechanisms that require sender-specific context (for example macros, exists, or ptr). Full SPF evaluation requires message inputs such as sender IP, HELO, and MAIL FROM.")
   }
 
+  # PowerShell 7.6 introduced a regression where @($genericList[object])
+  # throws "Argument types do not match" (repro:
+  # @((New-Object System.Collections.Generic.List[object]))). That caused
+  # Get-SpfNestedAnalysis to silently return $null on every call, which in
+  # turn hid the SPF Expansion Records card in the UI. Using .ToArray() on
+  # each List[object] materializes a plain object[] that survives the
+  # pscustomobject literal on affected PowerShell versions. List[string]
+  # fields are unaffected so we leave them on the simpler @() form.
   [pscustomobject]@{
     domain = $Domain
     record = $SpfRecord
-    includes = @($includes)
+    includes = $includes.ToArray()
     redirect = $redirect
-    existsTerms = @($existsTerms)
-    aTerms = @($aTerms)
-    mxTerms = @($mxTerms)
-    ptrTerms = @($ptrTerms)
+    existsTerms = $existsTerms.ToArray()
+    aTerms = $aTerms.ToArray()
+    mxTerms = $mxTerms.ToArray()
+    ptrTerms = $ptrTerms.ToArray()
     macros = @($macros | Select-Object -Unique)
     lookupTerms = $lookupTerms
     nestedLookupTerms = $nestedLookupTerms
@@ -6747,7 +6772,7 @@ if (-not [string]::IsNullOrWhiteSpace($TestDomain)) {
     collectedAtUtc = ([DateTime]::UtcNow.ToString('o'))
     aggregate = $aggregate
     reputation = $reputation
-  } | ConvertTo-Json -Depth 8
+  } | ConvertTo-Json -Depth 16
   return
 }
 
@@ -7357,6 +7382,83 @@ button.primary:disabled {
 
 .mx-table tr:first-child td {
   border-top: none;
+}
+
+/* SPF Expansion Records table.
+   Extends .mx-table but switches cell font back to the main UI stack so that
+   enum-style cells (Depth / Mechanism / Parent / Target / Lookups) read cleanly,
+   while keeping the resolved TXT record cell in a monospace font for SPF
+   readability. The table uses auto layout so Parent and Target size to fit
+   the longest domain on a single line; long resolved TXT records are still
+   constrained via max-width so the record column wraps instead of pushing
+   the table to absurd widths. The card body wraps the table in an
+   overflow-x: auto container so very wide chains scroll horizontally on
+   narrow viewports. */
+.spf-expansion-table {
+  table-layout: auto;
+  font-family: inherit;
+  width: 100%;
+}
+.spf-expansion-table th,
+.spf-expansion-table td {
+  font-family: inherit;
+  vertical-align: top;
+  word-break: break-word;
+}
+.spf-expansion-table th {
+  /* Header labels are short enums (DEPTH / MECHANISM / LOOKUPS); keeping
+     them single-line avoids ugly mid-word wraps when uppercase styling is
+     applied by the parent .mx-table rules. */
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-depth {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-lookups {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-mechanism,
+.spf-expansion-table td.spf-col-parent,
+.spf-expansion-table td.spf-col-target {
+  /* Show the full domain on a single line. If the chain is wide enough to
+     exceed the card, the wrapping container scrolls horizontally rather
+     than truncating values. */
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-record {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  line-height: 1.45;
+  /* Give the record column a soft cap so it keeps wrapping instead of
+     stretching the table when other columns are narrow. min-width keeps
+     it usable even when the chain is short and there's plenty of room. */
+  min-width: 320px;
+  max-width: 640px;
+}
+.spf-expansion-table .spf-chain-arrow {
+  opacity: 0.55;
+  margin-right: 4px;
+}
+.spf-expansion-table .spf-parent-repeat {
+  opacity: 0.45;
+}
+.spf-expansion-table .spf-lookups-heavy {
+  background: rgba(217, 119, 6, 0.18);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-weight: 600;
+}
+/* Horizontally scrollable wrapper around the SPF expansion table. Lets very
+   wide chains scroll inside the card instead of breaking the page layout. */
+.spf-expansion-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .dns-records-toolbar {
@@ -8839,6 +8941,21 @@ const TRANSLATIONS = {
     acsEmailDomainVerification: 'ACS Email Domain Verification',
     acsEmailQuotaLimitIncrease: 'ACS Email Quota Limit Increase',
     spfRecordBasics: 'SPF Record Basics',
+    spfExpansionRecordsTitle: 'SPF Expansion Records',
+    spfExpansionEmpty: 'This SPF record has no include or redirect mechanisms to expand.',
+    spfExpansionDepth: 'Depth',
+    spfExpansionParent: 'Parent',
+    spfExpansionMechanism: 'Mechanism',
+    spfExpansionTarget: 'Target',
+    spfExpansionRecord: 'Resolved TXT record',
+    spfExpansionError: 'Error',
+    spfExpansionRowsCount: '{count} resolved record(s)',
+    spfExpansionLookups: 'Lookups',
+    spfExpansionLookupsHint: 'DNS-lookup-style terms found directly inside this row\u0027s resolved TXT record. Each include / redirect / a / mx / exists / ptr term counts against the SPF 10-lookup limit. The card summary above totals the entire expanded chain.',
+    spfExpansionLookupSummary: '{total} of 10 DNS lookups used in the expanded SPF chain \u2014 {status}.',
+    spfExpansionWithinLimit: 'within the SPF 10-lookup limit',
+    spfExpansionExceededLimit: 'exceeds the SPF 10-lookup limit',
+    spfExpansionParentRepeatHint: 'Same as the previous row\u0027s target (continued chain).',
     dmarcRecordBasics: 'DMARC Record Basics',
     dkimRecordBasics: 'DKIM Record Basics',
     mxRecordBasics: 'MX Record Basics',
@@ -15237,6 +15354,175 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
   </div>`;
 }
 
+// Walk the recursive spfAnalysis tree (server-built by Get-SpfNestedAnalysis) and
+// produce a flat array of rows describing every include / redirect target that was
+// resolved during expansion, including the resolved TXT record text and the parent
+// node that referenced it. Used to render the SPF Expansion Records table inside
+// its own sibling card so the main DNS records table can stay scoped to the
+// queried domain.
+function flattenSpfExpansion(analysis, parentDomain, depth, out) {
+  if (!analysis || !out) return;
+  // Helper: read a numeric field off a nested analysis node safely. The server
+  // emits lookupTerms (direct at that node) and totalLookupTerms (subtree sum).
+  const readInt = (obj, key) => {
+    if (!obj) return null;
+    const v = obj[key];
+    if (v === null || typeof v === 'undefined') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const includes = Array.isArray(analysis.includes) ? analysis.includes : [];
+  for (const inc of includes) {
+    if (!inc) continue;
+    // Each include mechanism costs 1 DNS lookup itself plus any lookup-style
+    // terms found inside the resolved record. We surface the subtree total so
+    // the UI can show the contribution of this branch against the 10-lookup
+    // limit.
+    const ownLookups = readInt(inc.analysis, 'lookupTerms');
+    const subtreeLookups = readInt(inc.analysis, 'totalLookupTerms');
+    out.push({
+      depth: depth,
+      parent: parentDomain || '',
+      mechanism: 'include',
+      target: String(inc.domain || ''),
+      record: inc.record ? String(inc.record) : '',
+      error: inc.error ? String(inc.error) : '',
+      ownLookups: ownLookups,
+      subtreeLookups: subtreeLookups
+    });
+    if (inc.analysis) {
+      flattenSpfExpansion(inc.analysis, String(inc.domain || ''), depth + 1, out);
+    }
+  }
+  const redirect = analysis.redirect;
+  if (redirect) {
+    const rOwnLookups = readInt(redirect.analysis, 'lookupTerms');
+    const rSubtreeLookups = readInt(redirect.analysis, 'totalLookupTerms');
+    out.push({
+      depth: depth,
+      parent: parentDomain || '',
+      mechanism: 'redirect',
+      target: String(redirect.domain || ''),
+      record: redirect.record ? String(redirect.record) : '',
+      error: redirect.error ? String(redirect.error) : '',
+      ownLookups: rOwnLookups,
+      subtreeLookups: rSubtreeLookups
+    });
+    if (redirect.analysis) {
+      flattenSpfExpansion(redirect.analysis, String(redirect.domain || ''), depth + 1, out);
+    }
+  }
+}
+
+// Build the inner HTML for the SPF Expansion Records card body. Returns either an
+// HTML <table> with one row per resolved include/redirect target, or a short
+// localized note explaining that the SPF record has no expansion to show.
+function buildSpfExpansionCardHtml(analysis, queriedDomain) {
+  const rows = [];
+  if (analysis) {
+    flattenSpfExpansion(analysis, String(queriedDomain || ''), 1, rows);
+  }
+
+  if (rows.length === 0) {
+    return `<div class="code">${escapeHtml(t('spfExpansionEmpty'))}</div>`;
+  }
+
+  // Pull the root SPF chain's total DNS-lookup count so we can tell the user
+  // at a glance whether the record stays within the SPF 10-lookup limit.
+  const rootTotalLookups = (analysis && analysis.totalLookupTerms !== null && typeof analysis.totalLookupTerms !== 'undefined' && Number.isFinite(Number(analysis.totalLookupTerms)))
+    ? Number(analysis.totalLookupTerms)
+    : null;
+  const exceededLimit = rootTotalLookups !== null && rootTotalLookups > 10;
+
+  // The table uses auto layout so Parent/Target columns expand to fit the
+  // longest domain on a single line. The Resolved TXT record column is
+  // constrained via CSS (.spf-col-record) so it wraps instead of dragging
+  // the table to ridiculous widths. A scroll wrapper around the table lets
+  // very wide SPF chains scroll horizontally on narrow viewports.
+  const header = `
+    <thead>
+      <tr>
+        <th style="text-align:center;">${escapeHtml(t('spfExpansionDepth'))}</th>
+        <th>${escapeHtml(t('spfExpansionMechanism'))}</th>
+        <th>${escapeHtml(t('spfExpansionParent'))}</th>
+        <th>${escapeHtml(t('spfExpansionTarget'))}</th>
+        <th style="text-align:right;" title="${escapeHtml(t('spfExpansionLookupsHint'))}">${escapeHtml(t('spfExpansionLookups'))}</th>
+        <th>${escapeHtml(t('spfExpansionRecord'))}</th>
+      </tr>
+    </thead>`;
+
+  // Track the previous row's target so nested rows can dim a repeated parent
+  // value (chain continuation) to reduce visual noise.
+  let previousTarget = '';
+  const body = rows.map((row) => {
+    const recordCellHtml = row.error
+      ? `<span style="color: var(--fail-fg, #d33);">${escapeHtml(row.error)}</span>`
+      : (row.record ? escapeHtml(row.record) : `<span style="opacity:0.6;">${escapeHtml(t('noRecordsAvailable'))}</span>`);
+
+    // Resolve the per-row lookup count for display. Prefer the OWN-node
+    // count (lookup-style terms found directly inside this node's resolved
+    // record) so the column reflects this row's real contribution to the
+    // 10-lookup budget. The subtree total is intentionally NOT used here
+    // because it double-counts as you walk up the chain (root subtree =
+    // sum of every descendant subtree). The card-level summary line still
+    // reports the chain-wide total, which is what users compare to 10.
+    let lookupsValue = null;
+    if (row.ownLookups !== null && typeof row.ownLookups !== 'undefined') {
+      lookupsValue = Number(row.ownLookups);
+    } else if (row.subtreeLookups !== null && typeof row.subtreeLookups !== 'undefined') {
+      lookupsValue = Number(row.subtreeLookups);
+    }
+    let lookupsCellHtml = '\u2014';
+    if (lookupsValue !== null && Number.isFinite(lookupsValue)) {
+      // Heavy-contributor flag: any single record introducing >=3 lookup
+      // terms by itself is worth highlighting since the SPF budget is only
+      // 10 across the whole chain.
+      const heavy = lookupsValue >= 3;
+      lookupsCellHtml = heavy
+        ? `<span class="spf-lookups-heavy">${escapeHtml(String(lookupsValue))}</span>`
+        : escapeHtml(String(lookupsValue));
+    }
+
+    // Depth indent: render an em-dash arrow per depth level so the hierarchy
+    // is visible in the Target column without requiring readers to reconcile
+    // Parent/Target manually.
+    const indentDepth = Math.max(0, Number(row.depth) - 1);
+    const indentHtml = indentDepth > 0
+      ? `<span class="spf-chain-arrow" aria-hidden="true">${'&nbsp;&nbsp;'.repeat(indentDepth - 1)}&#x21B3;</span>`
+      : '';
+
+    // Dim the Parent cell when it equals the target of the previous row, i.e.
+    // when this row is a direct child of the row immediately above it.
+    const parentText = escapeHtml(row.parent || '');
+    const parentRepeats = row.parent && previousTarget && row.parent === previousTarget;
+    const parentCellHtml = parentRepeats
+      ? `<span class="spf-parent-repeat" title="${escapeHtml(t('spfExpansionParentRepeatHint'))}">${parentText}</span>`
+      : parentText;
+
+    previousTarget = row.target || '';
+
+    return `
+      <tr>
+        <td class="spf-col-depth">${escapeHtml(String(row.depth))}</td>
+        <td class="spf-col-mechanism">${escapeHtml(row.mechanism)}</td>
+        <td class="spf-col-parent">${parentCellHtml}</td>
+        <td class="spf-col-target">${indentHtml}${escapeHtml(row.target)}</td>
+        <td class="spf-col-lookups">${lookupsCellHtml}</td>
+        <td class="spf-col-record">${recordCellHtml}</td>
+      </tr>`;
+  }).join('');
+
+  const rowsCountHtml = `<div style="font-size:12px; opacity:0.75;">${escapeHtml(t('spfExpansionRowsCount', { count: String(rows.length) }))}</div>`;
+  let limitSummaryHtml = '';
+  if (rootTotalLookups !== null) {
+    const statusText = exceededLimit ? t('spfExpansionExceededLimit') : t('spfExpansionWithinLimit');
+    const statusColor = exceededLimit ? 'var(--fail-fg, #d33)' : 'var(--pass-fg, #2a8f2a)';
+    limitSummaryHtml = `<div style="font-size:12px; margin-top:2px; color:${statusColor};">${escapeHtml(t('spfExpansionLookupSummary', { total: String(rootTotalLookups), status: statusText }))}</div>`;
+  }
+  const summary = `<div style="margin-bottom:6px;">${rowsCountHtml}${limitSummaryHtml}</div>`;
+  return `${summary}<div class="spf-expansion-scroll"><table class="mx-table spf-expansion-table">${header}<tbody>${body}</tbody></table></div>`;
+}
+
 // Toggle for MX additional details
 function toggleMxDetails(element) {
   const el = document.getElementById("mxDetails");
@@ -16710,7 +16996,9 @@ function render(r) {
     if (!r.whoisExpiryDateUtc && r.whoisExpiryUnavailableReason && r.whoisExpiryUnavailableReason.message) {
       const reason = r.whoisExpiryUnavailableReason;
       const reasonHtml = `<div class="kv-value-secondary">${escapeHtml(reason.message)}</div>`;
-      addWhoisRow(t('registryExpiryDate'), reason.message, { html: reasonHtml, italic: true });
+      // `addWhoisRow()` renders `html` values directly, so text-only style flags
+      // like `italic` would be ignored here and would only make the call misleading.
+      addWhoisRow(t('registryExpiryDate'), reason.message, { html: reasonHtml });
     }
     addWhoisRow(t('registrarLabel'), r.whoisRegistrar);
     addWhoisRow(t('registrantLabel'), r.whoisRegistrant);
@@ -17026,18 +17314,37 @@ function render(r) {
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n");
-  // The expanded SPF analysis is server-generated in English, and it is only meaningful once the
-  // base TXT payload has loaded, so only render it for English after the base check completes.
-  const spfExpandedSection = currentLanguage === 'en' && loaded.base && r.spfExpandedText
-    ? `\n\n--- ${t('spfRecordBasics')} ---\n${stripSpfRequirementSection(r.spfExpandedText)}`
-    : '';
+  // The SPF card body intentionally stops at the record value + ACS Outlook
+  // requirement verdict. The full expanded SPF chain (per-node domain,
+  // resolved TXT, and lookup-count contributions) is rendered as a
+  // structured table in the sibling SPF Expansion Records card below, so
+  // duplicating the same data here as an indented text dump just adds
+  // visual noise. (The server still emits r.spfExpandedText for raw API
+  // consumers.)
   cards.push(card(
     t('spfQueried'),
-    (spfCardValue || t('noRecordsAvailable')) + spfExpandedSection,
+    (spfCardValue || t('noRecordsAvailable')),
     basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : "FAIL")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
     "spf"
   ));
+
+  // Sibling card listing every include/redirect target the SPF expansion resolved,
+  // along with the actual TXT record returned for each. This keeps the main DNS
+  // records table scoped to the queried domain while still surfacing the resolved
+  // third-party SPF chain for troubleshooting.
+  if (loaded.base && r.spfAnalysis && (effectiveSpfPresent || r.spfPresent)) {
+    const spfExpansionBodyHtml = buildSpfExpansionCardHtml(r.spfAnalysis, r.domain);
+    cards.push(`
+  <div class="card" id="card-spfExpansion">
+    <div class="card-header" onclick="toggleCard(this)">
+      <span class="chevron">&#x25BC;</span>
+      <span class="tag tag-info">${escapeHtml(translateBadge('INFO'))}</span>
+      <strong>${escapeHtml(t('spfExpansionRecordsTitle'))}</strong>
+    </div>
+    <div class="card-content">${spfExpansionBodyHtml}</div>
+  </div>`);
+  }
 
   cards.push(card(
     t('acsDomainVerificationTxt'),
@@ -19027,7 +19334,7 @@ $functionNames = @(
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
-  'Get-SpfTokens','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
+  'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',

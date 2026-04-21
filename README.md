@@ -252,6 +252,8 @@ The tool performs the following DNS checks and generates actionable guidance str
 
 Mail provider detection recognizes Microsoft 365, Google Workspace, Zoho, Proofpoint, Mimecast, and Cloudflare Email Routing out of the box.
 
+A separate **SPF Expansion Records** card sits directly below the SPF card and lists every `include:` / `redirect=` target the recursive SPF resolver visited, the parent record that referenced it, and the actual TXT record returned by each lookup. This keeps the main DNS Records table scoped to the queried domain while still surfacing the third-party SPF chain (for example `_u.<domain>._spf.smart.ondmarc.com`, `spf.protection.outlook.com`, `_spf.google.com`) for troubleshooting. The expansion card also reports a per-row "Lookups" contribution and a chain-wide "N of 10 DNS lookups used" summary against the SPF 10-lookup limit (RFC 7208 §4.6.4). Because the structured table now owns the expansion view, the SPF card itself is intentionally kept lean: it shows just the queried-domain SPF record value and the ACS Outlook-include verdict, without duplicating the indented per-node text dump that older versions appended.
+
 ## 🛡️ DNSBL Reputation Checks
 
 The `/api/reputation` endpoint queries multiple DNS-based Block Lists (DNSBLs) to assess the sending reputation of IP addresses associated with a domain's MX records.
@@ -557,7 +559,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.0.44`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.0.52`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -580,8 +582,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.0.45
-git push origin v2.0.45
+git tag v2.0.52
+git push origin v2.0.52
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -592,7 +594,7 @@ git push origin v2.0.45
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.0.45`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.0.52`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -609,11 +611,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.0.44
+docker pull limitlessworlds/acs-domain-checker:2.0.52
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.0.44
-docker pull limitlessworlds/acs-domain-checker:windows-2.0.44
+docker pull limitlessworlds/acs-domain-checker:linux-2.0.52
+docker pull limitlessworlds/acs-domain-checker:windows-2.0.52
 ```
 
 ### 🛠️ Manual Build Script
@@ -628,7 +630,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.0.44
+./acs-domain-checker-dockerhub.ps1 -Version 2.0.52
 ```
 
 **📋 Requirements for manual script:**

@@ -22,7 +22,7 @@ if (-not [string]::IsNullOrWhiteSpace($TestDomain)) {
     collectedAtUtc = ([DateTime]::UtcNow.ToString('o'))
     aggregate = $aggregate
     reputation = $reputation
-  } | ConvertTo-Json -Depth 8
+  } | ConvertTo-Json -Depth 16
   return
 }
 

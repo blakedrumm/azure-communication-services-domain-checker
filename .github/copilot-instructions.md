@@ -65,7 +65,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.50`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.57`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics` |
 
@@ -183,7 +183,7 @@ These PowerShell functions are defined in one file but called from multiple othe
 5. **The JavaScript `render()` function** is in `20d-HtmlJsCore.ps1` — this is the main function that builds the results UI after a domain lookup.
 6. **API endpoint routing** is in `23-RequestHandler.ps1` — look here to understand which URL path maps to which handler.
 7. **DNS check logic** for each record type is in `16-DnsChecks.ps1`.
-8. **SPF analysis** (recursive expansion, guidance) is in `14-SpfAnalysis.ps1`.
+8. **SPF analysis** (recursive expansion, guidance) is in `14-SpfAnalysis.ps1`. The SPF card in the UI is accompanied by a dedicated "SPF Expansion Records" card (rendered by `buildSpfExpansionCardHtml` in `20d-HtmlJsCore.ps1`) that flattens every resolved include/redirect target, its contributed DNS-lookup count, and the running total against the SPF 10-lookup limit. Keep those columns (Depth, Mechanism, Parent, Target, Lookups, Resolved TXT record) and the lookup-limit summary in sync when changing SPF expansion data shape.
 9. **If you add a new PowerShell function that can be called during HTTP request handling**, also add it to the `$functionNames` list in `22-RunspaceSetup.ps1` so it is imported into the runspace pool.
 10. If substantial changes are done, increment the version number. For example, if it was version 1.0.1, increment to 1.0.2. If the changes are breaking, increment to 1.1.0, and if it's a major change, increment to 2.0.0. This is important for metrics and for users to understand the level of change in each release. When the version is updated, also update the version shown in GitHub workflows and in `README.md`, and keep Copilot instructions in sync.
 11. If there are any substantial changes to the application, please update this document to reflect the new structure or logic! This is meant to be a living document that evolves with the codebase. With it being so large, it needs a guide to navigate effectively.

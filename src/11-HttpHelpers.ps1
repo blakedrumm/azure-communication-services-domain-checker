@@ -54,7 +54,10 @@ function Write-Json {
     # The script can run in 2 server modes:
     # - HttpListener: native `HttpListenerContext`/`HttpListenerResponse` objects
     # - TcpListener : a minimal compatibility layer that mimics a subset of those APIs
-    $json  = $Object | ConvertTo-Json -Depth 8
+    # Depth 16 is needed because nested SPF expansion analysis (Get-SpfNestedAnalysis)
+    # can produce trees deeper than the default ConvertTo-Json depth of 2 and the
+    # earlier conservative limit of 8 — anything deeper was silently truncated to null.
+    $json  = $Object | ConvertTo-Json -Depth 16
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
 
   Set-SecurityHeaders -Context $Context

@@ -576,10 +576,14 @@ function Get-SpfNestedAnalysis {
         $errors.Add($mxError)
       }
 
+      # PowerShell 7.6 regression: @($genericList[object]) throws
+      # "Argument types do not match". Use .ToArray() to materialize the
+      # List[object] into a plain object[] that the pscustomobject literal
+      # can safely embed.
       $mxTerms.Add([pscustomobject]@{
         target = $target
         status = $analysisStatus
-        resolvedHosts = @($resolvedHosts)
+        resolvedHosts = $resolvedHosts.ToArray()
         error = $mxError
       })
       continue
@@ -618,15 +622,23 @@ function Get-SpfNestedAnalysis {
     $warnings.Add("SPF record for $Domain includes mechanisms that require sender-specific context (for example macros, exists, or ptr). Full SPF evaluation requires message inputs such as sender IP, HELO, and MAIL FROM.")
   }
 
+  # PowerShell 7.6 introduced a regression where @($genericList[object])
+  # throws "Argument types do not match" (repro:
+  # @((New-Object System.Collections.Generic.List[object]))). That caused
+  # Get-SpfNestedAnalysis to silently return $null on every call, which in
+  # turn hid the SPF Expansion Records card in the UI. Using .ToArray() on
+  # each List[object] materializes a plain object[] that survives the
+  # pscustomobject literal on affected PowerShell versions. List[string]
+  # fields are unaffected so we leave them on the simpler @() form.
   [pscustomobject]@{
     domain = $Domain
     record = $SpfRecord
-    includes = @($includes)
+    includes = $includes.ToArray()
     redirect = $redirect
-    existsTerms = @($existsTerms)
-    aTerms = @($aTerms)
-    mxTerms = @($mxTerms)
-    ptrTerms = @($ptrTerms)
+    existsTerms = $existsTerms.ToArray()
+    aTerms = $aTerms.ToArray()
+    mxTerms = $mxTerms.ToArray()
+    ptrTerms = $ptrTerms.ToArray()
     macros = @($macros | Select-Object -Unique)
     lookupTerms = $lookupTerms
     nestedLookupTerms = $nestedLookupTerms

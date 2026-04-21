@@ -457,6 +457,175 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
   </div>`;
 }
 
+// Walk the recursive spfAnalysis tree (server-built by Get-SpfNestedAnalysis) and
+// produce a flat array of rows describing every include / redirect target that was
+// resolved during expansion, including the resolved TXT record text and the parent
+// node that referenced it. Used to render the SPF Expansion Records table inside
+// its own sibling card so the main DNS records table can stay scoped to the
+// queried domain.
+function flattenSpfExpansion(analysis, parentDomain, depth, out) {
+  if (!analysis || !out) return;
+  // Helper: read a numeric field off a nested analysis node safely. The server
+  // emits lookupTerms (direct at that node) and totalLookupTerms (subtree sum).
+  const readInt = (obj, key) => {
+    if (!obj) return null;
+    const v = obj[key];
+    if (v === null || typeof v === 'undefined') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const includes = Array.isArray(analysis.includes) ? analysis.includes : [];
+  for (const inc of includes) {
+    if (!inc) continue;
+    // Each include mechanism costs 1 DNS lookup itself plus any lookup-style
+    // terms found inside the resolved record. We surface the subtree total so
+    // the UI can show the contribution of this branch against the 10-lookup
+    // limit.
+    const ownLookups = readInt(inc.analysis, 'lookupTerms');
+    const subtreeLookups = readInt(inc.analysis, 'totalLookupTerms');
+    out.push({
+      depth: depth,
+      parent: parentDomain || '',
+      mechanism: 'include',
+      target: String(inc.domain || ''),
+      record: inc.record ? String(inc.record) : '',
+      error: inc.error ? String(inc.error) : '',
+      ownLookups: ownLookups,
+      subtreeLookups: subtreeLookups
+    });
+    if (inc.analysis) {
+      flattenSpfExpansion(inc.analysis, String(inc.domain || ''), depth + 1, out);
+    }
+  }
+  const redirect = analysis.redirect;
+  if (redirect) {
+    const rOwnLookups = readInt(redirect.analysis, 'lookupTerms');
+    const rSubtreeLookups = readInt(redirect.analysis, 'totalLookupTerms');
+    out.push({
+      depth: depth,
+      parent: parentDomain || '',
+      mechanism: 'redirect',
+      target: String(redirect.domain || ''),
+      record: redirect.record ? String(redirect.record) : '',
+      error: redirect.error ? String(redirect.error) : '',
+      ownLookups: rOwnLookups,
+      subtreeLookups: rSubtreeLookups
+    });
+    if (redirect.analysis) {
+      flattenSpfExpansion(redirect.analysis, String(redirect.domain || ''), depth + 1, out);
+    }
+  }
+}
+
+// Build the inner HTML for the SPF Expansion Records card body. Returns either an
+// HTML <table> with one row per resolved include/redirect target, or a short
+// localized note explaining that the SPF record has no expansion to show.
+function buildSpfExpansionCardHtml(analysis, queriedDomain) {
+  const rows = [];
+  if (analysis) {
+    flattenSpfExpansion(analysis, String(queriedDomain || ''), 1, rows);
+  }
+
+  if (rows.length === 0) {
+    return `<div class="code">${escapeHtml(t('spfExpansionEmpty'))}</div>`;
+  }
+
+  // Pull the root SPF chain's total DNS-lookup count so we can tell the user
+  // at a glance whether the record stays within the SPF 10-lookup limit.
+  const rootTotalLookups = (analysis && analysis.totalLookupTerms !== null && typeof analysis.totalLookupTerms !== 'undefined' && Number.isFinite(Number(analysis.totalLookupTerms)))
+    ? Number(analysis.totalLookupTerms)
+    : null;
+  const exceededLimit = rootTotalLookups !== null && rootTotalLookups > 10;
+
+  // The table uses auto layout so Parent/Target columns expand to fit the
+  // longest domain on a single line. The Resolved TXT record column is
+  // constrained via CSS (.spf-col-record) so it wraps instead of dragging
+  // the table to ridiculous widths. A scroll wrapper around the table lets
+  // very wide SPF chains scroll horizontally on narrow viewports.
+  const header = `
+    <thead>
+      <tr>
+        <th style="text-align:center;">${escapeHtml(t('spfExpansionDepth'))}</th>
+        <th>${escapeHtml(t('spfExpansionMechanism'))}</th>
+        <th>${escapeHtml(t('spfExpansionParent'))}</th>
+        <th>${escapeHtml(t('spfExpansionTarget'))}</th>
+        <th style="text-align:right;" title="${escapeHtml(t('spfExpansionLookupsHint'))}">${escapeHtml(t('spfExpansionLookups'))}</th>
+        <th>${escapeHtml(t('spfExpansionRecord'))}</th>
+      </tr>
+    </thead>`;
+
+  // Track the previous row's target so nested rows can dim a repeated parent
+  // value (chain continuation) to reduce visual noise.
+  let previousTarget = '';
+  const body = rows.map((row) => {
+    const recordCellHtml = row.error
+      ? `<span style="color: var(--fail-fg, #d33);">${escapeHtml(row.error)}</span>`
+      : (row.record ? escapeHtml(row.record) : `<span style="opacity:0.6;">${escapeHtml(t('noRecordsAvailable'))}</span>`);
+
+    // Resolve the per-row lookup count for display. Prefer the OWN-node
+    // count (lookup-style terms found directly inside this node's resolved
+    // record) so the column reflects this row's real contribution to the
+    // 10-lookup budget. The subtree total is intentionally NOT used here
+    // because it double-counts as you walk up the chain (root subtree =
+    // sum of every descendant subtree). The card-level summary line still
+    // reports the chain-wide total, which is what users compare to 10.
+    let lookupsValue = null;
+    if (row.ownLookups !== null && typeof row.ownLookups !== 'undefined') {
+      lookupsValue = Number(row.ownLookups);
+    } else if (row.subtreeLookups !== null && typeof row.subtreeLookups !== 'undefined') {
+      lookupsValue = Number(row.subtreeLookups);
+    }
+    let lookupsCellHtml = '\u2014';
+    if (lookupsValue !== null && Number.isFinite(lookupsValue)) {
+      // Heavy-contributor flag: any single record introducing >=3 lookup
+      // terms by itself is worth highlighting since the SPF budget is only
+      // 10 across the whole chain.
+      const heavy = lookupsValue >= 3;
+      lookupsCellHtml = heavy
+        ? `<span class="spf-lookups-heavy">${escapeHtml(String(lookupsValue))}</span>`
+        : escapeHtml(String(lookupsValue));
+    }
+
+    // Depth indent: render an em-dash arrow per depth level so the hierarchy
+    // is visible in the Target column without requiring readers to reconcile
+    // Parent/Target manually.
+    const indentDepth = Math.max(0, Number(row.depth) - 1);
+    const indentHtml = indentDepth > 0
+      ? `<span class="spf-chain-arrow" aria-hidden="true">${'&nbsp;&nbsp;'.repeat(indentDepth - 1)}&#x21B3;</span>`
+      : '';
+
+    // Dim the Parent cell when it equals the target of the previous row, i.e.
+    // when this row is a direct child of the row immediately above it.
+    const parentText = escapeHtml(row.parent || '');
+    const parentRepeats = row.parent && previousTarget && row.parent === previousTarget;
+    const parentCellHtml = parentRepeats
+      ? `<span class="spf-parent-repeat" title="${escapeHtml(t('spfExpansionParentRepeatHint'))}">${parentText}</span>`
+      : parentText;
+
+    previousTarget = row.target || '';
+
+    return `
+      <tr>
+        <td class="spf-col-depth">${escapeHtml(String(row.depth))}</td>
+        <td class="spf-col-mechanism">${escapeHtml(row.mechanism)}</td>
+        <td class="spf-col-parent">${parentCellHtml}</td>
+        <td class="spf-col-target">${indentHtml}${escapeHtml(row.target)}</td>
+        <td class="spf-col-lookups">${lookupsCellHtml}</td>
+        <td class="spf-col-record">${recordCellHtml}</td>
+      </tr>`;
+  }).join('');
+
+  const rowsCountHtml = `<div style="font-size:12px; opacity:0.75;">${escapeHtml(t('spfExpansionRowsCount', { count: String(rows.length) }))}</div>`;
+  let limitSummaryHtml = '';
+  if (rootTotalLookups !== null) {
+    const statusText = exceededLimit ? t('spfExpansionExceededLimit') : t('spfExpansionWithinLimit');
+    const statusColor = exceededLimit ? 'var(--fail-fg, #d33)' : 'var(--pass-fg, #2a8f2a)';
+    limitSummaryHtml = `<div style="font-size:12px; margin-top:2px; color:${statusColor};">${escapeHtml(t('spfExpansionLookupSummary', { total: String(rootTotalLookups), status: statusText }))}</div>`;
+  }
+  const summary = `<div style="margin-bottom:6px;">${rowsCountHtml}${limitSummaryHtml}</div>`;
+  return `${summary}<div class="spf-expansion-scroll"><table class="mx-table spf-expansion-table">${header}<tbody>${body}</tbody></table></div>`;
+}
+
 // Toggle for MX additional details
 function toggleMxDetails(element) {
   const el = document.getElementById("mxDetails");
@@ -2248,18 +2417,37 @@ function render(r) {
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n");
-  // The expanded SPF analysis is server-generated in English, and it is only meaningful once the
-  // base TXT payload has loaded, so only render it for English after the base check completes.
-  const spfExpandedSection = currentLanguage === 'en' && loaded.base && r.spfExpandedText
-    ? `\n\n--- ${t('spfRecordBasics')} ---\n${stripSpfRequirementSection(r.spfExpandedText)}`
-    : '';
+  // The SPF card body intentionally stops at the record value + ACS Outlook
+  // requirement verdict. The full expanded SPF chain (per-node domain,
+  // resolved TXT, and lookup-count contributions) is rendered as a
+  // structured table in the sibling SPF Expansion Records card below, so
+  // duplicating the same data here as an indented text dump just adds
+  // visual noise. (The server still emits r.spfExpandedText for raw API
+  // consumers.)
   cards.push(card(
     t('spfQueried'),
-    (spfCardValue || t('noRecordsAvailable')) + spfExpandedSection,
+    (spfCardValue || t('noRecordsAvailable')),
     basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : "FAIL")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
     "spf"
   ));
+
+  // Sibling card listing every include/redirect target the SPF expansion resolved,
+  // along with the actual TXT record returned for each. This keeps the main DNS
+  // records table scoped to the queried domain while still surfacing the resolved
+  // third-party SPF chain for troubleshooting.
+  if (loaded.base && r.spfAnalysis && (effectiveSpfPresent || r.spfPresent)) {
+    const spfExpansionBodyHtml = buildSpfExpansionCardHtml(r.spfAnalysis, r.domain);
+    cards.push(`
+  <div class="card" id="card-spfExpansion">
+    <div class="card-header" onclick="toggleCard(this)">
+      <span class="chevron">&#x25BC;</span>
+      <span class="tag tag-info">${escapeHtml(translateBadge('INFO'))}</span>
+      <strong>${escapeHtml(t('spfExpansionRecordsTitle'))}</strong>
+    </div>
+    <div class="card-content">${spfExpansionBodyHtml}</div>
+  </div>`);
+  }
 
   cards.push(card(
     t('acsDomainVerificationTxt'),

@@ -606,6 +606,83 @@ button.primary:disabled {
   border-top: none;
 }
 
+/* SPF Expansion Records table.
+   Extends .mx-table but switches cell font back to the main UI stack so that
+   enum-style cells (Depth / Mechanism / Parent / Target / Lookups) read cleanly,
+   while keeping the resolved TXT record cell in a monospace font for SPF
+   readability. The table uses auto layout so Parent and Target size to fit
+   the longest domain on a single line; long resolved TXT records are still
+   constrained via max-width so the record column wraps instead of pushing
+   the table to absurd widths. The card body wraps the table in an
+   overflow-x: auto container so very wide chains scroll horizontally on
+   narrow viewports. */
+.spf-expansion-table {
+  table-layout: auto;
+  font-family: inherit;
+  width: 100%;
+}
+.spf-expansion-table th,
+.spf-expansion-table td {
+  font-family: inherit;
+  vertical-align: top;
+  word-break: break-word;
+}
+.spf-expansion-table th {
+  /* Header labels are short enums (DEPTH / MECHANISM / LOOKUPS); keeping
+     them single-line avoids ugly mid-word wraps when uppercase styling is
+     applied by the parent .mx-table rules. */
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-depth {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-lookups {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-mechanism,
+.spf-expansion-table td.spf-col-parent,
+.spf-expansion-table td.spf-col-target {
+  /* Show the full domain on a single line. If the chain is wide enough to
+     exceed the card, the wrapping container scrolls horizontally rather
+     than truncating values. */
+  white-space: nowrap;
+}
+.spf-expansion-table td.spf-col-record {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  line-height: 1.45;
+  /* Give the record column a soft cap so it keeps wrapping instead of
+     stretching the table when other columns are narrow. min-width keeps
+     it usable even when the chain is short and there's plenty of room. */
+  min-width: 320px;
+  max-width: 640px;
+}
+.spf-expansion-table .spf-chain-arrow {
+  opacity: 0.55;
+  margin-right: 4px;
+}
+.spf-expansion-table .spf-parent-repeat {
+  opacity: 0.45;
+}
+.spf-expansion-table .spf-lookups-heavy {
+  background: rgba(217, 119, 6, 0.18);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-weight: 600;
+}
+/* Horizontally scrollable wrapper around the SPF expansion table. Lets very
+   wide chains scroll inside the card instead of breaking the page layout. */
+.spf-expansion-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .dns-records-toolbar {
   /* Explicit grid: labels on row 1, controls on row 2, chips on row 3.
      This avoids nested grids so labels and controls always align. */
