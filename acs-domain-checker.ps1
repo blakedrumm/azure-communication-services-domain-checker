@@ -915,7 +915,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.57'
+$script:AppVersion = '2.0.68'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -3210,11 +3210,50 @@ function Resolve-DohName {
         $data = [string]$a.data
         if ([string]::IsNullOrWhiteSpace($data)) { continue }
         $data = $data.Trim()
-        if ($data.StartsWith('"') -and $data.EndsWith('"') -and $data.Length -ge 2) {
-          $data = $data.Substring(1, $data.Length - 2)
+
+        # A DNS TXT RDATA can hold multiple <character-string>s (RFC 1035 §3.3.14),
+        # each up to 255 octets. Cloudflare DoH returns them in presentation form as a
+        # space-separated sequence of double-quoted strings, e.g. `"foo" "bar"`.
+        # Per RFC 7208 §3.3, SPF parsers MUST concatenate those strings together with
+        # NO separator. Naively stripping only the outer quotes would leave the inner
+        # `" "` literal embedded in the record (e.g.
+        # `include:spf.protection." "outlook.com -all`), which breaks SPF tokenization.
+        # Walk the data string and emit each character-string as a separate element of
+        # `Strings`, mirroring the shape produced by Resolve-DnsName so downstream code
+        # can rely on `($record.Strings -join '')` to reconstruct the canonical TXT value.
+        $strings = New-Object System.Collections.Generic.List[string]
+        $index = 0
+        $length = $data.Length
+        while ($index -lt $length) {
+          # Skip inter-string whitespace.
+          while ($index -lt $length -and [char]::IsWhiteSpace($data[$index])) { $index++ }
+          if ($index -ge $length) { break }
+
+          if ($data[$index] -ne '"') {
+            # Defensive: if the payload isn't quoted (non-conforming server), take the
+            # remainder as a single character-string and stop.
+            $strings.Add($data.Substring($index))
+            break
+          }
+
+          # Consume one quoted character-string, honoring backslash escapes for `\\` and `\"`.
+          $index++  # opening quote
+          $builder = New-Object System.Text.StringBuilder
+          while ($index -lt $length -and $data[$index] -ne '"') {
+            if ($data[$index] -eq '\' -and ($index + 1) -lt $length) {
+              [void]$builder.Append($data[$index + 1])
+              $index += 2
+              continue
+            }
+            [void]$builder.Append($data[$index])
+            $index++
+          }
+          if ($index -lt $length -and $data[$index] -eq '"') { $index++ }  # closing quote
+          $strings.Add($builder.ToString())
         }
-        $data = $data -replace '\\"','"'
-        [pscustomobject]@{ Strings = @($data) }
+
+        if ($strings.Count -eq 0) { continue }
+        [pscustomobject]@{ Strings = $strings.ToArray() }
       }
     }
     'MX' {
@@ -4180,6 +4219,75 @@ function Get-DnsRecordsStatus {
       catch {
         $errors.Add($_.Exception.Message)
       }
+    }
+  }
+
+  # Related-name supplements: query well-known ACS-related subdomains so they
+  # show up in the DNS records grid alongside the apex records. The dedupe step
+  # below collapses duplicates if any of these were already discovered through
+  # other code paths. Each entry asks for the record types most likely to exist
+  # at that name so the grid reflects the actual published chain (e.g., a
+  # selector CNAME plus the resolved TXT public key on the ACS side).
+  #
+  # The DKIM selector list mirrors `Invoke-DkimFallbackSelectorProbe` in
+  # `Get-DnsDkimStatus` so any selector the DKIM card surfaces also appears in
+  # the records table. Selectors that are not published return NXDOMAIN
+  # quickly and are filtered out by `Resolve-DnsRecordsDetailed`, so the cost
+  # of probing them is negligible.
+  $relatedTargets = @(
+    [pscustomobject]@{ Name = "selector1-azurecomm-prod-net._domainkey.$Domain"; Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "selector2-azurecomm-prod-net._domainkey.$Domain"; Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "selector1._domainkey.$Domain";                    Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "selector2._domainkey.$Domain";                    Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "s1._domainkey.$Domain";                           Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "s2._domainkey.$Domain";                           Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "default._domainkey.$Domain";                      Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "google._domainkey.$Domain";                       Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "k1._domainkey.$Domain";                           Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "mail._domainkey.$Domain";                         Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "dkim._domainkey.$Domain";                         Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "_dmarc.$Domain";                                  Types = @('TXT') },
+    [pscustomobject]@{ Name = "www.$Domain";                                     Types = @('CNAME', 'A', 'AAAA') }
+  )
+  foreach ($target in $relatedTargets) {
+    try {
+      foreach ($row in @(Resolve-DnsRecordsDetailed -Name $target.Name -Types $target.Types)) {
+        if ($row) { $records.Add($row) }
+      }
+    }
+    catch {
+      $errors.Add($_.Exception.Message)
+    }
+  }
+
+  # CNAME-target follow-up: when a related-name probe returns a CNAME row,
+  # explicitly query the CNAME's target hostname for TXT records (and CNAME,
+  # in case of a multi-hop chain). `Resolve-DnsName -Type TXT` follows CNAME
+  # chains inconsistently across resolvers/runs -- sometimes it emits the
+  # target's TXT and sometimes it does not -- which previously produced
+  # asymmetric output (e.g., DKIM TXT shown for selector1 but not selector2).
+  # Probing the targets explicitly makes the records grid deterministic and
+  # symmetric for all CNAME-fronted records (DKIM selectors, www aliases,
+  # etc.). Each target is probed once even if multiple parents point at it.
+  $cnameFollowupTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  # PowerShell 7.6 regression: wrapping a List[object] with @(...) (e.g.,
+  # @($records)) throws "Argument types do not match". Materialize the list
+  # via .ToArray() before iterating so this loop survives on PS 7.6+.
+  foreach ($record in $records.ToArray()) {
+    if (-not $record) { continue }
+    if ([string]$record.type -ne 'CNAME') { continue }
+    $cnameTarget = ([string]$record.data).Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($cnameTarget)) { continue }
+    [void]$cnameFollowupTargets.Add($cnameTarget)
+  }
+  foreach ($cnameTarget in $cnameFollowupTargets) {
+    try {
+      foreach ($row in @(Resolve-DnsRecordsDetailed -Name $cnameTarget -Types @('CNAME', 'TXT'))) {
+        if ($row) { $records.Add($row) }
+      }
+    }
+    catch {
+      $errors.Add($_.Exception.Message)
     }
   }
 
@@ -6049,22 +6157,187 @@ function Get-DnsDmarcStatus {
 # Check for the two ACS-specific DKIM selector CNAME/TXT records:
 #   selector1-azurecomm-prod-net._domainkey.<domain>
 #   selector2-azurecomm-prod-net._domainkey.<domain>
+#
+# ACS publishes DKIM keys via Azure-managed selector hostnames at azurecomm.net.
+# The customer-side DNS only needs a CNAME pointing at the ACS-managed target;
+# the actual public key (TXT) lives on Microsoft's side. So the deterministic
+# "ACS configured" check is whether the customer's CNAME points at the expected
+# ACS selector hostname. We also capture the resolved TXT public-key value (the
+# CNAME chain is followed by both Resolve-DnsName and DoH) so the UI can show
+# the full picture.
+#
+# When the ACS-specific selector is not published, we additionally probe a
+# small set of well-known fallback DKIM selectors (Microsoft 365's bare
+# `selector1._domainkey`, plus a few common ones) so the card body can still
+# show the operator what DKIM IS configured for the domain. The pass/fail tag
+# in the UI is always evaluated against the strict ACS expectation.
 function Get-DnsDkimStatus {
   param([string]$Domain)
 
-  # ACS guidance expects these two DKIM selector TXT records.
+  # Lookup helper: resolves the CNAME target (if any) and the TXT value (which
+  # follows the CNAME chain), then compares the CNAME target against the
+  # expected ACS-managed selector hostname.
+  function Invoke-AcsDkimSelectorLookup {
+    param(
+      [string]$LookupName,
+      [string]$ExpectedCnameTarget
+    )
 
-  $dkim1 = $null
-  if ($d1 = ResolveSafely "selector1-azurecomm-prod-net._domainkey.$Domain" "TXT") {
-    $dkim1 = (($d1.Strings -join "") -replace '\s+', '').Trim()
+    $cnameTarget = Get-CnameTargetFromRecords (ResolveSafely $LookupName 'CNAME')
+    if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
+
+    $txtValue = $null
+    if ($txtRecords = ResolveSafely $LookupName 'TXT') {
+      $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
+      if ($joined) { $txtValue = $joined }
+    }
+
+    # Case-insensitive compare; both sides are normalized to no trailing dot.
+    $expected = $ExpectedCnameTarget.Trim().TrimEnd('.')
+    $acsConfigured = $false
+    if ($cnameTarget) {
+      $acsConfigured = [string]::Equals($cnameTarget, $expected, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    # Build a single human-readable display value combining both legs of the
+    # chain. This is what gets surfaced in the legacy `dkim1`/`dkim2` fields so
+    # existing UI/test-summary truthy checks still mean "something is published".
+    $displayParts = New-Object System.Collections.Generic.List[string]
+    if ($cnameTarget) { $displayParts.Add("CNAME -> $cnameTarget") }
+    if ($txtValue)    { $displayParts.Add("TXT: $txtValue") }
+    $display = if ($displayParts.Count -gt 0) { ($displayParts -join "`n") } else { $null }
+
+    [pscustomobject]@{
+      Display       = $display
+      CnameTarget   = $cnameTarget
+      TxtValue      = $txtValue
+      Expected      = $expected
+      AcsConfigured = $acsConfigured
+    }
   }
 
-  $dkim2 = $null
-  if ($d2 = ResolveSafely "selector2-azurecomm-prod-net._domainkey.$Domain" "TXT") {
-    $dkim2 = (($d2.Strings -join "") -replace '\s+', '').Trim()
+  # Fallback probe: when no ACS record exists at the expected selector, scan a
+  # small set of well-known DKIM selector names so the card can still show the
+  # operator what is configured. Returns a multi-line display string of every
+  # selector name with a CNAME or TXT plus a list of structured rows.
+  function Invoke-DkimFallbackSelectorProbe {
+    param(
+      [string]$Domain,
+      [int]$IndexHint
+    )
+
+    # Selector ordering matters: more specific / index-aligned names come first
+    # so e.g. `selector1._domainkey` is preferred for the DKIM1 card.
+    $hint = if ($IndexHint -eq 1 -or $IndexHint -eq 2) { $IndexHint } else { 1 }
+    $selectors = @(
+      "selector$hint",
+      "s$hint",
+      'default',
+      'google',
+      'k1',
+      'mail',
+      'dkim'
+    ) | Select-Object -Unique
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($selector in $selectors) {
+      $name = "$selector._domainkey.$Domain"
+
+      $cnameTarget = Get-CnameTargetFromRecords (ResolveSafely $name 'CNAME')
+      if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
+
+      $txtValue = $null
+      if ($txtRecords = ResolveSafely $name 'TXT') {
+        $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
+        if ($joined) { $txtValue = $joined }
+      }
+
+      if (-not $cnameTarget -and -not $txtValue) { continue }
+
+      $rows.Add([pscustomobject]@{
+        Name        = $name
+        Selector    = $selector
+        CnameTarget = $cnameTarget
+        TxtValue    = $txtValue
+      })
+    }
+
+    if ($rows.Count -eq 0) { return $null }
+
+    # Compose a friendly multi-line display, e.g.:
+    #   selector1._domainkey.example.com
+    #     CNAME -> selector1-example-com._domainkey.example.onmicrosoft.com
+    #     TXT: v=DKIM1;k=rsa;p=...
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($row in $rows) {
+      $lines.Add($row.Name)
+      if ($row.CnameTarget) { $lines.Add("  CNAME -> $($row.CnameTarget)") }
+      if ($row.TxtValue)    { $lines.Add("  TXT: $($row.TxtValue)") }
+    }
+
+    [pscustomobject]@{
+      Display = ($lines -join "`n")
+      Rows    = $rows.ToArray()
+    }
   }
 
-  [pscustomobject]@{ domain = $Domain; dkim1 = $dkim1; dkim2 = $dkim2 }
+  $dkim1Result = Invoke-AcsDkimSelectorLookup -LookupName "selector1-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector1-azurecomm-prod-net._domainkey.azurecomm.net'
+  $dkim2Result = Invoke-AcsDkimSelectorLookup -LookupName "selector2-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector2-azurecomm-prod-net._domainkey.azurecomm.net'
+
+  # If either ACS slot is empty, run the fallback probe so the card body can
+  # show whatever DKIM is actually published. The ACS-specific PASS/FAIL flag
+  # remains strict -- finding a non-ACS selector does not satisfy ACS DKIM.
+  $dkim1FallbackDisplay = $null
+  $dkim1FallbackRows    = @()
+  if (-not $dkim1Result.Display) {
+    $fb = Invoke-DkimFallbackSelectorProbe -Domain $Domain -IndexHint 1
+    if ($fb) {
+      $dkim1FallbackDisplay = $fb.Display
+      $dkim1FallbackRows    = $fb.Rows
+    }
+  }
+
+  $dkim2FallbackDisplay = $null
+  $dkim2FallbackRows    = @()
+  if (-not $dkim2Result.Display) {
+    $fb = Invoke-DkimFallbackSelectorProbe -Domain $Domain -IndexHint 2
+    if ($fb) {
+      $dkim2FallbackDisplay = $fb.Display
+      $dkim2FallbackRows    = $fb.Rows
+    }
+  }
+
+  # Compose the final display value for the legacy `dkim1`/`dkim2` fields. We
+  # keep the body to JUST the published record(s) -- no prose preface -- so the
+  # card shows clean DNS data. The UI is responsible for surfacing the
+  # "ACS selector not published" notice as a separate styled callout when the
+  # strict ACS PASS/FAIL flag indicates the alternate selector data is what is
+  # actually being shown.
+  $dkim1Display = $dkim1Result.Display
+  if (-not $dkim1Display -and $dkim1FallbackDisplay) {
+    $dkim1Display = $dkim1FallbackDisplay
+  }
+
+  $dkim2Display = $dkim2Result.Display
+  if (-not $dkim2Display -and $dkim2FallbackDisplay) {
+    $dkim2Display = $dkim2FallbackDisplay
+  }
+
+  [pscustomobject]@{
+    domain                    = $Domain
+    dkim1                     = $dkim1Display
+    dkim1CnameTarget          = $dkim1Result.CnameTarget
+    dkim1TxtValue             = $dkim1Result.TxtValue
+    dkim1ExpectedCname        = $dkim1Result.Expected
+    dkim1AcsConfigured        = $dkim1Result.AcsConfigured
+    dkim1FallbackSelectors    = $dkim1FallbackRows
+    dkim2                     = $dkim2Display
+    dkim2CnameTarget          = $dkim2Result.CnameTarget
+    dkim2TxtValue             = $dkim2Result.TxtValue
+    dkim2ExpectedCname        = $dkim2Result.Expected
+    dkim2AcsConfigured        = $dkim2Result.AcsConfigured
+    dkim2FallbackSelectors    = $dkim2FallbackRows
+  }
 }
 
 # Extract the CNAME target from DNS resolution result objects.
@@ -6640,8 +6913,22 @@ function Get-AcsDnsStatus {
         if (-not [string]::IsNullOrWhiteSpace($dmarcMessage)) { $guidance.Add($dmarcMessage) }
       }
       if ((-not $dmarc.dmarc) -or ($dmarcGuidance.Count -gt 0)) { $guidance.Add("For more information about DMARC TXT record syntax, see: $dmarcHelpUrl") }
-      if (-not $dkim.dkim1)      { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
-      if (-not $dkim.dkim2)      { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
+      # Tightened DKIM guidance: only emit the "wrong CNAME target" warning
+      # when the ACS selector hostname itself has a record (CNAME or TXT).
+      # `$dkim.dkim1` may be a fallback display string when an alternate
+      # selector was found, so it cannot be used to detect ACS-side records.
+      $dkim1HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1TxtValue)
+      $dkim2HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2TxtValue)
+      if (-not $dkim1HasAcsRecord) { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
+      elseif (-not $dkim.dkim1AcsConfigured) {
+        $actual1 = if ($dkim.dkim1CnameTarget) { $dkim.dkim1CnameTarget } else { '(no CNAME)' }
+        $guidance.Add("DKIM selector1 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim1ExpectedCname); found: $actual1.")
+      }
+      if (-not $dkim2HasAcsRecord) { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
+      elseif (-not $dkim.dkim2AcsConfigured) {
+        $actual2 = if ($dkim.dkim2CnameTarget) { $dkim.dkim2CnameTarget } else { '(no CNAME)' }
+        $guidance.Add("DKIM selector2 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim2ExpectedCname); found: $actual2.")
+      }
       if (-not $cname.cname)     {
         if ($cname.cnameLookupDomain -and $cname.cnameLookupDomain -ne $Domain) {
           $guidance.Add("CNAME is not configured on $Domain. Validate whether the queried host or its www alias should resolve for your scenario.")
@@ -6738,8 +7025,18 @@ function Get-AcsDnsStatus {
         dmarc      = $dmarc.dmarc
         dmarcLookupDomain = $dmarc.dmarcLookupDomain
         dmarcInherited = $dmarc.dmarcInherited
-        dkim1      = $dkim.dkim1
-        dkim2      = $dkim.dkim2
+        dkim1                = $dkim.dkim1
+        dkim1CnameTarget     = $dkim.dkim1CnameTarget
+        dkim1TxtValue        = $dkim.dkim1TxtValue
+        dkim1ExpectedCname   = $dkim.dkim1ExpectedCname
+        dkim1AcsConfigured   = $dkim.dkim1AcsConfigured
+        dkim1FallbackSelectors = $dkim.dkim1FallbackSelectors
+        dkim2                = $dkim.dkim2
+        dkim2CnameTarget     = $dkim.dkim2CnameTarget
+        dkim2TxtValue        = $dkim.dkim2TxtValue
+        dkim2ExpectedCname   = $dkim.dkim2ExpectedCname
+        dkim2AcsConfigured   = $dkim.dkim2AcsConfigured
+        dkim2FallbackSelectors = $dkim.dkim2FallbackSelectors
         cname      = $cname.cname
         cnameLookupDomain = $cname.cnameLookupDomain
         cnameUsedWwwFallback = $cname.cnameUsedWwwFallback
@@ -7704,6 +8001,56 @@ input.dns-records-search-input {
   gap: 8px;
 }
 
+/* ---------- DKIM card body layout ----------
+ * Used by the DKIM1/DKIM2 cards to render published records in a grouped
+ * "selector block" with a small Type | Value grid inside, instead of plain
+ * text lines with arrows. Mirrors the visual rhythm of the RDAP detail
+ * cards above so the DKIM body feels native. */
+.dkim-record-list {
+  display: grid;
+  gap: 8px;
+}
+
+.dkim-selector-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(47, 128, 237, 0.07), rgba(47, 128, 237, 0.02));
+}
+
+.dkim-selector-name {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.dkim-record-grid {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 6px 12px;
+  align-items: start;
+}
+
+.dkim-record-type {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #2f80ed;
+  text-transform: uppercase;
+  padding-top: 1px;
+}
+
+.dkim-record-value {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  line-height: 1.45;
+}
+
 .rdap-detail-card,
 .rdap-notice-card {
   padding: 10px 12px;
@@ -7860,6 +8207,21 @@ html.dark .dns-records-filter-select option {
 html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
   background: #8a6d00;
   color: #fff7d1;
+}
+
+/* Chain marker: small "down-and-right arrow" glyph prefixed to the Name
+ * column when a TXT row is rendered directly under the CNAME row that
+ * points at it (e.g., a DKIM public key on the resolved selector). The
+ * indent + accent color mirrors the row hierarchy without changing layout. */
+.dns-records-table .dns-record-row-chained td:first-child {
+  padding-left: 18px;
+}
+
+.dns-records-table .dns-record-chain-marker {
+  color: #2f80ed;
+  font-weight: 600;
+  margin-right: 2px;
+  user-select: none;
 }
 
 .dns-records-no-matches {
@@ -14466,8 +14828,31 @@ function buildGuidance(r) {
   }
 
   if (loaded.dkim) {
-    if (!r.dkim1) guidance.push({ type: 'attention', text: t('guidanceDkim1Missing') });
-    if (!r.dkim2) guidance.push({ type: 'attention', text: t('guidanceDkim2Missing') });
+    // The "missing" message is suppressed when something is published at the
+    // ACS selector hostname (even if pointed at the wrong target) AND when
+    // only a fallback selector was detected. The "wrong CNAME" warning is
+    // strictly about the ACS selector hostname itself.
+    const dkim1HasAcsRecord = !!(r.dkim1CnameTarget || r.dkim1TxtValue);
+    const dkim2HasAcsRecord = !!(r.dkim2CnameTarget || r.dkim2TxtValue);
+    if (!dkim1HasAcsRecord) {
+      guidance.push({ type: 'attention', text: t('guidanceDkim1Missing') });
+    } else if (r.dkim1AcsConfigured === false) {
+      // Selector hostname is published but the CNAME target does not point at
+      // the ACS-managed selector. The server-side guidance list also includes
+      // a localized version of this message; we add a concise client-side
+      // hint here so the in-page guidance is complete even when the server
+      // payload is partial. No translation key yet -- English fallback.
+      const expected1 = r.dkim1ExpectedCname || 'selector1-azurecomm-prod-net._domainkey.azurecomm.net';
+      const actual1 = r.dkim1CnameTarget || '(no CNAME target)';
+      guidance.push({ type: 'attention', text: 'DKIM selector1 is published but its CNAME does not point to ACS. Expected: ' + expected1 + '; found: ' + actual1 + '.' });
+    }
+    if (!dkim2HasAcsRecord) {
+      guidance.push({ type: 'attention', text: t('guidanceDkim2Missing') });
+    } else if (r.dkim2AcsConfigured === false) {
+      const expected2 = r.dkim2ExpectedCname || 'selector2-azurecomm-prod-net._domainkey.azurecomm.net';
+      const actual2 = r.dkim2CnameTarget || '(no CNAME target)';
+      guidance.push({ type: 'attention', text: 'DKIM selector2 is published but its CNAME does not point to ACS. Expected: ' + expected2 + '; found: ' + actual2 + '.' });
+    }
   }
 
   if (loaded.cname && !r.cname) {
@@ -14607,8 +14992,11 @@ function buildTestSummaryHtml(r) {
     add("DKIM1", "error");
     add("DKIM2", "error");
   } else {
-    add("DKIM1", r.dkim1 ? "pass" : "fail", true);
-    add("DKIM2", r.dkim2 ? "pass" : "fail", true);
+    // DKIM is "pass" only when the customer-side CNAME points at the
+    // ACS-managed selector hostname (server-side dkim*AcsConfigured).
+    // A record that exists but targets the wrong host is a real fail.
+    add("DKIM1", r.dkim1AcsConfigured ? "pass" : "fail", true);
+    add("DKIM2", r.dkim2AcsConfigured ? "pass" : "fail", true);
   }
 
   // CNAME
@@ -15334,13 +15722,24 @@ function animateTopSections() {
   });
 }
 
-function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = '') {
+function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = '', appendHtml = '', bodyHtml = '') {
   const cardId = key ? `card-${key}` : '';
   const checkedDomain = (lastResult && lastResult.domain) ? String(lastResult.domain) : '';
   // Always escape the title text to prevent XSS via crafted DNS responses.
   // Use titleSuffixHtml for trusted HTML additions (e.g., info-dot buttons, links).
+  // appendHtml is rendered after the value div and is trusted (caller is
+  // responsible for escaping any user-derived content it embeds). It is
+  // intentionally OUTSIDE the field-${key} div so that the Copy button --
+  // which reads `innerText` of that div -- skips the appended content (used
+  // for warning/notice bubbles that should not pollute the clipboard).
+  // bodyHtml, when provided, REPLACES the auto-escaped plain-text body so a
+  // caller can render a rich layout (table, grid, etc.). The caller is then
+  // responsible for embedding properly escaped user-derived content. The
+  // resulting `innerText` of that rich layout is what the Copy button copies,
+  // so the rendered text should still read sensibly when stripped of markup.
   const safeTitle = applyCheckedDomainEmphasis(escapeHtml(title), checkedDomain);
   const safeValue = applyCheckedDomainEmphasis(escapeHtml(value || t('noRecordsAvailable')), checkedDomain);
+  const bodyContent = bodyHtml ? bodyHtml : safeValue;
   const translatedLabel = label ? escapeHtml(translateBadge(label)) : "";
   return `
   <div class="card"${cardId ? ` id="${cardId}"` : ''}>
@@ -15350,7 +15749,7 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
       <strong>${safeTitle}</strong>${titleSuffixHtml ? ' ' + titleSuffixHtml : ''}
       ${showCopy ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, '${key}')">${escapeHtml(t('copy'))}</button>` : ""}
     </div>
-    <div id="field-${key}" class="code card-content">${safeValue}</div>
+    <div id="field-${key}" class="code card-content">${bodyContent}</div>${appendHtml ? appendHtml : ''}
   </div>`;
 }
 
@@ -15935,7 +16334,7 @@ function compareDnsRecordSortValues(leftValue, rightValue) {
 }
 
 function sortDnsRecordsRows(records) {
-  return [...(Array.isArray(records) ? records : [])].sort((left, right) => {
+  const sorted = [...(Array.isArray(records) ? records : [])].sort((left, right) => {
     const valueComparisons = [
       compareDnsRecordSortValues(left && left.type, right && right.type),
       compareDnsRecordSortValues(left && left.name, right && right.name),
@@ -15951,6 +16350,71 @@ function sortDnsRecordsRows(records) {
 
     return (Number(left && left.ttlSeconds) || 0) - (Number(right && right.ttlSeconds) || 0);
   });
+
+  // Post-sort chain reorder: when a CNAME row's `data` (target hostname)
+  // matches the `name` of one or more TXT rows in the table, splice those
+  // TXT rows in directly after the CNAME row. This makes resolved DKIM keys
+  // (and any other CNAME->TXT chain) appear visually grouped under the
+  // selector that points to them, instead of being scattered at the bottom
+  // of the alphabetical TXT block. The base Type/Name/Data sort is still
+  // applied; only "child" TXT rows are repositioned.
+  return reorderDnsCnameTxtChains(sorted);
+}
+
+// Normalize a DNS name for comparison: strip trailing dots and lowercase.
+function normalizeDnsNameForChain(value) {
+  return String(value || '').trim().toLowerCase().replace(/\.+$/, '');
+}
+
+// Walk a pre-sorted records array. Whenever we emit a CNAME row, look up any
+// TXT rows whose name matches the CNAME's target hostname and emit them
+// immediately afterward. Each record is emitted exactly once -- the `added`
+// set guards against duplication when the TXT happens to sort before its
+// CNAME parent in the base ordering.
+function reorderDnsCnameTxtChains(sorted) {
+  if (!Array.isArray(sorted) || sorted.length === 0) return sorted;
+
+  // Index TXT rows by normalized name for O(1) lookup during the walk.
+  const txtByName = new Map();
+  sorted.forEach((record, index) => {
+    if (!record || String(record.type || '').toUpperCase() !== 'TXT') return;
+    const key = normalizeDnsNameForChain(record.name);
+    if (!key) return;
+    if (!txtByName.has(key)) txtByName.set(key, []);
+    txtByName.get(key).push(index);
+  });
+
+  if (txtByName.size === 0) return sorted;
+
+  const added = new Set();
+  const result = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (added.has(i)) continue;
+    const record = sorted[i];
+    result.push(record);
+    added.add(i);
+
+    if (!record || String(record.type || '').toUpperCase() !== 'CNAME') continue;
+
+    const target = normalizeDnsNameForChain(record.data);
+    if (!target) continue;
+
+    const matchIndices = txtByName.get(target);
+    if (!matchIndices) continue;
+
+    for (const txtIndex of matchIndices) {
+      if (added.has(txtIndex)) continue;
+      // Shallow-clone the TXT record and tag it as a chained child so the
+      // renderer can prefix the Name column with a `↳` glyph. We avoid
+      // mutating the original record because the same object may be cached
+      // upstream (e.g., reused across re-renders or re-sorts).
+      const childRecord = Object.assign({}, sorted[txtIndex], { _chainedFromCname: true });
+      result.push(childRecord);
+      added.add(txtIndex);
+    }
+  }
+
+  return result;
 }
 
 function getDnsRecordSelectionKey(record) {
@@ -16385,7 +16849,16 @@ function renderDnsRecordsTable(records) {
   }
 
   const body = rows.map(record => {
-    const name = escapeHtml(record.name || '');
+    const isChainedChild = !!(record && record._chainedFromCname);
+    const escapedName = escapeHtml(record.name || '');
+    // Prefix chained-child rows (e.g., a DKIM TXT key resolved via a CNAME)
+    // with a muted "down-and-right arrow" glyph so the parent/child
+    // relationship reads visually in the Name column. The glyph is rendered
+    // via a span so it can be styled separately and is hidden from the
+    // search/filter haystack (which uses the original `record.name`).
+    const name = isChainedChild
+      ? `<span class="dns-record-chain-marker" aria-hidden="true">&#x21B3;&nbsp;</span>${escapedName}`
+      : escapedName;
     const dnsClass = escapeHtml(record.class || 'IN');
     const type = escapeHtml(record.type || '');
     const details = Array.isArray(record.details) ? record.details.filter(Boolean) : [];
@@ -16396,7 +16869,10 @@ function renderDnsRecordsTable(records) {
     const rowKey = getDnsRecordSelectionKey(record);
     const isSelected = selectedDnsRecordKeys.has(rowKey);
     const searchText = getDnsRecordSearchText(record);
-    return `<tr class="dns-record-row${isSelected ? ' dns-record-row-selected' : ''}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+    const rowClasses = ['dns-record-row'];
+    if (isSelected) rowClasses.push('dns-record-row-selected');
+    if (isChainedChild) rowClasses.push('dns-record-row-chained');
+    return `<tr class="${rowClasses.join(' ')}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
   }).join('');
 
   return `
@@ -17371,21 +17847,140 @@ function render(r) {
     "dmarc"
   ));
 
-  // include full selector host with domain in title
+  // include full selector host with domain in title.
+  // ONE tag only, driven by the strict ACS-specific check (`dkim*AcsConfigured`):
+  //   - PASS     => CNAME at the ACS selector matches the ACS-managed target
+  //   - FAIL     => something is published at the ACS selector hostname but
+  //                 does not point at ACS (will not satisfy ACS verification)
+  //   - OPTIONAL => nothing is published at the ACS selector hostname
+  //
+  // Card body shows ONLY the published record value(s) -- either the ACS
+  // selector chain (CNAME + TXT) or, when the ACS selector is missing, the
+  // fallback selector chain that the server-side probe discovered. When the
+  // displayed records are NOT the ACS selector itself, we render a separate
+  // yellow warning bubble below the body so the operator can immediately see
+  // the records on screen are alternate DKIM, not the ACS-required selector.
+  // The warning HTML is intentionally inline-styled (no new CSS class) to keep
+  // this UI tweak self-contained.
+  function buildDkimAcsMissingNotice() {
+    // English string is intentionally hardcoded here to stay consistent with
+    // the existing DKIM client-side fallback guidance (no translation key has
+    // been added across the i18n tables yet). The notice is purely
+    // informational; the canonical PASS/FAIL/OPTIONAL contract lives in the
+    // card tag. Rendered OUTSIDE the field-${key} div so the Copy button
+    // (which reads `innerText` of that div) does not include this prose.
+    return '<div class="card-content" style="margin:0 12px 12px 12px; padding:8px 10px; '
+      + 'background:#fff8e1; border:1px solid #f9d976; border-radius:6px; color:#5c3c00; '
+      + 'font-size:0.9em; display:flex; gap:8px; align-items:flex-start;">'
+      + '<span aria-hidden="true" style="font-size:1.1em; line-height:1;">&#x26A0;&#xFE0F;</span>'
+      + '<span>ACS selector not published. The records shown above are alternate DKIM selectors detected on this domain.</span>'
+      + '</div>';
+  }
+
+  // Render one selector "block": a header line with the selector hostname and a
+  // small Type | Value grid for whichever record types are present. All
+  // user-derived strings are escaped. Returns '' when the selector has no
+  // record content so the caller can filter empty blocks out.
+  function buildDkimSelectorBlockHtml(name, cnameTarget, txtValue) {
+    const safeName = escapeHtml(String(name || ''));
+    const rows = [];
+    if (cnameTarget) {
+      rows.push(
+        '<div class="dkim-record-type">CNAME</div>'
+        + '<div class="dkim-record-value">' + escapeHtml(String(cnameTarget)) + '</div>'
+      );
+    }
+    if (txtValue) {
+      rows.push(
+        '<div class="dkim-record-type">TXT</div>'
+        + '<div class="dkim-record-value">' + escapeHtml(String(txtValue)) + '</div>'
+      );
+    }
+    if (rows.length === 0) return '';
+    return '<div class="dkim-selector-block">'
+      + '<div class="dkim-selector-name">' + safeName + '</div>'
+      + '<div class="dkim-record-grid">' + rows.join('') + '</div>'
+      + '</div>';
+  }
+
+  // Build the full rich body for a DKIM card. Three cases:
+  //   1. ACS selector itself has CNAME/TXT  -> render single block for the ACS
+  //      selector hostname (the strict ACS PASS/FAIL applies)
+  //   2. Only fallback selectors detected   -> render one block per fallback
+  //      selector row returned by the server
+  //   3. Nothing                            -> '' (caller falls back to the
+  //      default escaped "No Records Available" text body)
+  function buildDkimBodyHtml(domain, slot, acsCnameTarget, acsTxtValue, fallbackSelectors) {
+    if (acsCnameTarget || acsTxtValue) {
+      const acsName = 'selector' + slot + '-azurecomm-prod-net._domainkey.' + (domain || '');
+      const block = buildDkimSelectorBlockHtml(acsName, acsCnameTarget, acsTxtValue);
+      return block ? '<div class="dkim-record-list">' + block + '</div>' : '';
+    }
+
+    const rows = Array.isArray(fallbackSelectors) ? fallbackSelectors : [];
+    const blocks = rows
+      .map(row => row ? buildDkimSelectorBlockHtml(row.Name, row.CnameTarget, row.TxtValue) : '')
+      .filter(Boolean);
+    if (blocks.length === 0) return '';
+    return '<div class="dkim-record-list">' + blocks.join('') + '</div>';
+  }
+
+  const dkim1HasAcsSelectorRecord = !!(r.dkim1CnameTarget || r.dkim1TxtValue);
+  // Plain-text fallback body used when the rich HTML body is empty (loading,
+  // error, or truly nothing-found cases). r.dkim1 already contains the
+  // server-built display string for a non-empty record set, but we prefer the
+  // rich HTML when the data is structured enough to render it.
+  const dkim1PlainBody = loaded.dkim
+    ? (r.dkim1 || null)
+    : (errors.dkim ? errors.dkim : t('loadingValue'));
+  const dkim1RichBody = loaded.dkim && !errors.dkim
+    ? buildDkimBodyHtml(r.domain, 1, r.dkim1CnameTarget, r.dkim1TxtValue, r.dkim1FallbackSelectors)
+    : '';
+  const dkim1Tag = (!loaded.dkim && !errors.dkim)
+    ? "LOADING"
+    : (errors.dkim ? "ERROR" : (r.dkim1AcsConfigured ? "PASS" : (dkim1HasAcsSelectorRecord ? "FAIL" : "OPTIONAL")));
+  const dkim1TagClass = (!loaded.dkim && !errors.dkim)
+    ? "tag-info"
+    : (errors.dkim ? "tag-fail" : (r.dkim1AcsConfigured ? "tag-pass" : (dkim1HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
+  const dkim1ShowAcsMissingNotice = loaded.dkim && !errors.dkim
+    && !dkim1HasAcsSelectorRecord && !!dkim1RichBody;
   cards.push(card(
     `${t('dkim1Title')} (selector1-azurecomm-prod-net._domainkey.${r.domain || ""})`,
-    loaded.dkim ? r.dkim1 : (errors.dkim ? errors.dkim : t('loadingValue')),
-    (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim1 ? "PASS" : "OPTIONAL")),
-    (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim1 ? "tag-pass" : "tag-info")),
-    "dkim1"
+    dkim1PlainBody,
+    dkim1Tag,
+    dkim1TagClass,
+    "dkim1",
+    true,
+    '',
+    dkim1ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
+    dkim1RichBody
   ));
 
+  const dkim2HasAcsSelectorRecord = !!(r.dkim2CnameTarget || r.dkim2TxtValue);
+  const dkim2PlainBody = loaded.dkim
+    ? (r.dkim2 || null)
+    : (errors.dkim ? errors.dkim : t('loadingValue'));
+  const dkim2RichBody = loaded.dkim && !errors.dkim
+    ? buildDkimBodyHtml(r.domain, 2, r.dkim2CnameTarget, r.dkim2TxtValue, r.dkim2FallbackSelectors)
+    : '';
+  const dkim2Tag = (!loaded.dkim && !errors.dkim)
+    ? "LOADING"
+    : (errors.dkim ? "ERROR" : (r.dkim2AcsConfigured ? "PASS" : (dkim2HasAcsSelectorRecord ? "FAIL" : "OPTIONAL")));
+  const dkim2TagClass = (!loaded.dkim && !errors.dkim)
+    ? "tag-info"
+    : (errors.dkim ? "tag-fail" : (r.dkim2AcsConfigured ? "tag-pass" : (dkim2HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
+  const dkim2ShowAcsMissingNotice = loaded.dkim && !errors.dkim
+    && !dkim2HasAcsSelectorRecord && !!dkim2RichBody;
   cards.push(card(
     `${t('dkim2Title')} (selector2-azurecomm-prod-net._domainkey.${r.domain || ""})`,
-    loaded.dkim ? r.dkim2 : (errors.dkim ? errors.dkim : t('loadingValue')),
-    (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim2 ? "PASS" : "OPTIONAL")),
-    (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim2 ? "tag-pass" : "tag-info")),
-    "dkim2"
+    dkim2PlainBody,
+    dkim2Tag,
+    dkim2TagClass,
+    "dkim2",
+    true,
+    '',
+    dkim2ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
+    dkim2RichBody
   ));
 
   // Reputation / DNSBL

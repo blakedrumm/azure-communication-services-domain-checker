@@ -437,13 +437,24 @@ function animateTopSections() {
   });
 }
 
-function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = '') {
+function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = '', appendHtml = '', bodyHtml = '') {
   const cardId = key ? `card-${key}` : '';
   const checkedDomain = (lastResult && lastResult.domain) ? String(lastResult.domain) : '';
   // Always escape the title text to prevent XSS via crafted DNS responses.
   // Use titleSuffixHtml for trusted HTML additions (e.g., info-dot buttons, links).
+  // appendHtml is rendered after the value div and is trusted (caller is
+  // responsible for escaping any user-derived content it embeds). It is
+  // intentionally OUTSIDE the field-${key} div so that the Copy button --
+  // which reads `innerText` of that div -- skips the appended content (used
+  // for warning/notice bubbles that should not pollute the clipboard).
+  // bodyHtml, when provided, REPLACES the auto-escaped plain-text body so a
+  // caller can render a rich layout (table, grid, etc.). The caller is then
+  // responsible for embedding properly escaped user-derived content. The
+  // resulting `innerText` of that rich layout is what the Copy button copies,
+  // so the rendered text should still read sensibly when stripped of markup.
   const safeTitle = applyCheckedDomainEmphasis(escapeHtml(title), checkedDomain);
   const safeValue = applyCheckedDomainEmphasis(escapeHtml(value || t('noRecordsAvailable')), checkedDomain);
+  const bodyContent = bodyHtml ? bodyHtml : safeValue;
   const translatedLabel = label ? escapeHtml(translateBadge(label)) : "";
   return `
   <div class="card"${cardId ? ` id="${cardId}"` : ''}>
@@ -453,7 +464,7 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
       <strong>${safeTitle}</strong>${titleSuffixHtml ? ' ' + titleSuffixHtml : ''}
       ${showCopy ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, '${key}')">${escapeHtml(t('copy'))}</button>` : ""}
     </div>
-    <div id="field-${key}" class="code card-content">${safeValue}</div>
+    <div id="field-${key}" class="code card-content">${bodyContent}</div>${appendHtml ? appendHtml : ''}
   </div>`;
 }
 
@@ -1038,7 +1049,7 @@ function compareDnsRecordSortValues(leftValue, rightValue) {
 }
 
 function sortDnsRecordsRows(records) {
-  return [...(Array.isArray(records) ? records : [])].sort((left, right) => {
+  const sorted = [...(Array.isArray(records) ? records : [])].sort((left, right) => {
     const valueComparisons = [
       compareDnsRecordSortValues(left && left.type, right && right.type),
       compareDnsRecordSortValues(left && left.name, right && right.name),
@@ -1054,6 +1065,71 @@ function sortDnsRecordsRows(records) {
 
     return (Number(left && left.ttlSeconds) || 0) - (Number(right && right.ttlSeconds) || 0);
   });
+
+  // Post-sort chain reorder: when a CNAME row's `data` (target hostname)
+  // matches the `name` of one or more TXT rows in the table, splice those
+  // TXT rows in directly after the CNAME row. This makes resolved DKIM keys
+  // (and any other CNAME->TXT chain) appear visually grouped under the
+  // selector that points to them, instead of being scattered at the bottom
+  // of the alphabetical TXT block. The base Type/Name/Data sort is still
+  // applied; only "child" TXT rows are repositioned.
+  return reorderDnsCnameTxtChains(sorted);
+}
+
+// Normalize a DNS name for comparison: strip trailing dots and lowercase.
+function normalizeDnsNameForChain(value) {
+  return String(value || '').trim().toLowerCase().replace(/\.+$/, '');
+}
+
+// Walk a pre-sorted records array. Whenever we emit a CNAME row, look up any
+// TXT rows whose name matches the CNAME's target hostname and emit them
+// immediately afterward. Each record is emitted exactly once -- the `added`
+// set guards against duplication when the TXT happens to sort before its
+// CNAME parent in the base ordering.
+function reorderDnsCnameTxtChains(sorted) {
+  if (!Array.isArray(sorted) || sorted.length === 0) return sorted;
+
+  // Index TXT rows by normalized name for O(1) lookup during the walk.
+  const txtByName = new Map();
+  sorted.forEach((record, index) => {
+    if (!record || String(record.type || '').toUpperCase() !== 'TXT') return;
+    const key = normalizeDnsNameForChain(record.name);
+    if (!key) return;
+    if (!txtByName.has(key)) txtByName.set(key, []);
+    txtByName.get(key).push(index);
+  });
+
+  if (txtByName.size === 0) return sorted;
+
+  const added = new Set();
+  const result = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (added.has(i)) continue;
+    const record = sorted[i];
+    result.push(record);
+    added.add(i);
+
+    if (!record || String(record.type || '').toUpperCase() !== 'CNAME') continue;
+
+    const target = normalizeDnsNameForChain(record.data);
+    if (!target) continue;
+
+    const matchIndices = txtByName.get(target);
+    if (!matchIndices) continue;
+
+    for (const txtIndex of matchIndices) {
+      if (added.has(txtIndex)) continue;
+      // Shallow-clone the TXT record and tag it as a chained child so the
+      // renderer can prefix the Name column with a `↳` glyph. We avoid
+      // mutating the original record because the same object may be cached
+      // upstream (e.g., reused across re-renders or re-sorts).
+      const childRecord = Object.assign({}, sorted[txtIndex], { _chainedFromCname: true });
+      result.push(childRecord);
+      added.add(txtIndex);
+    }
+  }
+
+  return result;
 }
 
 function getDnsRecordSelectionKey(record) {
@@ -1488,7 +1564,16 @@ function renderDnsRecordsTable(records) {
   }
 
   const body = rows.map(record => {
-    const name = escapeHtml(record.name || '');
+    const isChainedChild = !!(record && record._chainedFromCname);
+    const escapedName = escapeHtml(record.name || '');
+    // Prefix chained-child rows (e.g., a DKIM TXT key resolved via a CNAME)
+    // with a muted "down-and-right arrow" glyph so the parent/child
+    // relationship reads visually in the Name column. The glyph is rendered
+    // via a span so it can be styled separately and is hidden from the
+    // search/filter haystack (which uses the original `record.name`).
+    const name = isChainedChild
+      ? `<span class="dns-record-chain-marker" aria-hidden="true">&#x21B3;&nbsp;</span>${escapedName}`
+      : escapedName;
     const dnsClass = escapeHtml(record.class || 'IN');
     const type = escapeHtml(record.type || '');
     const details = Array.isArray(record.details) ? record.details.filter(Boolean) : [];
@@ -1499,7 +1584,10 @@ function renderDnsRecordsTable(records) {
     const rowKey = getDnsRecordSelectionKey(record);
     const isSelected = selectedDnsRecordKeys.has(rowKey);
     const searchText = getDnsRecordSearchText(record);
-    return `<tr class="dns-record-row${isSelected ? ' dns-record-row-selected' : ''}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+    const rowClasses = ['dns-record-row'];
+    if (isSelected) rowClasses.push('dns-record-row-selected');
+    if (isChainedChild) rowClasses.push('dns-record-row-chained');
+    return `<tr class="${rowClasses.join(' ')}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
   }).join('');
 
   return `
@@ -2474,21 +2562,140 @@ function render(r) {
     "dmarc"
   ));
 
-  // include full selector host with domain in title
+  // include full selector host with domain in title.
+  // ONE tag only, driven by the strict ACS-specific check (`dkim*AcsConfigured`):
+  //   - PASS     => CNAME at the ACS selector matches the ACS-managed target
+  //   - FAIL     => something is published at the ACS selector hostname but
+  //                 does not point at ACS (will not satisfy ACS verification)
+  //   - OPTIONAL => nothing is published at the ACS selector hostname
+  //
+  // Card body shows ONLY the published record value(s) -- either the ACS
+  // selector chain (CNAME + TXT) or, when the ACS selector is missing, the
+  // fallback selector chain that the server-side probe discovered. When the
+  // displayed records are NOT the ACS selector itself, we render a separate
+  // yellow warning bubble below the body so the operator can immediately see
+  // the records on screen are alternate DKIM, not the ACS-required selector.
+  // The warning HTML is intentionally inline-styled (no new CSS class) to keep
+  // this UI tweak self-contained.
+  function buildDkimAcsMissingNotice() {
+    // English string is intentionally hardcoded here to stay consistent with
+    // the existing DKIM client-side fallback guidance (no translation key has
+    // been added across the i18n tables yet). The notice is purely
+    // informational; the canonical PASS/FAIL/OPTIONAL contract lives in the
+    // card tag. Rendered OUTSIDE the field-${key} div so the Copy button
+    // (which reads `innerText` of that div) does not include this prose.
+    return '<div class="card-content" style="margin:0 12px 12px 12px; padding:8px 10px; '
+      + 'background:#fff8e1; border:1px solid #f9d976; border-radius:6px; color:#5c3c00; '
+      + 'font-size:0.9em; display:flex; gap:8px; align-items:flex-start;">'
+      + '<span aria-hidden="true" style="font-size:1.1em; line-height:1;">&#x26A0;&#xFE0F;</span>'
+      + '<span>ACS selector not published. The records shown above are alternate DKIM selectors detected on this domain.</span>'
+      + '</div>';
+  }
+
+  // Render one selector "block": a header line with the selector hostname and a
+  // small Type | Value grid for whichever record types are present. All
+  // user-derived strings are escaped. Returns '' when the selector has no
+  // record content so the caller can filter empty blocks out.
+  function buildDkimSelectorBlockHtml(name, cnameTarget, txtValue) {
+    const safeName = escapeHtml(String(name || ''));
+    const rows = [];
+    if (cnameTarget) {
+      rows.push(
+        '<div class="dkim-record-type">CNAME</div>'
+        + '<div class="dkim-record-value">' + escapeHtml(String(cnameTarget)) + '</div>'
+      );
+    }
+    if (txtValue) {
+      rows.push(
+        '<div class="dkim-record-type">TXT</div>'
+        + '<div class="dkim-record-value">' + escapeHtml(String(txtValue)) + '</div>'
+      );
+    }
+    if (rows.length === 0) return '';
+    return '<div class="dkim-selector-block">'
+      + '<div class="dkim-selector-name">' + safeName + '</div>'
+      + '<div class="dkim-record-grid">' + rows.join('') + '</div>'
+      + '</div>';
+  }
+
+  // Build the full rich body for a DKIM card. Three cases:
+  //   1. ACS selector itself has CNAME/TXT  -> render single block for the ACS
+  //      selector hostname (the strict ACS PASS/FAIL applies)
+  //   2. Only fallback selectors detected   -> render one block per fallback
+  //      selector row returned by the server
+  //   3. Nothing                            -> '' (caller falls back to the
+  //      default escaped "No Records Available" text body)
+  function buildDkimBodyHtml(domain, slot, acsCnameTarget, acsTxtValue, fallbackSelectors) {
+    if (acsCnameTarget || acsTxtValue) {
+      const acsName = 'selector' + slot + '-azurecomm-prod-net._domainkey.' + (domain || '');
+      const block = buildDkimSelectorBlockHtml(acsName, acsCnameTarget, acsTxtValue);
+      return block ? '<div class="dkim-record-list">' + block + '</div>' : '';
+    }
+
+    const rows = Array.isArray(fallbackSelectors) ? fallbackSelectors : [];
+    const blocks = rows
+      .map(row => row ? buildDkimSelectorBlockHtml(row.Name, row.CnameTarget, row.TxtValue) : '')
+      .filter(Boolean);
+    if (blocks.length === 0) return '';
+    return '<div class="dkim-record-list">' + blocks.join('') + '</div>';
+  }
+
+  const dkim1HasAcsSelectorRecord = !!(r.dkim1CnameTarget || r.dkim1TxtValue);
+  // Plain-text fallback body used when the rich HTML body is empty (loading,
+  // error, or truly nothing-found cases). r.dkim1 already contains the
+  // server-built display string for a non-empty record set, but we prefer the
+  // rich HTML when the data is structured enough to render it.
+  const dkim1PlainBody = loaded.dkim
+    ? (r.dkim1 || null)
+    : (errors.dkim ? errors.dkim : t('loadingValue'));
+  const dkim1RichBody = loaded.dkim && !errors.dkim
+    ? buildDkimBodyHtml(r.domain, 1, r.dkim1CnameTarget, r.dkim1TxtValue, r.dkim1FallbackSelectors)
+    : '';
+  const dkim1Tag = (!loaded.dkim && !errors.dkim)
+    ? "LOADING"
+    : (errors.dkim ? "ERROR" : (r.dkim1AcsConfigured ? "PASS" : (dkim1HasAcsSelectorRecord ? "FAIL" : "OPTIONAL")));
+  const dkim1TagClass = (!loaded.dkim && !errors.dkim)
+    ? "tag-info"
+    : (errors.dkim ? "tag-fail" : (r.dkim1AcsConfigured ? "tag-pass" : (dkim1HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
+  const dkim1ShowAcsMissingNotice = loaded.dkim && !errors.dkim
+    && !dkim1HasAcsSelectorRecord && !!dkim1RichBody;
   cards.push(card(
     `${t('dkim1Title')} (selector1-azurecomm-prod-net._domainkey.${r.domain || ""})`,
-    loaded.dkim ? r.dkim1 : (errors.dkim ? errors.dkim : t('loadingValue')),
-    (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim1 ? "PASS" : "OPTIONAL")),
-    (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim1 ? "tag-pass" : "tag-info")),
-    "dkim1"
+    dkim1PlainBody,
+    dkim1Tag,
+    dkim1TagClass,
+    "dkim1",
+    true,
+    '',
+    dkim1ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
+    dkim1RichBody
   ));
 
+  const dkim2HasAcsSelectorRecord = !!(r.dkim2CnameTarget || r.dkim2TxtValue);
+  const dkim2PlainBody = loaded.dkim
+    ? (r.dkim2 || null)
+    : (errors.dkim ? errors.dkim : t('loadingValue'));
+  const dkim2RichBody = loaded.dkim && !errors.dkim
+    ? buildDkimBodyHtml(r.domain, 2, r.dkim2CnameTarget, r.dkim2TxtValue, r.dkim2FallbackSelectors)
+    : '';
+  const dkim2Tag = (!loaded.dkim && !errors.dkim)
+    ? "LOADING"
+    : (errors.dkim ? "ERROR" : (r.dkim2AcsConfigured ? "PASS" : (dkim2HasAcsSelectorRecord ? "FAIL" : "OPTIONAL")));
+  const dkim2TagClass = (!loaded.dkim && !errors.dkim)
+    ? "tag-info"
+    : (errors.dkim ? "tag-fail" : (r.dkim2AcsConfigured ? "tag-pass" : (dkim2HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
+  const dkim2ShowAcsMissingNotice = loaded.dkim && !errors.dkim
+    && !dkim2HasAcsSelectorRecord && !!dkim2RichBody;
   cards.push(card(
     `${t('dkim2Title')} (selector2-azurecomm-prod-net._domainkey.${r.domain || ""})`,
-    loaded.dkim ? r.dkim2 : (errors.dkim ? errors.dkim : t('loadingValue')),
-    (!loaded.dkim && !errors.dkim) ? "LOADING" : (errors.dkim ? "ERROR" : (r.dkim2 ? "PASS" : "OPTIONAL")),
-    (!loaded.dkim && !errors.dkim) ? "tag-info" : (errors.dkim ? "tag-fail" : (r.dkim2 ? "tag-pass" : "tag-info")),
-    "dkim2"
+    dkim2PlainBody,
+    dkim2Tag,
+    dkim2TagClass,
+    "dkim2",
+    true,
+    '',
+    dkim2ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
+    dkim2RichBody
   ));
 
   // Reputation / DNSBL

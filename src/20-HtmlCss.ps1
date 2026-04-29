@@ -926,6 +926,56 @@ input.dns-records-search-input {
   gap: 8px;
 }
 
+/* ---------- DKIM card body layout ----------
+ * Used by the DKIM1/DKIM2 cards to render published records in a grouped
+ * "selector block" with a small Type | Value grid inside, instead of plain
+ * text lines with arrows. Mirrors the visual rhythm of the RDAP detail
+ * cards above so the DKIM body feels native. */
+.dkim-record-list {
+  display: grid;
+  gap: 8px;
+}
+
+.dkim-selector-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(47, 128, 237, 0.07), rgba(47, 128, 237, 0.02));
+}
+
+.dkim-selector-name {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.dkim-record-grid {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 6px 12px;
+  align-items: start;
+}
+
+.dkim-record-type {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #2f80ed;
+  text-transform: uppercase;
+  padding-top: 1px;
+}
+
+.dkim-record-value {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  line-height: 1.45;
+}
+
 .rdap-detail-card,
 .rdap-notice-card {
   padding: 10px 12px;
@@ -1082,6 +1132,21 @@ html.dark .dns-records-filter-select option {
 html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
   background: #8a6d00;
   color: #fff7d1;
+}
+
+/* Chain marker: small "down-and-right arrow" glyph prefixed to the Name
+ * column when a TXT row is rendered directly under the CNAME row that
+ * points at it (e.g., a DKIM public key on the resolved selector). The
+ * indent + accent color mirrors the row hierarchy without changing layout. */
+.dns-records-table .dns-record-row-chained td:first-child {
+  padding-left: 18px;
+}
+
+.dns-records-table .dns-record-chain-marker {
+  color: #2f80ed;
+  font-weight: 600;
+  margin-right: 2px;
+  user-select: none;
 }
 
 .dns-records-no-matches {

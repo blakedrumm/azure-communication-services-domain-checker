@@ -121,8 +121,22 @@ function Get-AcsDnsStatus {
         if (-not [string]::IsNullOrWhiteSpace($dmarcMessage)) { $guidance.Add($dmarcMessage) }
       }
       if ((-not $dmarc.dmarc) -or ($dmarcGuidance.Count -gt 0)) { $guidance.Add("For more information about DMARC TXT record syntax, see: $dmarcHelpUrl") }
-      if (-not $dkim.dkim1)      { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
-      if (-not $dkim.dkim2)      { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
+      # Tightened DKIM guidance: only emit the "wrong CNAME target" warning
+      # when the ACS selector hostname itself has a record (CNAME or TXT).
+      # `$dkim.dkim1` may be a fallback display string when an alternate
+      # selector was found, so it cannot be used to detect ACS-side records.
+      $dkim1HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1TxtValue)
+      $dkim2HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2TxtValue)
+      if (-not $dkim1HasAcsRecord) { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
+      elseif (-not $dkim.dkim1AcsConfigured) {
+        $actual1 = if ($dkim.dkim1CnameTarget) { $dkim.dkim1CnameTarget } else { '(no CNAME)' }
+        $guidance.Add("DKIM selector1 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim1ExpectedCname); found: $actual1.")
+      }
+      if (-not $dkim2HasAcsRecord) { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
+      elseif (-not $dkim.dkim2AcsConfigured) {
+        $actual2 = if ($dkim.dkim2CnameTarget) { $dkim.dkim2CnameTarget } else { '(no CNAME)' }
+        $guidance.Add("DKIM selector2 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim2ExpectedCname); found: $actual2.")
+      }
       if (-not $cname.cname)     {
         if ($cname.cnameLookupDomain -and $cname.cnameLookupDomain -ne $Domain) {
           $guidance.Add("CNAME is not configured on $Domain. Validate whether the queried host or its www alias should resolve for your scenario.")
@@ -219,8 +233,18 @@ function Get-AcsDnsStatus {
         dmarc      = $dmarc.dmarc
         dmarcLookupDomain = $dmarc.dmarcLookupDomain
         dmarcInherited = $dmarc.dmarcInherited
-        dkim1      = $dkim.dkim1
-        dkim2      = $dkim.dkim2
+        dkim1                = $dkim.dkim1
+        dkim1CnameTarget     = $dkim.dkim1CnameTarget
+        dkim1TxtValue        = $dkim.dkim1TxtValue
+        dkim1ExpectedCname   = $dkim.dkim1ExpectedCname
+        dkim1AcsConfigured   = $dkim.dkim1AcsConfigured
+        dkim1FallbackSelectors = $dkim.dkim1FallbackSelectors
+        dkim2                = $dkim.dkim2
+        dkim2CnameTarget     = $dkim.dkim2CnameTarget
+        dkim2TxtValue        = $dkim.dkim2TxtValue
+        dkim2ExpectedCname   = $dkim.dkim2ExpectedCname
+        dkim2AcsConfigured   = $dkim.dkim2AcsConfigured
+        dkim2FallbackSelectors = $dkim.dkim2FallbackSelectors
         cname      = $cname.cname
         cnameLookupDomain = $cname.cnameLookupDomain
         cnameUsedWwwFallback = $cname.cnameUsedWwwFallback

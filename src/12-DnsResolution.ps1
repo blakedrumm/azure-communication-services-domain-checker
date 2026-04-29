@@ -36,11 +36,50 @@ function Resolve-DohName {
         $data = [string]$a.data
         if ([string]::IsNullOrWhiteSpace($data)) { continue }
         $data = $data.Trim()
-        if ($data.StartsWith('"') -and $data.EndsWith('"') -and $data.Length -ge 2) {
-          $data = $data.Substring(1, $data.Length - 2)
+
+        # A DNS TXT RDATA can hold multiple <character-string>s (RFC 1035 §3.3.14),
+        # each up to 255 octets. Cloudflare DoH returns them in presentation form as a
+        # space-separated sequence of double-quoted strings, e.g. `"foo" "bar"`.
+        # Per RFC 7208 §3.3, SPF parsers MUST concatenate those strings together with
+        # NO separator. Naively stripping only the outer quotes would leave the inner
+        # `" "` literal embedded in the record (e.g.
+        # `include:spf.protection." "outlook.com -all`), which breaks SPF tokenization.
+        # Walk the data string and emit each character-string as a separate element of
+        # `Strings`, mirroring the shape produced by Resolve-DnsName so downstream code
+        # can rely on `($record.Strings -join '')` to reconstruct the canonical TXT value.
+        $strings = New-Object System.Collections.Generic.List[string]
+        $index = 0
+        $length = $data.Length
+        while ($index -lt $length) {
+          # Skip inter-string whitespace.
+          while ($index -lt $length -and [char]::IsWhiteSpace($data[$index])) { $index++ }
+          if ($index -ge $length) { break }
+
+          if ($data[$index] -ne '"') {
+            # Defensive: if the payload isn't quoted (non-conforming server), take the
+            # remainder as a single character-string and stop.
+            $strings.Add($data.Substring($index))
+            break
+          }
+
+          # Consume one quoted character-string, honoring backslash escapes for `\\` and `\"`.
+          $index++  # opening quote
+          $builder = New-Object System.Text.StringBuilder
+          while ($index -lt $length -and $data[$index] -ne '"') {
+            if ($data[$index] -eq '\' -and ($index + 1) -lt $length) {
+              [void]$builder.Append($data[$index + 1])
+              $index += 2
+              continue
+            }
+            [void]$builder.Append($data[$index])
+            $index++
+          }
+          if ($index -lt $length -and $data[$index] -eq '"') { $index++ }  # closing quote
+          $strings.Add($builder.ToString())
         }
-        $data = $data -replace '\\"','"'
-        [pscustomobject]@{ Strings = @($data) }
+
+        if ($strings.Count -eq 0) { continue }
+        [pscustomobject]@{ Strings = $strings.ToArray() }
       }
     }
     'MX' {
@@ -1006,6 +1045,75 @@ function Get-DnsRecordsStatus {
       catch {
         $errors.Add($_.Exception.Message)
       }
+    }
+  }
+
+  # Related-name supplements: query well-known ACS-related subdomains so they
+  # show up in the DNS records grid alongside the apex records. The dedupe step
+  # below collapses duplicates if any of these were already discovered through
+  # other code paths. Each entry asks for the record types most likely to exist
+  # at that name so the grid reflects the actual published chain (e.g., a
+  # selector CNAME plus the resolved TXT public key on the ACS side).
+  #
+  # The DKIM selector list mirrors `Invoke-DkimFallbackSelectorProbe` in
+  # `Get-DnsDkimStatus` so any selector the DKIM card surfaces also appears in
+  # the records table. Selectors that are not published return NXDOMAIN
+  # quickly and are filtered out by `Resolve-DnsRecordsDetailed`, so the cost
+  # of probing them is negligible.
+  $relatedTargets = @(
+    [pscustomobject]@{ Name = "selector1-azurecomm-prod-net._domainkey.$Domain"; Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "selector2-azurecomm-prod-net._domainkey.$Domain"; Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "selector1._domainkey.$Domain";                    Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "selector2._domainkey.$Domain";                    Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "s1._domainkey.$Domain";                           Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "s2._domainkey.$Domain";                           Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "default._domainkey.$Domain";                      Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "google._domainkey.$Domain";                       Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "k1._domainkey.$Domain";                           Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "mail._domainkey.$Domain";                         Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "dkim._domainkey.$Domain";                         Types = @('CNAME', 'TXT') },
+    [pscustomobject]@{ Name = "_dmarc.$Domain";                                  Types = @('TXT') },
+    [pscustomobject]@{ Name = "www.$Domain";                                     Types = @('CNAME', 'A', 'AAAA') }
+  )
+  foreach ($target in $relatedTargets) {
+    try {
+      foreach ($row in @(Resolve-DnsRecordsDetailed -Name $target.Name -Types $target.Types)) {
+        if ($row) { $records.Add($row) }
+      }
+    }
+    catch {
+      $errors.Add($_.Exception.Message)
+    }
+  }
+
+  # CNAME-target follow-up: when a related-name probe returns a CNAME row,
+  # explicitly query the CNAME's target hostname for TXT records (and CNAME,
+  # in case of a multi-hop chain). `Resolve-DnsName -Type TXT` follows CNAME
+  # chains inconsistently across resolvers/runs -- sometimes it emits the
+  # target's TXT and sometimes it does not -- which previously produced
+  # asymmetric output (e.g., DKIM TXT shown for selector1 but not selector2).
+  # Probing the targets explicitly makes the records grid deterministic and
+  # symmetric for all CNAME-fronted records (DKIM selectors, www aliases,
+  # etc.). Each target is probed once even if multiple parents point at it.
+  $cnameFollowupTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  # PowerShell 7.6 regression: wrapping a List[object] with @(...) (e.g.,
+  # @($records)) throws "Argument types do not match". Materialize the list
+  # via .ToArray() before iterating so this loop survives on PS 7.6+.
+  foreach ($record in $records.ToArray()) {
+    if (-not $record) { continue }
+    if ([string]$record.type -ne 'CNAME') { continue }
+    $cnameTarget = ([string]$record.data).Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($cnameTarget)) { continue }
+    [void]$cnameFollowupTargets.Add($cnameTarget)
+  }
+  foreach ($cnameTarget in $cnameFollowupTargets) {
+    try {
+      foreach ($row in @(Resolve-DnsRecordsDetailed -Name $cnameTarget -Types @('CNAME', 'TXT'))) {
+        if ($row) { $records.Add($row) }
+      }
+    }
+    catch {
+      $errors.Add($_.Exception.Message)
     }
   }
 

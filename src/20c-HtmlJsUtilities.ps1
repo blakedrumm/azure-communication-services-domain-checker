@@ -1167,8 +1167,31 @@ function buildGuidance(r) {
   }
 
   if (loaded.dkim) {
-    if (!r.dkim1) guidance.push({ type: 'attention', text: t('guidanceDkim1Missing') });
-    if (!r.dkim2) guidance.push({ type: 'attention', text: t('guidanceDkim2Missing') });
+    // The "missing" message is suppressed when something is published at the
+    // ACS selector hostname (even if pointed at the wrong target) AND when
+    // only a fallback selector was detected. The "wrong CNAME" warning is
+    // strictly about the ACS selector hostname itself.
+    const dkim1HasAcsRecord = !!(r.dkim1CnameTarget || r.dkim1TxtValue);
+    const dkim2HasAcsRecord = !!(r.dkim2CnameTarget || r.dkim2TxtValue);
+    if (!dkim1HasAcsRecord) {
+      guidance.push({ type: 'attention', text: t('guidanceDkim1Missing') });
+    } else if (r.dkim1AcsConfigured === false) {
+      // Selector hostname is published but the CNAME target does not point at
+      // the ACS-managed selector. The server-side guidance list also includes
+      // a localized version of this message; we add a concise client-side
+      // hint here so the in-page guidance is complete even when the server
+      // payload is partial. No translation key yet -- English fallback.
+      const expected1 = r.dkim1ExpectedCname || 'selector1-azurecomm-prod-net._domainkey.azurecomm.net';
+      const actual1 = r.dkim1CnameTarget || '(no CNAME target)';
+      guidance.push({ type: 'attention', text: 'DKIM selector1 is published but its CNAME does not point to ACS. Expected: ' + expected1 + '; found: ' + actual1 + '.' });
+    }
+    if (!dkim2HasAcsRecord) {
+      guidance.push({ type: 'attention', text: t('guidanceDkim2Missing') });
+    } else if (r.dkim2AcsConfigured === false) {
+      const expected2 = r.dkim2ExpectedCname || 'selector2-azurecomm-prod-net._domainkey.azurecomm.net';
+      const actual2 = r.dkim2CnameTarget || '(no CNAME target)';
+      guidance.push({ type: 'attention', text: 'DKIM selector2 is published but its CNAME does not point to ACS. Expected: ' + expected2 + '; found: ' + actual2 + '.' });
+    }
   }
 
   if (loaded.cname && !r.cname) {
@@ -1308,8 +1331,11 @@ function buildTestSummaryHtml(r) {
     add("DKIM1", "error");
     add("DKIM2", "error");
   } else {
-    add("DKIM1", r.dkim1 ? "pass" : "fail", true);
-    add("DKIM2", r.dkim2 ? "pass" : "fail", true);
+    // DKIM is "pass" only when the customer-side CNAME points at the
+    // ACS-managed selector hostname (server-side dkim*AcsConfigured).
+    // A record that exists but targets the wrong host is a real fail.
+    add("DKIM1", r.dkim1AcsConfigured ? "pass" : "fail", true);
+    add("DKIM2", r.dkim2AcsConfigured ? "pass" : "fail", true);
   }
 
   // CNAME

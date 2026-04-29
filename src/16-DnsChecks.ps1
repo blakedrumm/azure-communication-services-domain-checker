@@ -750,22 +750,187 @@ function Get-DnsDmarcStatus {
 # Check for the two ACS-specific DKIM selector CNAME/TXT records:
 #   selector1-azurecomm-prod-net._domainkey.<domain>
 #   selector2-azurecomm-prod-net._domainkey.<domain>
+#
+# ACS publishes DKIM keys via Azure-managed selector hostnames at azurecomm.net.
+# The customer-side DNS only needs a CNAME pointing at the ACS-managed target;
+# the actual public key (TXT) lives on Microsoft's side. So the deterministic
+# "ACS configured" check is whether the customer's CNAME points at the expected
+# ACS selector hostname. We also capture the resolved TXT public-key value (the
+# CNAME chain is followed by both Resolve-DnsName and DoH) so the UI can show
+# the full picture.
+#
+# When the ACS-specific selector is not published, we additionally probe a
+# small set of well-known fallback DKIM selectors (Microsoft 365's bare
+# `selector1._domainkey`, plus a few common ones) so the card body can still
+# show the operator what DKIM IS configured for the domain. The pass/fail tag
+# in the UI is always evaluated against the strict ACS expectation.
 function Get-DnsDkimStatus {
   param([string]$Domain)
 
-  # ACS guidance expects these two DKIM selector TXT records.
+  # Lookup helper: resolves the CNAME target (if any) and the TXT value (which
+  # follows the CNAME chain), then compares the CNAME target against the
+  # expected ACS-managed selector hostname.
+  function Invoke-AcsDkimSelectorLookup {
+    param(
+      [string]$LookupName,
+      [string]$ExpectedCnameTarget
+    )
 
-  $dkim1 = $null
-  if ($d1 = ResolveSafely "selector1-azurecomm-prod-net._domainkey.$Domain" "TXT") {
-    $dkim1 = (($d1.Strings -join "") -replace '\s+', '').Trim()
+    $cnameTarget = Get-CnameTargetFromRecords (ResolveSafely $LookupName 'CNAME')
+    if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
+
+    $txtValue = $null
+    if ($txtRecords = ResolveSafely $LookupName 'TXT') {
+      $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
+      if ($joined) { $txtValue = $joined }
+    }
+
+    # Case-insensitive compare; both sides are normalized to no trailing dot.
+    $expected = $ExpectedCnameTarget.Trim().TrimEnd('.')
+    $acsConfigured = $false
+    if ($cnameTarget) {
+      $acsConfigured = [string]::Equals($cnameTarget, $expected, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    # Build a single human-readable display value combining both legs of the
+    # chain. This is what gets surfaced in the legacy `dkim1`/`dkim2` fields so
+    # existing UI/test-summary truthy checks still mean "something is published".
+    $displayParts = New-Object System.Collections.Generic.List[string]
+    if ($cnameTarget) { $displayParts.Add("CNAME -> $cnameTarget") }
+    if ($txtValue)    { $displayParts.Add("TXT: $txtValue") }
+    $display = if ($displayParts.Count -gt 0) { ($displayParts -join "`n") } else { $null }
+
+    [pscustomobject]@{
+      Display       = $display
+      CnameTarget   = $cnameTarget
+      TxtValue      = $txtValue
+      Expected      = $expected
+      AcsConfigured = $acsConfigured
+    }
   }
 
-  $dkim2 = $null
-  if ($d2 = ResolveSafely "selector2-azurecomm-prod-net._domainkey.$Domain" "TXT") {
-    $dkim2 = (($d2.Strings -join "") -replace '\s+', '').Trim()
+  # Fallback probe: when no ACS record exists at the expected selector, scan a
+  # small set of well-known DKIM selector names so the card can still show the
+  # operator what is configured. Returns a multi-line display string of every
+  # selector name with a CNAME or TXT plus a list of structured rows.
+  function Invoke-DkimFallbackSelectorProbe {
+    param(
+      [string]$Domain,
+      [int]$IndexHint
+    )
+
+    # Selector ordering matters: more specific / index-aligned names come first
+    # so e.g. `selector1._domainkey` is preferred for the DKIM1 card.
+    $hint = if ($IndexHint -eq 1 -or $IndexHint -eq 2) { $IndexHint } else { 1 }
+    $selectors = @(
+      "selector$hint",
+      "s$hint",
+      'default',
+      'google',
+      'k1',
+      'mail',
+      'dkim'
+    ) | Select-Object -Unique
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($selector in $selectors) {
+      $name = "$selector._domainkey.$Domain"
+
+      $cnameTarget = Get-CnameTargetFromRecords (ResolveSafely $name 'CNAME')
+      if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
+
+      $txtValue = $null
+      if ($txtRecords = ResolveSafely $name 'TXT') {
+        $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
+        if ($joined) { $txtValue = $joined }
+      }
+
+      if (-not $cnameTarget -and -not $txtValue) { continue }
+
+      $rows.Add([pscustomobject]@{
+        Name        = $name
+        Selector    = $selector
+        CnameTarget = $cnameTarget
+        TxtValue    = $txtValue
+      })
+    }
+
+    if ($rows.Count -eq 0) { return $null }
+
+    # Compose a friendly multi-line display, e.g.:
+    #   selector1._domainkey.example.com
+    #     CNAME -> selector1-example-com._domainkey.example.onmicrosoft.com
+    #     TXT: v=DKIM1;k=rsa;p=...
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($row in $rows) {
+      $lines.Add($row.Name)
+      if ($row.CnameTarget) { $lines.Add("  CNAME -> $($row.CnameTarget)") }
+      if ($row.TxtValue)    { $lines.Add("  TXT: $($row.TxtValue)") }
+    }
+
+    [pscustomobject]@{
+      Display = ($lines -join "`n")
+      Rows    = $rows.ToArray()
+    }
   }
 
-  [pscustomobject]@{ domain = $Domain; dkim1 = $dkim1; dkim2 = $dkim2 }
+  $dkim1Result = Invoke-AcsDkimSelectorLookup -LookupName "selector1-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector1-azurecomm-prod-net._domainkey.azurecomm.net'
+  $dkim2Result = Invoke-AcsDkimSelectorLookup -LookupName "selector2-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector2-azurecomm-prod-net._domainkey.azurecomm.net'
+
+  # If either ACS slot is empty, run the fallback probe so the card body can
+  # show whatever DKIM is actually published. The ACS-specific PASS/FAIL flag
+  # remains strict -- finding a non-ACS selector does not satisfy ACS DKIM.
+  $dkim1FallbackDisplay = $null
+  $dkim1FallbackRows    = @()
+  if (-not $dkim1Result.Display) {
+    $fb = Invoke-DkimFallbackSelectorProbe -Domain $Domain -IndexHint 1
+    if ($fb) {
+      $dkim1FallbackDisplay = $fb.Display
+      $dkim1FallbackRows    = $fb.Rows
+    }
+  }
+
+  $dkim2FallbackDisplay = $null
+  $dkim2FallbackRows    = @()
+  if (-not $dkim2Result.Display) {
+    $fb = Invoke-DkimFallbackSelectorProbe -Domain $Domain -IndexHint 2
+    if ($fb) {
+      $dkim2FallbackDisplay = $fb.Display
+      $dkim2FallbackRows    = $fb.Rows
+    }
+  }
+
+  # Compose the final display value for the legacy `dkim1`/`dkim2` fields. We
+  # keep the body to JUST the published record(s) -- no prose preface -- so the
+  # card shows clean DNS data. The UI is responsible for surfacing the
+  # "ACS selector not published" notice as a separate styled callout when the
+  # strict ACS PASS/FAIL flag indicates the alternate selector data is what is
+  # actually being shown.
+  $dkim1Display = $dkim1Result.Display
+  if (-not $dkim1Display -and $dkim1FallbackDisplay) {
+    $dkim1Display = $dkim1FallbackDisplay
+  }
+
+  $dkim2Display = $dkim2Result.Display
+  if (-not $dkim2Display -and $dkim2FallbackDisplay) {
+    $dkim2Display = $dkim2FallbackDisplay
+  }
+
+  [pscustomobject]@{
+    domain                    = $Domain
+    dkim1                     = $dkim1Display
+    dkim1CnameTarget          = $dkim1Result.CnameTarget
+    dkim1TxtValue             = $dkim1Result.TxtValue
+    dkim1ExpectedCname        = $dkim1Result.Expected
+    dkim1AcsConfigured        = $dkim1Result.AcsConfigured
+    dkim1FallbackSelectors    = $dkim1FallbackRows
+    dkim2                     = $dkim2Display
+    dkim2CnameTarget          = $dkim2Result.CnameTarget
+    dkim2TxtValue             = $dkim2Result.TxtValue
+    dkim2ExpectedCname        = $dkim2Result.Expected
+    dkim2AcsConfigured        = $dkim2Result.AcsConfigured
+    dkim2FallbackSelectors    = $dkim2FallbackRows
+  }
 }
 
 # Extract the CNAME target from DNS resolution result objects.
