@@ -915,7 +915,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.68'
+$script:AppVersion = '2.0.70'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -3059,6 +3059,13 @@ function Write-Json {
   Set-SecurityHeaders -Context $Context
 
   if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+    # Disable browser/proxy caching for all JSON API responses so users always
+    # see fresh DNS/WHOIS data without needing a forced refresh (CTRL+SHIFT+R).
+    try {
+      $Context.Response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+      $Context.Response.Headers['Pragma'] = 'no-cache'
+      $Context.Response.Headers['Expires'] = '0'
+    } catch { }
     $Context.Response.ContentType = "application/json; charset=utf-8"
     try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
     $Context.Response.StatusCode  = $StatusCode
@@ -14109,7 +14116,8 @@ function populateLanguageSelect() {
 function applyLanguageToStaticUi() {
   document.documentElement.lang = currentLanguage;
   document.documentElement.dir = isRtlLanguage(currentLanguage) ? 'rtl' : 'ltr';
-  document.title = t('pageTitle');
+  // Keep the queried domain visible in the tab/shortcut title across language changes.
+  updatePageTitle();
 
   const heading = document.getElementById('appHeading');
   if (heading) heading.innerHTML = t('appHeading');
@@ -14281,11 +14289,32 @@ function toggleClearBtn() {
   if (btn) btn.style.display = input.value ? "block" : "none";
 }
 
+// Build the document/tab title, optionally suffixing the queried domain so the
+// browser tab and any bookmark/shortcut display name reflect what was checked.
+// Falling back to the plain localized page title keeps the initial load tidy.
+function updatePageTitle(domain) {
+  const baseTitle = t('pageTitle');
+  let candidate = '';
+  try {
+    candidate = typeof domain === 'string' ? domain : '';
+  } catch { candidate = ''; }
+  if (!candidate) {
+    try {
+      const input = document.getElementById('domainInput');
+      candidate = input ? String(input.value || '') : '';
+    } catch { candidate = ''; }
+  }
+  const normalized = (typeof normalizeDomain === 'function') ? normalizeDomain(candidate) : String(candidate || '').trim();
+  const valid = normalized && (typeof isValidDomain === 'function' ? isValidDomain(normalized) : true);
+  document.title = valid ? `${baseTitle} (${normalized})` : baseTitle;
+}
+
 function clearInput() {
   const input = document.getElementById("domainInput");
   input.value = "";
   input.focus();
   toggleClearBtn();
+  updatePageTitle('');
 }
 
 function readHistoryItems() {
@@ -15296,6 +15325,9 @@ function lookup(options = {}) {
   const domain = normalizeDomain(domainSource);
   input.value = domain;
   toggleClearBtn();
+  // Reflect the queried domain in the document/tab title so browser
+  // shortcuts/bookmarks created from this page show what was checked.
+  updatePageTitle(domain);
 
   if (!domain) {
     setStatus(t('promptEnterDomain'));
@@ -15353,7 +15385,13 @@ function lookup(options = {}) {
         headers['X-Api-Key'] = apiKey;
       }
       headers = buildConsentRequestHeaders(headers);
-      const r = await fetch(path + "?domain=" + encodeURIComponent(domain), { signal: controller.signal, headers: headers });
+      // Add cache-busting query param and explicit no-store cache mode so the browser
+      // never serves stale DNS/WHOIS data from its HTTP cache or BFCache.
+      headers['Cache-Control'] = 'no-cache';
+      headers['Pragma'] = 'no-cache';
+      const cacheBuster = "_=" + Date.now();
+      const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster;
+      const r = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
       if (!r.ok) {
         let body = "";
         try { body = await r.text(); } catch {}
@@ -18243,6 +18281,9 @@ function initializePage() {
   loadHistory();
   document.getElementById("domainInput").value = bootstrapDomain;
   toggleClearBtn();
+  // Set the title up front so a shareable ?domain= URL produces a domain-suffixed
+  // tab title even before the asynchronous lookup begins rendering.
+  updatePageTitle(bootstrapDomain);
 
   const reportBtn = document.getElementById("reportIssueBtn");
   const issueUrl = (acsIssueUrl || '').trim();

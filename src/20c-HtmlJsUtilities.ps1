@@ -448,7 +448,8 @@ function populateLanguageSelect() {
 function applyLanguageToStaticUi() {
   document.documentElement.lang = currentLanguage;
   document.documentElement.dir = isRtlLanguage(currentLanguage) ? 'rtl' : 'ltr';
-  document.title = t('pageTitle');
+  // Keep the queried domain visible in the tab/shortcut title across language changes.
+  updatePageTitle();
 
   const heading = document.getElementById('appHeading');
   if (heading) heading.innerHTML = t('appHeading');
@@ -620,11 +621,32 @@ function toggleClearBtn() {
   if (btn) btn.style.display = input.value ? "block" : "none";
 }
 
+// Build the document/tab title, optionally suffixing the queried domain so the
+// browser tab and any bookmark/shortcut display name reflect what was checked.
+// Falling back to the plain localized page title keeps the initial load tidy.
+function updatePageTitle(domain) {
+  const baseTitle = t('pageTitle');
+  let candidate = '';
+  try {
+    candidate = typeof domain === 'string' ? domain : '';
+  } catch { candidate = ''; }
+  if (!candidate) {
+    try {
+      const input = document.getElementById('domainInput');
+      candidate = input ? String(input.value || '') : '';
+    } catch { candidate = ''; }
+  }
+  const normalized = (typeof normalizeDomain === 'function') ? normalizeDomain(candidate) : String(candidate || '').trim();
+  const valid = normalized && (typeof isValidDomain === 'function' ? isValidDomain(normalized) : true);
+  document.title = valid ? `${baseTitle} (${normalized})` : baseTitle;
+}
+
 function clearInput() {
   const input = document.getElementById("domainInput");
   input.value = "";
   input.focus();
   toggleClearBtn();
+  updatePageTitle('');
 }
 
 function readHistoryItems() {

@@ -11,6 +11,9 @@ function lookup(options = {}) {
   const domain = normalizeDomain(domainSource);
   input.value = domain;
   toggleClearBtn();
+  // Reflect the queried domain in the document/tab title so browser
+  // shortcuts/bookmarks created from this page show what was checked.
+  updatePageTitle(domain);
 
   if (!domain) {
     setStatus(t('promptEnterDomain'));
@@ -68,7 +71,13 @@ function lookup(options = {}) {
         headers['X-Api-Key'] = apiKey;
       }
       headers = buildConsentRequestHeaders(headers);
-      const r = await fetch(path + "?domain=" + encodeURIComponent(domain), { signal: controller.signal, headers: headers });
+      // Add cache-busting query param and explicit no-store cache mode so the browser
+      // never serves stale DNS/WHOIS data from its HTTP cache or BFCache.
+      headers['Cache-Control'] = 'no-cache';
+      headers['Pragma'] = 'no-cache';
+      const cacheBuster = "_=" + Date.now();
+      const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster;
+      const r = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
       if (!r.ok) {
         let body = "";
         try { body = await r.text(); } catch {}
@@ -2958,6 +2967,9 @@ function initializePage() {
   loadHistory();
   document.getElementById("domainInput").value = bootstrapDomain;
   toggleClearBtn();
+  // Set the title up front so a shareable ?domain= URL produces a domain-suffixed
+  // tab title even before the asynchronous lookup begins rendering.
+  updatePageTitle(bootstrapDomain);
 
   const reportBtn = document.getElementById("reportIssueBtn");
   const issueUrl = (acsIssueUrl || '').trim();

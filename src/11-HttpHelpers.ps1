@@ -63,6 +63,13 @@ function Write-Json {
   Set-SecurityHeaders -Context $Context
 
   if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+    # Disable browser/proxy caching for all JSON API responses so users always
+    # see fresh DNS/WHOIS data without needing a forced refresh (CTRL+SHIFT+R).
+    try {
+      $Context.Response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+      $Context.Response.Headers['Pragma'] = 'no-cache'
+      $Context.Response.Headers['Expires'] = '0'
+    } catch { }
     $Context.Response.ContentType = "application/json; charset=utf-8"
     try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
     $Context.Response.StatusCode  = $StatusCode
