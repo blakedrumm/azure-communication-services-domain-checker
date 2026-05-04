@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 2.0.70). Leave empty to extract from acs-domain-checker.ps1'
+        description: 'Version to publish (e.g., 2.0.78). Leave empty to extract from acs-domain-checker.ps1'
         required: false
         default: ''
 

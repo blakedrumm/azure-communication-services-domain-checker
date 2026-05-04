@@ -34,14 +34,29 @@ function Get-RequestHeaderValue {
 
   if (-not $Context -or [string]::IsNullOrWhiteSpace($Name)) { return $null }
   try {
-    $props = $Context.Request.PSObject.Properties
-    if ($props.Match('Headers').Count -gt 0 -and $Context.Request.Headers) {
-      if ($Context.Request.Headers.ContainsKey($Name)) { return [string]$Context.Request.Headers[$Name] }
+    $headers = $null
+    try { $headers = $Context.Request.Headers } catch { $headers = $null }
+    if ($null -eq $headers) { return $null }
+
+    # Branch on the *headers* type, not the request type. The TcpListener shim
+    # stores headers as a [hashtable] (lowercased keys, supports ContainsKey),
+    # while HttpListenerRequest exposes a WebHeaderCollection (no ContainsKey
+    # method, but case-insensitive indexer). Picking the right access pattern
+    # by type avoids a silent throw-and-swallow that previously caused this
+    # function to always return $null for HttpListener requests, which in turn
+    # broke consent-gated analytics increments (see /api/base path).
+    if ($headers -is [System.Collections.IDictionary]) {
+      if ($headers.Contains($Name)) { return [string]$headers[$Name] }
       $lower = $Name.ToLowerInvariant()
-      if ($Context.Request.Headers.ContainsKey($lower)) { return [string]$Context.Request.Headers[$lower] }
-    } elseif ($Context.Request -is [System.Net.HttpListenerRequest]) {
-      try { return [string]$Context.Request.Headers[$Name] } catch { return $null }
+      if ($headers.Contains($lower)) { return [string]$headers[$lower] }
+      return $null
     }
+
+    # WebHeaderCollection / NameValueCollection — case-insensitive indexer
+    # returns $null for missing keys instead of throwing.
+    $value = $null
+    try { $value = $headers[$Name] } catch { $value = $null }
+    if ($null -ne $value) { return [string]$value }
   } catch { }
   return $null
 }
@@ -89,13 +104,20 @@ function Get-OrCreate-AnonymousSessionId {
 
   try {
     $cookieHeader = $null
-    $props = $Context.Request.PSObject.Properties
-    if ($props.Match('Headers').Count -gt 0 -and $Context.Request.Headers) {
-      # TcpListener shim uses a hashtable headers dictionary
-      if ($Context.Request.Headers.ContainsKey('cookie')) { $cookieHeader = [string]$Context.Request.Headers['cookie'] }
-      elseif ($Context.Request.Headers.ContainsKey('Cookie')) { $cookieHeader = [string]$Context.Request.Headers['Cookie'] }
-    } elseif ($Context.Request -is [System.Net.HttpListenerRequest]) {
-      try { $cookieHeader = [string]$Context.Request.Headers['Cookie'] } catch { $cookieHeader = $null }
+    $headers = $null
+    try { $headers = $Context.Request.Headers } catch { $headers = $null }
+    if ($null -ne $headers) {
+      # Branch on the *headers* type so we use the correct access pattern. See
+      # the comment in Get-RequestHeaderValue for the full rationale: the
+      # TcpListener shim uses a [hashtable] with ContainsKey/Contains, while
+      # HttpListenerRequest exposes a WebHeaderCollection whose ContainsKey
+      # call would throw and silently zero out the cookie header.
+      if ($headers -is [System.Collections.IDictionary]) {
+        if ($headers.Contains('cookie')) { $cookieHeader = [string]$headers['cookie'] }
+        elseif ($headers.Contains('Cookie')) { $cookieHeader = [string]$headers['Cookie'] }
+      } else {
+        try { $cookieHeader = [string]$headers['Cookie'] } catch { $cookieHeader = $null }
+      }
     }
 
     $cookies = Get-RequestCookies -CookieHeader $cookieHeader
@@ -180,6 +202,65 @@ function Update-AnonymousMetrics {
       [System.Threading.Interlocked]::Decrement($script:AcsMetrics['activeLookups']) | Out-Null
       Save-AnonymousMetricsPersisted
     }
+  } catch {
+    $null = $_
+  }
+}
+
+# Anonymous Microsoft Entra ID auth metrics. Called from the consent-gated
+# `/api/auth/event` route after the SPA has finished verifying the user
+# against Microsoft Graph entirely client-side. The server never sees the
+# user's access token, UPN, oid, or tenant ID directly:
+#
+# - $AccountKey is an opaque, client-side SHA-256 hex digest of
+#   `tenantId + ':' + oid`. The browser computes it via SubtleCrypto and
+#   posts only the hex digest. We then HMAC-rehash it with the server-only
+#   `MetricsHashKey` so that even if both the persisted metrics file and the
+#   client-side digest leak, an attacker cannot precompute the stored hash
+#   without also stealing the per-install hash key.
+# - $IsMicrosoftEmployee is a boolean flag the SPA derives from the user's
+#   UPN domain (microsoft.com / microsoftsupport.com). We trust it for
+#   anonymous bucket counting only; nothing security-sensitive depends on
+#   the value being honest. Worst case a tampered request inflates a usage
+#   counter by 1, which is acceptable for an opt-in analytics signal.
+#
+# Both per-call counters (totalMsAuthVerifications, lifetimeMsAuthVerifications)
+# are incremented unconditionally so we can see overall sign-in volume; the
+# unique employee hash set only grows when IsMicrosoftEmployee is true.
+function Update-AnonymousAuthMetrics {
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$AccountKey,
+
+    [Parameter(Mandatory = $false)]
+    [bool]$IsMicrosoftEmployee
+  )
+
+  $enabled = ($env:ACS_ENABLE_ANON_METRICS -eq '1') -or ($true -eq $AcsAnonMetricsEnabled) -or ($script:EnableAnonymousMetrics -eq $true)
+  if (-not $enabled) { return }
+
+  try {
+    # Per-verification counters are bumped for every authenticated request so
+    # the lifetime counter reflects total sign-in volume (employees + guests).
+    [System.Threading.Interlocked]::Increment($script:AcsMetrics['totalMsAuthVerifications']) | Out-Null
+    [System.Threading.Interlocked]::Increment($script:AcsMetrics['lifetimeMsAuthVerifications']) | Out-Null
+
+    if ($IsMicrosoftEmployee -and -not [string]::IsNullOrWhiteSpace($AccountKey)) {
+      # Rehash the SPA-supplied SHA-256 with the server-side HMAC key. The
+      # existing Get-HashedDomain helper already wraps HMAC-SHA256 with
+      # `MetricsHashKey`, so we reuse it for consistency rather than
+      # duplicating the crypto. The trim+lowercase it does is a no-op on a
+      # hex digest but keeps behavior uniform with domain hashing.
+      $hashed = Get-HashedDomain $AccountKey
+      if (-not [string]::IsNullOrWhiteSpace($hashed)) {
+        $null = $script:AcsMetrics['lifetimeMsEmployeeIdHashes'].TryAdd($hashed, 0)
+      }
+    }
+
+    # Persist immediately so the new event survives a quick restart. Save is
+    # internally throttled / mutex-protected, so calling it here is safe even
+    # under bursty consent toggles.
+    Save-AnonymousMetricsPersisted
   } catch {
     $null = $_
   }

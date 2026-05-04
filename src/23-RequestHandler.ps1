@@ -31,6 +31,50 @@ if ([string]::IsNullOrWhiteSpace($path)) {
 }
 if ([string]::IsNullOrWhiteSpace($path)) { $path = '/' }
 
+# SECURITY: Cap POST/PUT/PATCH request bodies before any handler runs. The
+# only POST today is /api/consent which is header-driven and ignores the
+# body, so any oversized body is wasted bandwidth and a tying-up vector for
+# worker runspaces. The cap is configurable via ACS_MAX_REQUEST_BODY_BYTES
+# (default 64 KB, set in 00-Header.ps1). Returning 413 early avoids reading
+# the body at all.
+try {
+  $reqMethod = $null
+  try { $reqMethod = [string]$ctx.Request.HttpMethod } catch { $reqMethod = $null }
+  if ([string]::IsNullOrWhiteSpace($reqMethod)) {
+    try { $reqMethod = [string]$ctx.Request.Method } catch { $reqMethod = $null }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($reqMethod)) {
+    $reqMethodUpper = $reqMethod.ToUpperInvariant()
+    if ($reqMethodUpper -eq 'POST' -or $reqMethodUpper -eq 'PUT' -or $reqMethodUpper -eq 'PATCH') {
+      $bodyCap = 65536
+      if ($env:ACS_MAX_REQUEST_BODY_BYTES -and $env:ACS_MAX_REQUEST_BODY_BYTES -match '^\d+$') {
+        $bodyCap = [int]$env:ACS_MAX_REQUEST_BODY_BYTES
+      }
+      $contentLength = -1
+      try {
+        if ($ctx.Request -is [System.Net.HttpListenerRequest]) {
+          $contentLength = [int64]$ctx.Request.ContentLength64
+        } else {
+          $clHeader = $null
+          try {
+            if ($ctx.Request.Headers -and $ctx.Request.Headers.ContainsKey('content-length')) {
+              $clHeader = [string]$ctx.Request.Headers['content-length']
+            }
+          } catch { $clHeader = $null }
+          if (-not [string]::IsNullOrWhiteSpace($clHeader)) {
+            $parsed = 0
+            if ([int64]::TryParse($clHeader, [ref]$parsed)) { $contentLength = $parsed }
+          }
+        }
+      } catch { $contentLength = -1 }
+      if ($contentLength -gt $bodyCap) {
+        Write-Json -Context $ctx -Object @{ error = 'Request body too large.'; maxBytes = $bodyCap } -StatusCode 413
+        return
+      }
+    }
+  }
+} catch { }
+
 # This script block runs inside the RunspacePool for each incoming request.
 # Inputs:
 # - $ctx         : the request/response context (HttpListenerContext or TcpListener shim)
@@ -42,6 +86,34 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
   # different lookup stages for the same domain can still run concurrently.
   $scopeKey = if ([string]::IsNullOrWhiteSpace($scope)) { 'default' } else { $scope.Trim() }
   $lockKey = if ([string]::IsNullOrWhiteSpace($domain)) { $scopeKey } else { "$scopeKey|$domain" }
+
+  # SECURITY/MEMORY: prune idle semaphores when the dictionary grows large so a
+  # long-running container that processes many distinct domains cannot leak
+  # memory indefinitely. We only remove entries whose semaphore is currently
+  # idle (CurrentCount == 1, meaning no holder, no waiters), so an in-flight
+  # lookup is never disturbed. The threshold was lowered from 10k to 1k so a
+  # request burst against many distinct domains cannot balloon the dictionary
+  # before the next prune fires; the prune walk itself is bounded so a very
+  # large dictionary cannot pin the request thread either.
+  try {
+    if ($domainLocks.Count -gt 1000) {
+      $pruneBudget = 2000
+      foreach ($existingKey in @($domainLocks.Keys)) {
+        if ($pruneBudget -le 0) { break }
+        $pruneBudget--
+        $existingSem = $null
+        if ($domainLocks.TryGetValue($existingKey, [ref]$existingSem)) {
+          if ($existingSem -and $existingSem.CurrentCount -eq 1) {
+            $removed = $null
+            if ($domainLocks.TryRemove($existingKey, [ref]$removed)) {
+              try { $removed.Dispose() } catch { }
+            }
+          }
+        }
+      }
+    }
+  } catch { }
+
   $sem = $null
   if (-not $domainLocks.TryGetValue($lockKey, [ref]$sem)) {
     $newSem = [System.Threading.SemaphoreSlim]::new(1, 1)
@@ -112,7 +184,26 @@ if ($metricsEnabled) {
       $rootFullPath = [System.IO.Path]::GetFullPath($assetsRoot)
       $assetFullPath = [System.IO.Path]::GetFullPath((Join-Path -Path $rootFullPath -ChildPath $relativeAssetPath))
 
-      if (-not $assetFullPath.StartsWith($rootFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+      # SECURITY: Append a directory separator before the prefix check so a
+      # sibling directory whose name starts with the same prefix (for example
+      # `C:\repo\assetsX\` vs `C:\repo\assets\`) cannot satisfy `StartsWith`.
+      # On Windows the comparison stays case-insensitive; on case-sensitive
+      # file systems we use ordinal comparison so an "/Assets/..." request
+      # path will not slip through pointing at a different directory.
+      $sep = [string][System.IO.Path]::DirectorySeparatorChar
+      $rootFullPathWithSep = if ($rootFullPath.EndsWith($sep)) { $rootFullPath } else { $rootFullPath + $sep }
+      # `$IsWindows` is only defined in PowerShell 7+. On Windows PowerShell
+      # 5.1 (Desktop edition) the variable is unset, so we treat the
+      # Desktop edition as Windows by definition.
+      $isWindowsRuntime = $false
+      try { if (Get-Variable -Name IsWindows -Scope Global -ErrorAction SilentlyContinue) { $isWindowsRuntime = [bool]$IsWindows } } catch { }
+      if (-not $isWindowsRuntime -and $PSVersionTable.PSEdition -eq 'Desktop') { $isWindowsRuntime = $true }
+      $comparisonMode = if ($isWindowsRuntime) {
+        [System.StringComparison]::OrdinalIgnoreCase
+      } else {
+        [System.StringComparison]::Ordinal
+      }
+      if (-not $assetFullPath.StartsWith($rootFullPathWithSep, $comparisonMode) -and ($assetFullPath -ne $rootFullPath)) {
         Write-Json -Context $ctx -Object @{ error = 'Invalid asset path.' } -StatusCode 400
         return
       }
@@ -147,7 +238,20 @@ if ($metricsEnabled) {
   # 1c) Consent sync endpoint. This is called by the SPA after the user saves
   # cookie preferences so the server can immediately clear any existing
   # analytics session cookie when analytics consent is rejected.
+  # Rate-limited so a noisy client cannot pin a worker runspace by spamming
+  # consent toggles. Uses a generous multiplier because the SPA may legitimately
+  # call this several times during a single page load (load + save + theme).
   if ($path -eq '/api/consent') {
+    $rate = Test-RateLimit -Context $ctx -Multiplier 4
+    if (-not $rate.allowed) {
+      try {
+        if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
+          $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
+        }
+      } catch { }
+      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      return
+    }
     if ($false -eq $analyticsConsentState) {
       Clear-AnonymousSessionCookie -Context $ctx
     }
@@ -221,180 +325,94 @@ if ($metricsEnabled) {
     return
   }
 
-  # 2b) Microsoft Entra ID authentication verification endpoint
-  if ($path -eq '/api/auth/verify') {
-    # Validate the Bearer token by calling Microsoft Graph /me endpoint.
-    # This ensures the token is valid and lets us check the user's domain.
-    $authHeader = $null
-    try {
-      if ($ctx.Request -is [System.Net.HttpListenerRequest]) {
-        $authHeader = [string]$ctx.Request.Headers['Authorization']
-      } elseif ($ctx.Request.Headers) {
-        if ($ctx.Request.Headers.ContainsKey('Authorization')) { $authHeader = [string]$ctx.Request.Headers['Authorization'] }
-        elseif ($ctx.Request.Headers.ContainsKey('authorization')) { $authHeader = [string]$ctx.Request.Headers['authorization'] }
-      }
-    } catch { $authHeader = $null }
-
-    if ([string]::IsNullOrWhiteSpace($authHeader) -or -not $authHeader.StartsWith('Bearer ', [System.StringComparison]::OrdinalIgnoreCase)) {
-      Write-Json -Context $ctx -Object @{ error = 'Missing or invalid Authorization header. Expected: Bearer <token>' } -StatusCode 401
+  # 2b) Microsoft Entra ID auth: handled entirely client-side in the SPA.
+  # The browser uses MSAL to acquire a Microsoft Graph token and calls
+  # Graph /me directly (see verifyMsAccount in 20e-HtmlAzureIntegration.ps1).
+  # The previous /api/auth/verify route forwarded user bearer tokens to
+  # Microsoft Graph from the server, which expanded the trust boundary
+  # without adding security. It was removed so the server never handles
+  # raw Entra access tokens.
+  #
+  # The /api/auth/event route below is the consent-gated, header-only
+  # successor: after the SPA finishes its own Graph verification it POSTs
+  # a single notification with two non-PII headers so we can keep counting
+  # anonymous sign-in volume and unique Microsoft-employee bucket counts:
+  #
+  #   X-ACS-Auth-Account-Key  - SHA-256 hex of (tenantId + ':' + oid),
+  #                             computed in the browser via SubtleCrypto.
+  #                             Optional; only sent when both claims are
+  #                             present. Server HMAC-rehashes it with the
+  #                             per-install MetricsHashKey before storing.
+  #   X-ACS-Auth-Is-Microsoft - '1' if the SPA classified the user as a
+  #                             Microsoft employee (UPN matches
+  #                             microsoft.com/microsoftsupport.com),
+  #                             otherwise '0'. Worst case a tampered
+  #                             value off-by-ones a usage counter, which
+  #                             is acceptable for an opt-in analytics
+  #                             signal.
+  #
+  # The route requires analytics consent and applies the standard rate
+  # limiter so a noisy client cannot pin a worker.
+  if ($path -eq '/api/auth/event') {
+    if (-not $metricsEnabled) {
+      Write-Json -Context $ctx -Object @{ ok = $true; recorded = $false; reason = 'metrics-disabled' }
+      return
+    }
+    if ($true -ne $analyticsConsentState) {
+      # Honor the user's consent choice: do nothing, but acknowledge with 200
+      # so the SPA does not retry. Mirrors the /api/consent shape.
+      Write-Json -Context $ctx -Object @{ ok = $true; recorded = $false; reason = 'analytics-consent-required' }
       return
     }
 
-    $accessToken = $authHeader.Substring(7).Trim()
-    if ([string]::IsNullOrWhiteSpace($accessToken)) {
-      Write-Json -Context $ctx -Object @{ error = 'Empty access token.' } -StatusCode 401
-      return
-    }
-
-    # Validate JWT audience claim before forwarding the token anywhere.
-    # NOTE: The UI acquires a Microsoft Graph access token (scope: User.Read) to validate the user via /me.
-    # That means the token audience (aud) is typically Microsoft Graph, not this SPA's client id.
-    # We allow:
-    # - Microsoft Graph (00000003-0000-0000-c000-000000000000)
-    # - this app's client id (ACS_ENTRA_CLIENT_ID)
-    try {
-      $expectedClientId = $env:ACS_ENTRA_CLIENT_ID
-      if (-not [string]::IsNullOrWhiteSpace($expectedClientId)) {
-        $jwtParts = $accessToken.Split('.')
-        if ($jwtParts.Count -ge 2) {
-          $payloadBase64 = $jwtParts[1]
-          # Base64url decode (JWT uses '-' '_' and may omit padding)
-          $payloadBase64 = $payloadBase64.Replace('-', '+').Replace('_', '/')
-          switch ($payloadBase64.Length % 4) {
-            0 { }
-            2 { $payloadBase64 += '==' }
-            3 { $payloadBase64 += '=' }
-            default { throw 'Malformed JWT payload (invalid base64 length).' }
-          }
-          $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payloadBase64))
-          $payload = $payloadJson | ConvertFrom-Json -ErrorAction Stop
-          $graphAud = '00000003-0000-0000-c000-000000000000'
-
-          # JWT aud can be a string or an array
-          $audValues = @()
-          try {
-            if ($null -eq $payload.aud) {
-              $audValues = @()
-            }
-            elseif ($payload.aud -is [System.Array]) {
-              $audValues = @($payload.aud | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            }
-            else {
-              $audValues = @([string]$payload.aud)
-            }
-          } catch {
-            $audValues = @()
-          }
-
-          $audOk = $false
-          foreach ($a in $audValues) {
-            if ([string]::Equals($a, $expectedClientId, [System.StringComparison]::OrdinalIgnoreCase) -or
-                [string]::Equals($a, $graphAud, [System.StringComparison]::OrdinalIgnoreCase)) {
-              $audOk = $true
-              break
-            }
-          }
-
-          if (-not $audOk) {
-            Write-Json -Context $ctx -Object @{ error = 'Token audience mismatch. Expected token for Microsoft Graph or this application.'; authenticated = $false; tokenAudiences = $audValues } -StatusCode 401
-            return
-          }
-        } else {
-          Write-Json -Context $ctx -Object @{ error = 'Malformed JWT token.'; authenticated = $false } -StatusCode 401
-          return
-        }
-      }
-    } catch {
-      Write-Json -Context $ctx -Object @{ error = "Token audience validation failed: $($_.Exception.Message)"; authenticated = $false } -StatusCode 401
-      return
-    }
-
-    try {
-      # Call Microsoft Graph /me to validate the token and get user info.
-      # This is the most secure server-side validation approach for SPAs:
-      # - The token is validated by Microsoft's own infrastructure
-      # - We get verified user claims (email, tenant, display name)
-      # - No need to manually validate JWT signatures/keys
-      $graphHeaders = @{ Authorization = "Bearer $accessToken"; 'Content-Type' = 'application/json' }
-      $graphResp = Invoke-RestMethod -Method Get -Uri 'https://graph.microsoft.com/v1.0/me' -Headers $graphHeaders -TimeoutSec 15 -ErrorAction Stop
-
-      $userPrincipalName = [string]$graphResp.userPrincipalName
-      $mail = [string]$graphResp.mail
-      $displayName = [string]$graphResp.displayName
-      $id = [string]$graphResp.id
-
-      # Determine if this is a Microsoft employee:
-      # Check both UPN and mail for @microsoft.com domain
-      $isMsEmployee = $false
-      $emailDomain = $null
-
-      if (-not [string]::IsNullOrWhiteSpace($userPrincipalName)) {
-        $atIdx = $userPrincipalName.LastIndexOf('@')
-        if ($atIdx -ge 0) {
-          $emailDomain = $userPrincipalName.Substring($atIdx + 1).Trim().ToLowerInvariant()
-          if ($emailDomain -eq 'microsoft.com') { $isMsEmployee = $true }
-        }
-      }
-
-      if (-not $isMsEmployee -and -not [string]::IsNullOrWhiteSpace($mail)) {
-        $atIdx2 = $mail.LastIndexOf('@')
-        if ($atIdx2 -ge 0) {
-          $mailDomain = $mail.Substring($atIdx2 + 1).Trim().ToLowerInvariant()
-          if ($mailDomain -eq 'microsoft.com') { $isMsEmployee = $true }
-          if (-not $emailDomain) { $emailDomain = $mailDomain }
-        }
-      }
-
-      # Anonymous metrics: count successful auth verifications (no PII stored).
-
+    $rate = Test-RateLimit -Context $ctx -Multiplier 4
+    if (-not $rate.allowed) {
       try {
-        if ($metricsEnabled -and $isMsEmployee -and $id) {
-          # Hash the AAD object ID (id) and store in the hash sets
-          $hash = $null
-          try {
-            $key = $MetricsHashKey
-            if ([string]::IsNullOrWhiteSpace($key)) { $key = $env:ACS_METRICS_HASH_KEY }
-            if (-not [string]::IsNullOrWhiteSpace($key)) {
-              $keyBytes = [Text.Encoding]::UTF8.GetBytes($key)
-              $dataBytes = [Text.Encoding]::UTF8.GetBytes($id)
-              $hmac = [System.Security.Cryptography.HMACSHA256]::new($keyBytes)
-              try {
-                $hash = [Convert]::ToBase64String($hmac.ComputeHash($dataBytes))
-              } finally { try { $hmac.Dispose() } catch { } }
-            }
-          } catch { $hash = $null }
-          if ($hash) {
-            $addedSession = $script:AcsMetrics['msEmployeeIdHashes'].TryAdd($hash, 0)
-            $addedLifetime = $script:AcsMetrics['lifetimeMsEmployeeIdHashes'].TryAdd($hash, 0)
-            if ($addedSession -or $addedLifetime) {
-              [System.Threading.Interlocked]::Increment($script:AcsMetrics['lifetimeMsAuthVerifications']) | Out-Null
-              Save-AnonymousMetricsPersisted
-            }
-          }
-        }
-      } catch { $null = $_ }
-
-      Write-Json -Context $ctx -Object ([pscustomobject]@{
-        authenticated = $true
-        isMicrosoftEmployee = $isMsEmployee
-        displayName = $displayName
-        emailDomain = $emailDomain
-        userId = $id
-      })
-    }
-    catch {
-      $errMsg = $_.Exception.Message
-      $statusCode = 401
-
-      # Try to extract HTTP status from WebException
-      try {
-        if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
-          $httpStatus = [int]$_.Exception.Response.StatusCode
-          if ($httpStatus -ge 400) { $statusCode = $httpStatus }
+        if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
+          $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
+      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      return
+    }
 
-      Write-Json -Context $ctx -Object @{ error = "Token validation failed: $errMsg"; authenticated = $false } -StatusCode $statusCode
+    # Read the two opt-in headers via Get-RequestHeaderValue, which already
+    # handles both the WebHeaderCollection (HttpListener) and hashtable
+    # (TcpListener shim) header shapes.
+    $accountKey = Get-RequestHeaderValue -Context $ctx -Name 'X-ACS-Auth-Account-Key'
+    $isMsRaw    = Get-RequestHeaderValue -Context $ctx -Name 'X-ACS-Auth-Is-Microsoft'
+
+    # Defensive validation: the account key must look like a SHA-256 hex
+    # digest (64 chars, [0-9a-f]). Anything else gets ignored so we never
+    # store junk in the unique-employee hash set.
+    $accountKeyValid = $false
+    if (-not [string]::IsNullOrWhiteSpace($accountKey)) {
+      $accountKeyTrimmed = $accountKey.Trim().ToLowerInvariant()
+      if ($accountKeyTrimmed -match '^[0-9a-f]{64}$') {
+        $accountKey = $accountKeyTrimmed
+        $accountKeyValid = $true
+      } else {
+        $accountKey = $null
+      }
+    } else {
+      $accountKey = $null
+    }
+
+    $isMsEmployee = $false
+    if (-not [string]::IsNullOrWhiteSpace($isMsRaw)) {
+      $isMsTrim = $isMsRaw.Trim().ToLowerInvariant()
+      if ($isMsTrim -in @('1', 'true', 'yes', 'on')) { $isMsEmployee = $true }
+    }
+
+    try {
+      Update-AnonymousAuthMetrics -AccountKey $accountKey -IsMicrosoftEmployee $isMsEmployee
+    } catch { $null = $_ }
+
+    Write-Json -Context $ctx -Object @{
+      ok = $true
+      recorded = $true
+      accountKeyAccepted = $accountKeyValid
+      isMicrosoftEmployee = $isMsEmployee
     }
     return
   }

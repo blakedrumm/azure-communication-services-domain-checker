@@ -33,7 +33,9 @@ function Get-RdapBootstrapData {
   $uri = 'https://data.iana.org/rdap/dns.json'
 
   try {
-    $data = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec $TimeoutSec -ErrorAction Stop
+    # IANA bootstrap is HTTPS only; route through Invoke-OutboundHttp so the
+    # outbound surface is consistent and easy to harden in one place.
+    $data = Invoke-OutboundHttp -Uri $uri -TimeoutSec $TimeoutSec -MaximumRedirection 3
     if ($null -eq $data -or $null -eq $data.services) {
       return $null
     }
@@ -172,7 +174,7 @@ function Invoke-RdapLookup {
       $baseUri = [System.Uri]::new($base, [System.UriKind]::Absolute)
       $uri     = [System.Uri]::new($baseUri, ("domain/{0}" -f $escaped)).AbsoluteUri
 
-      return (Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec $TimeoutSec -ErrorAction Stop)
+      return (Invoke-OutboundHttp -Uri $uri -TimeoutSec $TimeoutSec -MaximumRedirection 3)
     }
     catch {
       # Authoritative lookup failed; fall through to rdap.org fallback.
@@ -182,7 +184,7 @@ function Invoke-RdapLookup {
   # 2) Fallback to rdap.org proxy (will usually redirect to the authoritative server).
   try {
     $uri2 = "https://rdap.org/domain/$escaped"
-    return (Invoke-RestMethod -Method Get -Uri $uri2 -TimeoutSec $TimeoutSec -MaximumRedirection 5 -ErrorAction Stop)
+    return (Invoke-OutboundHttp -Uri $uri2 -TimeoutSec $TimeoutSec -MaximumRedirection 3)
   }
   catch {
     if ($ThrowOnError) { throw }
@@ -208,7 +210,7 @@ function Invoke-WhoisXmlLookup {
   if ([string]::IsNullOrWhiteSpace($d)) { return $null }
 
   $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=$([uri]::EscapeDataString($apiKey))&domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
-  $resp = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 20 -ErrorAction Stop
+  $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3
   if ($null -eq $resp) { return $null }
   return $resp
 }
@@ -246,7 +248,7 @@ function Invoke-GoDaddyWhoisLookup {
   $uri = "https://api.godaddy.com/v1/domains/$([uri]::EscapeDataString($d))"
   $headers = @{ Authorization = "sso-key $apiKey`:$apiSecret" }
   try {
-    Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+    Invoke-OutboundHttp -Uri $uri -Headers $headers -TimeoutSec 20 -MaximumRedirection 3
   }
   catch [System.Net.WebException] {
     # Surface HTTP status code + response body for debugging (e.g., 403 Forbidden vs quota/auth).

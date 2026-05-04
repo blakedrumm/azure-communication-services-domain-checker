@@ -326,7 +326,7 @@ The application exposes the following RESTful API endpoints:
 | `/api/cname` | CNAME records | Validates canonical name records |
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
-| `/api/auth/verify` | Entra ID token verification | Validates a Microsoft Entra ID Bearer token via Microsoft Graph |
+| `/api/auth/event` | Anonymous Microsoft Entra ID sign-in ping | Header-only, consent-gated. SPA POSTs an opaque SHA-256 account hash and a Microsoft-employee boolean after client-side MSAL/Graph verification; the server never sees access tokens, UPN, oid, or tenant id. |
 | `/terms` | Terms of Service | Embedded, localized Terms of Service page |
 | `/privacy` | Privacy Statement | Embedded, localized Privacy Statement page |
 
@@ -559,7 +559,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.0.70`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.0.78`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -582,8 +582,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.0.70
-git push origin v2.0.70
+git tag v2.0.78
+git push origin v2.0.78
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -594,7 +594,7 @@ git push origin v2.0.70
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.0.70`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.0.78`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -611,11 +611,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.0.70
+docker pull limitlessworlds/acs-domain-checker:2.0.78
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.0.70
-docker pull limitlessworlds/acs-domain-checker:windows-2.0.70
+docker pull limitlessworlds/acs-domain-checker:linux-2.0.78
+docker pull limitlessworlds/acs-domain-checker:windows-2.0.78
 ```
 
 ### 🛠️ Manual Build Script
@@ -630,7 +630,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.0.70
+./acs-domain-checker-dockerhub.ps1 -Version 2.0.78
 ```
 
 **📋 Requirements for manual script:**
@@ -762,6 +762,56 @@ If you encounter issues:
    - Steps to reproduce
    - Environment information (OS, PowerShell version, etc.)
    - Relevant error messages or logs
+
+## 🛠️ Build & Local UI Assets
+
+The repository ships both the **modular source** (under `src/NN-Name.ps1`) and a
+**built monolithic artifact** (`acs-domain-checker.ps1` at the repo root). Edit
+the modular sources, then rebuild — never edit the monolith directly.
+
+### 🧩 Source layout
+
+Source files in `src/` are numbered (`00-Header.ps1`, `01-DomainParsing.ps1`,
+`20a-HtmlScriptSetup.ps1`, etc.) so the build can concatenate them in a stable
+order. The build sorts by numeric prefix plus optional letter suffix, so
+`20a-*` correctly loads after `20-*` and before `21-*`.
+
+### 🏗️ Rebuilding `acs-domain-checker.ps1`
+
+Use `Build-Release.ps1` to refresh local UI assets (optional) and concatenate
+all `src/*.ps1` files into the monolithic script:
+
+```powershell
+# Standard rebuild (also refreshes local UI assets via Download-UiAssets.ps1)
+pwsh -NoProfile -File ./Build-Release.ps1 -Force
+
+# Offline / restricted environments — skip the asset download step
+pwsh -NoProfile -File ./Build-Release.ps1 -Force -SkipUiAssetDownload
+```
+
+### 🎨 Local UI assets (`Download-UiAssets.ps1`)
+
+To avoid third-party tracking-prevention warnings, the SPA can serve Lucide
+icons and language flag SVGs from same-origin `/assets/*` paths. Run the asset
+downloader once (or whenever new icons/flags are referenced) to populate
+`assets/vendor/...`:
+
+```powershell
+pwsh -NoProfile -File ./Download-UiAssets.ps1
+```
+
+Keep `Download-UiAssets.ps1` in sync with the asset names referenced by
+`src/20b-HtmlTranslations.ps1` and `src/20c-HtmlJsUtilities.ps1`.
+
+### ✅ Quick validation after a build
+
+```powershell
+# CLI smoke test — runs DNS checks once and prints JSON
+pwsh -NoProfile -File ./acs-domain-checker.ps1 -TestDomain example.com
+```
+
+For deeper guidance on the source layout, build pipeline, and conventions, see
+[`.github/copilot-instructions.md`](.github/copilot-instructions.md).
 
 ## 🤝 Contributing
 

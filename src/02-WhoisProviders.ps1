@@ -213,14 +213,28 @@ function Invoke-SysinternalsWhoisLookup {
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
 
-    $out = $p.StandardOutput.ReadToEnd()
-    $err = $p.StandardError.ReadToEnd()
+    # SECURITY/RELIABILITY: read stdout/stderr asynchronously. The previous
+    # implementation called the synchronous ReadToEnd() before WaitForExit,
+    # which meant a misbehaving WHOIS server (or a hostile peer) could keep
+    # the child's pipes open forever and the timeout below would never be
+    # reached. ReadToEndAsync() starts pumping immediately and the resulting
+    # Task completes naturally when the child exits or after we Kill it,
+    # which makes the WaitForExit timeout authoritative.
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
 
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+    $exited = $p.WaitForExit($TimeoutSec * 1000)
+    if (-not $exited) {
       try { $p.Kill($true) } catch { try { $p.Kill() } catch { } }
+      try { $p.WaitForExit(2000) | Out-Null } catch { }
       $msg = "Sysinternals whois timed out after $TimeoutSec seconds for '$d'."
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
+
+    $out = ''
+    $err = ''
+    try { $out = $outTask.GetAwaiter().GetResult() } catch { $out = '' }
+    try { $err = $errTask.GetAwaiter().GetResult() } catch { $err = '' }
 
     # Some tools write normal output to stderr; combine both safely
     $text = (($out, $err) -join "`r`n").Trim()
@@ -332,13 +346,26 @@ function Invoke-LinuxWhoisLookup {
     }
 
     try {
-      $out = $p.StandardOutput.ReadToEnd()
-      $err = $p.StandardError.ReadToEnd()
+      # SECURITY/RELIABILITY: read stdout/stderr asynchronously. The previous
+      # implementation called the synchronous ReadToEnd() before WaitForExit,
+      # which meant a stalled remote WHOIS server could pin the pipes open
+      # indefinitely and the WaitForExit timeout would never be reached.
+      # ReadToEndAsync() starts pumping immediately and the resulting Task
+      # completes naturally when the child exits or after we Kill it.
+      $outTask = $p.StandardOutput.ReadToEndAsync()
+      $errTask = $p.StandardError.ReadToEndAsync()
 
-      if (-not $p.WaitForExit($QueryTimeoutSec * 1000)) {
+      $exited = $p.WaitForExit($QueryTimeoutSec * 1000)
+      if (-not $exited) {
         try { $p.Kill($true) } catch { try { $p.Kill() } catch { } }
+        try { $p.WaitForExit(2000) | Out-Null } catch { }
         throw "whois timed out after $QueryTimeoutSec seconds for '$LookupDomain'."
       }
+
+      $out = ''
+      $err = ''
+      try { $out = $outTask.GetAwaiter().GetResult() } catch { $out = '' }
+      try { $err = $errTask.GetAwaiter().GetResult() } catch { $err = '' }
 
       return [pscustomobject]@{
         text = (($out, $err) -join "`r`n").Trim()

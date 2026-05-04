@@ -197,6 +197,10 @@ async function verifyMsAccount(accessToken) {
     const userPrincipalName = String((profile && (profile.userPrincipalName || profile.mail)) || msAuthAccount?.username || claims.preferred_username || '').trim();
     const displayName = String((profile && profile.displayName) || msAuthAccount?.name || claims.name || userPrincipalName || '').trim();
     const tenantId = String(claims.tid || '').trim();
+    // Object id (oid) is stable per user per tenant. We never send it raw -
+    // we hash (tid + ':' + oid) with SubtleCrypto so the server only ever
+    // sees an opaque 64-char hex digest.
+    const objectId = String(claims.oid || '').trim();
 
     const data = {
       displayName,
@@ -207,6 +211,44 @@ async function verifyMsAccount(accessToken) {
 
     isMsEmployee = data.isMicrosoftEmployee === true;
     updateAuthUI(data);
+
+    // Fire-and-forget anonymous analytics ping. Only sent when the user has
+    // granted analytics consent (the server enforces this too); the server
+    // sees only the SHA-256 hex of (tid + ':' + oid) plus a single boolean
+    // flag, never the access token, UPN, oid, or tenant id.
+    try {
+      if (hasConsentFor('analytics')) {
+        let accountKeyHex = '';
+        try {
+          if (tenantId && objectId && window.crypto && window.crypto.subtle && typeof TextEncoder !== 'undefined') {
+            const enc = new TextEncoder();
+            const buf = enc.encode(tenantId + ':' + objectId);
+            const digest = await window.crypto.subtle.digest('SHA-256', buf);
+            const bytes = new Uint8Array(digest);
+            let hex = '';
+            for (let i = 0; i < bytes.length; i++) {
+              hex += bytes[i].toString(16).padStart(2, '0');
+            }
+            accountKeyHex = hex;
+          }
+        } catch {}
+
+        const headers = buildConsentRequestHeaders({});
+        if (accountKeyHex) {
+          headers['X-ACS-Auth-Account-Key'] = accountKeyHex;
+        }
+        headers['X-ACS-Auth-Is-Microsoft'] = data.isMicrosoftEmployee ? '1' : '0';
+
+        // No body - the route is header-only so it works under both the
+        // HttpListener and TcpListener fallback paths without any body
+        // parsing. Errors are swallowed; analytics must never block sign-in.
+        fetch('/api/auth/event', {
+          method: 'POST',
+          headers: headers,
+          cache: 'no-store'
+        }).catch(() => {});
+      }
+    } catch {}
   } catch (e) {
     console.error('Auth verify error:', e);
     updateAuthUI(null);

@@ -10,16 +10,21 @@ function Resolve-DohName {
 
   # DNS-over-HTTPS resolver.
   # Returns objects shaped similarly to `Resolve-DnsName` output so downstream code can stay uniform.
+  # SECURITY: read the resolver endpoint from the environment but do NOT mutate
+  # process-wide $env:ACS_DNS_DOH_ENDPOINT here. Worker runspaces share the
+  # parent process environment, so mutating it from concurrent workers races
+  # and unnecessarily fingerprints internal state. The local variable is enough.
   $endpoint = $env:ACS_DNS_DOH_ENDPOINT
   if ([string]::IsNullOrWhiteSpace($endpoint)) {
     $endpoint = 'https://cloudflare-dns.com/dns-query'
-    $env:ACS_DNS_DOH_ENDPOINT = $endpoint
   }
 
   $uri = "{0}?name={1}&type={2}" -f $endpoint, ([uri]::EscapeDataString($Name)), $Type
 
   # Cloudflare-style DoH JSON response (RFC 8484 compatible JSON format).
-  $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -ErrorAction Stop
+  # Routed through Invoke-OutboundHttp so HTTPS-only / redirect cap / timeout
+  # are enforced consistently with the other user-driven lookups.
+  $resp = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -MaximumRedirection 3
   if ($null -eq $resp -or $null -eq $resp.Answer) { return $null }
 
   $answers = @($resp.Answer)
@@ -777,15 +782,19 @@ function Resolve-DohRecordsDetailed {
     [string]$Type
   )
 
+  # SECURITY: read the resolver endpoint from the environment but do NOT mutate
+  # process-wide $env:ACS_DNS_DOH_ENDPOINT here. Worker runspaces share the
+  # parent process environment, so mutating it from concurrent workers races
+  # and unnecessarily fingerprints internal state. The local variable is enough.
   $endpoint = $env:ACS_DNS_DOH_ENDPOINT
   if ([string]::IsNullOrWhiteSpace($endpoint)) {
     $endpoint = 'https://cloudflare-dns.com/dns-query'
-    $env:ACS_DNS_DOH_ENDPOINT = $endpoint
   }
 
   $typeCode = Get-DnsRecordTypeCode -Type $Type
   $uri = "{0}?name={1}&type={2}&do=true" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
-  $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -ErrorAction Stop
+  # Same outbound guardrails as Resolve-DohName.
+  $resp = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -MaximumRedirection 3
   if ($null -eq $resp -or $null -eq $resp.Answer) { return @() }
 
   $results = New-Object System.Collections.Generic.List[object]

@@ -55,6 +55,11 @@ try {
 
     # TcpListener fallback response object.
     # It exposes a subset of `HttpListenerResponse`-like properties and a `SendBody()` method.
+    # `_extraHeaders` is populated by Set-SecurityHeaders / Set-NoCacheHeaders so
+    # the fallback path emits the same CSP, X-Frame-Options, X-Content-Type-Options,
+    # Referrer-Policy, CORS, and cache-control headers as the HttpListener path.
+    # Without this slot the fallback server mode would silently strip every
+    # browser-side defense.
     $resp = [pscustomobject]@{
       StatusCode = 200
       StatusDescription = 'OK'
@@ -63,6 +68,7 @@ try {
       _client = $Client
       _stream = $networkStream
       _sent = $false
+      _extraHeaders = [ordered]@{}
     }
 
     $resp | Add-Member -MemberType ScriptMethod -Name SendBody -Value {
@@ -73,8 +79,35 @@ try {
       }
 
       $statusText = if ([string]::IsNullOrWhiteSpace($this.StatusDescription)) { 'OK' } else { $this.StatusDescription }
-      $headers = "HTTP/1.1 {0} {1}\r\nContent-Type: {2}\r\nContent-Length: {3}\r\nConnection: close\r\n\r\n" -f $this.StatusCode, $statusText, $this.ContentType, $Bytes.Length
-      $headerBytes = [Text.Encoding]::ASCII.GetBytes($headers)
+      # SECURITY/CORRECTNESS: HTTP/1.1 requires CRLF (0x0D 0x0A) between headers
+      # and after the final blank line. The previous implementation used the
+      # double-quoted PowerShell literal "\r\n" which is the four characters
+      # `\`, `r`, `\`, `n` and produces a single-line malformed response that
+      # browsers reject. Build the header block with explicit `r`n sequences.
+      $crlf = "`r`n"
+      $headerBuilder = New-Object System.Text.StringBuilder
+      [void]$headerBuilder.Append("HTTP/1.1 $($this.StatusCode) $statusText$crlf")
+      [void]$headerBuilder.Append("Content-Type: $($this.ContentType)$crlf")
+      [void]$headerBuilder.Append("Content-Length: $($Bytes.Length)$crlf")
+      [void]$headerBuilder.Append("Connection: close$crlf")
+      # Emit any security / cache-control headers the request handler attached
+      # via Set-SecurityHeaders / Set-NoCacheHeaders. We strip CR/LF from values
+      # defensively so a buggy caller cannot inject extra headers (HTTP response
+      # splitting). Skip duplicates of the headers we already wrote above.
+      $reserved = @('content-type','content-length','connection')
+      if ($null -ne $this._extraHeaders) {
+        foreach ($k in @($this._extraHeaders.Keys)) {
+          $kn = ([string]$k).Trim()
+          if ([string]::IsNullOrWhiteSpace($kn)) { continue }
+          if ($reserved -contains $kn.ToLowerInvariant()) { continue }
+          $v = [string]$this._extraHeaders[$k]
+          if ($null -eq $v) { continue }
+          $v = $v -replace "[`r`n]", ' '
+          [void]$headerBuilder.Append("$kn`: $v$crlf")
+        }
+      }
+      [void]$headerBuilder.Append($crlf)
+      $headerBytes = [Text.Encoding]::ASCII.GetBytes($headerBuilder.ToString())
 
       try {
         $this._stream.Write($headerBytes, 0, $headerBytes.Length)
@@ -115,12 +148,61 @@ try {
       [System.Net.Sockets.TcpClient]$Client
     )
 
-    # Extremely small HTTP/1.1 request reader (GET only).
-    # We only need the request line + headers to route GET requests and read query strings.
+    # Extremely small HTTP/1.1 request reader (GET/POST).
+    # We only need the request line + headers to route requests and read query strings.
+    # SECURITY: cap the request line length, individual header line length, and
+    # the total number of headers so a peer that opens a TCP connection and
+    # streams an unbounded line cannot tie up a worker indefinitely or exhaust
+    # memory. These limits are deliberately generous compared to real browsers
+    # (which send sub-kilobyte request lines) but small enough to fail fast on
+    # abuse.
+    $maxRequestLineBytes = 8192   # 8 KB request line cap
+    $maxHeaderLineBytes  = 8192   # 8 KB per header line
+    $maxHeaderCount      = 100    # max distinct headers
+    # Cap the POST request body we are willing to read/discard. /api/consent is
+    # the only POST endpoint today and its payload is a tiny JSON document; a
+    # generous cap is plenty and prevents an attacker from streaming unbounded
+    # bytes into the worker. Honor the operator's configured cap from
+    # ACS_MAX_REQUEST_BODY_BYTES (set in 00-Header.ps1) and clamp to a hard
+    # ceiling so the fallback never allocates an unreasonable buffer even if
+    # the env var is mis-configured.
+    $maxRequestBodyBytes = 65536  # 64 KB request body cap (default)
+    try {
+      if ($env:ACS_MAX_REQUEST_BODY_BYTES -and $env:ACS_MAX_REQUEST_BODY_BYTES -match '^\d+$') {
+        $envCap = [int]$env:ACS_MAX_REQUEST_BODY_BYTES
+        if ($envCap -gt 0) {
+          # Hard ceiling of 1 MB so the fallback can never allocate gigabyte buffers.
+          $maxRequestBodyBytes = [Math]::Min($envCap, 1048576)
+        }
+      }
+    } catch { }
+
+    # SECURITY: Bound how long we are willing to wait for the peer to send
+    # bytes. Without these, a slow-loris client could dribble data within
+    # the per-line caps and tie up a worker indefinitely. 15 seconds is
+    # comfortably above any normal browser/curl latency.
+    try { $Client.ReceiveTimeout = 15000 } catch { }
+    try { $Client.SendTimeout    = 15000 } catch { }
+
     $stream = $Client.GetStream()
-    $reader = [System.IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 8192, $true)
-    $line1 = $reader.ReadLine()
+    try { $stream.ReadTimeout  = 15000 } catch { }
+    try { $stream.WriteTimeout = 15000 } catch { }
+    # SECURITY/CORRECTNESS: use UTF-8 for the full reader. UTF-8 is ASCII-
+    # compatible so the request line + header parsing (which only deals with
+    # ASCII per HTTP/1.1) is unaffected, but POST bodies (e.g. JSON for
+    # /api/consent if it ever consumes a request body in this fallback path)
+    # are decoded correctly instead of being silently mangled by an ASCII
+    # decoder when they contain bytes >= 0x80.
+    $reader = [System.IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $false, 8192, $true)
+
+    try {
+      $line1 = $reader.ReadLine()
+    } catch {
+      # Read timeout / IO error; treat as a malformed request so the caller closes the socket.
+      return $null
+    }
     if ([string]::IsNullOrWhiteSpace($line1)) { return $null }
+    if ($line1.Length -gt $maxRequestLineBytes) { return $null }
 
     $parts = $line1 -split '\s+'
     if ($parts.Count -lt 2) { return $null }
@@ -129,10 +211,19 @@ try {
     $target = $parts[1].Trim()
 
     $headers = @{}
+    $headerCount = 0
     while ($true) {
-      $line = $reader.ReadLine()
+      try {
+        $line = $reader.ReadLine()
+      } catch {
+        # Read timeout / IO error mid-headers; treat as malformed.
+        return $null
+      }
       if ($null -eq $line) { break }
       if ($line -eq '') { break }
+      if ($line.Length -gt $maxHeaderLineBytes) { return $null }
+      $headerCount++
+      if ($headerCount -gt $maxHeaderCount) { return $null }
       $idx = $line.IndexOf(':')
       if ($idx -le 0) { continue }
       $hName = $line.Substring(0, $idx).Trim().ToLowerInvariant()
@@ -140,7 +231,38 @@ try {
       $headers[$hName] = $hValue
     }
 
-    return [pscustomobject]@{ Method = $method; Target = $target; Headers = $headers }
+    # Drain the POST body (if any) so the StreamReader buffer and the
+    # underlying network stream are consumed before we hand control to the
+    # request handler. Today no handler reads the body (the consent route is
+    # driven entirely by the X-ACS-Cookie-Consent header), so we simply
+    # discard up to $maxRequestBodyBytes. If a handler ever needs the body in
+    # this fallback mode, the captured value is exposed on the returned
+    # object as `Body`.
+    $body = $null
+    if ($method -eq 'POST') {
+      $contentLength = 0
+      if ($headers.ContainsKey('content-length')) {
+        $clRaw = [string]$headers['content-length']
+        [void][int]::TryParse($clRaw, [ref]$contentLength)
+      }
+      if ($contentLength -gt 0) {
+        $toRead = [Math]::Min($contentLength, $maxRequestBodyBytes)
+        try {
+          $buffer = New-Object char[] $toRead
+          $totalRead = 0
+          while ($totalRead -lt $toRead) {
+            $chunk = $reader.Read($buffer, $totalRead, ($toRead - $totalRead))
+            if ($chunk -le 0) { break }
+            $totalRead += $chunk
+          }
+          if ($totalRead -gt 0) {
+            $body = New-Object string ($buffer, 0, $totalRead)
+          }
+        } catch { $body = $null }
+      }
+    }
+
+    return [pscustomobject]@{ Method = $method; Target = $target; Headers = $headers; Body = $body }
   }
 
   if ($serverMode -eq 'HttpListener') {
@@ -163,6 +285,21 @@ try {
         # Fast-path metrics to avoid runspace contention during lookups.
         try { $absPath = $ctx.Request.Url.AbsolutePath } catch { $absPath = $null }
         if ($absPath -and ($absPath.TrimEnd('/') -ieq '/api/metrics')) {
+          # SECURITY: even though /api/metrics is cheap, it can take the metrics
+          # file mutex and read+JSON-parse the persistence file, which is a
+          # cheap-but-real DoS amplifier under sustained polling. Apply a
+          # generous rate limit (10x the per-endpoint limit) so the SPA's
+          # auto-refresh keeps working but a tight loop gets throttled.
+          $metricsRate = Test-RateLimit -Context $ctx -Multiplier 10
+          if (-not $metricsRate.allowed) {
+            try {
+              if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $metricsRate.retryAfterSec) {
+                $ctx.Response.Headers['Retry-After'] = [string]$metricsRate.retryAfterSec
+              }
+            } catch { }
+            Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $metricsRate.retryAfterSec } -StatusCode 429
+            continue
+          }
           # Respond inline (fast and avoids ThreadPool runspace issues).
           Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
@@ -217,6 +354,13 @@ try {
         # Fast-path metrics for TcpListener fallback as well.
         try { $absPath = $ctx.Request.Url.AbsolutePath } catch { $absPath = $null }
         if ($absPath -and ($absPath.TrimEnd('/') -ieq '/api/metrics')) {
+          # See HttpListener fast-path above for the rationale on rate-limiting
+          # the metrics endpoint with a 10x multiplier.
+          $metricsRate = Test-RateLimit -Context $ctx -Multiplier 10
+          if (-not $metricsRate.allowed) {
+            Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $metricsRate.retryAfterSec } -StatusCode 429
+            continue
+          }
           Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
         }

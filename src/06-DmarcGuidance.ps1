@@ -46,6 +46,10 @@ function Get-DmarcSecurityGuidance {
 
   if ($policy -eq 'none') {
     $messages.Add("DMARC for $targetDomain is monitor-only (`p=none`). For stronger protection against spoofing, move to enforcement with `p=quarantine` or `p=reject` after validating legitimate mail sources.")
+    # Bulk-sender callout: monitor-only DMARC provides no enforcement and is
+    # treated the same as "no DMARC" by major mailbox providers (Google, Yahoo,
+    # Microsoft) for bulk-sender (>5,000 messages/day) deliverability rules.
+    $messages.Add("DMARC is strongly recommended when sending more than 5,000 emails per day. Major mailbox providers (Google, Yahoo, Microsoft) require an enforced DMARC policy for bulk senders, and missing or weak DMARC frequently causes deliverability failures at high volume.")
   }
   elseif ($policy -eq 'quarantine') {
     $messages.Add("DMARC for $targetDomain is set to `p=quarantine`. For the strongest anti-spoofing posture, consider `p=reject` once you confirm valid mail is fully aligned.")

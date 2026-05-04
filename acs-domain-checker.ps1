@@ -63,6 +63,16 @@
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
                                    Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
+  - ACS_TRUSTED_PROXIES          : Optional comma/semicolon/newline-delimited list of trusted reverse-proxy IPs or CIDRs.
+                                   When set, X-Forwarded-For / X-Real-IP headers are honored only when the immediate
+                                   peer IP matches an entry. Default empty = forwarded headers are ignored
+                                   (rate-limit/log uses the direct socket peer).
+                                   Example: `127.0.0.1,::1,10.0.0.0/8`.
+  - ACS_ALLOWED_ORIGINS          : Optional comma/semicolon/newline-delimited list of allowed CORS origins. Hosts only
+                                   (with optional scheme/port). When unset, only loopback hosts are allowed.
+                                   Example: `https://acs.example.com,https://localhost:8443`.
+  - ACS_MAX_REQUEST_BODY_BYTES   : Optional cap on POST/PUT/PATCH request bodies (default 65536). Larger requests
+                                   receive a 413 response.
 
   Cross-platform / container notes:
   - Bind mode: Auto picks loopback on Windows; uses 0.0.0.0 in container scenarios. Override with -Bind Any/Localhost.
@@ -94,7 +104,28 @@ param(
   # - Enabled only when `-EnableAnonymousMetrics` is used.
   # - Persists counters and first-seen/restart metadata to a local JSON file.
   # - Does not persist session ids.
-  [string]$AnonymousMetricsFile
+  [string]$AnonymousMetricsFile,
+
+  # Optional comma/semicolon/newline-delimited list of trusted reverse-proxy
+  # IPs or CIDRs. When set, X-Forwarded-For / X-Real-IP request headers are
+  # honored only when the immediate socket peer is in this list. The default
+  # (empty) means forwarded headers are ignored, which is the safer choice
+  # for direct-to-listener deployments because it prevents clients from
+  # spoofing their IP for rate limiting.
+  [string]$TrustedProxies,
+
+  # Optional comma/semicolon/newline-delimited list of allowed CORS origins
+  # (host or scheme://host[:port]). When set, only listed origins are
+  # reflected back as `Access-Control-Allow-Origin`. When unset, only
+  # loopback origins (127.0.0.1 / [::1] / localhost) are accepted, which
+  # mirrors the safer "local troubleshooting" intent of the tool.
+  [string]$AllowedOrigins,
+
+  # Optional cap on POST/PUT/PATCH request bodies in bytes. Larger requests
+  # receive a 413 response. Default 65536 (64 KB) is plenty for the only
+  # POST today (`/api/consent`) and prevents an attacker from streaming
+  # unbounded bytes into a worker runspace.
+  [int]$MaxRequestBodyBytes = 0
 )
 
 # ------------------- UTF-8 ENCODING FIX -------------------
@@ -158,6 +189,28 @@ $script:EnableAnonymousMetrics = $anonMetricsEnabled
 if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
   $AnonymousMetricsFile = $env:ACS_ANON_METRICS_FILE
 }
+
+# Trusted reverse-proxy list. CLI parameter wins over environment variable.
+# Get-ClientIp consults `$env:ACS_TRUSTED_PROXIES` directly so the list is
+# visible inside RunspacePool worker runspaces (script scope is not copied).
+if (-not [string]::IsNullOrWhiteSpace($TrustedProxies)) {
+  $env:ACS_TRUSTED_PROXIES = $TrustedProxies
+}
+
+# CORS origin allow-list. Same env-vs-param precedence/visibility reasoning as above.
+if (-not [string]::IsNullOrWhiteSpace($AllowedOrigins)) {
+  $env:ACS_ALLOWED_ORIGINS = $AllowedOrigins
+}
+
+# Maximum POST/PUT/PATCH body size in bytes. CLI value > env > default (64 KB).
+$bodyCap = 0
+if ($MaxRequestBodyBytes -gt 0) {
+  $bodyCap = $MaxRequestBodyBytes
+} elseif ($env:ACS_MAX_REQUEST_BODY_BYTES -and $env:ACS_MAX_REQUEST_BODY_BYTES -match '^\d+$') {
+  $bodyCap = [int]$env:ACS_MAX_REQUEST_BODY_BYTES
+}
+if ($bodyCap -le 0) { $bodyCap = 65536 }
+$env:ACS_MAX_REQUEST_BODY_BYTES = $bodyCap.ToString()
 
 # ===== Domain Parsing Utilities =====
 # ------------------- DOMAIN PARSING UTILITIES -------------------
@@ -451,14 +504,28 @@ function Invoke-SysinternalsWhoisLookup {
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
 
-    $out = $p.StandardOutput.ReadToEnd()
-    $err = $p.StandardError.ReadToEnd()
+    # SECURITY/RELIABILITY: read stdout/stderr asynchronously. The previous
+    # implementation called the synchronous ReadToEnd() before WaitForExit,
+    # which meant a misbehaving WHOIS server (or a hostile peer) could keep
+    # the child's pipes open forever and the timeout below would never be
+    # reached. ReadToEndAsync() starts pumping immediately and the resulting
+    # Task completes naturally when the child exits or after we Kill it,
+    # which makes the WaitForExit timeout authoritative.
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
 
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+    $exited = $p.WaitForExit($TimeoutSec * 1000)
+    if (-not $exited) {
       try { $p.Kill($true) } catch { try { $p.Kill() } catch { } }
+      try { $p.WaitForExit(2000) | Out-Null } catch { }
       $msg = "Sysinternals whois timed out after $TimeoutSec seconds for '$d'."
       if ($ThrowOnError) { throw $msg } else { return $null }
     }
+
+    $out = ''
+    $err = ''
+    try { $out = $outTask.GetAwaiter().GetResult() } catch { $out = '' }
+    try { $err = $errTask.GetAwaiter().GetResult() } catch { $err = '' }
 
     # Some tools write normal output to stderr; combine both safely
     $text = (($out, $err) -join "`r`n").Trim()
@@ -570,13 +637,26 @@ function Invoke-LinuxWhoisLookup {
     }
 
     try {
-      $out = $p.StandardOutput.ReadToEnd()
-      $err = $p.StandardError.ReadToEnd()
+      # SECURITY/RELIABILITY: read stdout/stderr asynchronously. The previous
+      # implementation called the synchronous ReadToEnd() before WaitForExit,
+      # which meant a stalled remote WHOIS server could pin the pipes open
+      # indefinitely and the WaitForExit timeout would never be reached.
+      # ReadToEndAsync() starts pumping immediately and the resulting Task
+      # completes naturally when the child exits or after we Kill it.
+      $outTask = $p.StandardOutput.ReadToEndAsync()
+      $errTask = $p.StandardError.ReadToEndAsync()
 
-      if (-not $p.WaitForExit($QueryTimeoutSec * 1000)) {
+      $exited = $p.WaitForExit($QueryTimeoutSec * 1000)
+      if (-not $exited) {
         try { $p.Kill($true) } catch { try { $p.Kill() } catch { } }
+        try { $p.WaitForExit(2000) | Out-Null } catch { }
         throw "whois timed out after $QueryTimeoutSec seconds for '$LookupDomain'."
       }
+
+      $out = ''
+      $err = ''
+      try { $out = $outTask.GetAwaiter().GetResult() } catch { $out = '' }
+      try { $err = $errTask.GetAwaiter().GetResult() } catch { $err = '' }
 
       return [pscustomobject]@{
         text = (($out, $err) -join "`r`n").Trim()
@@ -915,7 +995,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.70'
+$script:AppVersion = '2.0.78'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1033,7 +1113,9 @@ function Get-RdapBootstrapData {
   $uri = 'https://data.iana.org/rdap/dns.json'
 
   try {
-    $data = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec $TimeoutSec -ErrorAction Stop
+    # IANA bootstrap is HTTPS only; route through Invoke-OutboundHttp so the
+    # outbound surface is consistent and easy to harden in one place.
+    $data = Invoke-OutboundHttp -Uri $uri -TimeoutSec $TimeoutSec -MaximumRedirection 3
     if ($null -eq $data -or $null -eq $data.services) {
       return $null
     }
@@ -1172,7 +1254,7 @@ function Invoke-RdapLookup {
       $baseUri = [System.Uri]::new($base, [System.UriKind]::Absolute)
       $uri     = [System.Uri]::new($baseUri, ("domain/{0}" -f $escaped)).AbsoluteUri
 
-      return (Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec $TimeoutSec -ErrorAction Stop)
+      return (Invoke-OutboundHttp -Uri $uri -TimeoutSec $TimeoutSec -MaximumRedirection 3)
     }
     catch {
       # Authoritative lookup failed; fall through to rdap.org fallback.
@@ -1182,7 +1264,7 @@ function Invoke-RdapLookup {
   # 2) Fallback to rdap.org proxy (will usually redirect to the authoritative server).
   try {
     $uri2 = "https://rdap.org/domain/$escaped"
-    return (Invoke-RestMethod -Method Get -Uri $uri2 -TimeoutSec $TimeoutSec -MaximumRedirection 5 -ErrorAction Stop)
+    return (Invoke-OutboundHttp -Uri $uri2 -TimeoutSec $TimeoutSec -MaximumRedirection 3)
   }
   catch {
     if ($ThrowOnError) { throw }
@@ -1208,7 +1290,7 @@ function Invoke-WhoisXmlLookup {
   if ([string]::IsNullOrWhiteSpace($d)) { return $null }
 
   $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=$([uri]::EscapeDataString($apiKey))&domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
-  $resp = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 20 -ErrorAction Stop
+  $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3
   if ($null -eq $resp) { return $null }
   return $resp
 }
@@ -1246,7 +1328,7 @@ function Invoke-GoDaddyWhoisLookup {
   $uri = "https://api.godaddy.com/v1/domains/$([uri]::EscapeDataString($d))"
   $headers = @{ Authorization = "sso-key $apiKey`:$apiSecret" }
   try {
-    Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+    Invoke-OutboundHttp -Uri $uri -Headers $headers -TimeoutSec 20 -MaximumRedirection 3
   }
   catch [System.Net.WebException] {
     # Surface HTTP status code + response body for debugging (e.g., 403 Forbidden vs quota/auth).
@@ -1466,6 +1548,10 @@ function Get-DmarcSecurityGuidance {
 
   if ($policy -eq 'none') {
     $messages.Add("DMARC for $targetDomain is monitor-only (`p=none`). For stronger protection against spoofing, move to enforcement with `p=quarantine` or `p=reject` after validating legitimate mail sources.")
+    # Bulk-sender callout: monitor-only DMARC provides no enforcement and is
+    # treated the same as "no DMARC" by major mailbox providers (Google, Yahoo,
+    # Microsoft) for bulk-sender (>5,000 messages/day) deliverability rules.
+    $messages.Add("DMARC is strongly recommended when sending more than 5,000 emails per day. Major mailbox providers (Google, Yahoo, Microsoft) require an enforced DMARC policy for bulk senders, and missing or weak DMARC frequently causes deliverability failures at high volume.")
   }
   elseif ($policy -eq 'quarantine') {
     $messages.Add("DMARC for $targetDomain is set to `p=quarantine`. For the strongest anti-spoofing posture, consider `p=reject` once you confirm valid mail is fully aligned.")
@@ -2344,6 +2430,78 @@ function Get-AnonymousMetricsPersistPath {
   return $p
 }
 
+# SECURITY: Restrict the metrics persistence file to the current user only.
+# The file contains the persistent HMAC `hashKey` used to compute hashed
+# domain values; anyone with read access can use it to recompute the same
+# hashes for any domain they choose, which would let them unmask values
+# stored in the metrics file. This best-effort tightening covers Linux
+# (chmod 600) and Windows (NTFS DACL limited to the current user); it is
+# wrapped in try/catch so persistence still succeeds on file systems where
+# the operation is unsupported (for example FAT32 or some container
+# bind-mounted volumes).
+function Set-AnonymousMetricsFilePermissions {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
+
+  try {
+    $isWindowsHost = $true
+    try {
+      # `$IsWindows` only exists in PowerShell 7+. On Windows PowerShell 5.1
+      # (Desktop edition) we default to true; otherwise probe the variable.
+      if (Get-Variable -Name IsWindows -Scope Global -ErrorAction SilentlyContinue) {
+        $isWindowsHost = [bool]$IsWindows
+      } elseif ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $isWindowsHost = $true
+      }
+    } catch { $isWindowsHost = $true }
+
+    if ($isWindowsHost) {
+      # Build the new restrictive DACL on a snapshot of the current ACL so we
+      # never partially mutate the live SecurityDescriptor that Set-Acl will
+      # commit. If anything throws while constructing or applying the ACL we
+      # fall back to leaving the inherited ACL in place rather than wiping
+      # all access; the persisted file is then no less protected than any
+      # other file the process writes.
+      try {
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($existing in @($acl.Access)) {
+          try { $null = $acl.RemoveAccessRule($existing) } catch { }
+        }
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+          $currentUser,
+          [System.Security.AccessControl.FileSystemRights]::FullControl,
+          [System.Security.AccessControl.AccessControlType]::Allow)
+        $acl.AddAccessRule($rule)
+        # Verify the rebuilt ACL grants at least one explicit ACE for the
+        # current user before applying. If somehow the rule list is empty we
+        # skip the Set-Acl call entirely so the file does not end up with
+        # zero ACEs (which would lock the metrics writer out of its own file).
+        $hasOwnerRule = $false
+        foreach ($r in @($acl.Access)) {
+          if ($r.IdentityReference.Value -eq $currentUser) { $hasOwnerRule = $true; break }
+        }
+        if ($hasOwnerRule) {
+          Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+      } catch {
+        # Best-effort: if ACL rebuild fails we leave the inherited ACL intact.
+      }
+    } else {
+      try {
+        $chmod = Get-Command -Name chmod -ErrorAction SilentlyContinue
+        if ($chmod) {
+          & $chmod.Source 600 -- $Path 2>$null
+        }
+      } catch { }
+    }
+  } catch { }
+}
+
 # Normalize a value (possibly [DateTime] from ConvertFrom-Json) to ISO 8601 round-trip string.
 function ConvertTo-Iso8601Utc {
   param($Value)
@@ -2634,6 +2792,11 @@ function Save-AnonymousMetricsPersisted {
     $tmp = "$path.tmp"
     $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $path -Force
+    # SECURITY: tighten file permissions after the rename so the persisted
+    # hashKey cannot be read by other local users. Best-effort; failures are
+    # swallowed so persistence keeps working on file systems that do not
+    # support ACL/chmod operations.
+    try { Set-AnonymousMetricsFilePermissions -Path $path } catch { }
     $script:AcsMetrics['_lastPersistUtc'] = $now.ToString('o')
     try { $script:AcsMetrics['_lastPersistDomains'].Value = $script:AcsMetrics['lifetimeTotalDomains'].Value } catch { }
   }
@@ -2685,14 +2848,29 @@ function Get-RequestHeaderValue {
 
   if (-not $Context -or [string]::IsNullOrWhiteSpace($Name)) { return $null }
   try {
-    $props = $Context.Request.PSObject.Properties
-    if ($props.Match('Headers').Count -gt 0 -and $Context.Request.Headers) {
-      if ($Context.Request.Headers.ContainsKey($Name)) { return [string]$Context.Request.Headers[$Name] }
+    $headers = $null
+    try { $headers = $Context.Request.Headers } catch { $headers = $null }
+    if ($null -eq $headers) { return $null }
+
+    # Branch on the *headers* type, not the request type. The TcpListener shim
+    # stores headers as a [hashtable] (lowercased keys, supports ContainsKey),
+    # while HttpListenerRequest exposes a WebHeaderCollection (no ContainsKey
+    # method, but case-insensitive indexer). Picking the right access pattern
+    # by type avoids a silent throw-and-swallow that previously caused this
+    # function to always return $null for HttpListener requests, which in turn
+    # broke consent-gated analytics increments (see /api/base path).
+    if ($headers -is [System.Collections.IDictionary]) {
+      if ($headers.Contains($Name)) { return [string]$headers[$Name] }
       $lower = $Name.ToLowerInvariant()
-      if ($Context.Request.Headers.ContainsKey($lower)) { return [string]$Context.Request.Headers[$lower] }
-    } elseif ($Context.Request -is [System.Net.HttpListenerRequest]) {
-      try { return [string]$Context.Request.Headers[$Name] } catch { return $null }
+      if ($headers.Contains($lower)) { return [string]$headers[$lower] }
+      return $null
     }
+
+    # WebHeaderCollection / NameValueCollection — case-insensitive indexer
+    # returns $null for missing keys instead of throwing.
+    $value = $null
+    try { $value = $headers[$Name] } catch { $value = $null }
+    if ($null -ne $value) { return [string]$value }
   } catch { }
   return $null
 }
@@ -2740,13 +2918,20 @@ function Get-OrCreate-AnonymousSessionId {
 
   try {
     $cookieHeader = $null
-    $props = $Context.Request.PSObject.Properties
-    if ($props.Match('Headers').Count -gt 0 -and $Context.Request.Headers) {
-      # TcpListener shim uses a hashtable headers dictionary
-      if ($Context.Request.Headers.ContainsKey('cookie')) { $cookieHeader = [string]$Context.Request.Headers['cookie'] }
-      elseif ($Context.Request.Headers.ContainsKey('Cookie')) { $cookieHeader = [string]$Context.Request.Headers['Cookie'] }
-    } elseif ($Context.Request -is [System.Net.HttpListenerRequest]) {
-      try { $cookieHeader = [string]$Context.Request.Headers['Cookie'] } catch { $cookieHeader = $null }
+    $headers = $null
+    try { $headers = $Context.Request.Headers } catch { $headers = $null }
+    if ($null -ne $headers) {
+      # Branch on the *headers* type so we use the correct access pattern. See
+      # the comment in Get-RequestHeaderValue for the full rationale: the
+      # TcpListener shim uses a [hashtable] with ContainsKey/Contains, while
+      # HttpListenerRequest exposes a WebHeaderCollection whose ContainsKey
+      # call would throw and silently zero out the cookie header.
+      if ($headers -is [System.Collections.IDictionary]) {
+        if ($headers.Contains('cookie')) { $cookieHeader = [string]$headers['cookie'] }
+        elseif ($headers.Contains('Cookie')) { $cookieHeader = [string]$headers['Cookie'] }
+      } else {
+        try { $cookieHeader = [string]$headers['Cookie'] } catch { $cookieHeader = $null }
+      }
     }
 
     $cookies = Get-RequestCookies -CookieHeader $cookieHeader
@@ -2831,6 +3016,65 @@ function Update-AnonymousMetrics {
       [System.Threading.Interlocked]::Decrement($script:AcsMetrics['activeLookups']) | Out-Null
       Save-AnonymousMetricsPersisted
     }
+  } catch {
+    $null = $_
+  }
+}
+
+# Anonymous Microsoft Entra ID auth metrics. Called from the consent-gated
+# `/api/auth/event` route after the SPA has finished verifying the user
+# against Microsoft Graph entirely client-side. The server never sees the
+# user's access token, UPN, oid, or tenant ID directly:
+#
+# - $AccountKey is an opaque, client-side SHA-256 hex digest of
+#   `tenantId + ':' + oid`. The browser computes it via SubtleCrypto and
+#   posts only the hex digest. We then HMAC-rehash it with the server-only
+#   `MetricsHashKey` so that even if both the persisted metrics file and the
+#   client-side digest leak, an attacker cannot precompute the stored hash
+#   without also stealing the per-install hash key.
+# - $IsMicrosoftEmployee is a boolean flag the SPA derives from the user's
+#   UPN domain (microsoft.com / microsoftsupport.com). We trust it for
+#   anonymous bucket counting only; nothing security-sensitive depends on
+#   the value being honest. Worst case a tampered request inflates a usage
+#   counter by 1, which is acceptable for an opt-in analytics signal.
+#
+# Both per-call counters (totalMsAuthVerifications, lifetimeMsAuthVerifications)
+# are incremented unconditionally so we can see overall sign-in volume; the
+# unique employee hash set only grows when IsMicrosoftEmployee is true.
+function Update-AnonymousAuthMetrics {
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$AccountKey,
+
+    [Parameter(Mandatory = $false)]
+    [bool]$IsMicrosoftEmployee
+  )
+
+  $enabled = ($env:ACS_ENABLE_ANON_METRICS -eq '1') -or ($true -eq $AcsAnonMetricsEnabled) -or ($script:EnableAnonymousMetrics -eq $true)
+  if (-not $enabled) { return }
+
+  try {
+    # Per-verification counters are bumped for every authenticated request so
+    # the lifetime counter reflects total sign-in volume (employees + guests).
+    [System.Threading.Interlocked]::Increment($script:AcsMetrics['totalMsAuthVerifications']) | Out-Null
+    [System.Threading.Interlocked]::Increment($script:AcsMetrics['lifetimeMsAuthVerifications']) | Out-Null
+
+    if ($IsMicrosoftEmployee -and -not [string]::IsNullOrWhiteSpace($AccountKey)) {
+      # Rehash the SPA-supplied SHA-256 with the server-side HMAC key. The
+      # existing Get-HashedDomain helper already wraps HMAC-SHA256 with
+      # `MetricsHashKey`, so we reuse it for consistency rather than
+      # duplicating the crypto. The trim+lowercase it does is a no-op on a
+      # hex digest but keeps behavior uniform with domain hashing.
+      $hashed = Get-HashedDomain $AccountKey
+      if (-not [string]::IsNullOrWhiteSpace($hashed)) {
+        $null = $script:AcsMetrics['lifetimeMsEmployeeIdHashes'].TryAdd($hashed, 0)
+      }
+    }
+
+    # Persist immediately so the new event survives a quick restart. Save is
+    # internally throttled / mutex-protected, so calling it here is safe even
+    # under bursty consent toggles.
+    Save-AnonymousMetricsPersisted
   } catch {
     $null = $_
   }
@@ -2995,6 +3239,77 @@ if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
 # Set security-related HTTP headers on every response:
 # CORS, Content Security Policy, X-Frame-Options, etc.
 # ===== HTTP Response Helpers =====
+function Get-SecurityHeaderMap {
+  param(
+    $Context,
+    [string]$Nonce
+  )
+  # Compute the security/CORS header map for a given request context. Returned
+  # as a hashtable so both the HttpListener path (Set-SecurityHeaders) and the
+  # TcpListener fallback (New-TcpContext SendBody) can write the same set of
+  # headers. This guarantees the fallback server mode is not silently weaker
+  # than the primary one.
+  $headers = [ordered]@{}
+
+  $origin = $null
+  try { $origin = [string]$Context.Request.Headers['Origin'] } catch { $origin = $null }
+  if (-not [string]::IsNullOrWhiteSpace($origin)) {
+    $allowOrigin = $false
+    $allowList = [string]$env:ACS_ALLOWED_ORIGINS
+    if (-not [string]::IsNullOrWhiteSpace($allowList)) {
+      foreach ($entry in ($allowList -split '[,;\r\n]')) {
+        $e = ([string]$entry).Trim().TrimEnd('/')
+        if ([string]::IsNullOrWhiteSpace($e)) { continue }
+        if ([string]::Equals($origin.TrimEnd('/'), $e, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $allowOrigin = $true
+          break
+        }
+        try {
+          $oUri = [uri]$origin
+          if ([string]::Equals($oUri.Host, $e, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $allowOrigin = $true
+            break
+          }
+        } catch { }
+      }
+    }
+    else {
+      $requestHost = $null
+      try { $requestHost = $Context.Request.Url.GetLeftPart([System.UriPartial]::Authority) } catch { $requestHost = $null }
+      if ($origin -eq $requestHost) {
+        try {
+          $oHost = ([uri]$origin).Host
+          if ($oHost -eq '127.0.0.1' -or $oHost -eq '::1' -or $oHost -eq '[::1]' -or
+              [string]::Equals($oHost, 'localhost', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $allowOrigin = $true
+          }
+        } catch { $allowOrigin = $false }
+      }
+    }
+
+    if ($allowOrigin) {
+      $headers['Access-Control-Allow-Origin']  = $origin
+      $headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+      $headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Api-Key, X-ACS-API-Key'
+      $headers['Access-Control-Max-Age']       = '3600'
+      $headers['Vary']                         = 'Origin'
+    }
+  }
+
+  $headers['X-Content-Type-Options'] = 'nosniff'
+  $headers['X-Frame-Options']        = 'DENY'
+  $headers['Referrer-Policy']        = 'no-referrer'
+
+  $nonceToken = if ([string]::IsNullOrWhiteSpace($Nonce)) { $null } else { "'nonce-$Nonce'" }
+  $scriptSrcParts = @("'self'", $nonceToken, 'https://cdn.jsdelivr.net', 'https://alcdn.msauth.net') | Where-Object { $_ }
+  $styleSrcParts  = @("'self'", $nonceToken) | Where-Object { $_ }
+  $scriptSrc = 'script-src ' + ($scriptSrcParts -join ' ')
+  $styleSrc  = 'style-src '  + ($styleSrcParts  -join ' ')
+  $headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-ancestors 'none'"
+
+  return $headers
+}
+
 function Set-SecurityHeaders {
   param(
     $Context,
@@ -3007,34 +3322,116 @@ function Set-SecurityHeaders {
   # - X-Frame-Options: prevent clickjacking
   # - Referrer-Policy: minimize referrer leakage
   try {
+    $headers = Get-SecurityHeaderMap -Context $Context -Nonce $Nonce
     if ($Context.Response -is [System.Net.HttpListenerResponse]) {
-      $origin = $null
-      try { $origin = [string]$Context.Request.Headers['Origin'] } catch { $origin = $null }
-      if (-not [string]::IsNullOrWhiteSpace($origin)) {
-        # Only reflect the origin if it matches the listener's own origin
-        $requestHost = $null
-        try { $requestHost = $Context.Request.Url.GetLeftPart([System.UriPartial]::Authority) } catch { $requestHost = $null }
-        if ($origin -eq $requestHost) {
-          $Context.Response.Headers['Access-Control-Allow-Origin'] = $origin
-          $Context.Response.Headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-          $Context.Response.Headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Api-Key, X-ACS-API-Key'
-          $Context.Response.Headers['Access-Control-Max-Age'] = '3600'
-          $Context.Response.Headers['Vary'] = 'Origin'
-        }
-        # If origin does not match, no CORS headers are set (browser blocks the response)
+      foreach ($k in $headers.Keys) {
+        try { $Context.Response.Headers[$k] = [string]$headers[$k] } catch { }
       }
-      $Context.Response.Headers['X-Content-Type-Options'] = 'nosniff'
-      $Context.Response.Headers['X-Frame-Options'] = 'DENY'
-      $Context.Response.Headers['Referrer-Policy'] = 'no-referrer'
-
-      $nonceToken = if ([string]::IsNullOrWhiteSpace($Nonce)) { $null } else { "'nonce-$Nonce'" }
-      $scriptSrcParts = @("'self'", $nonceToken, 'https://cdn.jsdelivr.net', 'https://alcdn.msauth.net') | Where-Object { $_ }
-      $styleSrcParts = @("'self'", $nonceToken) | Where-Object { $_ }
-      $scriptSrc = 'script-src ' + ($scriptSrcParts -join ' ')
-      $styleSrc = 'style-src ' + ($styleSrcParts -join ' ')
-      $Context.Response.Headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-ancestors 'none'"
+    }
+    else {
+      # TcpListener fallback: stash the headers on the response object so
+      # SendBody emits them alongside Content-Type / Content-Length. Without
+      # this branch the fallback server mode would serve every response
+      # without CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+      # or any CORS gating, which is materially weaker than the primary
+      # HttpListener path.
+      try {
+        if ($null -ne $Context.Response.PSObject.Properties['_extraHeaders']) {
+          $existing = $Context.Response._extraHeaders
+          if ($null -eq $existing) {
+            $Context.Response._extraHeaders = $headers
+          } else {
+            foreach ($k in $headers.Keys) { $existing[$k] = $headers[$k] }
+          }
+        }
+      } catch { }
     }
   } catch { }
+}
+
+function Set-NoCacheHeaders {
+  param($Context)
+  # Apply no-cache headers in a way that works for both the HttpListener path
+  # and the TcpListener fallback. Centralizing this avoids the previous bug
+  # where the fallback path silently dropped Cache-Control/Pragma/Expires.
+  $noCache = [ordered]@{
+    'Cache-Control' = 'no-store, no-cache, must-revalidate, max-age=0'
+    'Pragma'        = 'no-cache'
+    'Expires'       = '0'
+  }
+  try {
+    if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+      foreach ($k in $noCache.Keys) {
+        try { $Context.Response.Headers[$k] = [string]$noCache[$k] } catch { }
+      }
+    } else {
+      if ($null -ne $Context.Response.PSObject.Properties['_extraHeaders']) {
+        $existing = $Context.Response._extraHeaders
+        if ($null -eq $existing) {
+          $Context.Response._extraHeaders = $noCache
+        } else {
+          foreach ($k in $noCache.Keys) { $existing[$k] = $noCache[$k] }
+        }
+      }
+    }
+  } catch { }
+}
+
+# Centralized outbound HTTP helper for user-driven lookups (DoH, RDAP, WHOIS,
+# RBL, etc.). Goals:
+# - Enforce HTTPS-only (refuses cleartext) so a typo in a custom endpoint
+#   cannot leak a domain query in plaintext.
+# - Hard-cap timeout per request and the number of redirects we will follow.
+# - Centralize the outbound surface so future hardening (proxy, per-request
+#   call counter, IP allow-list) only has to land in one place.
+# Returns the deserialized body when -ReturnRaw is omitted; throws on failure
+# so callers' existing try/catch flow keeps working.
+function Invoke-OutboundHttp {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Uri,
+
+    [string]$Method = 'GET',
+
+    [hashtable]$Headers,
+
+    [int]$TimeoutSec = 15,
+
+    [int]$MaximumRedirection = 3,
+
+    [switch]$ReturnRaw
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Uri)) {
+    throw "Invoke-OutboundHttp: Uri is required."
+  }
+
+  $parsed = $null
+  try { $parsed = [uri]$Uri } catch { throw "Invoke-OutboundHttp: malformed Uri '$Uri'." }
+  if (-not $parsed.IsAbsoluteUri) {
+    throw "Invoke-OutboundHttp: Uri must be absolute ('$Uri')."
+  }
+  if ($parsed.Scheme -ne 'https') {
+    throw "Invoke-OutboundHttp: only https is allowed (got '$($parsed.Scheme)' for '$Uri')."
+  }
+
+  if ($TimeoutSec -le 0) { $TimeoutSec = 15 }
+  if ($MaximumRedirection -lt 0) { $MaximumRedirection = 0 }
+
+  $params = @{
+    Uri                 = $Uri
+    Method              = $Method
+    TimeoutSec          = $TimeoutSec
+    MaximumRedirection  = $MaximumRedirection
+    ErrorAction         = 'Stop'
+  }
+  if ($Headers -and $Headers.Count -gt 0) { $params.Headers = $Headers }
+
+  if ($ReturnRaw) {
+    $params.UseBasicParsing = $true
+    return Invoke-WebRequest @params
+  }
+  return Invoke-RestMethod @params
 }
 
 # Serialize an object to JSON and write it as the HTTP response body.
@@ -3057,15 +3454,13 @@ function Write-Json {
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
 
   Set-SecurityHeaders -Context $Context
+  # Disable browser/proxy caching for all JSON API responses so users always
+  # see fresh DNS/WHOIS data without needing a forced refresh (CTRL+SHIFT+R).
+  # Routed through Set-NoCacheHeaders so the TcpListener fallback also emits
+  # these headers (the previous inline writes only worked for HttpListener).
+  Set-NoCacheHeaders -Context $Context
 
   if ($Context.Response -is [System.Net.HttpListenerResponse]) {
-    # Disable browser/proxy caching for all JSON API responses so users always
-    # see fresh DNS/WHOIS data without needing a forced refresh (CTRL+SHIFT+R).
-    try {
-      $Context.Response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-      $Context.Response.Headers['Pragma'] = 'no-cache'
-      $Context.Response.Headers['Expires'] = '0'
-    } catch { }
     $Context.Response.ContentType = "application/json; charset=utf-8"
     try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
     $Context.Response.StatusCode  = $StatusCode
@@ -3147,13 +3542,9 @@ function Write-Html {
     $bytes = [Text.Encoding]::UTF8.GetBytes($Html)
 
     Set-SecurityHeaders -Context $Context -Nonce $Nonce
+    Set-NoCacheHeaders -Context $Context
 
     if ($Context.Response -is [System.Net.HttpListenerResponse]) {
-      try {
-        $Context.Response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        $Context.Response.Headers['Pragma'] = 'no-cache'
-        $Context.Response.Headers['Expires'] = '0'
-      } catch { }
       $Context.Response.ContentType = "text/html; charset=utf-8"
       try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
       $Context.Response.StatusCode  = 200
@@ -3191,16 +3582,21 @@ function Resolve-DohName {
 
   # DNS-over-HTTPS resolver.
   # Returns objects shaped similarly to `Resolve-DnsName` output so downstream code can stay uniform.
+  # SECURITY: read the resolver endpoint from the environment but do NOT mutate
+  # process-wide $env:ACS_DNS_DOH_ENDPOINT here. Worker runspaces share the
+  # parent process environment, so mutating it from concurrent workers races
+  # and unnecessarily fingerprints internal state. The local variable is enough.
   $endpoint = $env:ACS_DNS_DOH_ENDPOINT
   if ([string]::IsNullOrWhiteSpace($endpoint)) {
     $endpoint = 'https://cloudflare-dns.com/dns-query'
-    $env:ACS_DNS_DOH_ENDPOINT = $endpoint
   }
 
   $uri = "{0}?name={1}&type={2}" -f $endpoint, ([uri]::EscapeDataString($Name)), $Type
 
   # Cloudflare-style DoH JSON response (RFC 8484 compatible JSON format).
-  $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -ErrorAction Stop
+  # Routed through Invoke-OutboundHttp so HTTPS-only / redirect cap / timeout
+  # are enforced consistently with the other user-driven lookups.
+  $resp = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -MaximumRedirection 3
   if ($null -eq $resp -or $null -eq $resp.Answer) { return $null }
 
   $answers = @($resp.Answer)
@@ -3958,15 +4354,19 @@ function Resolve-DohRecordsDetailed {
     [string]$Type
   )
 
+  # SECURITY: read the resolver endpoint from the environment but do NOT mutate
+  # process-wide $env:ACS_DNS_DOH_ENDPOINT here. Worker runspaces share the
+  # parent process environment, so mutating it from concurrent workers races
+  # and unnecessarily fingerprints internal state. The local variable is enough.
   $endpoint = $env:ACS_DNS_DOH_ENDPOINT
   if ([string]::IsNullOrWhiteSpace($endpoint)) {
     $endpoint = 'https://cloudflare-dns.com/dns-query'
-    $env:ACS_DNS_DOH_ENDPOINT = $endpoint
   }
 
   $typeCode = Get-DnsRecordTypeCode -Type $Type
   $uri = "{0}?name={1}&type={2}&do=true" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
-  $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -ErrorAction Stop
+  # Same outbound guardrails as Resolve-DohName.
+  $resp = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -MaximumRedirection 3
   if ($null -eq $resp -or $null -eq $resp.Answer) { return @() }
 
   $results = New-Object System.Collections.Generic.List[object]
@@ -5254,8 +5654,17 @@ function Write-RequestLog {
   Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Action for '$Domain'"
 }
 
-# Extract the client's IP address from the request, preferring X-Forwarded-For when present
-# (for reverse-proxy/container scenarios). Used only for rate limiting, never logged.
+# Extract the client's IP address from the request.
+#
+# By default we use the immediate TCP peer (RemoteEndPoint). If the
+# `ACS_TRUSTED_PROXIES` env var lists the immediate peer (as an IP or CIDR),
+# we additionally honor `X-Forwarded-For` / `X-Real-IP` so reverse-proxy
+# deployments can still rate-limit / log on the originating client IP.
+#
+# This is intentionally strict: arbitrary clients can set X-Forwarded-For,
+# so trusting it unconditionally lets any caller spoof their identity for
+# `Test-RateLimit`. Operators who terminate TLS at a known proxy must
+# opt in by listing that proxy's IP/CIDR in ACS_TRUSTED_PROXIES.
 function Get-ClientIp {
   param($Context)
 
@@ -5268,31 +5677,107 @@ function Get-ClientIp {
     }
   } catch { $headers = $null }
 
-  $xff = $null
-  if ($headers) {
-    try { $xff = [string]$headers['X-Forwarded-For'] } catch { $xff = $null }
-    if ([string]::IsNullOrWhiteSpace($xff)) {
-      try { $xff = [string]$headers['x-forwarded-for'] } catch { $xff = $null }
-    }
-  }
-
-  if (-not [string]::IsNullOrWhiteSpace($xff)) {
-    $first = ($xff -split ',')[0]
-    $first = [string]$first
-    $first = $first.Trim()
-    if (-not [string]::IsNullOrWhiteSpace($first)) { return $first }
-  }
-
+  # Resolve the immediate socket peer first; this is the trust anchor.
+  $peerIp = $null
   try {
     if ($Context.Request -is [System.Net.HttpListenerRequest]) {
-      return [string]$Context.Request.RemoteEndPoint.Address
+      $peerIp = [string]$Context.Request.RemoteEndPoint.Address
     }
-    if ($Context.Request.RemoteEndPoint) {
-      return [string]$Context.Request.RemoteEndPoint.Address
+    elseif ($Context.Request.RemoteEndPoint) {
+      $peerIp = [string]$Context.Request.RemoteEndPoint.Address
     }
-  } catch { }
+  } catch { $peerIp = $null }
 
+  # Honor forwarded headers only when the immediate peer is a configured
+  # trusted proxy. This avoids client-spoofable rate-limit bypass.
+  if ($headers -and -not [string]::IsNullOrWhiteSpace($peerIp) -and (Test-IsTrustedProxy -PeerIp $peerIp)) {
+    $forwardedRaw = $null
+    foreach ($h in @('X-Forwarded-For','x-forwarded-for')) {
+      try { $forwardedRaw = [string]$headers[$h] } catch { $forwardedRaw = $null }
+      if (-not [string]::IsNullOrWhiteSpace($forwardedRaw)) { break }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($forwardedRaw)) {
+      # Per RFC 7239 / de-facto standard, the original client IP is the leftmost
+      # value in a comma-separated list. Normalize whitespace and surrounding brackets.
+      $first = ($forwardedRaw -split ',')[0]
+      $first = ([string]$first).Trim().Trim('"').Trim('[').Trim(']')
+      if (-not [string]::IsNullOrWhiteSpace($first)) { return $first }
+    }
+
+    $realIp = $null
+    foreach ($h in @('X-Real-IP','x-real-ip')) {
+      try { $realIp = [string]$headers[$h] } catch { $realIp = $null }
+      if (-not [string]::IsNullOrWhiteSpace($realIp)) { break }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($realIp)) {
+      return $realIp.Trim()
+    }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($peerIp)) { return $peerIp }
   return $null
+}
+
+# Return $true when the immediate peer IP is listed in ACS_TRUSTED_PROXIES
+# (comma/semicolon/newline-delimited list of IPs and/or CIDRs). Parsing is
+# best-effort: malformed entries are silently ignored so a typo never causes
+# the listener to crash mid-request.
+function Test-IsTrustedProxy {
+  param([string]$PeerIp)
+
+  if ([string]::IsNullOrWhiteSpace($PeerIp)) { return $false }
+  $raw = [string]$env:ACS_TRUSTED_PROXIES
+  if ([string]::IsNullOrWhiteSpace($raw)) { return $false }
+
+  $peerAddr = $null
+  try { $peerAddr = [System.Net.IPAddress]::Parse($PeerIp) } catch { return $false }
+
+  $entries = @()
+  foreach ($chunk in ($raw -split '[,;\r\n]')) {
+    $t = ([string]$chunk).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($t)) { $entries += $t }
+  }
+  if ($entries.Count -eq 0) { return $false }
+
+  foreach ($entry in $entries) {
+    # CIDR form: address/prefix
+    if ($entry.Contains('/')) {
+      $parts = $entry.Split('/', 2)
+      if ($parts.Count -ne 2) { continue }
+      $network = $null
+      try { $network = [System.Net.IPAddress]::Parse($parts[0]) } catch { continue }
+      $prefix = 0
+      if (-not [int]::TryParse($parts[1], [ref]$prefix)) { continue }
+      if ($network.AddressFamily -ne $peerAddr.AddressFamily) { continue }
+      $netBytes = $network.GetAddressBytes()
+      $peerBytes = $peerAddr.GetAddressBytes()
+      $maxBits = $netBytes.Length * 8
+      if ($prefix -lt 0 -or $prefix -gt $maxBits) { continue }
+      $bitsRemaining = $prefix
+      $matched = $true
+      for ($i = 0; $i -lt $netBytes.Length; $i++) {
+        if ($bitsRemaining -ge 8) {
+          if ($netBytes[$i] -ne $peerBytes[$i]) { $matched = $false; break }
+          $bitsRemaining -= 8
+        }
+        elseif ($bitsRemaining -gt 0) {
+          $mask = [byte](0xFF -shl (8 - $bitsRemaining)) -band 0xFF
+          if (($netBytes[$i] -band $mask) -ne ($peerBytes[$i] -band $mask)) { $matched = $false }
+          break
+        }
+        else { break }
+      }
+      if ($matched) { return $true }
+    }
+    else {
+      # Plain address form
+      $candidate = $null
+      try { $candidate = [System.Net.IPAddress]::Parse($entry) } catch { continue }
+      if ($candidate.Equals($peerAddr)) { return $true }
+    }
+  }
+
+  return $false
 }
 
 # Extract the API key from the request. Checks headers (X-Api-Key, X-ACS-API-Key, Authorization: ApiKey ...)
@@ -5339,6 +5824,37 @@ function Get-ApiKeyFromRequest {
   return $null
 }
 
+# Constant-time string comparison.
+# Avoids the small timing side channel of [string]::Equals which short-circuits
+# on the first mismatching byte. The remote-attacker exploitability of that
+# side channel over the network is low (PowerShell + jitter dominate any
+# nanosecond-scale leak), but a fixed-time compare costs essentially nothing
+# and removes the side channel entirely. The XOR-accumulator pattern walks
+# every byte of the longer string so the elapsed time depends only on the
+# combined length, not on where the first byte differs.
+function Test-StringEqualsConstantTime {
+  param(
+    [string]$A,
+    [string]$B
+  )
+
+  if ($null -eq $A) { $A = '' }
+  if ($null -eq $B) { $B = '' }
+
+  $bytesA = [Text.Encoding]::UTF8.GetBytes($A)
+  $bytesB = [Text.Encoding]::UTF8.GetBytes($B)
+
+  # Walk the longer of the two so length differences cannot short-circuit.
+  $maxLen = [Math]::Max($bytesA.Length, $bytesB.Length)
+  $diff = $bytesA.Length -bxor $bytesB.Length
+  for ($i = 0; $i -lt $maxLen; $i++) {
+    $bA = if ($i -lt $bytesA.Length) { $bytesA[$i] } else { 0 }
+    $bB = if ($i -lt $bytesB.Length) { $bytesB[$i] } else { 0 }
+    $diff = $diff -bor ($bA -bxor $bB)
+  }
+  return ($diff -eq 0)
+}
+
 # Validate the API key from the request against ACS_API_KEY env var.
 # Returns $true if no API key is configured (open access) or if the provided key matches.
 function Test-ApiKey {
@@ -5350,13 +5866,24 @@ function Test-ApiKey {
   $provided = Get-ApiKeyFromRequest -Context $Context
   if ([string]::IsNullOrWhiteSpace($provided)) { return $false }
 
-  return [string]::Equals($provided, $expected, [System.StringComparison]::Ordinal)
+  # Constant-time compare so a remote caller cannot infer the API key one byte
+  # at a time by measuring response timing. See Test-StringEqualsConstantTime.
+  return Test-StringEqualsConstantTime -A $provided -B $expected
 }
 
 # Enforce per-client-IP rate limiting using a sliding 60-second window.
 # Returns an object with allowed (bool), remaining count, and retry-after seconds.
+#
+# -Multiplier raises the per-window limit for cheap, high-frequency endpoints
+# (such as /api/metrics, which is polled by the SPA dashboard). The default
+# multiplier of 1 keeps the original behavior for DNS/WHOIS endpoints. The
+# bucket is shared across multipliers so a single noisy client cannot escape
+# rate limiting by spreading calls across endpoints.
 function Test-RateLimit {
-  param($Context)
+  param(
+    $Context,
+    [int]$Multiplier = 1
+  )
 
   $limit = 0
   if ($env:ACS_RATE_LIMIT_PER_MIN -and $env:ACS_RATE_LIMIT_PER_MIN -match '^\d+$') {
@@ -5365,6 +5892,8 @@ function Test-RateLimit {
   if ($limit -le 0) {
     return [pscustomobject]@{ allowed = $true; remaining = $null; retryAfterSec = $null; limit = $limit }
   }
+  if ($Multiplier -lt 1) { $Multiplier = 1 }
+  $effectiveLimit = $limit * $Multiplier
 
   $clientIp = Get-ClientIp -Context $Context
   if ([string]::IsNullOrWhiteSpace($clientIp)) { $clientIp = 'unknown' }
@@ -5390,15 +5919,15 @@ function Test-RateLimit {
       $entry.count = 0
     }
 
-    if ($entry.count -ge $limit) {
+    if ($entry.count -ge $effectiveLimit) {
       $retryAfter = [int][Math]::Ceiling(($entry.windowStart.AddSeconds($windowSeconds) - $now).TotalSeconds)
       if ($retryAfter -lt 1) { $retryAfter = 1 }
-      return [pscustomobject]@{ allowed = $false; remaining = 0; retryAfterSec = $retryAfter; limit = $limit }
+      return [pscustomobject]@{ allowed = $false; remaining = 0; retryAfterSec = $retryAfter; limit = $effectiveLimit }
     }
 
     $entry.count++
-    $remaining = [Math]::Max(0, $limit - $entry.count)
-    return [pscustomobject]@{ allowed = $true; remaining = $remaining; retryAfterSec = $null; limit = $limit }
+    $remaining = [Math]::Max(0, $effectiveLimit - $entry.count)
+    return [pscustomobject]@{ allowed = $true; remaining = $remaining; retryAfterSec = $null; limit = $effectiveLimit }
   }
   finally {
     [System.Threading.Monitor]::Exit($AcsRateLimitLock)
@@ -9453,6 +9982,7 @@ const TRANSLATIONS = {
     dmarcMissingSp: 'DMARC for subdomains of {lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like {domain}, consider adding sp=quarantine or sp=reject for clearer protection.',
     dmarcMissingRua: 'DMARC for {domain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact.',
     dmarcMissingRuf: 'DMARC for {domain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations.',
+    dmarcBulkSenderThreshold: 'DMARC is strongly recommended when sending more than 5,000 emails per day. Major mailbox providers (Google, Yahoo, Microsoft) require an enforced DMARC policy for bulk senders, and missing or weak DMARC frequently causes deliverability failures at high volume.',
     mxUsingParentNote: '(using MX from parent domain {lookupDomain})',
     parentCheckedNoMx: 'Checked parent domain {parentDomain} (no MX).',
     expiredOn: 'Expired on {date}',
@@ -14681,6 +15211,10 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
 
   if (policy === 'none') {
     guidance.push({ type: 'attention', text: t('dmarcMonitorOnly', { domain: targetDomain }) });
+    // Mirror the bulk-sender callout for monitor-only DMARC. p=none means no
+    // enforcement, which mailbox providers treat the same as "no DMARC" for
+    // bulk-sender (>5,000/day) deliverability decisions.
+    guidance.push({ type: 'attention', text: t('dmarcBulkSenderThreshold') });
   } else if (policy === 'quarantine') {
     guidance.push({ type: 'attention', text: t('dmarcQuarantine', { domain: targetDomain }) });
   }
@@ -14841,6 +15375,11 @@ function buildGuidance(r) {
 
   if (loaded.dmarc && !r.dmarc) {
     guidance.push({ type: 'attention', text: t('guidanceDmarcMissing', { domain: r.domain || '' }) });
+    // Bulk-sender callout: missing DMARC is the worst case for high-volume
+    // senders since Google/Yahoo/Microsoft now require an enforced policy
+    // above ~5,000 messages/day. Surface it next to the missing-DMARC line
+    // so the operator immediately understands the deliverability impact.
+    guidance.push({ type: 'attention', text: t('dmarcBulkSenderThreshold') });
   } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
     guidance.push({ type: 'info', text: t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }) });
   }
@@ -18594,6 +19133,10 @@ async function verifyMsAccount(accessToken) {
     const userPrincipalName = String((profile && (profile.userPrincipalName || profile.mail)) || msAuthAccount?.username || claims.preferred_username || '').trim();
     const displayName = String((profile && profile.displayName) || msAuthAccount?.name || claims.name || userPrincipalName || '').trim();
     const tenantId = String(claims.tid || '').trim();
+    // Object id (oid) is stable per user per tenant. We never send it raw -
+    // we hash (tid + ':' + oid) with SubtleCrypto so the server only ever
+    // sees an opaque 64-char hex digest.
+    const objectId = String(claims.oid || '').trim();
 
     const data = {
       displayName,
@@ -18604,6 +19147,44 @@ async function verifyMsAccount(accessToken) {
 
     isMsEmployee = data.isMicrosoftEmployee === true;
     updateAuthUI(data);
+
+    // Fire-and-forget anonymous analytics ping. Only sent when the user has
+    // granted analytics consent (the server enforces this too); the server
+    // sees only the SHA-256 hex of (tid + ':' + oid) plus a single boolean
+    // flag, never the access token, UPN, oid, or tenant id.
+    try {
+      if (hasConsentFor('analytics')) {
+        let accountKeyHex = '';
+        try {
+          if (tenantId && objectId && window.crypto && window.crypto.subtle && typeof TextEncoder !== 'undefined') {
+            const enc = new TextEncoder();
+            const buf = enc.encode(tenantId + ':' + objectId);
+            const digest = await window.crypto.subtle.digest('SHA-256', buf);
+            const bytes = new Uint8Array(digest);
+            let hex = '';
+            for (let i = 0; i < bytes.length; i++) {
+              hex += bytes[i].toString(16).padStart(2, '0');
+            }
+            accountKeyHex = hex;
+          }
+        } catch {}
+
+        const headers = buildConsentRequestHeaders({});
+        if (accountKeyHex) {
+          headers['X-ACS-Auth-Account-Key'] = accountKeyHex;
+        }
+        headers['X-ACS-Auth-Is-Microsoft'] = data.isMicrosoftEmployee ? '1' : '0';
+
+        // No body - the route is header-only so it works under both the
+        // HttpListener and TcpListener fallback paths without any body
+        // parsing. Errors are swallowed; analytics must never block sign-in.
+        fetch('/api/auth/event', {
+          method: 'POST',
+          headers: headers,
+          cache: 'no-store'
+        }).catch(() => {});
+      }
+    } catch {}
   } catch (e) {
     console.error('Auth verify error:', e);
     updateAuthUI(null);
@@ -19963,15 +20544,15 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # List all functions that need to be available inside the runspace workers.
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
-  'Set-SecurityHeaders','Write-Json','Write-Html','Write-FileResponse',
+  'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain',
-  'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted',
-  'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot',
+  'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions',
+  'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
-  'Get-ClientIp','Get-ApiKeyFromRequest','Test-ApiKey','Test-RateLimit',
+  'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-DomainRegistrationStatus',
@@ -20109,6 +20690,50 @@ if ([string]::IsNullOrWhiteSpace($path)) {
 }
 if ([string]::IsNullOrWhiteSpace($path)) { $path = '/' }
 
+# SECURITY: Cap POST/PUT/PATCH request bodies before any handler runs. The
+# only POST today is /api/consent which is header-driven and ignores the
+# body, so any oversized body is wasted bandwidth and a tying-up vector for
+# worker runspaces. The cap is configurable via ACS_MAX_REQUEST_BODY_BYTES
+# (default 64 KB, set in 00-Header.ps1). Returning 413 early avoids reading
+# the body at all.
+try {
+  $reqMethod = $null
+  try { $reqMethod = [string]$ctx.Request.HttpMethod } catch { $reqMethod = $null }
+  if ([string]::IsNullOrWhiteSpace($reqMethod)) {
+    try { $reqMethod = [string]$ctx.Request.Method } catch { $reqMethod = $null }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($reqMethod)) {
+    $reqMethodUpper = $reqMethod.ToUpperInvariant()
+    if ($reqMethodUpper -eq 'POST' -or $reqMethodUpper -eq 'PUT' -or $reqMethodUpper -eq 'PATCH') {
+      $bodyCap = 65536
+      if ($env:ACS_MAX_REQUEST_BODY_BYTES -and $env:ACS_MAX_REQUEST_BODY_BYTES -match '^\d+$') {
+        $bodyCap = [int]$env:ACS_MAX_REQUEST_BODY_BYTES
+      }
+      $contentLength = -1
+      try {
+        if ($ctx.Request -is [System.Net.HttpListenerRequest]) {
+          $contentLength = [int64]$ctx.Request.ContentLength64
+        } else {
+          $clHeader = $null
+          try {
+            if ($ctx.Request.Headers -and $ctx.Request.Headers.ContainsKey('content-length')) {
+              $clHeader = [string]$ctx.Request.Headers['content-length']
+            }
+          } catch { $clHeader = $null }
+          if (-not [string]::IsNullOrWhiteSpace($clHeader)) {
+            $parsed = 0
+            if ([int64]::TryParse($clHeader, [ref]$parsed)) { $contentLength = $parsed }
+          }
+        }
+      } catch { $contentLength = -1 }
+      if ($contentLength -gt $bodyCap) {
+        Write-Json -Context $ctx -Object @{ error = 'Request body too large.'; maxBytes = $bodyCap } -StatusCode 413
+        return
+      }
+    }
+  }
+} catch { }
+
 # This script block runs inside the RunspacePool for each incoming request.
 # Inputs:
 # - $ctx         : the request/response context (HttpListenerContext or TcpListener shim)
@@ -20120,6 +20745,34 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
   # different lookup stages for the same domain can still run concurrently.
   $scopeKey = if ([string]::IsNullOrWhiteSpace($scope)) { 'default' } else { $scope.Trim() }
   $lockKey = if ([string]::IsNullOrWhiteSpace($domain)) { $scopeKey } else { "$scopeKey|$domain" }
+
+  # SECURITY/MEMORY: prune idle semaphores when the dictionary grows large so a
+  # long-running container that processes many distinct domains cannot leak
+  # memory indefinitely. We only remove entries whose semaphore is currently
+  # idle (CurrentCount == 1, meaning no holder, no waiters), so an in-flight
+  # lookup is never disturbed. The threshold was lowered from 10k to 1k so a
+  # request burst against many distinct domains cannot balloon the dictionary
+  # before the next prune fires; the prune walk itself is bounded so a very
+  # large dictionary cannot pin the request thread either.
+  try {
+    if ($domainLocks.Count -gt 1000) {
+      $pruneBudget = 2000
+      foreach ($existingKey in @($domainLocks.Keys)) {
+        if ($pruneBudget -le 0) { break }
+        $pruneBudget--
+        $existingSem = $null
+        if ($domainLocks.TryGetValue($existingKey, [ref]$existingSem)) {
+          if ($existingSem -and $existingSem.CurrentCount -eq 1) {
+            $removed = $null
+            if ($domainLocks.TryRemove($existingKey, [ref]$removed)) {
+              try { $removed.Dispose() } catch { }
+            }
+          }
+        }
+      }
+    }
+  } catch { }
+
   $sem = $null
   if (-not $domainLocks.TryGetValue($lockKey, [ref]$sem)) {
     $newSem = [System.Threading.SemaphoreSlim]::new(1, 1)
@@ -20190,7 +20843,26 @@ if ($metricsEnabled) {
       $rootFullPath = [System.IO.Path]::GetFullPath($assetsRoot)
       $assetFullPath = [System.IO.Path]::GetFullPath((Join-Path -Path $rootFullPath -ChildPath $relativeAssetPath))
 
-      if (-not $assetFullPath.StartsWith($rootFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+      # SECURITY: Append a directory separator before the prefix check so a
+      # sibling directory whose name starts with the same prefix (for example
+      # `C:\repo\assetsX\` vs `C:\repo\assets\`) cannot satisfy `StartsWith`.
+      # On Windows the comparison stays case-insensitive; on case-sensitive
+      # file systems we use ordinal comparison so an "/Assets/..." request
+      # path will not slip through pointing at a different directory.
+      $sep = [string][System.IO.Path]::DirectorySeparatorChar
+      $rootFullPathWithSep = if ($rootFullPath.EndsWith($sep)) { $rootFullPath } else { $rootFullPath + $sep }
+      # `$IsWindows` is only defined in PowerShell 7+. On Windows PowerShell
+      # 5.1 (Desktop edition) the variable is unset, so we treat the
+      # Desktop edition as Windows by definition.
+      $isWindowsRuntime = $false
+      try { if (Get-Variable -Name IsWindows -Scope Global -ErrorAction SilentlyContinue) { $isWindowsRuntime = [bool]$IsWindows } } catch { }
+      if (-not $isWindowsRuntime -and $PSVersionTable.PSEdition -eq 'Desktop') { $isWindowsRuntime = $true }
+      $comparisonMode = if ($isWindowsRuntime) {
+        [System.StringComparison]::OrdinalIgnoreCase
+      } else {
+        [System.StringComparison]::Ordinal
+      }
+      if (-not $assetFullPath.StartsWith($rootFullPathWithSep, $comparisonMode) -and ($assetFullPath -ne $rootFullPath)) {
         Write-Json -Context $ctx -Object @{ error = 'Invalid asset path.' } -StatusCode 400
         return
       }
@@ -20225,7 +20897,20 @@ if ($metricsEnabled) {
   # 1c) Consent sync endpoint. This is called by the SPA after the user saves
   # cookie preferences so the server can immediately clear any existing
   # analytics session cookie when analytics consent is rejected.
+  # Rate-limited so a noisy client cannot pin a worker runspace by spamming
+  # consent toggles. Uses a generous multiplier because the SPA may legitimately
+  # call this several times during a single page load (load + save + theme).
   if ($path -eq '/api/consent') {
+    $rate = Test-RateLimit -Context $ctx -Multiplier 4
+    if (-not $rate.allowed) {
+      try {
+        if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
+          $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
+        }
+      } catch { }
+      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      return
+    }
     if ($false -eq $analyticsConsentState) {
       Clear-AnonymousSessionCookie -Context $ctx
     }
@@ -20299,180 +20984,94 @@ if ($metricsEnabled) {
     return
   }
 
-  # 2b) Microsoft Entra ID authentication verification endpoint
-  if ($path -eq '/api/auth/verify') {
-    # Validate the Bearer token by calling Microsoft Graph /me endpoint.
-    # This ensures the token is valid and lets us check the user's domain.
-    $authHeader = $null
-    try {
-      if ($ctx.Request -is [System.Net.HttpListenerRequest]) {
-        $authHeader = [string]$ctx.Request.Headers['Authorization']
-      } elseif ($ctx.Request.Headers) {
-        if ($ctx.Request.Headers.ContainsKey('Authorization')) { $authHeader = [string]$ctx.Request.Headers['Authorization'] }
-        elseif ($ctx.Request.Headers.ContainsKey('authorization')) { $authHeader = [string]$ctx.Request.Headers['authorization'] }
-      }
-    } catch { $authHeader = $null }
-
-    if ([string]::IsNullOrWhiteSpace($authHeader) -or -not $authHeader.StartsWith('Bearer ', [System.StringComparison]::OrdinalIgnoreCase)) {
-      Write-Json -Context $ctx -Object @{ error = 'Missing or invalid Authorization header. Expected: Bearer <token>' } -StatusCode 401
+  # 2b) Microsoft Entra ID auth: handled entirely client-side in the SPA.
+  # The browser uses MSAL to acquire a Microsoft Graph token and calls
+  # Graph /me directly (see verifyMsAccount in 20e-HtmlAzureIntegration.ps1).
+  # The previous /api/auth/verify route forwarded user bearer tokens to
+  # Microsoft Graph from the server, which expanded the trust boundary
+  # without adding security. It was removed so the server never handles
+  # raw Entra access tokens.
+  #
+  # The /api/auth/event route below is the consent-gated, header-only
+  # successor: after the SPA finishes its own Graph verification it POSTs
+  # a single notification with two non-PII headers so we can keep counting
+  # anonymous sign-in volume and unique Microsoft-employee bucket counts:
+  #
+  #   X-ACS-Auth-Account-Key  - SHA-256 hex of (tenantId + ':' + oid),
+  #                             computed in the browser via SubtleCrypto.
+  #                             Optional; only sent when both claims are
+  #                             present. Server HMAC-rehashes it with the
+  #                             per-install MetricsHashKey before storing.
+  #   X-ACS-Auth-Is-Microsoft - '1' if the SPA classified the user as a
+  #                             Microsoft employee (UPN matches
+  #                             microsoft.com/microsoftsupport.com),
+  #                             otherwise '0'. Worst case a tampered
+  #                             value off-by-ones a usage counter, which
+  #                             is acceptable for an opt-in analytics
+  #                             signal.
+  #
+  # The route requires analytics consent and applies the standard rate
+  # limiter so a noisy client cannot pin a worker.
+  if ($path -eq '/api/auth/event') {
+    if (-not $metricsEnabled) {
+      Write-Json -Context $ctx -Object @{ ok = $true; recorded = $false; reason = 'metrics-disabled' }
+      return
+    }
+    if ($true -ne $analyticsConsentState) {
+      # Honor the user's consent choice: do nothing, but acknowledge with 200
+      # so the SPA does not retry. Mirrors the /api/consent shape.
+      Write-Json -Context $ctx -Object @{ ok = $true; recorded = $false; reason = 'analytics-consent-required' }
       return
     }
 
-    $accessToken = $authHeader.Substring(7).Trim()
-    if ([string]::IsNullOrWhiteSpace($accessToken)) {
-      Write-Json -Context $ctx -Object @{ error = 'Empty access token.' } -StatusCode 401
-      return
-    }
-
-    # Validate JWT audience claim before forwarding the token anywhere.
-    # NOTE: The UI acquires a Microsoft Graph access token (scope: User.Read) to validate the user via /me.
-    # That means the token audience (aud) is typically Microsoft Graph, not this SPA's client id.
-    # We allow:
-    # - Microsoft Graph (00000003-0000-0000-c000-000000000000)
-    # - this app's client id (ACS_ENTRA_CLIENT_ID)
-    try {
-      $expectedClientId = $env:ACS_ENTRA_CLIENT_ID
-      if (-not [string]::IsNullOrWhiteSpace($expectedClientId)) {
-        $jwtParts = $accessToken.Split('.')
-        if ($jwtParts.Count -ge 2) {
-          $payloadBase64 = $jwtParts[1]
-          # Base64url decode (JWT uses '-' '_' and may omit padding)
-          $payloadBase64 = $payloadBase64.Replace('-', '+').Replace('_', '/')
-          switch ($payloadBase64.Length % 4) {
-            0 { }
-            2 { $payloadBase64 += '==' }
-            3 { $payloadBase64 += '=' }
-            default { throw 'Malformed JWT payload (invalid base64 length).' }
-          }
-          $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payloadBase64))
-          $payload = $payloadJson | ConvertFrom-Json -ErrorAction Stop
-          $graphAud = '00000003-0000-0000-c000-000000000000'
-
-          # JWT aud can be a string or an array
-          $audValues = @()
-          try {
-            if ($null -eq $payload.aud) {
-              $audValues = @()
-            }
-            elseif ($payload.aud -is [System.Array]) {
-              $audValues = @($payload.aud | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            }
-            else {
-              $audValues = @([string]$payload.aud)
-            }
-          } catch {
-            $audValues = @()
-          }
-
-          $audOk = $false
-          foreach ($a in $audValues) {
-            if ([string]::Equals($a, $expectedClientId, [System.StringComparison]::OrdinalIgnoreCase) -or
-                [string]::Equals($a, $graphAud, [System.StringComparison]::OrdinalIgnoreCase)) {
-              $audOk = $true
-              break
-            }
-          }
-
-          if (-not $audOk) {
-            Write-Json -Context $ctx -Object @{ error = 'Token audience mismatch. Expected token for Microsoft Graph or this application.'; authenticated = $false; tokenAudiences = $audValues } -StatusCode 401
-            return
-          }
-        } else {
-          Write-Json -Context $ctx -Object @{ error = 'Malformed JWT token.'; authenticated = $false } -StatusCode 401
-          return
-        }
-      }
-    } catch {
-      Write-Json -Context $ctx -Object @{ error = "Token audience validation failed: $($_.Exception.Message)"; authenticated = $false } -StatusCode 401
-      return
-    }
-
-    try {
-      # Call Microsoft Graph /me to validate the token and get user info.
-      # This is the most secure server-side validation approach for SPAs:
-      # - The token is validated by Microsoft's own infrastructure
-      # - We get verified user claims (email, tenant, display name)
-      # - No need to manually validate JWT signatures/keys
-      $graphHeaders = @{ Authorization = "Bearer $accessToken"; 'Content-Type' = 'application/json' }
-      $graphResp = Invoke-RestMethod -Method Get -Uri 'https://graph.microsoft.com/v1.0/me' -Headers $graphHeaders -TimeoutSec 15 -ErrorAction Stop
-
-      $userPrincipalName = [string]$graphResp.userPrincipalName
-      $mail = [string]$graphResp.mail
-      $displayName = [string]$graphResp.displayName
-      $id = [string]$graphResp.id
-
-      # Determine if this is a Microsoft employee:
-      # Check both UPN and mail for @microsoft.com domain
-      $isMsEmployee = $false
-      $emailDomain = $null
-
-      if (-not [string]::IsNullOrWhiteSpace($userPrincipalName)) {
-        $atIdx = $userPrincipalName.LastIndexOf('@')
-        if ($atIdx -ge 0) {
-          $emailDomain = $userPrincipalName.Substring($atIdx + 1).Trim().ToLowerInvariant()
-          if ($emailDomain -eq 'microsoft.com') { $isMsEmployee = $true }
-        }
-      }
-
-      if (-not $isMsEmployee -and -not [string]::IsNullOrWhiteSpace($mail)) {
-        $atIdx2 = $mail.LastIndexOf('@')
-        if ($atIdx2 -ge 0) {
-          $mailDomain = $mail.Substring($atIdx2 + 1).Trim().ToLowerInvariant()
-          if ($mailDomain -eq 'microsoft.com') { $isMsEmployee = $true }
-          if (-not $emailDomain) { $emailDomain = $mailDomain }
-        }
-      }
-
-      # Anonymous metrics: count successful auth verifications (no PII stored).
-
+    $rate = Test-RateLimit -Context $ctx -Multiplier 4
+    if (-not $rate.allowed) {
       try {
-        if ($metricsEnabled -and $isMsEmployee -and $id) {
-          # Hash the AAD object ID (id) and store in the hash sets
-          $hash = $null
-          try {
-            $key = $MetricsHashKey
-            if ([string]::IsNullOrWhiteSpace($key)) { $key = $env:ACS_METRICS_HASH_KEY }
-            if (-not [string]::IsNullOrWhiteSpace($key)) {
-              $keyBytes = [Text.Encoding]::UTF8.GetBytes($key)
-              $dataBytes = [Text.Encoding]::UTF8.GetBytes($id)
-              $hmac = [System.Security.Cryptography.HMACSHA256]::new($keyBytes)
-              try {
-                $hash = [Convert]::ToBase64String($hmac.ComputeHash($dataBytes))
-              } finally { try { $hmac.Dispose() } catch { } }
-            }
-          } catch { $hash = $null }
-          if ($hash) {
-            $addedSession = $script:AcsMetrics['msEmployeeIdHashes'].TryAdd($hash, 0)
-            $addedLifetime = $script:AcsMetrics['lifetimeMsEmployeeIdHashes'].TryAdd($hash, 0)
-            if ($addedSession -or $addedLifetime) {
-              [System.Threading.Interlocked]::Increment($script:AcsMetrics['lifetimeMsAuthVerifications']) | Out-Null
-              Save-AnonymousMetricsPersisted
-            }
-          }
-        }
-      } catch { $null = $_ }
-
-      Write-Json -Context $ctx -Object ([pscustomobject]@{
-        authenticated = $true
-        isMicrosoftEmployee = $isMsEmployee
-        displayName = $displayName
-        emailDomain = $emailDomain
-        userId = $id
-      })
-    }
-    catch {
-      $errMsg = $_.Exception.Message
-      $statusCode = 401
-
-      # Try to extract HTTP status from WebException
-      try {
-        if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
-          $httpStatus = [int]$_.Exception.Response.StatusCode
-          if ($httpStatus -ge 400) { $statusCode = $httpStatus }
+        if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
+          $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
+      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      return
+    }
 
-      Write-Json -Context $ctx -Object @{ error = "Token validation failed: $errMsg"; authenticated = $false } -StatusCode $statusCode
+    # Read the two opt-in headers via Get-RequestHeaderValue, which already
+    # handles both the WebHeaderCollection (HttpListener) and hashtable
+    # (TcpListener shim) header shapes.
+    $accountKey = Get-RequestHeaderValue -Context $ctx -Name 'X-ACS-Auth-Account-Key'
+    $isMsRaw    = Get-RequestHeaderValue -Context $ctx -Name 'X-ACS-Auth-Is-Microsoft'
+
+    # Defensive validation: the account key must look like a SHA-256 hex
+    # digest (64 chars, [0-9a-f]). Anything else gets ignored so we never
+    # store junk in the unique-employee hash set.
+    $accountKeyValid = $false
+    if (-not [string]::IsNullOrWhiteSpace($accountKey)) {
+      $accountKeyTrimmed = $accountKey.Trim().ToLowerInvariant()
+      if ($accountKeyTrimmed -match '^[0-9a-f]{64}$') {
+        $accountKey = $accountKeyTrimmed
+        $accountKeyValid = $true
+      } else {
+        $accountKey = $null
+      }
+    } else {
+      $accountKey = $null
+    }
+
+    $isMsEmployee = $false
+    if (-not [string]::IsNullOrWhiteSpace($isMsRaw)) {
+      $isMsTrim = $isMsRaw.Trim().ToLowerInvariant()
+      if ($isMsTrim -in @('1', 'true', 'yes', 'on')) { $isMsEmployee = $true }
+    }
+
+    try {
+      Update-AnonymousAuthMetrics -AccountKey $accountKey -IsMicrosoftEmployee $isMsEmployee
+    } catch { $null = $_ }
+
+    Write-Json -Context $ctx -Object @{
+      ok = $true
+      recorded = $true
+      accountKeyAccepted = $accountKeyValid
+      isMicrosoftEmployee = $isMsEmployee
     }
     return
   }
@@ -20595,6 +21194,11 @@ try {
 
     # TcpListener fallback response object.
     # It exposes a subset of `HttpListenerResponse`-like properties and a `SendBody()` method.
+    # `_extraHeaders` is populated by Set-SecurityHeaders / Set-NoCacheHeaders so
+    # the fallback path emits the same CSP, X-Frame-Options, X-Content-Type-Options,
+    # Referrer-Policy, CORS, and cache-control headers as the HttpListener path.
+    # Without this slot the fallback server mode would silently strip every
+    # browser-side defense.
     $resp = [pscustomobject]@{
       StatusCode = 200
       StatusDescription = 'OK'
@@ -20603,6 +21207,7 @@ try {
       _client = $Client
       _stream = $networkStream
       _sent = $false
+      _extraHeaders = [ordered]@{}
     }
 
     $resp | Add-Member -MemberType ScriptMethod -Name SendBody -Value {
@@ -20613,8 +21218,35 @@ try {
       }
 
       $statusText = if ([string]::IsNullOrWhiteSpace($this.StatusDescription)) { 'OK' } else { $this.StatusDescription }
-      $headers = "HTTP/1.1 {0} {1}\r\nContent-Type: {2}\r\nContent-Length: {3}\r\nConnection: close\r\n\r\n" -f $this.StatusCode, $statusText, $this.ContentType, $Bytes.Length
-      $headerBytes = [Text.Encoding]::ASCII.GetBytes($headers)
+      # SECURITY/CORRECTNESS: HTTP/1.1 requires CRLF (0x0D 0x0A) between headers
+      # and after the final blank line. The previous implementation used the
+      # double-quoted PowerShell literal "\r\n" which is the four characters
+      # `\`, `r`, `\`, `n` and produces a single-line malformed response that
+      # browsers reject. Build the header block with explicit `r`n sequences.
+      $crlf = "`r`n"
+      $headerBuilder = New-Object System.Text.StringBuilder
+      [void]$headerBuilder.Append("HTTP/1.1 $($this.StatusCode) $statusText$crlf")
+      [void]$headerBuilder.Append("Content-Type: $($this.ContentType)$crlf")
+      [void]$headerBuilder.Append("Content-Length: $($Bytes.Length)$crlf")
+      [void]$headerBuilder.Append("Connection: close$crlf")
+      # Emit any security / cache-control headers the request handler attached
+      # via Set-SecurityHeaders / Set-NoCacheHeaders. We strip CR/LF from values
+      # defensively so a buggy caller cannot inject extra headers (HTTP response
+      # splitting). Skip duplicates of the headers we already wrote above.
+      $reserved = @('content-type','content-length','connection')
+      if ($null -ne $this._extraHeaders) {
+        foreach ($k in @($this._extraHeaders.Keys)) {
+          $kn = ([string]$k).Trim()
+          if ([string]::IsNullOrWhiteSpace($kn)) { continue }
+          if ($reserved -contains $kn.ToLowerInvariant()) { continue }
+          $v = [string]$this._extraHeaders[$k]
+          if ($null -eq $v) { continue }
+          $v = $v -replace "[`r`n]", ' '
+          [void]$headerBuilder.Append("$kn`: $v$crlf")
+        }
+      }
+      [void]$headerBuilder.Append($crlf)
+      $headerBytes = [Text.Encoding]::ASCII.GetBytes($headerBuilder.ToString())
 
       try {
         $this._stream.Write($headerBytes, 0, $headerBytes.Length)
@@ -20655,12 +21287,61 @@ try {
       [System.Net.Sockets.TcpClient]$Client
     )
 
-    # Extremely small HTTP/1.1 request reader (GET only).
-    # We only need the request line + headers to route GET requests and read query strings.
+    # Extremely small HTTP/1.1 request reader (GET/POST).
+    # We only need the request line + headers to route requests and read query strings.
+    # SECURITY: cap the request line length, individual header line length, and
+    # the total number of headers so a peer that opens a TCP connection and
+    # streams an unbounded line cannot tie up a worker indefinitely or exhaust
+    # memory. These limits are deliberately generous compared to real browsers
+    # (which send sub-kilobyte request lines) but small enough to fail fast on
+    # abuse.
+    $maxRequestLineBytes = 8192   # 8 KB request line cap
+    $maxHeaderLineBytes  = 8192   # 8 KB per header line
+    $maxHeaderCount      = 100    # max distinct headers
+    # Cap the POST request body we are willing to read/discard. /api/consent is
+    # the only POST endpoint today and its payload is a tiny JSON document; a
+    # generous cap is plenty and prevents an attacker from streaming unbounded
+    # bytes into the worker. Honor the operator's configured cap from
+    # ACS_MAX_REQUEST_BODY_BYTES (set in 00-Header.ps1) and clamp to a hard
+    # ceiling so the fallback never allocates an unreasonable buffer even if
+    # the env var is mis-configured.
+    $maxRequestBodyBytes = 65536  # 64 KB request body cap (default)
+    try {
+      if ($env:ACS_MAX_REQUEST_BODY_BYTES -and $env:ACS_MAX_REQUEST_BODY_BYTES -match '^\d+$') {
+        $envCap = [int]$env:ACS_MAX_REQUEST_BODY_BYTES
+        if ($envCap -gt 0) {
+          # Hard ceiling of 1 MB so the fallback can never allocate gigabyte buffers.
+          $maxRequestBodyBytes = [Math]::Min($envCap, 1048576)
+        }
+      }
+    } catch { }
+
+    # SECURITY: Bound how long we are willing to wait for the peer to send
+    # bytes. Without these, a slow-loris client could dribble data within
+    # the per-line caps and tie up a worker indefinitely. 15 seconds is
+    # comfortably above any normal browser/curl latency.
+    try { $Client.ReceiveTimeout = 15000 } catch { }
+    try { $Client.SendTimeout    = 15000 } catch { }
+
     $stream = $Client.GetStream()
-    $reader = [System.IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 8192, $true)
-    $line1 = $reader.ReadLine()
+    try { $stream.ReadTimeout  = 15000 } catch { }
+    try { $stream.WriteTimeout = 15000 } catch { }
+    # SECURITY/CORRECTNESS: use UTF-8 for the full reader. UTF-8 is ASCII-
+    # compatible so the request line + header parsing (which only deals with
+    # ASCII per HTTP/1.1) is unaffected, but POST bodies (e.g. JSON for
+    # /api/consent if it ever consumes a request body in this fallback path)
+    # are decoded correctly instead of being silently mangled by an ASCII
+    # decoder when they contain bytes >= 0x80.
+    $reader = [System.IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $false, 8192, $true)
+
+    try {
+      $line1 = $reader.ReadLine()
+    } catch {
+      # Read timeout / IO error; treat as a malformed request so the caller closes the socket.
+      return $null
+    }
     if ([string]::IsNullOrWhiteSpace($line1)) { return $null }
+    if ($line1.Length -gt $maxRequestLineBytes) { return $null }
 
     $parts = $line1 -split '\s+'
     if ($parts.Count -lt 2) { return $null }
@@ -20669,10 +21350,19 @@ try {
     $target = $parts[1].Trim()
 
     $headers = @{}
+    $headerCount = 0
     while ($true) {
-      $line = $reader.ReadLine()
+      try {
+        $line = $reader.ReadLine()
+      } catch {
+        # Read timeout / IO error mid-headers; treat as malformed.
+        return $null
+      }
       if ($null -eq $line) { break }
       if ($line -eq '') { break }
+      if ($line.Length -gt $maxHeaderLineBytes) { return $null }
+      $headerCount++
+      if ($headerCount -gt $maxHeaderCount) { return $null }
       $idx = $line.IndexOf(':')
       if ($idx -le 0) { continue }
       $hName = $line.Substring(0, $idx).Trim().ToLowerInvariant()
@@ -20680,7 +21370,38 @@ try {
       $headers[$hName] = $hValue
     }
 
-    return [pscustomobject]@{ Method = $method; Target = $target; Headers = $headers }
+    # Drain the POST body (if any) so the StreamReader buffer and the
+    # underlying network stream are consumed before we hand control to the
+    # request handler. Today no handler reads the body (the consent route is
+    # driven entirely by the X-ACS-Cookie-Consent header), so we simply
+    # discard up to $maxRequestBodyBytes. If a handler ever needs the body in
+    # this fallback mode, the captured value is exposed on the returned
+    # object as `Body`.
+    $body = $null
+    if ($method -eq 'POST') {
+      $contentLength = 0
+      if ($headers.ContainsKey('content-length')) {
+        $clRaw = [string]$headers['content-length']
+        [void][int]::TryParse($clRaw, [ref]$contentLength)
+      }
+      if ($contentLength -gt 0) {
+        $toRead = [Math]::Min($contentLength, $maxRequestBodyBytes)
+        try {
+          $buffer = New-Object char[] $toRead
+          $totalRead = 0
+          while ($totalRead -lt $toRead) {
+            $chunk = $reader.Read($buffer, $totalRead, ($toRead - $totalRead))
+            if ($chunk -le 0) { break }
+            $totalRead += $chunk
+          }
+          if ($totalRead -gt 0) {
+            $body = New-Object string ($buffer, 0, $totalRead)
+          }
+        } catch { $body = $null }
+      }
+    }
+
+    return [pscustomobject]@{ Method = $method; Target = $target; Headers = $headers; Body = $body }
   }
 
   if ($serverMode -eq 'HttpListener') {
@@ -20703,6 +21424,21 @@ try {
         # Fast-path metrics to avoid runspace contention during lookups.
         try { $absPath = $ctx.Request.Url.AbsolutePath } catch { $absPath = $null }
         if ($absPath -and ($absPath.TrimEnd('/') -ieq '/api/metrics')) {
+          # SECURITY: even though /api/metrics is cheap, it can take the metrics
+          # file mutex and read+JSON-parse the persistence file, which is a
+          # cheap-but-real DoS amplifier under sustained polling. Apply a
+          # generous rate limit (10x the per-endpoint limit) so the SPA's
+          # auto-refresh keeps working but a tight loop gets throttled.
+          $metricsRate = Test-RateLimit -Context $ctx -Multiplier 10
+          if (-not $metricsRate.allowed) {
+            try {
+              if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $metricsRate.retryAfterSec) {
+                $ctx.Response.Headers['Retry-After'] = [string]$metricsRate.retryAfterSec
+              }
+            } catch { }
+            Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $metricsRate.retryAfterSec } -StatusCode 429
+            continue
+          }
           # Respond inline (fast and avoids ThreadPool runspace issues).
           Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
@@ -20757,6 +21493,13 @@ try {
         # Fast-path metrics for TcpListener fallback as well.
         try { $absPath = $ctx.Request.Url.AbsolutePath } catch { $absPath = $null }
         if ($absPath -and ($absPath.TrimEnd('/') -ieq '/api/metrics')) {
+          # See HttpListener fast-path above for the rationale on rate-limiting
+          # the metrics endpoint with a 10x multiplier.
+          $metricsRate = Test-RateLimit -Context $ctx -Multiplier 10
+          if (-not $metricsRate.allowed) {
+            Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $metricsRate.retryAfterSec } -StatusCode 429
+            continue
+          }
           Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
         }

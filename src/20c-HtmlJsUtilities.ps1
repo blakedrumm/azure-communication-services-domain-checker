@@ -1013,6 +1013,10 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
 
   if (policy === 'none') {
     guidance.push({ type: 'attention', text: t('dmarcMonitorOnly', { domain: targetDomain }) });
+    // Mirror the bulk-sender callout for monitor-only DMARC. p=none means no
+    // enforcement, which mailbox providers treat the same as "no DMARC" for
+    // bulk-sender (>5,000/day) deliverability decisions.
+    guidance.push({ type: 'attention', text: t('dmarcBulkSenderThreshold') });
   } else if (policy === 'quarantine') {
     guidance.push({ type: 'attention', text: t('dmarcQuarantine', { domain: targetDomain }) });
   }
@@ -1173,6 +1177,11 @@ function buildGuidance(r) {
 
   if (loaded.dmarc && !r.dmarc) {
     guidance.push({ type: 'attention', text: t('guidanceDmarcMissing', { domain: r.domain || '' }) });
+    // Bulk-sender callout: missing DMARC is the worst case for high-volume
+    // senders since Google/Yahoo/Microsoft now require an enforced policy
+    // above ~5,000 messages/day. Surface it next to the missing-DMARC line
+    // so the operator immediately understands the deliverability impact.
+    guidance.push({ type: 'attention', text: t('dmarcBulkSenderThreshold') });
   } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
     guidance.push({ type: 'info', text: t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }) });
   }

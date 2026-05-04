@@ -63,6 +63,16 @@
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
                                    Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
+  - ACS_TRUSTED_PROXIES          : Optional comma/semicolon/newline-delimited list of trusted reverse-proxy IPs or CIDRs.
+                                   When set, X-Forwarded-For / X-Real-IP headers are honored only when the immediate
+                                   peer IP matches an entry. Default empty = forwarded headers are ignored
+                                   (rate-limit/log uses the direct socket peer).
+                                   Example: `127.0.0.1,::1,10.0.0.0/8`.
+  - ACS_ALLOWED_ORIGINS          : Optional comma/semicolon/newline-delimited list of allowed CORS origins. Hosts only
+                                   (with optional scheme/port). When unset, only loopback hosts are allowed.
+                                   Example: `https://acs.example.com,https://localhost:8443`.
+  - ACS_MAX_REQUEST_BODY_BYTES   : Optional cap on POST/PUT/PATCH request bodies (default 65536). Larger requests
+                                   receive a 413 response.
 
   Cross-platform / container notes:
   - Bind mode: Auto picks loopback on Windows; uses 0.0.0.0 in container scenarios. Override with -Bind Any/Localhost.
@@ -94,7 +104,28 @@ param(
   # - Enabled only when `-EnableAnonymousMetrics` is used.
   # - Persists counters and first-seen/restart metadata to a local JSON file.
   # - Does not persist session ids.
-  [string]$AnonymousMetricsFile
+  [string]$AnonymousMetricsFile,
+
+  # Optional comma/semicolon/newline-delimited list of trusted reverse-proxy
+  # IPs or CIDRs. When set, X-Forwarded-For / X-Real-IP request headers are
+  # honored only when the immediate socket peer is in this list. The default
+  # (empty) means forwarded headers are ignored, which is the safer choice
+  # for direct-to-listener deployments because it prevents clients from
+  # spoofing their IP for rate limiting.
+  [string]$TrustedProxies,
+
+  # Optional comma/semicolon/newline-delimited list of allowed CORS origins
+  # (host or scheme://host[:port]). When set, only listed origins are
+  # reflected back as `Access-Control-Allow-Origin`. When unset, only
+  # loopback origins (127.0.0.1 / [::1] / localhost) are accepted, which
+  # mirrors the safer "local troubleshooting" intent of the tool.
+  [string]$AllowedOrigins,
+
+  # Optional cap on POST/PUT/PATCH request bodies in bytes. Larger requests
+  # receive a 413 response. Default 65536 (64 KB) is plenty for the only
+  # POST today (`/api/consent`) and prevents an attacker from streaming
+  # unbounded bytes into a worker runspace.
+  [int]$MaxRequestBodyBytes = 0
 )
 
 # ------------------- UTF-8 ENCODING FIX -------------------
@@ -158,4 +189,26 @@ $script:EnableAnonymousMetrics = $anonMetricsEnabled
 if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
   $AnonymousMetricsFile = $env:ACS_ANON_METRICS_FILE
 }
+
+# Trusted reverse-proxy list. CLI parameter wins over environment variable.
+# Get-ClientIp consults `$env:ACS_TRUSTED_PROXIES` directly so the list is
+# visible inside RunspacePool worker runspaces (script scope is not copied).
+if (-not [string]::IsNullOrWhiteSpace($TrustedProxies)) {
+  $env:ACS_TRUSTED_PROXIES = $TrustedProxies
+}
+
+# CORS origin allow-list. Same env-vs-param precedence/visibility reasoning as above.
+if (-not [string]::IsNullOrWhiteSpace($AllowedOrigins)) {
+  $env:ACS_ALLOWED_ORIGINS = $AllowedOrigins
+}
+
+# Maximum POST/PUT/PATCH body size in bytes. CLI value > env > default (64 KB).
+$bodyCap = 0
+if ($MaxRequestBodyBytes -gt 0) {
+  $bodyCap = $MaxRequestBodyBytes
+} elseif ($env:ACS_MAX_REQUEST_BODY_BYTES -and $env:ACS_MAX_REQUEST_BODY_BYTES -match '^\d+$') {
+  $bodyCap = [int]$env:ACS_MAX_REQUEST_BODY_BYTES
+}
+if ($bodyCap -le 0) { $bodyCap = 65536 }
+$env:ACS_MAX_REQUEST_BODY_BYTES = $bodyCap.ToString()
 

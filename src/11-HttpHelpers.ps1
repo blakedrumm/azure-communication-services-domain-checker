@@ -1,4 +1,75 @@
 # ===== HTTP Response Helpers =====
+function Get-SecurityHeaderMap {
+  param(
+    $Context,
+    [string]$Nonce
+  )
+  # Compute the security/CORS header map for a given request context. Returned
+  # as a hashtable so both the HttpListener path (Set-SecurityHeaders) and the
+  # TcpListener fallback (New-TcpContext SendBody) can write the same set of
+  # headers. This guarantees the fallback server mode is not silently weaker
+  # than the primary one.
+  $headers = [ordered]@{}
+
+  $origin = $null
+  try { $origin = [string]$Context.Request.Headers['Origin'] } catch { $origin = $null }
+  if (-not [string]::IsNullOrWhiteSpace($origin)) {
+    $allowOrigin = $false
+    $allowList = [string]$env:ACS_ALLOWED_ORIGINS
+    if (-not [string]::IsNullOrWhiteSpace($allowList)) {
+      foreach ($entry in ($allowList -split '[,;\r\n]')) {
+        $e = ([string]$entry).Trim().TrimEnd('/')
+        if ([string]::IsNullOrWhiteSpace($e)) { continue }
+        if ([string]::Equals($origin.TrimEnd('/'), $e, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $allowOrigin = $true
+          break
+        }
+        try {
+          $oUri = [uri]$origin
+          if ([string]::Equals($oUri.Host, $e, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $allowOrigin = $true
+            break
+          }
+        } catch { }
+      }
+    }
+    else {
+      $requestHost = $null
+      try { $requestHost = $Context.Request.Url.GetLeftPart([System.UriPartial]::Authority) } catch { $requestHost = $null }
+      if ($origin -eq $requestHost) {
+        try {
+          $oHost = ([uri]$origin).Host
+          if ($oHost -eq '127.0.0.1' -or $oHost -eq '::1' -or $oHost -eq '[::1]' -or
+              [string]::Equals($oHost, 'localhost', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $allowOrigin = $true
+          }
+        } catch { $allowOrigin = $false }
+      }
+    }
+
+    if ($allowOrigin) {
+      $headers['Access-Control-Allow-Origin']  = $origin
+      $headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+      $headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Api-Key, X-ACS-API-Key'
+      $headers['Access-Control-Max-Age']       = '3600'
+      $headers['Vary']                         = 'Origin'
+    }
+  }
+
+  $headers['X-Content-Type-Options'] = 'nosniff'
+  $headers['X-Frame-Options']        = 'DENY'
+  $headers['Referrer-Policy']        = 'no-referrer'
+
+  $nonceToken = if ([string]::IsNullOrWhiteSpace($Nonce)) { $null } else { "'nonce-$Nonce'" }
+  $scriptSrcParts = @("'self'", $nonceToken, 'https://cdn.jsdelivr.net', 'https://alcdn.msauth.net') | Where-Object { $_ }
+  $styleSrcParts  = @("'self'", $nonceToken) | Where-Object { $_ }
+  $scriptSrc = 'script-src ' + ($scriptSrcParts -join ' ')
+  $styleSrc  = 'style-src '  + ($styleSrcParts  -join ' ')
+  $headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-ancestors 'none'"
+
+  return $headers
+}
+
 function Set-SecurityHeaders {
   param(
     $Context,
@@ -11,34 +82,116 @@ function Set-SecurityHeaders {
   # - X-Frame-Options: prevent clickjacking
   # - Referrer-Policy: minimize referrer leakage
   try {
+    $headers = Get-SecurityHeaderMap -Context $Context -Nonce $Nonce
     if ($Context.Response -is [System.Net.HttpListenerResponse]) {
-      $origin = $null
-      try { $origin = [string]$Context.Request.Headers['Origin'] } catch { $origin = $null }
-      if (-not [string]::IsNullOrWhiteSpace($origin)) {
-        # Only reflect the origin if it matches the listener's own origin
-        $requestHost = $null
-        try { $requestHost = $Context.Request.Url.GetLeftPart([System.UriPartial]::Authority) } catch { $requestHost = $null }
-        if ($origin -eq $requestHost) {
-          $Context.Response.Headers['Access-Control-Allow-Origin'] = $origin
-          $Context.Response.Headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-          $Context.Response.Headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Api-Key, X-ACS-API-Key'
-          $Context.Response.Headers['Access-Control-Max-Age'] = '3600'
-          $Context.Response.Headers['Vary'] = 'Origin'
-        }
-        # If origin does not match, no CORS headers are set (browser blocks the response)
+      foreach ($k in $headers.Keys) {
+        try { $Context.Response.Headers[$k] = [string]$headers[$k] } catch { }
       }
-      $Context.Response.Headers['X-Content-Type-Options'] = 'nosniff'
-      $Context.Response.Headers['X-Frame-Options'] = 'DENY'
-      $Context.Response.Headers['Referrer-Policy'] = 'no-referrer'
-
-      $nonceToken = if ([string]::IsNullOrWhiteSpace($Nonce)) { $null } else { "'nonce-$Nonce'" }
-      $scriptSrcParts = @("'self'", $nonceToken, 'https://cdn.jsdelivr.net', 'https://alcdn.msauth.net') | Where-Object { $_ }
-      $styleSrcParts = @("'self'", $nonceToken) | Where-Object { $_ }
-      $scriptSrc = 'script-src ' + ($scriptSrcParts -join ' ')
-      $styleSrc = 'style-src ' + ($styleSrcParts -join ' ')
-      $Context.Response.Headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-ancestors 'none'"
+    }
+    else {
+      # TcpListener fallback: stash the headers on the response object so
+      # SendBody emits them alongside Content-Type / Content-Length. Without
+      # this branch the fallback server mode would serve every response
+      # without CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+      # or any CORS gating, which is materially weaker than the primary
+      # HttpListener path.
+      try {
+        if ($null -ne $Context.Response.PSObject.Properties['_extraHeaders']) {
+          $existing = $Context.Response._extraHeaders
+          if ($null -eq $existing) {
+            $Context.Response._extraHeaders = $headers
+          } else {
+            foreach ($k in $headers.Keys) { $existing[$k] = $headers[$k] }
+          }
+        }
+      } catch { }
     }
   } catch { }
+}
+
+function Set-NoCacheHeaders {
+  param($Context)
+  # Apply no-cache headers in a way that works for both the HttpListener path
+  # and the TcpListener fallback. Centralizing this avoids the previous bug
+  # where the fallback path silently dropped Cache-Control/Pragma/Expires.
+  $noCache = [ordered]@{
+    'Cache-Control' = 'no-store, no-cache, must-revalidate, max-age=0'
+    'Pragma'        = 'no-cache'
+    'Expires'       = '0'
+  }
+  try {
+    if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+      foreach ($k in $noCache.Keys) {
+        try { $Context.Response.Headers[$k] = [string]$noCache[$k] } catch { }
+      }
+    } else {
+      if ($null -ne $Context.Response.PSObject.Properties['_extraHeaders']) {
+        $existing = $Context.Response._extraHeaders
+        if ($null -eq $existing) {
+          $Context.Response._extraHeaders = $noCache
+        } else {
+          foreach ($k in $noCache.Keys) { $existing[$k] = $noCache[$k] }
+        }
+      }
+    }
+  } catch { }
+}
+
+# Centralized outbound HTTP helper for user-driven lookups (DoH, RDAP, WHOIS,
+# RBL, etc.). Goals:
+# - Enforce HTTPS-only (refuses cleartext) so a typo in a custom endpoint
+#   cannot leak a domain query in plaintext.
+# - Hard-cap timeout per request and the number of redirects we will follow.
+# - Centralize the outbound surface so future hardening (proxy, per-request
+#   call counter, IP allow-list) only has to land in one place.
+# Returns the deserialized body when -ReturnRaw is omitted; throws on failure
+# so callers' existing try/catch flow keeps working.
+function Invoke-OutboundHttp {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Uri,
+
+    [string]$Method = 'GET',
+
+    [hashtable]$Headers,
+
+    [int]$TimeoutSec = 15,
+
+    [int]$MaximumRedirection = 3,
+
+    [switch]$ReturnRaw
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Uri)) {
+    throw "Invoke-OutboundHttp: Uri is required."
+  }
+
+  $parsed = $null
+  try { $parsed = [uri]$Uri } catch { throw "Invoke-OutboundHttp: malformed Uri '$Uri'." }
+  if (-not $parsed.IsAbsoluteUri) {
+    throw "Invoke-OutboundHttp: Uri must be absolute ('$Uri')."
+  }
+  if ($parsed.Scheme -ne 'https') {
+    throw "Invoke-OutboundHttp: only https is allowed (got '$($parsed.Scheme)' for '$Uri')."
+  }
+
+  if ($TimeoutSec -le 0) { $TimeoutSec = 15 }
+  if ($MaximumRedirection -lt 0) { $MaximumRedirection = 0 }
+
+  $params = @{
+    Uri                 = $Uri
+    Method              = $Method
+    TimeoutSec          = $TimeoutSec
+    MaximumRedirection  = $MaximumRedirection
+    ErrorAction         = 'Stop'
+  }
+  if ($Headers -and $Headers.Count -gt 0) { $params.Headers = $Headers }
+
+  if ($ReturnRaw) {
+    $params.UseBasicParsing = $true
+    return Invoke-WebRequest @params
+  }
+  return Invoke-RestMethod @params
 }
 
 # Serialize an object to JSON and write it as the HTTP response body.
@@ -61,15 +214,13 @@ function Write-Json {
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
 
   Set-SecurityHeaders -Context $Context
+  # Disable browser/proxy caching for all JSON API responses so users always
+  # see fresh DNS/WHOIS data without needing a forced refresh (CTRL+SHIFT+R).
+  # Routed through Set-NoCacheHeaders so the TcpListener fallback also emits
+  # these headers (the previous inline writes only worked for HttpListener).
+  Set-NoCacheHeaders -Context $Context
 
   if ($Context.Response -is [System.Net.HttpListenerResponse]) {
-    # Disable browser/proxy caching for all JSON API responses so users always
-    # see fresh DNS/WHOIS data without needing a forced refresh (CTRL+SHIFT+R).
-    try {
-      $Context.Response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-      $Context.Response.Headers['Pragma'] = 'no-cache'
-      $Context.Response.Headers['Expires'] = '0'
-    } catch { }
     $Context.Response.ContentType = "application/json; charset=utf-8"
     try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
     $Context.Response.StatusCode  = $StatusCode
@@ -151,13 +302,9 @@ function Write-Html {
     $bytes = [Text.Encoding]::UTF8.GetBytes($Html)
 
     Set-SecurityHeaders -Context $Context -Nonce $Nonce
+    Set-NoCacheHeaders -Context $Context
 
     if ($Context.Response -is [System.Net.HttpListenerResponse]) {
-      try {
-        $Context.Response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        $Context.Response.Headers['Pragma'] = 'no-cache'
-        $Context.Response.Headers['Expires'] = '0'
-      } catch { }
       $Context.Response.ContentType = "text/html; charset=utf-8"
       try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
       $Context.Response.StatusCode  = 200

@@ -11,7 +11,7 @@ This is a **single-file PowerShell web application** that runs a local HTTP serv
 ### Runtime flow
 
 1. **CLI mode** (`-TestDomain example.com`): runs DNS checks, outputs JSON, and exits.
-2. **Server mode** (default): starts an HTTP listener, serves the SPA UI, and exposes routes such as `/`, `/index.html`, `/dns`, `/api/base`, `/api/mx`, `/api/records`, `/api/whois`, `/api/dmarc`, `/api/dkim`, `/api/cname`, `/api/reputation`, `/api/metrics`, `/api/auth/verify`, `/terms`, and `/privacy`.
+2. **Server mode** (default): starts an HTTP listener, serves the SPA UI, and exposes routes such as `/`, `/index.html`, `/dns`, `/api/base`, `/api/mx`, `/api/records`, `/api/whois`, `/api/dmarc`, `/api/dkim`, `/api/cname`, `/api/reputation`, `/api/metrics`, `/api/auth/event`, `/terms`, and `/privacy`. Microsoft Entra ID sign-in is handled entirely client-side in the SPA via MSAL + Microsoft Graph; there is intentionally no server-side `/api/auth/verify` route, so the server never sees raw user access tokens. The replacement `/api/auth/event` route is consent-gated and header-only: the SPA POSTs an opaque SHA-256 of `tenantId + ':' + oid` plus an `isMicrosoftEmployee` boolean so anonymous sign-in counters (`lifetimeMsAuthVerifications`, `lifetimeMsEmployeeVerifications`) keep advancing without exposing any token, UPN, oid, or tenant id to the server.
 
 ---
 
@@ -65,7 +65,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.70`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.78`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics` |
 
@@ -78,7 +78,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 | `11-HttpHelpers.ps1` | ~175 | HTTP response helpers: `Set-SecurityHeaders`, `Write-Json`, `Write-FileResponse`, `Write-Html` |
 | `12-DnsResolution.ps1` | ~194 | DNS resolution via DoH plus detailed DNS record collection, reverse-lookup supplements, related-name supplements (ACS DKIM selectors, `_dmarc.<domain>`, `www.<domain>`) so well-known subdomains surface in the records grid, TTL formatting helpers, readable decoding for escaped DNS labels, and authoritative fallback collection for records like `HINFO` and `RRSIG`: `Resolve-DohName`, `ResolveSafely`, `Get-DnsIpString`, `Get-MxRecordObjects`, `Get-DnsRecordsStatus` |
 | `13-InputValidation.ps1` | ~69 | `ConvertTo-NormalizedDomain`, `Test-DomainName` — domain input sanitization |
-| `15-RequestUtilities.ps1` | ~170 | `Write-RequestLog`, `Get-ClientIp`, `Get-ApiKeyFromRequest`, `Test-ApiKey`, `Test-RateLimit` |
+| `15-RequestUtilities.ps1` | ~299 | `Write-RequestLog`, `Get-ClientIp`, `Test-IsTrustedProxy`, `Get-ApiKeyFromRequest`, `Test-StringEqualsConstantTime`, `Test-ApiKey`, `Test-RateLimit`. `Test-RateLimit` accepts a `-Multiplier` so cheap, high-frequency endpoints (such as `/api/metrics`) can share the per-IP bucket with a more generous effective limit. `Test-ApiKey` uses `Test-StringEqualsConstantTime` to defeat timing-based key recovery. |
 
 ### DNS Analysis
 

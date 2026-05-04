@@ -228,6 +228,7 @@ const TRANSLATIONS = {
     dmarcMissingSp: 'DMARC for subdomains of {lookupDomain} does not define an explicit subdomain policy (sp=). If you send from subdomains like {domain}, consider adding sp=quarantine or sp=reject for clearer protection.',
     dmarcMissingRua: 'DMARC for {domain} does not publish aggregate reporting (rua=). Adding a reporting mailbox improves visibility into spoofing attempts and enforcement impact.',
     dmarcMissingRuf: 'DMARC for {domain} does not publish forensic reporting (ruf=). If your process allows it, forensic reports can provide additional failure detail for investigations.',
+    dmarcBulkSenderThreshold: 'DMARC is strongly recommended when sending more than 5,000 emails per day. Major mailbox providers (Google, Yahoo, Microsoft) require an enforced DMARC policy for bulk senders, and missing or weak DMARC frequently causes deliverability failures at high volume.',
     mxUsingParentNote: '(using MX from parent domain {lookupDomain})',
     parentCheckedNoMx: 'Checked parent domain {parentDomain} (no MX).',
     expiredOn: 'Expired on {date}',

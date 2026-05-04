@@ -54,6 +54,78 @@ function Get-AnonymousMetricsPersistPath {
   return $p
 }
 
+# SECURITY: Restrict the metrics persistence file to the current user only.
+# The file contains the persistent HMAC `hashKey` used to compute hashed
+# domain values; anyone with read access can use it to recompute the same
+# hashes for any domain they choose, which would let them unmask values
+# stored in the metrics file. This best-effort tightening covers Linux
+# (chmod 600) and Windows (NTFS DACL limited to the current user); it is
+# wrapped in try/catch so persistence still succeeds on file systems where
+# the operation is unsupported (for example FAT32 or some container
+# bind-mounted volumes).
+function Set-AnonymousMetricsFilePermissions {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
+
+  try {
+    $isWindowsHost = $true
+    try {
+      # `$IsWindows` only exists in PowerShell 7+. On Windows PowerShell 5.1
+      # (Desktop edition) we default to true; otherwise probe the variable.
+      if (Get-Variable -Name IsWindows -Scope Global -ErrorAction SilentlyContinue) {
+        $isWindowsHost = [bool]$IsWindows
+      } elseif ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $isWindowsHost = $true
+      }
+    } catch { $isWindowsHost = $true }
+
+    if ($isWindowsHost) {
+      # Build the new restrictive DACL on a snapshot of the current ACL so we
+      # never partially mutate the live SecurityDescriptor that Set-Acl will
+      # commit. If anything throws while constructing or applying the ACL we
+      # fall back to leaving the inherited ACL in place rather than wiping
+      # all access; the persisted file is then no less protected than any
+      # other file the process writes.
+      try {
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($existing in @($acl.Access)) {
+          try { $null = $acl.RemoveAccessRule($existing) } catch { }
+        }
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+          $currentUser,
+          [System.Security.AccessControl.FileSystemRights]::FullControl,
+          [System.Security.AccessControl.AccessControlType]::Allow)
+        $acl.AddAccessRule($rule)
+        # Verify the rebuilt ACL grants at least one explicit ACE for the
+        # current user before applying. If somehow the rule list is empty we
+        # skip the Set-Acl call entirely so the file does not end up with
+        # zero ACEs (which would lock the metrics writer out of its own file).
+        $hasOwnerRule = $false
+        foreach ($r in @($acl.Access)) {
+          if ($r.IdentityReference.Value -eq $currentUser) { $hasOwnerRule = $true; break }
+        }
+        if ($hasOwnerRule) {
+          Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+      } catch {
+        # Best-effort: if ACL rebuild fails we leave the inherited ACL intact.
+      }
+    } else {
+      try {
+        $chmod = Get-Command -Name chmod -ErrorAction SilentlyContinue
+        if ($chmod) {
+          & $chmod.Source 600 -- $Path 2>$null
+        }
+      } catch { }
+    }
+  } catch { }
+}
+
 # Normalize a value (possibly [DateTime] from ConvertFrom-Json) to ISO 8601 round-trip string.
 function ConvertTo-Iso8601Utc {
   param($Value)
@@ -344,6 +416,11 @@ function Save-AnonymousMetricsPersisted {
     $tmp = "$path.tmp"
     $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $path -Force
+    # SECURITY: tighten file permissions after the rename so the persisted
+    # hashKey cannot be read by other local users. Best-effort; failures are
+    # swallowed so persistence keeps working on file systems that do not
+    # support ACL/chmod operations.
+    try { Set-AnonymousMetricsFilePermissions -Path $path } catch { }
     $script:AcsMetrics['_lastPersistUtc'] = $now.ToString('o')
     try { $script:AcsMetrics['_lastPersistDomains'].Value = $script:AcsMetrics['lifetimeTotalDomains'].Value } catch { }
   }
