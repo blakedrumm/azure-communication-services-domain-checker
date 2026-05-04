@@ -118,43 +118,101 @@ jobs:
       - name: Create Pull Request
         if: steps.check-update.outputs.needs_update == 'true'
         id: create-pull-request
-        uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: 'chore: update msal-browser.min.js to v${{ steps.get-version.outputs.version }}'
-          branch: update-msal-browser-v${{ steps.get-version.outputs.version }}
-          delete-branch: true
-          title: 'chore: Update MSAL Browser Library to v${{ steps.get-version.outputs.version }}'
-          body: |
-            ## Automated Update: MSAL Browser Library
-            
-            This PR updates `msal-browser.min.js` from **v${{ steps.get-version.outputs.current_version }}** to **v${{ steps.get-version.outputs.version }}**.
-            
-            ### Changes
-            - ✅ Updated `msal-browser.min.js` to latest version from npm registry
-            - ✅ Updated `package.json` dependency reference
-            
-            ### Package Information
-            - **Package**: [@azure/msal-browser](https://www.npmjs.com/package/@azure/msal-browser)
-            - **Version**: ${{ steps.get-version.outputs.version }}
-            - **Registry**: npm (https://registry.npmjs.org)
-            
-            ### Release Notes
-            View the full changelog at: https://github.com/AzureAD/microsoft-authentication-library-for-js/releases/tag/@azure/msal-browser@${{ steps.get-version.outputs.version }}
-            
-            ### Verification Steps
-            Before merging, please verify:
-            1. The PowerShell script still serves the file correctly at `/assets/msal-browser.min.js`
-            2. Microsoft Entra ID authentication functionality works as expected
-            3. No console errors in the browser when loading the UI
-            
-            ---
-            
-            🤖 This PR was automatically created by the [Update MSAL Browser Library workflow](.github/workflows/update-msal-browser.yml).
-          labels: |
-            dependencies
-            automated
-          draft: false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_VERSION: ${{ steps.get-version.outputs.version }}
+          CURRENT_VERSION: ${{ steps.get-version.outputs.current_version }}
+        run: |
+          # Native git + gh CLI implementation that replaces peter-evans/create-pull-request
+          # (third-party actions are blocked by the enterprise allowlist on this repository).
+          # Behavior preserved: same branch name, commit message, PR title/body, labels, and
+          # outputs (pull-request-url, pull-request-operation) consumed by the auto-merge step.
+          set -euo pipefail
+
+          BRANCH="update-msal-browser-v${TARGET_VERSION}"
+          BASE_BRANCH="${GITHUB_REF_NAME}"
+          COMMIT_MESSAGE="chore: update msal-browser.min.js to v${TARGET_VERSION}"
+          PR_TITLE="chore: Update MSAL Browser Library to v${TARGET_VERSION}"
+
+          # Configure git identity for the automated commit (matches peter-evans default).
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Build the PR body in a file to preserve newlines/formatting.
+          PR_BODY_FILE="$(mktemp)"
+          cat > "$PR_BODY_FILE" <<EOF
+          ## Automated Update: MSAL Browser Library
+
+          This PR updates \`msal-browser.min.js\` from **v${CURRENT_VERSION}** to **v${TARGET_VERSION}**.
+
+          ### Changes
+          - ✅ Updated \`msal-browser.min.js\` to latest version from npm registry
+          - ✅ Updated \`package.json\` dependency reference
+
+          ### Package Information
+          - **Package**: [@azure/msal-browser](https://www.npmjs.com/package/@azure/msal-browser)
+          - **Version**: ${TARGET_VERSION}
+          - **Registry**: npm (https://registry.npmjs.org)
+
+          ### Release Notes
+          View the full changelog at: https://github.com/AzureAD/microsoft-authentication-library-for-js/releases/tag/@azure/msal-browser@${TARGET_VERSION}
+
+          ### Verification Steps
+          Before merging, please verify:
+          1. The PowerShell script still serves the file correctly at \`/assets/msal-browser.min.js\`
+          2. Microsoft Entra ID authentication functionality works as expected
+          3. No console errors in the browser when loading the UI
+
+          ---
+
+          🤖 This PR was automatically created by the [Update MSAL Browser Library workflow](.github/workflows/update-msal-browser.yml).
+          EOF
+
+          # Create or reset the working branch from the current commit and stage updates.
+          git checkout -B "$BRANCH"
+          git add msal-browser.min.js package.json
+
+          # If there are no changes (e.g. because a previous run already pushed identical
+          # content), skip PR creation but still emit outputs so downstream steps no-op gracefully.
+          if git diff --cached --quiet; then
+            echo "No file changes detected; skipping PR creation."
+            echo "pull-request-operation=none" >> "$GITHUB_OUTPUT"
+            echo "pull-request-url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "$COMMIT_MESSAGE"
+
+          # Force-push so re-running the workflow with the same target version refreshes
+          # the branch contents (mirrors peter-evans/create-pull-request behavior).
+          git push --force origin "$BRANCH"
+
+          # Determine whether a PR for this branch already exists; create or update accordingly.
+          EXISTING_PR_URL="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+
+          if [ -z "$EXISTING_PR_URL" ]; then
+            PR_URL="$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_BRANCH" \
+              --head "$BRANCH" \
+              --title "$PR_TITLE" \
+              --body-file "$PR_BODY_FILE" \
+              --label "dependencies" \
+              --label "automated")"
+            OPERATION="created"
+          else
+            gh pr edit "$EXISTING_PR_URL" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$PR_TITLE" \
+              --body-file "$PR_BODY_FILE" \
+              --add-label "dependencies" \
+              --add-label "automated"
+            PR_URL="$EXISTING_PR_URL"
+            OPERATION="updated"
+          fi
+
+          echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "pull-request-operation=$OPERATION" >> "$GITHUB_OUTPUT"
 
       - name: Enable Pull Request Auto-Merge
         if: steps.check-update.outputs.needs_update == 'true' && contains(fromJSON('["created","updated"]'), steps.create-pull-request.outputs.pull-request-operation)
