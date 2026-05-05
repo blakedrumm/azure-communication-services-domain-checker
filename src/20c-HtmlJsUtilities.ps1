@@ -862,6 +862,22 @@ function applyCheckedDomainEmphasis(html, checkedDomain) {
   return String(html || '').replace(new RegExp(escapeRegex(escapedDomain), 'gi'), '<em class="checked-domain">$&</em>');
 }
 
+function formatDnssecEdeLabel(code) {
+  // RFC 8914 Extended DNS Error info codes that we treat as DNSSEC anomalies.
+  // Anything not in this map falls back to the raw code so we still surface
+  // unknown values without translation gymnastics.
+  switch (Number(code)) {
+    case 6: return 'DNSSEC Bogus (malformed signature in chain of trust)';
+    case 7: return 'DNSSEC Signature Expired';
+    case 8: return 'DNSSEC Signature Not Yet Valid';
+    case 9: return 'DNSKEY Missing';
+    case 10: return 'RRSIGs Missing';
+    case 11: return 'No Zone Key Bit Set';
+    case 12: return 'NSEC Missing';
+    default: return 'EDE ' + String(code);
+  }
+}
+
 function formatGuidanceText(text, checkedDomain) {
   let value = String(text || '');
   const protectedTokens = [];
@@ -1116,6 +1132,22 @@ function buildGuidance(r) {
   const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
   const txtRecovery = getDnsTxtRecoveryState(r);
   const guidanceWorkflowComplete = ['base', 'mx', 'records', 'whois', 'dmarc', 'dkim', 'cname', 'reputation'].every(key => loaded[key] === true);
+
+  // Surface DNSSEC anomalies first so the operator immediately understands why
+  // downstream cards may look unusual, and that we worked around the issue
+  // rather than failing. The server runs a one-shot DoH probe (without cd=1)
+  // alongside /api/base and exposes the result as r.dnssecAnomaly. Kept as
+  // `info` (not `attention`) because records were still successfully returned;
+  // a strict downstream validator could still treat the zone as bogus, hence
+  // the supporting wording about "downstream validating resolver".
+  if (loaded.base && r.dnssecAnomaly && (r.dnssecAnomaly.summary || r.dnssecAnomaly.primaryEdeCode != null || r.dnssecAnomaly.status === 2)) {
+    let edeSuffix = '';
+    if (r.dnssecAnomaly.primaryEdeCode != null) {
+      const label = formatDnssecEdeLabel(r.dnssecAnomaly.primaryEdeCode);
+      edeSuffix = t('guidanceDnssecAnomalyEdeSuffix', { code: String(r.dnssecAnomaly.primaryEdeCode), label });
+    }
+    guidance.push({ type: 'info', text: t('guidanceDnssecAnomaly', { edeSuffix }) });
+  }
 
   // Only surface a terminal TXT lookup failure once the broader lookup workflow
   // has settled, and suppress it when the detailed DNS records payload already

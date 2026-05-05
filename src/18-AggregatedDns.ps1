@@ -17,6 +17,12 @@ function Get-AcsDnsStatus {
   $dkim  = Get-DnsDkimStatus  -Domain $Domain
   $cname = Get-DnsCnameStatus -Domain $Domain
 
+  # DNSSEC anomaly is detected as part of Get-DnsBaseStatus (so the incremental
+  # /api/base UI path can show the note immediately). Reuse that result here so
+  # we don't make a second probe for the aggregated /dns endpoint.
+  $dnssecAnomaly = $null
+  try { $dnssecAnomaly = $base.dnssecAnomaly } catch { $dnssecAnomaly = $null }
+
   # Recover queried-domain TXT-derived state from the detailed DNS records payload
   # when the dedicated base TXT lookup timed out but record collection still
   # produced authoritative TXT rows for the queried domain.
@@ -79,6 +85,14 @@ function Get-AcsDnsStatus {
 
     # Guidance
     $guidance = New-Object System.Collections.Generic.List[string]
+
+    # Surface DNSSEC anomalies first so the operator immediately understands why
+    # downstream cards may look unusual, and that we worked around the issue
+    # rather than failing. Kept as `info` (not `attention`) because the records
+    # were still successfully returned.
+    if ($dnssecAnomaly -and -not [string]::IsNullOrWhiteSpace([string]$dnssecAnomaly.summary)) {
+      $guidance.Add([string]$dnssecAnomaly.summary)
+    }
 
     if ($effectiveDnsFailed) {
         $guidance.Add("DNS TXT lookup failed or timed out. Other DNS records may still resolve.")
@@ -176,6 +190,8 @@ function Get-AcsDnsStatus {
       dohEndpoint = $(if ($env:ACS_DNS_RESOLVER -eq 'DoH' -or ($env:ACS_DNS_RESOLVER -eq 'Auto' -and -not (Get-Command -Name Resolve-DnsName -ErrorAction SilentlyContinue))) { $env:ACS_DNS_DOH_ENDPOINT } else { $null })
         dnsFailed  = $effectiveDnsFailed
         dnsError   = $effectiveDnsError
+
+        dnssecAnomaly = $dnssecAnomaly
 
         txtLookupDomain = $base.txtLookupDomain
         txtUsedParent   = $base.txtUsedParent

@@ -65,7 +65,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.78`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.80`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics` |
 
@@ -76,7 +76,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 | `05-DateUtilities.ps1` | ~145 | `ConvertTo-NullableUtcIso8601`, `Get-DomainAgeDays`, `Get-DomainAgeParts`, `Format-DomainAge`, `Get-TimeUntilParts`, `Format-ExpiryRemaining` |
 | `06-DmarcGuidance.ps1` | ~85 | `Get-DmarcSecurityGuidance` — analyzes DMARC records and produces security recommendations |
 | `11-HttpHelpers.ps1` | ~175 | HTTP response helpers: `Set-SecurityHeaders`, `Write-Json`, `Write-FileResponse`, `Write-Html` |
-| `12-DnsResolution.ps1` | ~194 | DNS resolution via DoH plus detailed DNS record collection, reverse-lookup supplements, related-name supplements (ACS DKIM selectors, `_dmarc.<domain>`, `www.<domain>`) so well-known subdomains surface in the records grid, TTL formatting helpers, readable decoding for escaped DNS labels, and authoritative fallback collection for records like `HINFO` and `RRSIG`: `Resolve-DohName`, `ResolveSafely`, `Get-DnsIpString`, `Get-MxRecordObjects`, `Get-DnsRecordsStatus` |
+| `12-DnsResolution.ps1` | ~194 | DNS resolution via DoH plus detailed DNS record collection, reverse-lookup supplements, related-name supplements (ACS DKIM selectors, `_dmarc.<domain>`, `www.<domain>`) so well-known subdomains surface in the records grid, TTL formatting helpers, readable decoding for escaped DNS labels, authoritative fallback collection for records like `HINFO` and `RRSIG`, a one-shot `Get-DohDnssecAnomaly` probe (without `cd=1`) so the SPA can surface a friendly informational note when an upstream DNSSEC validation failure (e.g. malformed TLD RRSIG) is silently being worked around, and a fast System-resolver-to-DoH fallback inside `ResolveSafely` and `Resolve-DnsRecordsDetailed` that short-circuits when the System resolver returns SERVFAIL/timeout (Win32 9002/9701) so single-name multi-type lookups don't pay the 15s timeout per type on broken zones such as during `.de` DNSSEC outages. NXDOMAIN/no-records (9003/9501) is preserved as a fast negative answer. Functions: `Resolve-DohName`, `ResolveSafely`, `Get-DnsIpString`, `Get-MxRecordObjects`, `Get-DohDnssecAnomaly`, `Get-DnsRecordsStatus` |
 | `13-InputValidation.ps1` | ~69 | `ConvertTo-NormalizedDomain`, `Test-DomainName` — domain input sanitization |
 | `15-RequestUtilities.ps1` | ~299 | `Write-RequestLog`, `Get-ClientIp`, `Test-IsTrustedProxy`, `Get-ApiKeyFromRequest`, `Test-StringEqualsConstantTime`, `Test-ApiKey`, `Test-RateLimit`. `Test-RateLimit` accepts a `-Multiplier` so cheap, high-frequency endpoints (such as `/api/metrics`) can share the per-IP bucket with a more generous effective limit. `Test-ApiKey` uses `Test-StringEqualsConstantTime` to defeat timing-based key recovery. |
 

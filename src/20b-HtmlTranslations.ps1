@@ -168,6 +168,8 @@ const TRANSLATIONS = {
     expiresInLabel: 'Expires in',
     acsReadyMessage: 'This domain appears ready for Azure Communication Services domain verification.',
     guidanceDnsTxtFailed: 'DNS TXT lookup failed or timed out. Other DNS records may still resolve.',
+    guidanceDnssecAnomaly: 'Upstream DNSSEC validation failed for this zone{edeSuffix}. Records were returned with DNSSEC checking disabled so this tool can still display them, but a downstream validating resolver may treat the zone as bogus.',
+    guidanceDnssecAnomalyEdeSuffix: ' (EDE {code}: {label})',
     guidanceSpfMissingParent: 'SPF is missing on {domain}. Parent domain {lookupDomain} publishes SPF, but SPF does not automatically apply to the queried subdomain.',
     guidanceSpfMissing: 'SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent).',
     guidanceAcsMissingParent: 'ACS ms-domain-verification TXT is missing on {domain}. Parent domain {lookupDomain} has an ACS TXT record, but it does not verify the queried subdomain.',

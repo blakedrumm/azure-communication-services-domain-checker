@@ -131,10 +131,23 @@ function Get-DnsBaseStatus {
     }
   }
 
+  # Run the DNSSEC anomaly probe once per base lookup, so the incremental UI
+  # (which calls /api/base before the aggregated /dns endpoint completes) can
+  # render the informational note as soon as the rest of the base card loads.
+  # The probe itself is a single small DoH HTTP request, so we run it for both
+  # System and DoH modes -- on Windows the System resolver can SERVFAIL on
+  # zones with broken DNSSEC parents (e.g. `.de` outages) just as easily as
+  # DoH can, and the user benefits either way from seeing the diagnostic.
+  # See Get-DohDnssecAnomaly for the full rationale.
+  $dnssecAnomaly = $null
+  try { $dnssecAnomaly = Get-DohDnssecAnomaly -Name $Domain -Type 'MX' } catch { $dnssecAnomaly = $null }
+
   [pscustomobject]@{
     domain     = $Domain
     dnsFailed  = $dnsFailed
     dnsError   = $dnsError
+
+    dnssecAnomaly = $dnssecAnomaly
 
     txtLookupDomain = $txtLookupDomain
     txtUsedParent   = $txtUsedParent

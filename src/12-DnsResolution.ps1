@@ -19,7 +19,17 @@ function Resolve-DohName {
     $endpoint = 'https://cloudflare-dns.com/dns-query'
   }
 
-  $uri = "{0}?name={1}&type={2}" -f $endpoint, ([uri]::EscapeDataString($Name)), $Type
+  # Append `cd=1` (Checking Disabled per RFC 4035) so the upstream DoH resolver
+  # returns the requested records even when the parent zone has a DNSSEC
+  # anomaly (e.g. a malformed RRSIG anywhere in the chain of trust). Without
+  # this flag, validating resolvers like Cloudflare/Google DoH return SERVFAIL
+  # and an empty Answer section, which surfaced as "No MX records detected" /
+  # "No SPF record" / blank DNS records grid for otherwise-healthy domains
+  # whose TLD was temporarily mis-signed (observed for several .de domains
+  # during a 2025 .de zone signing incident). This tool is a diagnostic
+  # checker, not a DNSSEC validator, so we want the same view of DNS that
+  # stub resolvers (`nslookup`, `dig +cd`) and tools like MXToolbox give.
+  $uri = "{0}?name={1}&type={2}&cd=1" -f $endpoint, ([uri]::EscapeDataString($Name)), $Type
 
   # Cloudflare-style DoH JSON response (RFC 8484 compatible JSON format).
   # Routed through Invoke-OutboundHttp so HTTPS-only / redirect cap / timeout
@@ -122,6 +132,197 @@ function Resolve-DohName {
   }
 }
 
+# Probe a DoH endpoint *without* the Checking Disabled (`cd=1`) flag so we can
+# observe whether the upstream resolver is currently failing DNSSEC validation
+# for this name. Our regular lookups always pass `cd=1` so the records grid
+# stays usable when a parent zone is mis-signed (see Resolve-DohName for the
+# full rationale and the .de incident this was originally written for). That
+# fix has the side-effect of also hiding the EDE diagnostics, so we run a
+# single extra probe here purely to surface an informational note.
+#
+# Returns $null when no anomaly is detected, otherwise a small object with:
+#   status        : DoH status code (e.g. 2 = SERVFAIL)
+#   statusLabel   : Human-readable status (e.g. 'SERVFAIL')
+#   primaryEdeCode: EDE info code from the response (or $null)
+#   primaryEdeText: EDE extra_text payload (or $null)
+#   edeCodes      : Array of all EDE info codes in the response
+#   summary       : Short single-line summary suitable for guidance UI
+#   queriedName   : Name that was probed
+#   queriedType   : Record type that was probed (string)
+function Get-DohDnssecAnomaly {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [string]$Type = 'MX'
+  )
+
+  # Same endpoint resolution as Resolve-DohName so the probe matches the
+  # transport the rest of the app is actually using.
+  $endpoint = $env:ACS_DNS_DOH_ENDPOINT
+  if ([string]::IsNullOrWhiteSpace($endpoint)) {
+    $endpoint = 'https://cloudflare-dns.com/dns-query'
+  }
+
+  # NOTE: deliberately NO `cd=1` here -- we want the resolver to perform DNSSEC
+  # validation so that any failure is reported in `Status` / `extended_dns_errors`
+  # / `Comment`.
+  $uri = "{0}?name={1}&type={2}" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
+
+  $resp = $null
+  try {
+    $resp = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 8 -MaximumRedirection 3
+  } catch {
+    # If the probe itself fails (network error, timeout, etc.) just skip the
+    # diagnostic. Real lookups have their own error handling and this is
+    # purely an informational extra.
+    return $null
+  }
+  if ($null -eq $resp) { return $null }
+
+  # Status is an integer per RFC 8484. 0 = NOERROR, 2 = SERVFAIL, 3 = NXDOMAIN.
+  $statusCode = $null
+  try { $statusCode = [int]$resp.Status } catch { $statusCode = $null }
+
+  # Collect every EDE we can find. There are two real-world response shapes:
+  #
+  #   1. Google + (sometimes) Cloudflare emit `extended_dns_errors` as an array
+  #      of structured { info_code, extra_text } objects.
+  #   2. Cloudflare also frequently emits a `Comment` field containing strings
+  #      like "EDE(22): No Reachable Authority" -- either as a bare string or
+  #      as an array of strings -- without populating extended_dns_errors at
+  #      all. We parse those out so we don't lose the diagnostic just because
+  #      the resolver decided to use the legacy presentation.
+  $edeCodes = @()
+  $primaryEdeCode = $null
+  $primaryEdeText = $null
+
+  # Shape #1 -- structured extended_dns_errors array.
+  try {
+    if ($resp.PSObject.Properties.Match('extended_dns_errors').Count -gt 0 -and $resp.extended_dns_errors) {
+      foreach ($entry in @($resp.extended_dns_errors)) {
+        if ($null -eq $entry) { continue }
+        $code = $null
+        try { $code = [int]$entry.info_code } catch { $code = $null }
+        $text = $null
+        try { $text = [string]$entry.extra_text } catch { $text = $null }
+        if ($null -ne $code) {
+          $edeCodes += $code
+          if ($null -eq $primaryEdeCode) {
+            $primaryEdeCode = $code
+            if (-not [string]::IsNullOrWhiteSpace($text)) { $primaryEdeText = $text }
+          }
+        }
+      }
+    }
+  } catch { }
+
+  # Shape #2 -- string Comment(s) that include "EDE(N): text".
+  # Also parse a free-form Comment that mentions "DNSSEC validation failure"
+  # so we still get something useful when no EDE number is included.
+  $commentSawDnssecPhrase = $false
+  try {
+    if ($resp.PSObject.Properties.Match('Comment').Count -gt 0 -and $resp.Comment) {
+      foreach ($comment in @($resp.Comment)) {
+        if ($null -eq $comment) { continue }
+        $text = [string]$comment
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+
+        $matches = [regex]::Matches($text, 'EDE\s*\(?\s*(\d+)\s*\)?\s*:\s*([^\r\n]*)')
+        foreach ($match in $matches) {
+          $code = $null
+          try { $code = [int]$match.Groups[1].Value } catch { $code = $null }
+          $extra = $null
+          if ($match.Groups.Count -ge 3) { $extra = $match.Groups[2].Value.Trim() }
+          if ($null -ne $code) {
+            $edeCodes += $code
+            if ($null -eq $primaryEdeCode) {
+              $primaryEdeCode = $code
+              if (-not [string]::IsNullOrWhiteSpace($extra)) { $primaryEdeText = $extra }
+            }
+          }
+        }
+
+        if ($text -match '(?i)DNSSEC') { $commentSawDnssecPhrase = $true }
+      }
+    }
+  } catch { }
+
+  # Decide whether this is actually a DNSSEC anomaly. Per RFC 8914 the codes we
+  # treat as DNSSEC-related are 6-12. Code 22 ("No Reachable Authority") on its
+  # own is NOT DNSSEC, but we still surface it when the same response also
+  # mentions DNSSEC in the comment text -- that's the shape Cloudflare returns
+  # when it gives up on a chain it could not validate. To avoid false positives
+  # for run-of-the-mill SERVFAILs we additionally confirm the issue disappears
+  # when DNSSEC validation is bypassed (`cd=1`).
+  $dnssecRelevantCodes = @(6, 7, 8, 9, 10, 11, 12)
+  $hasDnssecRelevantEde = @($edeCodes | Where-Object { $dnssecRelevantCodes -contains $_ }).Count -gt 0
+
+  $looksLikeDnssec = $hasDnssecRelevantEde -or ($statusCode -eq 2 -and $commentSawDnssecPhrase)
+
+  # If we got SERVFAIL but didn't see any DNSSEC indicator yet, fall back to
+  # confirming with a cd=1 probe. If that succeeds, the validating layer is the
+  # only difference between "broken" and "works" -- treat as a DNSSEC anomaly.
+  if (-not $looksLikeDnssec -and $statusCode -eq 2) {
+    $cdUri = "{0}?name={1}&type={2}&cd=1" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
+    try {
+      $cdResp = Invoke-OutboundHttp -Uri $cdUri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 8 -MaximumRedirection 3
+      $cdStatus = $null
+      try { $cdStatus = [int]$cdResp.Status } catch { $cdStatus = $null }
+      $cdHasAnswer = $false
+      try { $cdHasAnswer = $null -ne $cdResp.Answer -and (@($cdResp.Answer)).Count -gt 0 } catch { $cdHasAnswer = $false }
+      if ($cdStatus -eq 0 -and $cdHasAnswer) { $looksLikeDnssec = $true }
+    } catch { }
+  }
+
+  if (-not $looksLikeDnssec) { return $null }
+
+  # Friendly labels for the well-known EDE codes we trigger on. Anything else
+  # falls through to the raw code number so we still surface unknown values.
+  $edeLabel = switch ($primaryEdeCode) {
+    6  { 'DNSSEC Bogus (malformed signature in chain of trust)' }
+    7  { 'DNSSEC Signature Expired' }
+    8  { 'DNSSEC Signature Not Yet Valid' }
+    9  { 'DNSKEY Missing' }
+    10 { 'RRSIGs Missing' }
+    11 { 'No Zone Key Bit Set' }
+    12 { 'NSEC Missing' }
+    22 { 'No Reachable Authority (validating resolver gave up)' }
+    default {
+      if ($null -ne $primaryEdeCode) { "EDE $primaryEdeCode" }
+      elseif (-not [string]::IsNullOrWhiteSpace($primaryEdeText)) { $primaryEdeText }
+      else { 'DNSSEC validation failure' }
+    }
+  }
+
+  $statusLabel = switch ($statusCode) {
+    0 { 'NOERROR' }
+    2 { 'SERVFAIL' }
+    3 { 'NXDOMAIN' }
+    default { if ($null -ne $statusCode) { "RCODE $statusCode" } else { 'unknown' } }
+  }
+
+  # Compose a short summary so the front-end has a ready-to-display sentence
+  # without needing to know the EDE numbering. We deliberately keep this
+  # informational ("records were returned with DNSSEC checking disabled") to
+  # convey that the tool worked around the issue rather than failing.
+  # NOTE: use ${...} braces around variable names that precede a `:` since the
+  # PowerShell parser otherwise reads `$primaryEdeCode:` as a scoped variable
+  # reference and fails to load the module.
+  $codeSuffix = if ($null -ne $primaryEdeCode) { " (EDE ${primaryEdeCode}: $edeLabel)" } else { '' }
+  $summary = "Upstream DNSSEC validation failed for this zone$codeSuffix. Records were returned with DNSSEC checking disabled."
+
+  [pscustomobject]@{
+    status         = $statusCode
+    statusLabel    = $statusLabel
+    primaryEdeCode = $primaryEdeCode
+    primaryEdeText = $primaryEdeText
+    edeCodes       = $edeCodes
+    summary        = $summary
+    queriedName    = $Name
+    queriedType    = $Type
+  }
+}
+
 # Unified DNS lookup wrapper: selects the appropriate resolver (System vs DoH vs Auto)
 # based on the ACS_DNS_RESOLVER env var, and optionally throws on failure.
 # All DNS lookups in the script go through this function.
@@ -150,10 +351,41 @@ function ResolveSafely {
             return (Resolve-DnsName -Name $Name -Type $Type -ErrorAction Stop)
           }
           default {
-            # Auto
+            # Auto: prefer the System resolver when available because it is
+            # typically faster and uses the host's configured nameservers.
+            # However, when System fails with a *server-side* error (SERVFAIL,
+            # timeout) -- as happens for zones whose parent DNSSEC chain is
+            # broken (e.g. `.de` during 2025 incidents) -- fall back to DoH
+            # with `cd=1` so the app can still surface records that other
+            # tools see. We only fall back on transport failures, not on a
+            # legitimate "no records" response, so that the existing fast
+            # negative path is preserved.
             $cmd = Get-Command -Name Resolve-DnsName -ErrorAction SilentlyContinue
             if ($cmd) {
-              return (Resolve-DnsName -Name $Name -Type $Type -ErrorAction Stop)
+              try {
+                return (Resolve-DnsName -Name $Name -Type $Type -ErrorAction Stop)
+              } catch {
+                $errMsg = [string]$_.Exception.Message
+                $nativeCode = $null
+                try {
+                  if ($_.Exception.PSObject.Properties.Match('NativeErrorCode').Count -gt 0) {
+                    $nativeCode = [int]$_.Exception.NativeErrorCode
+                  }
+                } catch { $nativeCode = $null }
+
+                # 9003 = NXDOMAIN, 9501 = no records -- those are real answers,
+                # not transport failures, so re-throw / return null without
+                # paying the cost of a DoH retry.
+                $isNoRecords = ($nativeCode -eq 9003 -or $nativeCode -eq 9501)
+                if ($isNoRecords) { throw }
+
+                # 9002 = SERVFAIL, 9701 = timeout, plus generic message match
+                # for older PS hosts that don't surface NativeErrorCode.
+                if ($nativeCode -eq 9002 -or $nativeCode -eq 9701 -or $errMsg -match '(?i)timeout|server failure|SERVFAIL') {
+                  return (Resolve-DohName -Name $Name -Type $Type)
+                }
+                throw
+              }
             }
             return (Resolve-DohName -Name $Name -Type $Type)
           }
@@ -792,7 +1024,13 @@ function Resolve-DohRecordsDetailed {
   }
 
   $typeCode = Get-DnsRecordTypeCode -Type $Type
-  $uri = "{0}?name={1}&type={2}&do=true" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
+  # Append `cd=1` (Checking Disabled) for the same reason as Resolve-DohName:
+  # we want the resolver to return the records even if the parent zone has a
+  # broken DNSSEC chain (e.g. malformed RRSIG in the .de zone). Otherwise the
+  # detailed DNS records grid renders empty for affected domains while
+  # nslookup/dig still return data. We keep `do=true` so DNSSEC RRs (RRSIG,
+  # NSEC, etc.) are still included in the answer when present.
+  $uri = "{0}?name={1}&type={2}&do=true&cd=1" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
   # Same outbound guardrails as Resolve-DohName.
   $resp = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 10 -MaximumRedirection 3
   if ($null -eq $resp -or $null -eq $resp.Answer) { return @() }
@@ -936,13 +1174,23 @@ function Resolve-DnsRecordsDetailed {
     return $supplemental.ToArray()
   }
 
+  # Per-name short-circuit: when the System resolver returns a *server* failure
+  # (typically SERVFAIL from a broken upstream DNSSEC chain like `.de`), every
+  # subsequent type query for the same name is going to take the full client
+  # timeout (~15s) before we fall back to DoH. With ~12 types per name and
+  # ~15+ names probed per request, that adds up to multi-minute hangs that
+  # leave the UI cards stuck on "Loading...". Once we've seen one server-side
+  # failure for this name in this call, force the remaining types straight to
+  # DoH so the records grid finishes in a bounded amount of time.
+  $skipSystemForName = $false
+
   foreach ($type in @($Types)) {
     if ([string]::IsNullOrWhiteSpace($type)) { continue }
 
     $typeResultsAdded = $false
     $systemLookupFailed = $false
 
-    if ($useSystem) {
+    if ($useSystem -and -not $skipSystemForName) {
       try {
         $queryParams = @{ Name = $Name; Type = $type; ErrorAction = 'Stop' }
         if ($type -in @('RRSIG', 'NSEC', 'DNSKEY')) { $queryParams['DnssecOk'] = $true }
@@ -981,6 +1229,29 @@ function Resolve-DnsRecordsDetailed {
       }
       catch {
         $systemLookupFailed = $true
+
+        # Inspect the underlying Win32 DNS error code so we can distinguish a
+        # legitimate "this record doesn't exist" (NXDOMAIN/no records) from a
+        # broken upstream resolver chain (SERVFAIL, timeout, etc.). Only the
+        # latter justifies blacklisting the System resolver for the remainder
+        # of this name -- NXDOMAIN is fast and we want to keep using System
+        # for the next type if it's working.
+        $errMsg = [string]$_.Exception.Message
+        $nativeCode = $null
+        try {
+          if ($_.Exception.PSObject.Properties.Match('NativeErrorCode').Count -gt 0) {
+            $nativeCode = [int]$_.Exception.NativeErrorCode
+          }
+        } catch { $nativeCode = $null }
+
+        # 9002 = DNS_ERROR_RCODE_SERVER_FAILURE, 9501 = DNS_INFO_NO_RECORDS,
+        # 9003 = DNS_ERROR_RCODE_NAME_ERROR (NXDOMAIN), 9701 = timeout.
+        # Treat anything that is NOT a "no records / NXDOMAIN" as a transport
+        # failure that warrants short-circuiting.
+        $isNoRecords = ($nativeCode -eq 9003 -or $nativeCode -eq 9501)
+        if (-not $isNoRecords -and ($nativeCode -eq 9002 -or $nativeCode -eq 9701 -or $errMsg -match '(?i)timeout|server failure|SERVFAIL')) {
+          $skipSystemForName = $true
+        }
       }
 
       if (-not $typeResultsAdded -and $mode -eq 'Auto') {
@@ -1009,6 +1280,10 @@ function Resolve-DnsRecordsDetailed {
       }
     }
     else {
+      # Either DoH-only mode, or System has already failed for this name in
+      # this call -- go straight to DoH so we don't pay another System
+      # timeout. The aggregate caller will still see results because DoH is
+      # generally able to return records (the app passes cd=1).
       try {
         foreach ($row in @(Resolve-DohRecordsDetailed -Name $Name -Type $type)) {
           if ($row) {
