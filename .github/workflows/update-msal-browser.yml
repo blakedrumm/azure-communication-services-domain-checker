@@ -138,6 +138,22 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          # Ensure the labels we attach to the PR exist in the repository. `gh pr create`
+          # (and `gh pr edit --add-label`) fail hard with "could not add label: '<name>' not
+          # found" when a referenced label is missing, which previously broke this workflow.
+          # `gh label create` exits non-zero if the label already exists, so swallow that
+          # case with `|| true` to keep the step idempotent on every run.
+          gh label create "dependencies" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color "0366d6" \
+            --description "Pull requests that update a dependency file" \
+            || true
+          gh label create "automated" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color "ededed" \
+            --description "Pull requests created by automation" \
+            || true
+
           # Build the PR body in a file to preserve newlines/formatting.
           PR_BODY_FILE="$(mktemp)"
           cat > "$PR_BODY_FILE" <<EOF
