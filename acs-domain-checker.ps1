@@ -995,7 +995,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.80'
+$script:AppVersion = '2.0.82'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -10163,6 +10163,7 @@ const TRANSLATIONS = {
     mxRecordBasics: 'MX Record Basics',
     domainDossier: 'Domain Dossier (CentralOps)',
     multiRblLookup: 'MultiRBL DNSBL Lookup',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (domain lookup)',
     copied: 'Copied! \u2714',
     languageLabel: 'Language',
     pageTitle: 'Azure Communication Services - Email Domain Checker',
@@ -10437,6 +10438,7 @@ const TRANSLATIONS = {
     mxRecordBasics: 'Conceptos b\u00E1sicos de MX',
     domainDossier: 'Domain Dossier (CentralOps)',
     multiRblLookup: 'Consulta DNSBL de MultiRBL',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (b\u00FAsqueda de dominio)',
     copied: '\u00A1Copiado! \u2714',
     languageLabel: 'Idioma',
     pageTitle: 'Azure Communication Services - Comprobador de dominio de correo',
@@ -10618,6 +10620,7 @@ const TRANSLATIONS = {
     mxRecordBasics: 'Notions de base MX',
     domainDossier: 'Domain Dossier (CentralOps)',
     multiRblLookup: 'Recherche DNSBL MultiRBL',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (recherche de domaine)',
     copied: 'Copi\u00E9 ! \u2714',
     languageLabel: 'Langue',
     promptEnterDomain: 'Veuillez saisir un domaine.',
@@ -10741,6 +10744,7 @@ const TRANSLATIONS = {
     mxRecordBasics: 'MX-Grundlagen',
     domainDossier: 'Domain Dossier (CentralOps)',
     multiRblLookup: 'MultiRBL-DNSBL-Abfrage',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (Dom\u00E4nenabfrage)',
     copied: 'Kopiert! \u2714',
     languageLabel: 'Sprache',
     promptEnterDomain: 'Bitte geben Sie eine Domain ein.',
@@ -10864,6 +10868,7 @@ const TRANSLATIONS = {
     mxRecordBasics: 'No\u00E7\u00F5es b\u00E1sicas de MX',
     domainDossier: 'Domain Dossier (CentralOps)',
     multiRblLookup: 'Consulta DNSBL MultiRBL',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (consulta de dom\u00EDnio)',
     copied: 'Copiado! \u2714',
     languageLabel: 'Idioma',
     promptEnterDomain: 'Insira um dom\u00EDnio.',
@@ -12566,6 +12571,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     missingRequiredAcsTxt: 'TXT \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0627\u0644\u062E\u0627\u0635 \u0628\u0640 ACS \u0645\u0641\u0642\u0648\u062F.',
     msDomainVerificationFound: '\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 TXT \u0627\u0644\u062E\u0627\u0635 \u0628\u0640 ms-domain-verification.',
     multiRblLookup: '\u0628\u062D\u062B DNSBL \u0639\u0628\u0631 MultiRBL',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (\u0628\u062D\u062B \u0627\u0644\u0646\u0637\u0627\u0642)',
     mxRecordBasics: '\u0623\u0633\u0627\u0633\u064A\u0627\u062A MX',
     newDomainUnderDays: '\u0646\u0637\u0627\u0642 \u062C\u062F\u064A\u062F (\u0623\u0642\u0644 \u0645\u0646 {days} \u064A\u0648\u0645\u064B\u0627){suffix}',
     no: '\u0644\u0627',
@@ -12688,6 +12694,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     loadingValue: '\u52A0\u8F7D\u4E2D...',
     missingRequiredAcsTxt: '\u7F3A\u5C11\u6240\u9700\u7684 ACS TXT\u3002',
     multiRblLookup: 'MultiRBL DNSBL \u67E5\u8BE2',
+    mxToolboxSuperTool: 'MXToolbox SuperTool\uFF08\u57DF\u540D\u67E5\u8BE2\uFF09',
     mxRecordBasics: 'MX \u57FA\u7840\u77E5\u8BC6',
     newDomainUnderDays: '\u65B0\u57DF\u540D\uFF08\u5C11\u4E8E {days} \u5929\uFF09{suffix}',
     noAdditionalGuidance: '\u65E0\u5176\u4ED6\u6307\u5BFC\u3002',
@@ -12790,6 +12797,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     loadingValue: '\u0932\u094B\u0921 \u0939\u094B \u0930\u0939\u093E \u0939\u0948...',
     missingRequiredAcsTxt: '\u0906\u0935\u0936\u094D\u092F\u0915 ACS TXT \u0905\u0928\u0941\u092A\u0938\u094D\u0925\u093F\u0924 \u0939\u0948\u0964',
     multiRblLookup: 'MultiRBL DNSBL \u0932\u0941\u0915\u0905\u092A',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (\u0921\u094B\u092E\u0947\u0928 \u0932\u0941\u0915\u0905\u092A)',
     mxRecordBasics: 'MX \u0915\u0940 \u092E\u0942\u0932 \u092C\u093E\u0924\u0947\u0902',
     newDomainUnderDays: '\u0928\u092F\u093E \u0921\u094B\u092E\u0947\u0928 ({days} \u0926\u093F\u0928\u094B\u0902 \u0938\u0947 \u0915\u092E){suffix}',
     noAdditionalGuidance: '\u0915\u094B\u0908 \u0905\u0924\u093F\u0930\u093F\u0915\u094D\u0924 \u092E\u093E\u0930\u094D\u0917\u0926\u0930\u094D\u0936\u0928 \u0928\u0939\u0940\u0902\u0964',
@@ -12892,6 +12900,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     loadingValue: '\u8AAD\u307F\u8FBC\u307F\u4E2D...',
     missingRequiredAcsTxt: '\u5FC5\u8981\u306A ACS TXT \u304C\u3042\u308A\u307E\u305B\u3093\u3002',
     multiRblLookup: 'MultiRBL DNSBL \u53C2\u7167',
+    mxToolboxSuperTool: 'MXToolbox SuperTool\uFF08\u30C9\u30E1\u30A4\u30F3\u691C\u7D22\uFF09',
     mxRecordBasics: 'MX \u306E\u57FA\u790E',
     newDomainUnderDays: '\u65B0\u3057\u3044\u30C9\u30E1\u30A4\u30F3 ({days} \u65E5\u672A\u6E80){suffix}',
     noAdditionalGuidance: '\u8FFD\u52A0\u306E\u30AC\u30A4\u30C0\u30F3\u30B9\u306F\u3042\u308A\u307E\u305B\u3093\u3002',
@@ -12994,6 +13003,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     loadingValue: '\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430...',
     missingRequiredAcsTxt: '\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439 ACS TXT.',
     multiRblLookup: '\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 DNSBL \u0447\u0435\u0440\u0435\u0437 MultiRBL',
+    mxToolboxSuperTool: 'MXToolbox SuperTool (\u043F\u043E\u0438\u0441\u043A \u0434\u043E\u043C\u0435\u043D\u0430)',
     mxRecordBasics: '\u041E\u0441\u043D\u043E\u0432\u044B MX',
     newDomainUnderDays: '\u041D\u043E\u0432\u044B\u0439 \u0434\u043E\u043C\u0435\u043D (\u043C\u0435\u043D\u044C\u0448\u0435 {days} \u0434\u043D\u0435\u0439){suffix}',
     noAdditionalGuidance: '\u0414\u043E\u043F\u043E\u043B\u043D\u0438\u0442\u0435\u043B\u044C\u043D\u044B\u0445 \u0440\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0430\u0446\u0438\u0439 \u043D\u0435\u0442.',
@@ -15999,7 +16009,31 @@ function copyShareLink() {
   }
   url.searchParams.set(LANG_PARAM, currentLanguage);
 
-  navigator.clipboard.writeText(url.toString())
+  // Build a rich-text payload alongside the plain URL so pasting into
+  // Outlook/Teams/Word/OneNote etc. produces a clickable hyperlink labeled
+  // with the page title (which already includes the queried domain), matching
+  // the behavior the browser uses when the user copies straight from the
+  // address bar. Falls back to plain-text URL when the browser does not
+  // expose ClipboardItem (older Safari/Firefox) or the rich write fails.
+  const linkUrl = url.toString();
+  const linkTitle = (document.title && document.title.trim()) || linkUrl;
+  const safeUrl = escapeHtml(linkUrl);
+  const safeTitle = escapeHtml(linkTitle);
+  const html = `<a href="${safeUrl}">${safeTitle}</a>`;
+
+  const writePlain = () => navigator.clipboard.writeText(linkUrl);
+  const writeRich = () => {
+    if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) {
+      return Promise.reject();
+    }
+    const item = new ClipboardItem({
+      'text/html': new Blob([html], { type: 'text/html' }),
+      'text/plain': new Blob([linkUrl], { type: 'text/plain' })
+    });
+    return navigator.clipboard.write([item]);
+  };
+
+  writeRich().catch(writePlain)
     .then(() => {
       if (btn) {
         const original = btn.innerHTML;
@@ -19065,6 +19099,12 @@ function render(r) {
   const domainForLinks = encodeURIComponent(r.domain || "");
   const centralOps = `https://centralops.net/co/DomainDossier.aspx?addr=${domainForLinks}&dom_whois=true&dom_dns=true&traceroute=true&net_whois=true&svc_scan=true`;
   const multiRbl = `https://multirbl.valli.org/dnsbl-lookup/${domainForLinks}.html`;
+  // MXToolbox SuperTool deep-link: the SuperTool action string is a single
+  // colon-prefixed parameter ("domain:<name>") that the form URL-encodes as
+  // "domain%3A<name>". `domainForLinks` is already URI-component-encoded, so
+  // appending it after the literal "domain%3A" produces a valid SuperTool URL
+  // that lands directly on a domain-scoped lookup view.
+  const mxToolbox = `https://mxtoolbox.com/SuperTool.aspx?action=domain%3A${domainForLinks}&run=toolpage`;
   cards.push(`
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
@@ -19076,6 +19116,7 @@ function render(r) {
         <ul class="guidance">
           <li><a href="${centralOps}" target="_blank" rel="noopener">${escapeHtml(t('domainDossier'))}</a></li>
           <li><a href="${multiRbl}" target="_blank" rel="noopener">${escapeHtml(t('multiRblLookup'))}</a></li>
+          <li><a href="${mxToolbox}" target="_blank" rel="noopener">${escapeHtml(t('mxToolboxSuperTool'))}</a></li>
         </ul>
       </div>
     </div>

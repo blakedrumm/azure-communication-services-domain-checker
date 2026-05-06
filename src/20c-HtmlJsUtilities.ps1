@@ -1495,7 +1495,31 @@ function copyShareLink() {
   }
   url.searchParams.set(LANG_PARAM, currentLanguage);
 
-  navigator.clipboard.writeText(url.toString())
+  // Build a rich-text payload alongside the plain URL so pasting into
+  // Outlook/Teams/Word/OneNote etc. produces a clickable hyperlink labeled
+  // with the page title (which already includes the queried domain), matching
+  // the behavior the browser uses when the user copies straight from the
+  // address bar. Falls back to plain-text URL when the browser does not
+  // expose ClipboardItem (older Safari/Firefox) or the rich write fails.
+  const linkUrl = url.toString();
+  const linkTitle = (document.title && document.title.trim()) || linkUrl;
+  const safeUrl = escapeHtml(linkUrl);
+  const safeTitle = escapeHtml(linkTitle);
+  const html = `<a href="${safeUrl}">${safeTitle}</a>`;
+
+  const writePlain = () => navigator.clipboard.writeText(linkUrl);
+  const writeRich = () => {
+    if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) {
+      return Promise.reject();
+    }
+    const item = new ClipboardItem({
+      'text/html': new Blob([html], { type: 'text/html' }),
+      'text/plain': new Blob([linkUrl], { type: 'text/plain' })
+    });
+    return navigator.clipboard.write([item]);
+  };
+
+  writeRich().catch(writePlain)
     .then(() => {
       if (btn) {
         const original = btn.innerHTML;

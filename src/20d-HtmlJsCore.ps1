@@ -2874,6 +2874,12 @@ function render(r) {
   const domainForLinks = encodeURIComponent(r.domain || "");
   const centralOps = `https://centralops.net/co/DomainDossier.aspx?addr=${domainForLinks}&dom_whois=true&dom_dns=true&traceroute=true&net_whois=true&svc_scan=true`;
   const multiRbl = `https://multirbl.valli.org/dnsbl-lookup/${domainForLinks}.html`;
+  // MXToolbox SuperTool deep-link: the SuperTool action string is a single
+  // colon-prefixed parameter ("domain:<name>") that the form URL-encodes as
+  // "domain%3A<name>". `domainForLinks` is already URI-component-encoded, so
+  // appending it after the literal "domain%3A" produces a valid SuperTool URL
+  // that lands directly on a domain-scoped lookup view.
+  const mxToolbox = `https://mxtoolbox.com/SuperTool.aspx?action=domain%3A${domainForLinks}&run=toolpage`;
   cards.push(`
     <div class="card">
       <div class="card-header" onclick="toggleCard(this)">
@@ -2885,6 +2891,7 @@ function render(r) {
         <ul class="guidance">
           <li><a href="${centralOps}" target="_blank" rel="noopener">${escapeHtml(t('domainDossier'))}</a></li>
           <li><a href="${multiRbl}" target="_blank" rel="noopener">${escapeHtml(t('multiRblLookup'))}</a></li>
+          <li><a href="${mxToolbox}" target="_blank" rel="noopener">${escapeHtml(t('mxToolboxSuperTool'))}</a></li>
         </ul>
       </div>
     </div>
