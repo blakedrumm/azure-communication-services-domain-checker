@@ -9,11 +9,36 @@ const entraTenant = '__ENTRA_TENANT_ID__';
 const acsApiKey = '__ACS_API_KEY__';
 const acsIssueUrl = '__ACS_ISSUE_URL__';
 const appVersion = '__APP_VERSION__';
+
+// MSAL load sources, in order of preference. Local-first so a same-origin
+// copy (served from /assets/msal-browser.min.js) defeats CDN tampering
+// entirely; the CDN entries are network fallbacks only.
+//
+// SECURITY: For each entry we attach an optional Subresource Integrity (SRI)
+// hash via the msalIntegrity map below. When a hash is present, the browser
+// refuses to execute the file unless its bytes match. Operators can inject
+// their own pinned hashes through the ACS_MSAL_SRI env var, which the server
+// validates as JSON and substitutes into __ACS_MSAL_SRI__ as a JSON object
+// literal: { "<src>": "sha384-..." }. Empty/missing entries simply load
+// without SRI (the previous behavior), so this is purely additive hardening.
 const msalSources = [
   '/assets/msal-browser.min.js',
   'https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js',
   'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/dist/msal-browser.min.js'
 ];
+
+let msalIntegrity = {};
+try {
+  // __ACS_MSAL_SRI__ is replaced server-side with a JSON object literal or
+  // the string 'null'. We parse defensively so a malformed value never
+  // breaks the page; worst case we fall back to no SRI.
+  const rawMsalSri = '__ACS_MSAL_SRI__';
+  if (rawMsalSri && rawMsalSri !== 'null') {
+    const parsed = JSON.parse(rawMsalSri);
+    if (parsed && typeof parsed === 'object') { msalIntegrity = parsed; }
+  }
+} catch (_) { msalIntegrity = {}; }
+
 let msalLoadPromise = null;
 
 function loadScript(src) {
@@ -21,6 +46,14 @@ function loadScript(src) {
     const s = document.createElement('script');
     s.src = src;
     s.async = false;
+    // crossOrigin must be set for SRI to be enforced on a cross-origin
+    // script. Setting it unconditionally is safe for same-origin requests
+    // too (the browser simply omits the CORS preflight in that case).
+    s.crossOrigin = 'anonymous';
+    const sri = msalIntegrity[src];
+    if (sri && typeof sri === 'string' && sri.indexOf('sha') === 0) {
+      s.integrity = sri;
+    }
     s.onload = () => resolve(true);
     s.onerror = () => reject(new Error('Failed to load ' + src));
     document.head.appendChild(s);
@@ -60,6 +93,26 @@ async function ensureMsalLoaded() {
   } catch (e) {}
 })();
 </script>
+<!--
+  Preload language flag SVGs so the browser begins fetching them during
+  HTML parse, before <body>, before any JS runs, and before the top-bar
+  fade-in animation starts. Without this, the visible flag inside the
+  language button is only requested when populateLanguageSelect() injects
+  the <img> mid-animation, which causes the icon to "pop in" after the
+  English text is already showing. These are static, same-origin SVGs
+  served from /assets/vendor/flag-icons/, so listing them here keeps the
+  HTML self-contained and avoids any JS-timing dependency.
+-->
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/us.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/es.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/fr.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/de.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/br.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/sa.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/cn.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/in.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/jp.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/ru.svg">
 </head>
 
 <body class="section-fade-enabled">
@@ -86,13 +139,78 @@ async function ensureMsalLoaded() {
   <h1 id="appHeading">Azure Communication Services<br/>Email Domain Checker</h1>
   <div class="input-row">
     <div class="input-wrapper">
-      <input id="domainInput" type="text" placeholder="example.com" oninput="toggleClearBtn()" />
+      <!--
+        autofocus lets the browser put the cursor in the search box as soon as the
+        element is parsed, well before the rest of the SPA finishes painting and
+        animating. That way users can paste a domain (Ctrl+A / Ctrl+V) immediately
+        on page load instead of waiting for the intro animation to settle.
+        autocomplete="off" + spellcheck="false" + autocapitalize="off" keep
+        accidental browser autofill / autocorrect from interfering with the typed
+        domain text. The inline script right below is a safety net for browsers
+        (notably some Safari versions) that ignore the autofocus attribute when
+        the page is busy bootstrapping; it focuses the input the moment the DOM
+        node exists, but skips the focus when the URL already contains a
+        ?domain= bootstrap value (in that case we are about to launch a lookup
+        and don't want to steal focus from the in-flight workflow).
+      -->
+      <input id="domainInput" type="text" placeholder="example.com" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="toggleClearBtn()" />
       <button id="clearBtn" class="clear-btn" type="button" onclick="clearInput()">&#x2715;</button>
     </div>
     <button id="lookupBtn" class="primary hide-on-screenshot" type="button" onclick="lookup()">Lookup</button>
+    <!--
+      Live progress popover. While a domain check runs the SPA fans out
+      to 8 backend endpoints in parallel (/api/base, /api/mx, /api/records,
+      /api/whois, /api/dmarc, /api/dkim, /api/cname, /api/reputation).
+      Some return in milliseconds (cached DNS), others (WHOIS/RDAP, DNSBL
+      fan-out) can take many seconds, so without this popover the user
+      only sees a spinner with no insight into which check is still in
+      flight. The list is built/updated by JS in 20d-HtmlJsCore.ps1;
+      markup here is only the empty container so the first paint cost
+      is zero. role="status" + aria-live="polite" lets assistive tech
+      announce per-task transitions without stealing focus.
+
+      The popover is rendered as a centered, always-visible card placed
+      OUTSIDE the .search-box wrapper so it sits between the search box
+      and the results cards (replacing the legacy "Checking {domain} ..."
+      status text). It is intentionally NOT a child of .input-row so its
+      width does not affect the search box layout.
+    -->
   </div>
+  <script nonce="__CSP_NONCE__">
+    // Early focus safety net: runs the instant this <script> tag is parsed, which
+    // is right after the input element above is in the DOM. We deliberately do
+    // NOT wait for DOMContentLoaded -- the whole point is to give the input
+    // focus before the heavy translation/render scripts further down run, so
+    // users can start typing/pasting during initial page paint.
+    //
+    // SECURITY: This block is nonce-bound (CSP nonce-__CSP_NONCE__). Keeping
+    // the nonce attribute in sync with the per-request nonce produced in
+    // 23-RequestHandler.ps1 is what allows it to execute under our strict CSP
+    // (which forbids 'unsafe-inline' for script-src). If you ever rename the
+    // template token __CSP_NONCE__, update Get-SecurityHeaderMap and
+    // Write-Html in 11-HttpHelpers.ps1 as well.
+    (function () {
+      try {
+        var earlyInput = document.getElementById('domainInput');
+        if (!earlyInput) return;
+        // Skip when a bootstrap ?domain= is present; that flow programmatically
+        // populates the input and kicks off a lookup, and we don't want to fight
+        // its focus management.
+        var hasBootstrapDomain = false;
+        try {
+          var qp = new URLSearchParams(window.location.search);
+          hasBootstrapDomain = !!(qp.get('domain') || '').trim();
+        } catch (_) { /* ignore URL parse errors on very old browsers */ }
+        if (hasBootstrapDomain) return;
+        // preventScroll avoids a jarring jump-to-top on browsers that scroll the
+        // focused element into view; the input is already at the top of the page.
+        earlyInput.focus({ preventScroll: true });
+      } catch (_) { /* never let early-focus break page load */ }
+    })();
+  </script>
   <div id="history" class="history hide-on-screenshot"></div>
 </div>
+<div id="checkProgressPopover" class="check-progress-popover hide-on-screenshot" role="status" aria-live="polite" hidden></div>
 <div id="status" class="engage-section"></div>
 <div id="azureDiagnosticsCard" class="card hide-on-screenshot engage-section" style="display:none; margin-bottom: 12px;">
   <div class="card-header" onclick="toggleCard(this)">

@@ -473,8 +473,22 @@ if ($metricsEnabled) {
   }
 }
 catch {
-  # Last-resort error handler: attempt to return a JSON error payload.
-  try { Write-Json -Context $ctx -Object @{ error = $_.Exception.Message } -StatusCode 500 } catch {}
+  # SECURITY: Do NOT echo $_.Exception.Message back to the client. PowerShell
+  # exception messages frequently include file paths, stack hints, env var
+  # values, or third-party library internals (e.g. "The remote name could
+  # not be resolved: 'rdap.nic.example' (proxy=10.1.2.3)"). Returning a
+  # generic error keeps the failure observable for the SPA without leaking
+  # those details to anonymous callers.
+  #
+  # The original message is still emitted to the server console via
+  # Write-Information so operators can correlate the request log line with
+  # the underlying exception when triaging.
+  try {
+    $errMsg = $null
+    try { $errMsg = [string]$_.Exception.Message } catch { $errMsg = '<unavailable>' }
+    Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] handler error for path '$path': $errMsg"
+  } catch { }
+  try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.' } -StatusCode 500 } catch {}
   try { if ($ctx -and $ctx.Response) { $ctx.Response.Close() } } catch {}
 }
 '@

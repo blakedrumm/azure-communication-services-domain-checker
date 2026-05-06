@@ -1,5 +1,99 @@
 # ===== JavaScript Core UI (Lookup, Render, Events) =====
 $htmlPage += @'
+// ---- Live check-progress popover helpers ----
+//
+// While a domain lookup runs, the SPA fans out 8 parallel API calls. Some
+// finish in milliseconds (cached DNS), others (WHOIS/RDAP, DNSBL fan-out)
+// can take several seconds. The popover gives the user real-time visibility
+// into which checks are still in flight, which completed, and which failed.
+//
+// UX model: the popover is shown automatically whenever a lookup is in
+// flight (replacing the legacy "Checking {domain} ..." status text) and
+// hidden as soon as every backend call has resolved. It is rendered as a
+// centered card in normal document flow between the search box and the
+// results, so it cannot be hidden behind any other element.
+//
+// State is kept on a single `checkProgress` object so the popover can be
+// re-rendered cheaply (e.g. when the language changes mid-lookup) without
+// touching the lookup workflow itself. runId guards against late updates
+// from a previous lookup leaking into the popover for a newer one.
+const checkProgress = {
+  runId: 0,
+  tasks: [],
+  // Whether a lookup is currently in flight; controls popover visibility.
+  active: false
+};
+
+// Map from API task key -> translation key. We deliberately reuse existing
+// translation keys so this feature ships in all 10 supported languages
+// without needing new translation strings. 'dkim' has no plain key in the
+// translations file (only dkim1Title/dkim2Title), but "DKIM" is the
+// universally recognized name for the standard, so a literal is fine.
+const CHECK_PROGRESS_LABELS = {
+  base:       'domain',
+  mx:         'mxRecords',
+  records:    'dnsRecords',
+  whois:      'domainRegistration',
+  dmarc:      'dmarc',
+  dkim:       null,
+  cname:      'cname',
+  reputation: 'reputationDnsbl'
+};
+
+function getCheckProgressLabel(key) {
+  if (key === 'dkim') return 'DKIM';
+  const tKey = CHECK_PROGRESS_LABELS[key];
+  return tKey ? t(tKey) : key;
+}
+
+function renderCheckProgressPopover() {
+  const el = document.getElementById('checkProgressPopover');
+  if (!el || !checkProgress.tasks || !checkProgress.tasks.length) return;
+  // Static "Gathering Data" header. The per-row spinners already convey
+  // progress, so a duplicated header spinner would be visual noise.
+  const titleHtml = '<div class="check-progress-title">'
+    + escapeHtml(t('gatheringData'))
+    + '</div>';
+  const itemsHtml = checkProgress.tasks.map(function (task) {
+    // Status -> icon glyph: spinner is rendered via CSS ::after for
+    // 'pending', so we only need glyphs for terminal states.
+    let glyph = '';
+    if (task.status === 'done') glyph = '\u2713';   // check mark
+    else if (task.status === 'error') glyph = '\u2717'; // ballot X
+    return '<li class="check-progress-item ' + escapeHtml(task.status) + '">'
+      + '<span class="check-progress-icon ' + escapeHtml(task.status) + '">' + glyph + '</span>'
+      + '<span class="check-progress-label">' + escapeHtml(getCheckProgressLabel(task.key)) + '</span>'
+      + '</li>';
+  }).join('');
+  el.innerHTML = titleHtml + '<ul class="check-progress-list">' + itemsHtml + '</ul>';
+}
+
+function markCheckProgress(runId, key, status) {
+  // Drop late updates from a superseded lookup so the popover for the
+  // current run is never corrupted by stragglers.
+  if (runId !== checkProgress.runId) return;
+  if (!checkProgress.tasks) return;
+  for (let i = 0; i < checkProgress.tasks.length; i++) {
+    if (checkProgress.tasks[i].key === key) {
+      checkProgress.tasks[i].status = status;
+      break;
+    }
+  }
+  renderCheckProgressPopover();
+}
+
+function setCheckProgressActive(active) {
+  checkProgress.active = !!active;
+  const el = document.getElementById('checkProgressPopover');
+  if (!el) return;
+  if (checkProgress.active) {
+    renderCheckProgressPopover();
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+}
+
 function lookup(options = {}) {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
@@ -53,7 +147,7 @@ function lookup(options = {}) {
   // Keep Lookup clickable so another click can cancel/restart
   btn.disabled = false;
   if (screenshotBtn) screenshotBtn.disabled = true;
-  btn.innerHTML = `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`;
+  btn.innerHTML = `${escapeHtml(t('gatheringData'))} <span class="spinner"></span>`;
   // setStatus("Checking " + escapeHtml(domain) + " &#x23F3;");
 
   function parseHttpError(r, bodyText) {
@@ -139,6 +233,34 @@ function hideTopBarItem(element) {
     { key: "reputation", path: "/api/reputation" }
   ];
 
+  // ---- Live check-progress popover state ----
+  // Tracks the per-task status displayed in #checkProgressPopover so the
+  // user can see exactly which of the eight parallel backend calls is
+  // still in flight. We initialize the state here (per-lookup, not global)
+  // so a fresh run always starts with a clean slate. The popover is
+  // shown automatically while the lookup is active and hidden as soon
+  // as setCheckProgressActive(false) is called from the .finally() below.
+  //
+  // When this lookup runs as part of the page intro (bootstrap ?domain=),
+  // we defer revealing the popover until the staggered top-section
+  // animation finishes so the popover slides in *after* the search box
+  // settles instead of beating it to the screen. For ad-hoc lookups
+  // (user clicks Lookup) the page is already settled, so reveal
+  // immediately.
+  checkProgress.runId = runId;
+  checkProgress.tasks = requests.map(function (r) { return { key: r.key, status: 'pending' }; });
+  if (animateTopIntro && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const introDelayMs = getTopSectionAnimationDurationMs();
+    window.setTimeout(function () {
+      // Drop the deferred reveal if a newer lookup has already started
+      // (or this one was cancelled) so we never flash a stale popover.
+      if (runId !== activeLookup.runId) return;
+      setCheckProgressActive(true);
+    }, introDelayMs);
+  } else {
+    setCheckProgressActive(true);
+  }
+
   let savedHistory = false;
   let downloadShown = false;
 
@@ -182,6 +304,9 @@ function hideTopBarItem(element) {
       }
       lastResult._loaded[key] = true;
       delete lastResult._errors[key];
+      // Mark this task as completed in the live progress popover so the
+      // user gets immediate feedback that this specific check is done.
+      markCheckProgress(runId, key, 'done');
 
       if (!downloadShown) {
         const dlBtn2 = document.getElementById("downloadBtn");
@@ -207,6 +332,9 @@ function hideTopBarItem(element) {
       ensureResultObject();
       lastResult._loaded[key] = true;
       lastResult._errors[key] = reason;
+      // Surface the per-task failure in the popover too so the user knows
+      // which check failed without having to scroll through cards.
+      markCheckProgress(runId, key, 'error');
       recomputeDerived(lastResult);
       render(lastResult);
     }
@@ -221,6 +349,8 @@ function hideTopBarItem(element) {
       if (screenshotBtn) screenshotBtn.disabled = false;
       if (dlBtn) dlBtn.disabled = false;
       btn.innerHTML = t('lookup');
+      // Lookup finished: hide the progress popover.
+      setCheckProgressActive(false);
     });
 }
 
@@ -1667,7 +1797,10 @@ function render(r) {
   let statusText = "";
 
   if (!allLoaded) {
-    statusText = `${escapeHtml(t('statusChecking', { domain: r.domain || '' }))} <span class="loading-dots status-loading-dots"><span class="loading-dot active">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span></span>`;
+    // While the lookup is still in flight, the #checkProgressPopover ("Gathering Data")
+    // already shows per-task progress, so we deliberately leave the inline #status
+    // text empty to avoid duplicating the same information twice on screen.
+    statusText = "";
   } else if (anyError) {
     statusText = escapeHtml(t('statusSomeChecksFailed'));
   } else if (loaded.base && !txtLookupResolved) {

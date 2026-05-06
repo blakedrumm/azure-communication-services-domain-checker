@@ -209,8 +209,23 @@ function Invoke-WhoisXmlLookup {
   $d = ([string]$Domain).Trim().TrimEnd('.')
   if ([string]::IsNullOrWhiteSpace($d)) { return $null }
 
-  $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=$([uri]::EscapeDataString($apiKey))&domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
-  $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3
+  # SECURITY: Send the API key in an Authorization header rather than the
+  # URL query string. URLs leak through proxy access logs, Referer headers,
+  # and shell histories. WhoisXML accepts the key via the standard Bearer
+  # scheme; we still pass the key as a query string fallback ONLY when an
+  # operator explicitly opts in via ACS_WHOISXML_KEY_IN_QUERY=1 (some
+  # restrictive corporate proxies strip Authorization headers and the
+  # legacy behavior is the only thing that works in that environment).
+  $useQueryFallback = ($env:ACS_WHOISXML_KEY_IN_QUERY -eq '1')
+
+  if ($useQueryFallback) {
+    $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=$([uri]::EscapeDataString($apiKey))&domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
+    $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3
+  } else {
+    $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
+    $headers = @{ 'Authorization' = "Bearer $apiKey" }
+    $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3 -Headers $headers
+  }
   if ($null -eq $resp) { return $null }
   return $resp
 }

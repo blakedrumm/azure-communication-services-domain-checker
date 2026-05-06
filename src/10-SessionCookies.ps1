@@ -128,12 +128,29 @@ function Get-OrCreate-AnonymousSessionId {
       # Set cookie on response.
       if ($Context.Response -is [System.Net.HttpListenerResponse]) {
         try {
-          # HttpOnly prevents JS access to the cookie; Secure ensures it's only sent over HTTPS.
+          # HttpOnly prevents JS access to the cookie; Secure ensures it's
+          # only sent over HTTPS.
+          #
+          # SECURITY: We only honor X-Forwarded-Proto when the immediate TCP
+          # peer is in ACS_TRUSTED_PROXIES, mirroring the trust model used by
+          # Get-ClientIp for X-Forwarded-For. An untrusted client can set any
+          # header it wants, so previously a hostile request could trick us
+          # into stamping `Secure` on a cookie that was actually traveling
+          # over plaintext (or, in the opposite direction, deny the Secure
+          # flag we should have set). Falling back to Request.Url.Scheme is
+          # always safe: it reflects the actual transport seen by this
+          # process.
           $isSecure = $false
           try {
-            $fwdProto = [string]$Context.Request.Headers['X-Forwarded-Proto']
-            if ($fwdProto -eq 'https') { $isSecure = $true }
-            elseif ($Context.Request.Url.Scheme -eq 'https') { $isSecure = $true }
+            $peerIpForCookie = $null
+            try { $peerIpForCookie = [string]$Context.Request.RemoteEndPoint.Address } catch { $peerIpForCookie = $null }
+            if (-not [string]::IsNullOrWhiteSpace($peerIpForCookie) -and (Test-IsTrustedProxy -PeerIp $peerIpForCookie)) {
+              $fwdProto = [string]$Context.Request.Headers['X-Forwarded-Proto']
+              if ($fwdProto -and $fwdProto.Trim().ToLowerInvariant() -eq 'https') {
+                $isSecure = $true
+              }
+            }
+            if (-not $isSecure -and $Context.Request.Url.Scheme -eq 'https') { $isSecure = $true }
           } catch { }
           $securePart = if ($isSecure) { '; Secure' } else { '' }
           $Context.Response.Headers.Add('Set-Cookie', "acs_session=$sid; Path=/; SameSite=Lax; HttpOnly$securePart")

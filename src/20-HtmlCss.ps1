@@ -292,6 +292,135 @@ html[dir="rtl"] .language-trigger {
   min-width: 0;
 }
 
+/* ===== Live check-progress popover =====
+   Shown while a lookup is in flight. It replaces the old
+   "Checking {domain} ..." status text, sitting between the search box
+   and the results cards. Each row corresponds to one of the eight
+   parallel backend calls and reflects pending / done / error state.
+
+   Layout: rendered as a centered, inline-block card so it follows
+   normal document flow (no overlap with results below). It auto-sizes
+   to its content.
+
+   Motion: fades in with the same ease curve and translate distance as
+   the rest of the engage-section intro animation so it feels native to
+   the page. Only the open transition is animated (no exit animation --
+   the popover is hidden as soon as the lookup completes). */
+.check-progress-popover {
+  display: block;
+  margin: 12px auto 16px auto;
+  width: fit-content;
+  max-width: min(360px, 92vw);
+  padding: 10px 14px;
+  background: var(--card-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: left;
+  animation: checkProgressFadeIn 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+html[dir="rtl"] .check-progress-popover {
+  text-align: right;
+}
+
+.check-progress-popover[hidden] {
+  display: none;
+}
+
+@keyframes checkProgressFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.check-progress-popover .check-progress-title {
+  font-weight: 600;
+  margin: 0 0 6px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.check-progress-popover ul.check-progress-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.check-progress-popover li.check-progress-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.check-progress-popover .check-progress-icon {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* Pending state: small spinner reusing the same look as the Lookup button
+   spinner so the visuals stay consistent. */
+.check-progress-popover .check-progress-icon.pending::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--button-bg);
+  border-radius: 50%;
+  animation: checkProgressSpin 800ms linear infinite;
+}
+
+.check-progress-popover .check-progress-item.done {
+  color: var(--fg);
+  opacity: 0.85;
+}
+
+.check-progress-popover .check-progress-item.done .check-progress-icon {
+  color: #2e7d32;
+  font-weight: 700;
+}
+
+.check-progress-popover .check-progress-item.error .check-progress-icon {
+  color: #c0392b;
+  font-weight: 700;
+}
+
+.check-progress-popover .check-progress-item.error {
+  color: #c0392b;
+}
+
+@keyframes checkProgressSpin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .check-progress-popover {
+    animation: none;
+  }
+  .check-progress-popover .check-progress-icon.pending::after {
+    animation: none;
+  }
+}
+
 input[type=text] {
   flex: 1;
   height: 38px;

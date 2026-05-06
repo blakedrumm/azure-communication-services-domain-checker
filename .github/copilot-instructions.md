@@ -58,16 +58,16 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 |---|---|---|
 | `01-DomainParsing.ps1` | ~77 | `Get-RegistrableDomain`, `Get-ParentDomains` — extract registrable domain from FQDN |
 | `02-WhoisProviders.ps1` | ~614 | Three WHOIS backends: `Invoke-SysinternalsWhoisLookup` (Windows), `Invoke-LinuxWhoisLookup` (Linux), `Invoke-TcpWhoisLookup` (raw TCP fallback) |
-| `04-RdapLookups.ps1` | ~225 | RDAP protocol lookups (`Invoke-RdapLookup`), plus WhoisXML and GoDaddy API fallbacks |
+| `04-RdapLookups.ps1` | ~225 | RDAP protocol lookups (`Invoke-RdapLookup`), plus WhoisXML and GoDaddy API fallbacks. `Invoke-WhoisXmlLookup` sends the API key in the `Authorization: Bearer` header by default so it never lands in proxy/access logs or `Referer` headers. Set `ACS_WHOISXML_KEY_IN_QUERY=1` to fall back to the legacy `?apiKey=...` query-string behavior on networks whose proxies strip Authorization headers. |
 | `07-DomainRegistration.ps1` | ~405 | `Get-DomainRegistrationStatus` — orchestrates RDAP → WHOIS → API fallback chain, returns creation/expiry dates; expose raw RDAP data when available. If raw WHOIS/RDAP data is the only available content, show it inline without a Raw button; only show the Raw WHOIS/RDAP button when structured WHOIS/RDAP fields are also present and the raw content is hidden behind a collapsible section. |
 
 ### Metrics & Configuration
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.82`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.88`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
-| `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics` |
+| `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics`. The `Secure` attribute on `acs_session` only honors the `X-Forwarded-Proto` header when the immediate TCP peer is in `ACS_TRUSTED_PROXIES` (mirrors `Get-ClientIp`); otherwise it falls back to `Request.Url.Scheme` so an untrusted client cannot trick the server into stamping `Secure` on a plaintext cookie. |
 
 ### Utility Functions
 
@@ -107,12 +107,12 @@ The web UI is split across seven files that build the `$htmlPage` here-string vi
 | File | Lines | Contents |
 |---|---|---|
 | `20-HtmlCss.ps1` | ~1,026 | Initializes `$htmlPage`. Contains `<!DOCTYPE html>`, `<head>`, and all CSS styles through `</style>` |
-| `20a-HtmlScriptSetup.ps1` | ~146 | External script tags (html2canvas CDN, MSAL loader), HTML `<body>` structure, main `<script>` tag opening with global JS variables |
+| `20a-HtmlScriptSetup.ps1` | ~146 | External script tags (html2canvas CDN, MSAL loader), HTML `<body>` structure, main `<script>` tag opening with global JS variables. The MSAL loader uses a local-first source list (`/assets/msal-browser.min.js` first, then CDN fallbacks) and applies optional Subresource Integrity (SRI) hashes from the `__ACS_MSAL_SRI__` template token (operator-supplied via `ACS_MSAL_SRI` env var as a JSON object: `{"<src>":"sha384-..."}`). The inline early-focus safety-net script under the search input is nonce-bound (`nonce="__CSP_NONCE__"`) so it executes under the strict CSP without `'unsafe-inline'`. |
 | `20b-HtmlTranslations.ps1` | ~3,431 | All JavaScript i18n data: `TRANSLATIONS`, `TRANSLATION_EXTENSIONS`, `REMAINING_TRANSLATION_OVERRIDES`, `MX_PROVIDER_HINTS`, `WHOIS_STATUS_LABELS`, `RISK_SUMMARY_LABELS`, `RUNTIME_TRANSLATION_OVERRIDES`, `GUIDANCE_AND_AZURE_OVERRIDES`, language config constants |
 | `20c-HtmlJsUtilities.ps1` | ~1,269 | JavaScript utility functions: language switching, domain normalization/validation, cookie consent management, history management, HTML escaping, localization helpers, guidance text formatting, test summary |
 | `20d-HtmlJsCore.ps1` | ~1,385 | Core UI JavaScript: theme toggle, clipboard/copy, screenshot capture, `lookup()`, `render()`, `card()`, event listeners, initialization |
 | `20e-HtmlAzureIntegration.ps1` | ~924 | Azure/MSAL authentication, ARM API calls, subscription/resource/workspace discovery, Log Analytics query execution, closing `</script></body></html>` |
-| `20f-HtmlPostProcess.ps1` | ~22 | PowerShell template replacements: injects `__APP_VERSION__`, `__ENTRA_CLIENT_ID__`, `__ENTRA_TENANT_ID__`, `__ACS_API_KEY__`, `__ACS_ISSUE_URL__` |
+| `20f-HtmlPostProcess.ps1` | ~22 | PowerShell template replacements: injects `__APP_VERSION__`, `__ENTRA_CLIENT_ID__`, `__ENTRA_TENANT_ID__`, `__ACS_API_KEY__`, `__ACS_ISSUE_URL__`, and `__ACS_MSAL_SRI__`. Every value substituted into a JS string literal is run through `ConvertTo-JsStringLiteralBody` to escape `\`, `'`, `"`, control characters, and angle brackets so a hostile env var can never break out of the literal or close the surrounding `<script>` block. `__ACS_MSAL_SRI__` is round-tripped through `ConvertFrom-Json`/`ConvertTo-Json` and falls back to the literal `null` on malformed input. |
 
 ### Static Pages
 

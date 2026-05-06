@@ -995,7 +995,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.82'
+$script:AppVersion = '2.0.94'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1289,8 +1289,23 @@ function Invoke-WhoisXmlLookup {
   $d = ([string]$Domain).Trim().TrimEnd('.')
   if ([string]::IsNullOrWhiteSpace($d)) { return $null }
 
-  $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=$([uri]::EscapeDataString($apiKey))&domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
-  $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3
+  # SECURITY: Send the API key in an Authorization header rather than the
+  # URL query string. URLs leak through proxy access logs, Referer headers,
+  # and shell histories. WhoisXML accepts the key via the standard Bearer
+  # scheme; we still pass the key as a query string fallback ONLY when an
+  # operator explicitly opts in via ACS_WHOISXML_KEY_IN_QUERY=1 (some
+  # restrictive corporate proxies strip Authorization headers and the
+  # legacy behavior is the only thing that works in that environment).
+  $useQueryFallback = ($env:ACS_WHOISXML_KEY_IN_QUERY -eq '1')
+
+  if ($useQueryFallback) {
+    $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=$([uri]::EscapeDataString($apiKey))&domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
+    $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3
+  } else {
+    $uri = "https://www.whoisxmlapi.com/whoisserver/WhoisService?domainName=$([uri]::EscapeDataString($d))&outputFormat=JSON"
+    $headers = @{ 'Authorization' = "Bearer $apiKey" }
+    $resp = Invoke-OutboundHttp -Uri $uri -TimeoutSec 20 -MaximumRedirection 3 -Headers $headers
+  }
   if ($null -eq $resp) { return $null }
   return $resp
 }
@@ -2942,12 +2957,29 @@ function Get-OrCreate-AnonymousSessionId {
       # Set cookie on response.
       if ($Context.Response -is [System.Net.HttpListenerResponse]) {
         try {
-          # HttpOnly prevents JS access to the cookie; Secure ensures it's only sent over HTTPS.
+          # HttpOnly prevents JS access to the cookie; Secure ensures it's
+          # only sent over HTTPS.
+          #
+          # SECURITY: We only honor X-Forwarded-Proto when the immediate TCP
+          # peer is in ACS_TRUSTED_PROXIES, mirroring the trust model used by
+          # Get-ClientIp for X-Forwarded-For. An untrusted client can set any
+          # header it wants, so previously a hostile request could trick us
+          # into stamping `Secure` on a cookie that was actually traveling
+          # over plaintext (or, in the opposite direction, deny the Secure
+          # flag we should have set). Falling back to Request.Url.Scheme is
+          # always safe: it reflects the actual transport seen by this
+          # process.
           $isSecure = $false
           try {
-            $fwdProto = [string]$Context.Request.Headers['X-Forwarded-Proto']
-            if ($fwdProto -eq 'https') { $isSecure = $true }
-            elseif ($Context.Request.Url.Scheme -eq 'https') { $isSecure = $true }
+            $peerIpForCookie = $null
+            try { $peerIpForCookie = [string]$Context.Request.RemoteEndPoint.Address } catch { $peerIpForCookie = $null }
+            if (-not [string]::IsNullOrWhiteSpace($peerIpForCookie) -and (Test-IsTrustedProxy -PeerIp $peerIpForCookie)) {
+              $fwdProto = [string]$Context.Request.Headers['X-Forwarded-Proto']
+              if ($fwdProto -and $fwdProto.Trim().ToLowerInvariant() -eq 'https') {
+                $isSecure = $true
+              }
+            }
+            if (-not $isSecure -and $Context.Request.Url.Scheme -eq 'https') { $isSecure = $true }
           } catch { }
           $securePart = if ($isSecure) { '; Secure' } else { '' }
           $Context.Response.Headers.Add('Set-Cookie', "acs_session=$sid; Path=/; SameSite=Lax; HttpOnly$securePart")
@@ -8207,6 +8239,135 @@ html[dir="rtl"] .language-trigger {
   min-width: 0;
 }
 
+/* ===== Live check-progress popover =====
+   Shown while a lookup is in flight. It replaces the old
+   "Checking {domain} ..." status text, sitting between the search box
+   and the results cards. Each row corresponds to one of the eight
+   parallel backend calls and reflects pending / done / error state.
+
+   Layout: rendered as a centered, inline-block card so it follows
+   normal document flow (no overlap with results below). It auto-sizes
+   to its content.
+
+   Motion: fades in with the same ease curve and translate distance as
+   the rest of the engage-section intro animation so it feels native to
+   the page. Only the open transition is animated (no exit animation --
+   the popover is hidden as soon as the lookup completes). */
+.check-progress-popover {
+  display: block;
+  margin: 12px auto 16px auto;
+  width: fit-content;
+  max-width: min(360px, 92vw);
+  padding: 10px 14px;
+  background: var(--card-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: left;
+  animation: checkProgressFadeIn 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+html[dir="rtl"] .check-progress-popover {
+  text-align: right;
+}
+
+.check-progress-popover[hidden] {
+  display: none;
+}
+
+@keyframes checkProgressFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.check-progress-popover .check-progress-title {
+  font-weight: 600;
+  margin: 0 0 6px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.check-progress-popover ul.check-progress-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.check-progress-popover li.check-progress-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.check-progress-popover .check-progress-icon {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* Pending state: small spinner reusing the same look as the Lookup button
+   spinner so the visuals stay consistent. */
+.check-progress-popover .check-progress-icon.pending::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--button-bg);
+  border-radius: 50%;
+  animation: checkProgressSpin 800ms linear infinite;
+}
+
+.check-progress-popover .check-progress-item.done {
+  color: var(--fg);
+  opacity: 0.85;
+}
+
+.check-progress-popover .check-progress-item.done .check-progress-icon {
+  color: #2e7d32;
+  font-weight: 700;
+}
+
+.check-progress-popover .check-progress-item.error .check-progress-icon {
+  color: #c0392b;
+  font-weight: 700;
+}
+
+.check-progress-popover .check-progress-item.error {
+  color: #c0392b;
+}
+
+@keyframes checkProgressSpin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .check-progress-popover {
+    animation: none;
+  }
+  .check-progress-popover .check-progress-icon.pending::after {
+    animation: none;
+  }
+}
+
 input[type=text] {
   flex: 1;
   height: 38px;
@@ -9874,11 +10035,36 @@ const entraTenant = '__ENTRA_TENANT_ID__';
 const acsApiKey = '__ACS_API_KEY__';
 const acsIssueUrl = '__ACS_ISSUE_URL__';
 const appVersion = '__APP_VERSION__';
+
+// MSAL load sources, in order of preference. Local-first so a same-origin
+// copy (served from /assets/msal-browser.min.js) defeats CDN tampering
+// entirely; the CDN entries are network fallbacks only.
+//
+// SECURITY: For each entry we attach an optional Subresource Integrity (SRI)
+// hash via the msalIntegrity map below. When a hash is present, the browser
+// refuses to execute the file unless its bytes match. Operators can inject
+// their own pinned hashes through the ACS_MSAL_SRI env var, which the server
+// validates as JSON and substitutes into __ACS_MSAL_SRI__ as a JSON object
+// literal: { "<src>": "sha384-..." }. Empty/missing entries simply load
+// without SRI (the previous behavior), so this is purely additive hardening.
 const msalSources = [
   '/assets/msal-browser.min.js',
   'https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js',
   'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/dist/msal-browser.min.js'
 ];
+
+let msalIntegrity = {};
+try {
+  // __ACS_MSAL_SRI__ is replaced server-side with a JSON object literal or
+  // the string 'null'. We parse defensively so a malformed value never
+  // breaks the page; worst case we fall back to no SRI.
+  const rawMsalSri = '__ACS_MSAL_SRI__';
+  if (rawMsalSri && rawMsalSri !== 'null') {
+    const parsed = JSON.parse(rawMsalSri);
+    if (parsed && typeof parsed === 'object') { msalIntegrity = parsed; }
+  }
+} catch (_) { msalIntegrity = {}; }
+
 let msalLoadPromise = null;
 
 function loadScript(src) {
@@ -9886,6 +10072,14 @@ function loadScript(src) {
     const s = document.createElement('script');
     s.src = src;
     s.async = false;
+    // crossOrigin must be set for SRI to be enforced on a cross-origin
+    // script. Setting it unconditionally is safe for same-origin requests
+    // too (the browser simply omits the CORS preflight in that case).
+    s.crossOrigin = 'anonymous';
+    const sri = msalIntegrity[src];
+    if (sri && typeof sri === 'string' && sri.indexOf('sha') === 0) {
+      s.integrity = sri;
+    }
     s.onload = () => resolve(true);
     s.onerror = () => reject(new Error('Failed to load ' + src));
     document.head.appendChild(s);
@@ -9925,6 +10119,26 @@ async function ensureMsalLoaded() {
   } catch (e) {}
 })();
 </script>
+<!--
+  Preload language flag SVGs so the browser begins fetching them during
+  HTML parse, before <body>, before any JS runs, and before the top-bar
+  fade-in animation starts. Without this, the visible flag inside the
+  language button is only requested when populateLanguageSelect() injects
+  the <img> mid-animation, which causes the icon to "pop in" after the
+  English text is already showing. These are static, same-origin SVGs
+  served from /assets/vendor/flag-icons/, so listing them here keeps the
+  HTML self-contained and avoids any JS-timing dependency.
+-->
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/us.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/es.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/fr.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/de.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/br.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/sa.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/cn.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/in.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/jp.svg">
+<link rel="preload" as="image" href="/assets/vendor/flag-icons/flags/4x3/ru.svg">
 </head>
 
 <body class="section-fade-enabled">
@@ -9951,13 +10165,78 @@ async function ensureMsalLoaded() {
   <h1 id="appHeading">Azure Communication Services<br/>Email Domain Checker</h1>
   <div class="input-row">
     <div class="input-wrapper">
-      <input id="domainInput" type="text" placeholder="example.com" oninput="toggleClearBtn()" />
+      <!--
+        autofocus lets the browser put the cursor in the search box as soon as the
+        element is parsed, well before the rest of the SPA finishes painting and
+        animating. That way users can paste a domain (Ctrl+A / Ctrl+V) immediately
+        on page load instead of waiting for the intro animation to settle.
+        autocomplete="off" + spellcheck="false" + autocapitalize="off" keep
+        accidental browser autofill / autocorrect from interfering with the typed
+        domain text. The inline script right below is a safety net for browsers
+        (notably some Safari versions) that ignore the autofocus attribute when
+        the page is busy bootstrapping; it focuses the input the moment the DOM
+        node exists, but skips the focus when the URL already contains a
+        ?domain= bootstrap value (in that case we are about to launch a lookup
+        and don't want to steal focus from the in-flight workflow).
+      -->
+      <input id="domainInput" type="text" placeholder="example.com" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="toggleClearBtn()" />
       <button id="clearBtn" class="clear-btn" type="button" onclick="clearInput()">&#x2715;</button>
     </div>
     <button id="lookupBtn" class="primary hide-on-screenshot" type="button" onclick="lookup()">Lookup</button>
+    <!--
+      Live progress popover. While a domain check runs the SPA fans out
+      to 8 backend endpoints in parallel (/api/base, /api/mx, /api/records,
+      /api/whois, /api/dmarc, /api/dkim, /api/cname, /api/reputation).
+      Some return in milliseconds (cached DNS), others (WHOIS/RDAP, DNSBL
+      fan-out) can take many seconds, so without this popover the user
+      only sees a spinner with no insight into which check is still in
+      flight. The list is built/updated by JS in 20d-HtmlJsCore.ps1;
+      markup here is only the empty container so the first paint cost
+      is zero. role="status" + aria-live="polite" lets assistive tech
+      announce per-task transitions without stealing focus.
+
+      The popover is rendered as a centered, always-visible card placed
+      OUTSIDE the .search-box wrapper so it sits between the search box
+      and the results cards (replacing the legacy "Checking {domain} ..."
+      status text). It is intentionally NOT a child of .input-row so its
+      width does not affect the search box layout.
+    -->
   </div>
+  <script nonce="__CSP_NONCE__">
+    // Early focus safety net: runs the instant this <script> tag is parsed, which
+    // is right after the input element above is in the DOM. We deliberately do
+    // NOT wait for DOMContentLoaded -- the whole point is to give the input
+    // focus before the heavy translation/render scripts further down run, so
+    // users can start typing/pasting during initial page paint.
+    //
+    // SECURITY: This block is nonce-bound (CSP nonce-__CSP_NONCE__). Keeping
+    // the nonce attribute in sync with the per-request nonce produced in
+    // 23-RequestHandler.ps1 is what allows it to execute under our strict CSP
+    // (which forbids 'unsafe-inline' for script-src). If you ever rename the
+    // template token __CSP_NONCE__, update Get-SecurityHeaderMap and
+    // Write-Html in 11-HttpHelpers.ps1 as well.
+    (function () {
+      try {
+        var earlyInput = document.getElementById('domainInput');
+        if (!earlyInput) return;
+        // Skip when a bootstrap ?domain= is present; that flow programmatically
+        // populates the input and kicks off a lookup, and we don't want to fight
+        // its focus management.
+        var hasBootstrapDomain = false;
+        try {
+          var qp = new URLSearchParams(window.location.search);
+          hasBootstrapDomain = !!(qp.get('domain') || '').trim();
+        } catch (_) { /* ignore URL parse errors on very old browsers */ }
+        if (hasBootstrapDomain) return;
+        // preventScroll avoids a jarring jump-to-top on browsers that scroll the
+        // focused element into view; the input is already at the top of the page.
+        earlyInput.focus({ preventScroll: true });
+      } catch (_) { /* never let early-focus break page load */ }
+    })();
+  </script>
   <div id="history" class="history hide-on-screenshot"></div>
 </div>
+<div id="checkProgressPopover" class="check-progress-popover hide-on-screenshot" role="status" aria-live="polite" hidden></div>
 <div id="status" class="engage-section"></div>
 <div id="azureDiagnosticsCard" class="card hide-on-screenshot engage-section" style="display:none; margin-bottom: 12px;">
   <div class="card-header" onclick="toggleCard(this)">
@@ -10065,6 +10344,7 @@ const TRANSLATIONS = {
     placeholderDomain: 'example.com',
     lookup: 'Lookup',
     checkingShort: 'Checking',
+    gatheringData: 'Gathering Data',
     themeDark: 'Dark mode \uD83C\uDF19',
     themeLight: 'Light mode \u2600\uFE0F',
     copyLink: 'Copy link \uD83D\uDD17',
@@ -10355,6 +10635,7 @@ const TRANSLATIONS = {
     placeholderDomain: 'ejemplo.com',
     lookup: 'Buscar',
     checkingShort: 'Comprobando',
+    gatheringData: 'Recopilando datos',
     themeDark: 'Modo oscuro \uD83C\uDF19',
     themeLight: 'Modo claro \u2600\uFE0F',
     copyLink: 'Copiar v\u00EDnculo \uD83D\uDD17',
@@ -10537,6 +10818,7 @@ const TRANSLATIONS = {
     placeholderDomain: 'exemple.com',
     lookup: 'Rechercher',
     checkingShort: 'V\u00E9rification',
+    gatheringData: 'Collecte des donn\u00E9es',
     themeDark: 'Mode sombre \uD83C\uDF19',
     themeLight: 'Mode clair \u2600\uFE0F',
     copyLink: 'Copier le lien \uD83D\uDD17',
@@ -10661,6 +10943,7 @@ const TRANSLATIONS = {
     placeholderDomain: 'beispiel.de',
     lookup: 'Pr\u00FCfen',
     checkingShort: 'Pr\u00FCfung',
+    gatheringData: 'Daten werden gesammelt',
     themeDark: 'Dunkler Modus \uD83C\uDF19',
     themeLight: 'Heller Modus \u2600\uFE0F',
     copyLink: 'Link kopieren \uD83D\uDD17',
@@ -10785,6 +11068,7 @@ const TRANSLATIONS = {
     placeholderDomain: 'exemplo.com.br',
     lookup: 'Verificar',
     checkingShort: 'Verificando',
+    gatheringData: 'Coletando dados',
     themeDark: 'Modo escuro \uD83C\uDF19',
     themeLight: 'Modo claro \u2600\uFE0F',
     copyLink: 'Copiar link \uD83D\uDD17',
@@ -10909,6 +11193,7 @@ const TRANSLATIONS = {
     placeholderDomain: 'example.sa',
     lookup: '\u062A\u062D\u0642\u0642',
     checkingShort: '\u062C\u0627\u0631\u064D \u0627\u0644\u062A\u062D\u0642\u0642',
+    gatheringData: '\u062C\u0627\u0631\u064D \u062C\u0645\u0639 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A',
     themeDark: '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062F\u0627\u0643\u0646 \uD83C\uDF19',
     themeLight: '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062A\u062D \u2600\uFE0F',
     copyLink: '\u0646\u0633\u062E \u0627\u0644\u0631\u0627\u0628\u0637 \uD83D\uDD17',
@@ -10960,6 +11245,7 @@ const TRANSLATIONS = {
     placeholderDomain: 'example.cn',
     lookup: '\u68C0\u67E5',
     checkingShort: '\u68C0\u67E5\u4E2D',
+    gatheringData: '\u6B63\u5728\u6536\u96C6\u6570\u636E',
     themeDark: '\u6DF1\u8272\u6A21\u5F0F \uD83C\uDF19',
     themeLight: '\u6D45\u8272\u6A21\u5F0F \u2600\uFE0F',
     copyLink: '\u590D\u5236\u94FE\u63A5 \uD83D\uDD17',
@@ -11369,6 +11655,7 @@ const TRANSLATION_EXTENSIONS = {
     placeholderDomain: 'example.in',
     lookup: '\u091C\u093E\u0901\u091A\u0947\u0902',
     checkingShort: '\u091C\u093E\u0901\u091A \u0939\u094B \u0930\u0939\u0940 \u0939\u0948',
+    gatheringData: '\u0921\u0947\u091F\u093E \u090F\u0915\u0924\u094D\u0930 \u0915\u093F\u092F\u093E \u091C\u093E \u0930\u0939\u093E \u0939\u0948',
     themeDark: '\u0921\u093E\u0930\u094D\u0915 \u092E\u094B\u0921 \uD83C\uDF19',
     themeLight: '\u0932\u093E\u0907\u091F \u092E\u094B\u0921 \u2600\uFE0F',
     copyLink: '\u0932\u093F\u0902\u0915 \u0915\u0949\u092A\u0940 \u0915\u0930\u0947\u0902 \uD83D\uDD17',
@@ -11493,6 +11780,7 @@ const TRANSLATION_EXTENSIONS = {
     placeholderDomain: 'example.jp',
     lookup: '\u78BA\u8A8D',
     checkingShort: '\u78BA\u8A8D\u4E2D',
+    gatheringData: '\u30C7\u30FC\u30BF\u53CE\u96C6\u4E2D',
     themeDark: '\u30C0\u30FC\u30AF \u30E2\u30FC\u30C9 \uD83C\uDF19',
     themeLight: '\u30E9\u30A4\u30C8 \u30E2\u30FC\u30C9 \u2600\uFE0F',
     copyLink: '\u30EA\u30F3\u30AF\u3092\u30B3\u30D4\u30FC \uD83D\uDD17',
@@ -11617,6 +11905,7 @@ const TRANSLATION_EXTENSIONS = {
     placeholderDomain: 'example.ru',
     lookup: '\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C',
     checkingShort: '\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430',
+    gatheringData: '\u0421\u0431\u043E\u0440 \u0434\u0430\u043D\u043D\u044B\u0445',
     themeDark: '\u0422\u0451\u043C\u043D\u044B\u0439 \u0440\u0435\u0436\u0438\u043C \uD83C\uDF19',
     themeLight: '\u0421\u0432\u0435\u0442\u043B\u044B\u0439 \u0440\u0435\u0436\u0438\u043C \u2600\uFE0F',
     copyLink: '\u041A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0441\u044B\u043B\u043A\u0443 \uD83D\uDD17',
@@ -14343,130 +14632,130 @@ const COOKIE_CONSENT_TRANSLATION_OVERRIDES = {
     cookieBtnAcceptAll: 'Accept all'
   },
   es: {
-    cookieSettings: 'Configuraci�n de cookies',
-    cookieConsentTitle: 'Configuraci�n de cookies',
-    cookieConsentDescription: 'Esta herramienta usa almacenamiento esencial del navegador para la funcionalidad principal y ofrece almacenamiento opcional para preferencias y an�lisis an�nimos. Puede elegir qu� categor�as opcionales permitir.',
+    cookieSettings: 'Configuraci\u00f3n de cookies',
+    cookieConsentTitle: 'Configuraci\u00f3n de cookies',
+    cookieConsentDescription: 'Esta herramienta usa almacenamiento esencial del navegador para la funcionalidad principal y ofrece almacenamiento opcional para preferencias y an\u00e1lisis an\u00f3nimos. Puede elegir qu\u00e9 categor\u00edas opcionales permitir.',
     cookieCatEssential: 'Esenciales',
     cookieCatEssentialDesc: 'Necesarias para que la herramienta funcione. No se pueden desactivar.',
     cookieCatFunctional: 'Preferencias',
     cookieCatFunctionalDesc: 'Guarda el tema, el idioma y el historial reciente de dominios en su navegador.',
-    cookieCatAnalytics: 'Anal�tica',
-    cookieCatAnalyticsDesc: 'Permite m�tricas an�nimas y la cookie temporal de sesi�n anal�tica usada para recuentos agregados.',
+    cookieCatAnalytics: 'Anal\u00edtica',
+    cookieCatAnalyticsDesc: 'Permite m\u00e9tricas an\u00f3nimas y la cookie temporal de sesi\u00f3n anal\u00edtica usada para recuentos agregados.',
     cookieBtnReject: 'Rechazar no esenciales',
     cookieBtnSave: 'Guardar preferencias',
     cookieBtnAcceptAll: 'Aceptar todo'
   },
   fr: {
-    cookieSettings: 'Param�tres des cookies',
-    cookieConsentTitle: 'Param�tres des cookies',
-    cookieConsentDescription: 'Cet outil utilise le stockage essentiel du navigateur pour les fonctions de base et propose un stockage facultatif pour les pr�f�rences et les analyses anonymes. Vous pouvez choisir les cat�gories facultatives � autoriser.',
+    cookieSettings: 'Param\u00e8tres des cookies',
+    cookieConsentTitle: 'Param\u00e8tres des cookies',
+    cookieConsentDescription: 'Cet outil utilise le stockage essentiel du navigateur pour les fonctions de base et propose un stockage facultatif pour les pr\u00e9f\u00e9rences et les analyses anonymes. Vous pouvez choisir les cat\u00e9gories facultatives \u00e0 autoriser.',
     cookieCatEssential: 'Essentiels',
-    cookieCatEssentialDesc: 'N�cessaires au fonctionnement de l�outil. Ils ne peuvent pas �tre d�sactiv�s.',
-    cookieCatFunctional: 'Pr�f�rences',
-    cookieCatFunctionalDesc: 'Enregistre le th�me, la langue et l�historique r�cent des domaines dans votre navigateur.',
+    cookieCatEssentialDesc: 'N\u00e9cessaires au fonctionnement de l\'outil. Ils ne peuvent pas \u00eatre d\u00e9sactiv\u00e9s.',
+    cookieCatFunctional: 'Pr\u00e9f\u00e9rences',
+    cookieCatFunctionalDesc: 'Enregistre le th\u00e8me, la langue et l\'historique r\u00e9cent des domaines dans votre navigateur.',
     cookieCatAnalytics: 'Analyses',
-    cookieCatAnalyticsDesc: 'Autorise les m�triques anonymes et le cookie temporaire de session analytique utilis� pour les comptes agr�g�s.',
+    cookieCatAnalyticsDesc: 'Autorise les m\u00e9triques anonymes et le cookie temporaire de session analytique utilis\u00e9 pour les comptes agr\u00e9g\u00e9s.',
     cookieBtnReject: 'Refuser le non essentiel',
-    cookieBtnSave: 'Enregistrer les pr�f�rences',
+    cookieBtnSave: 'Enregistrer les pr\u00e9f\u00e9rences',
     cookieBtnAcceptAll: 'Tout accepter'
   },
   de: {
     cookieSettings: 'Cookie-Einstellungen',
     cookieConsentTitle: 'Cookie-Einstellungen',
-    cookieConsentDescription: 'Dieses Tool verwendet essenziellen Browserspeicher f�r Kernfunktionen und bietet optionalen Speicher f�r Einstellungen und anonyme Analysen. Sie k�nnen w�hlen, welche optionalen Kategorien zugelassen werden.',
+    cookieConsentDescription: 'Dieses Tool verwendet essenziellen Browserspeicher f\u00fcr Kernfunktionen und bietet optionalen Speicher f\u00fcr Einstellungen und anonyme Analysen. Sie k\u00f6nnen w\u00e4hlen, welche optionalen Kategorien zugelassen werden.',
     cookieCatEssential: 'Essenziell',
-    cookieCatEssentialDesc: 'Erforderlich, damit das Tool funktioniert. Diese Elemente k�nnen nicht deaktiviert werden.',
+    cookieCatEssentialDesc: 'Erforderlich, damit das Tool funktioniert. Diese Elemente k\u00f6nnen nicht deaktiviert werden.',
     cookieCatFunctional: 'Einstellungen',
-    cookieCatFunctionalDesc: 'Speichert Design, Sprache und den j�ngsten Dom�nenverlauf in Ihrem Browser.',
+    cookieCatFunctionalDesc: 'Speichert Design, Sprache und den j\u00fcngsten Dom\u00e4nenverlauf in Ihrem Browser.',
     cookieCatAnalytics: 'Analytik',
-    cookieCatAnalyticsDesc: 'Erlaubt anonyme Metriken und das tempor�re Analyse-Sitzungscookie f�r aggregierte Z�hlungen.',
+    cookieCatAnalyticsDesc: 'Erlaubt anonyme Metriken und das tempor\u00e4re Analyse-Sitzungscookie f\u00fcr aggregierte Z\u00e4hlungen.',
     cookieBtnReject: 'Nicht essenzielle ablehnen',
     cookieBtnSave: 'Einstellungen speichern',
     cookieBtnAcceptAll: 'Alle akzeptieren'
   },
   'pt-BR': {
-    cookieSettings: 'Configura��es de cookies',
-    cookieConsentTitle: 'Configura��es de cookies',
-    cookieConsentDescription: 'Esta ferramenta usa armazenamento essencial do navegador para a funcionalidade principal e oferece armazenamento opcional para prefer�ncias e an�lises an�nimas. Voc� pode escolher quais categorias opcionais permitir.',
+    cookieSettings: 'Configura\u00e7\u00f5es de cookies',
+    cookieConsentTitle: 'Configura\u00e7\u00f5es de cookies',
+    cookieConsentDescription: 'Esta ferramenta usa armazenamento essencial do navegador para a funcionalidade principal e oferece armazenamento opcional para prefer\u00eancias e an\u00e1lises an\u00f4nimas. Voc\u00ea pode escolher quais categorias opcionais permitir.',
     cookieCatEssential: 'Essenciais',
-    cookieCatEssentialDesc: 'Necess�rios para o funcionamento da ferramenta. N�o podem ser desativados.',
-    cookieCatFunctional: 'Prefer�ncias',
-    cookieCatFunctionalDesc: 'Armazena tema, idioma e hist�rico recente de dom�nios no seu navegador.',
-    cookieCatAnalytics: 'An�lises',
-    cookieCatAnalyticsDesc: 'Permite m�tricas an�nimas e o cookie tempor�rio de sess�o anal�tica usado para contagens agregadas.',
-    cookieBtnReject: 'Rejeitar n�o essenciais',
-    cookieBtnSave: 'Salvar prefer�ncias',
+    cookieCatEssentialDesc: 'Necess\u00e1rios para o funcionamento da ferramenta. N\u00e3o podem ser desativados.',
+    cookieCatFunctional: 'Prefer\u00eancias',
+    cookieCatFunctionalDesc: 'Armazena tema, idioma e hist\u00f3rico recente de dom\u00ednios no seu navegador.',
+    cookieCatAnalytics: 'An\u00e1lises',
+    cookieCatAnalyticsDesc: 'Permite m\u00e9tricas an\u00f4nimas e o cookie tempor\u00e1rio de sess\u00e3o anal\u00edtica usado para contagens agregadas.',
+    cookieBtnReject: 'Rejeitar n\u00e3o essenciais',
+    cookieBtnSave: 'Salvar prefer\u00eancias',
     cookieBtnAcceptAll: 'Aceitar tudo'
   },
   ar: {
-    cookieSettings: '??????? ????? ????? ????????',
-    cookieConsentTitle: '??????? ????? ????? ????????',
-    cookieConsentDescription: '?????? ??? ?????? ????? ??????? ??????? ??????? ????????? ????? ??????? ????????? ????????? ?????????? ????????. ????? ?????? ?????? ?????????? ???? ???? ?????? ???.',
-    cookieCatEssential: '??????',
-    cookieCatEssentialDesc: '?????? ??? ???? ??????. ?? ???? ???????.',
-    cookieCatFunctional: '?????????',
-    cookieCatFunctionalDesc: '???? ?????? ?????? ???? ???????? ?????? ?? ??????.',
-    cookieCatAnalytics: '?????????',
-    cookieCatAnalyticsDesc: '???? ????????? ???????? ???? ????? ?????? ???? ????????? ?????? ???????? ????? ??????.',
-    cookieBtnReject: '??? ??? ????????',
-    cookieBtnSave: '??? ?????????',
-    cookieBtnAcceptAll: '???? ????'
+    cookieSettings: '\u0625\u0639\u062f\u0627\u062f\u0627\u062a \u0645\u0644\u0641\u0627\u062a \u062a\u0639\u0631\u064a\u0641 \u0627\u0644\u0627\u0631\u062a\u0628\u0627\u0637',
+    cookieConsentTitle: '\u0625\u0639\u062f\u0627\u062f\u0627\u062a \u0645\u0644\u0641\u0627\u062a \u062a\u0639\u0631\u064a\u0641 \u0627\u0644\u0627\u0631\u062a\u0628\u0627\u0637',
+    cookieConsentDescription: '\u062a\u0633\u062a\u062e\u062f\u0645 \u0647\u0630\u0647 \u0627\u0644\u0623\u062f\u0627\u0629 \u062a\u062e\u0632\u064a\u0646 \u0627\u0644\u0645\u062a\u0635\u0641\u062d \u0627\u0644\u0623\u0633\u0627\u0633\u064a \u0644\u0644\u0648\u0638\u0627\u0626\u0641 \u0627\u0644\u062c\u0648\u0647\u0631\u064a\u0629 \u0648\u062a\u0648\u0641\u0631 \u062a\u062e\u0632\u064a\u0646\u064b\u0627 \u0627\u062e\u062a\u064a\u0627\u0631\u064a\u064b\u0627 \u0644\u0644\u062a\u0641\u0636\u064a\u0644\u0627\u062a \u0648\u0627\u0644\u062a\u062d\u0644\u064a\u0644\u0627\u062a \u0627\u0644\u0645\u062c\u0647\u0648\u0644\u0629. \u064a\u0645\u0643\u0646\u0643 \u0627\u062e\u062a\u064a\u0627\u0631 \u0627\u0644\u0641\u0626\u0627\u062a \u0627\u0644\u0627\u062e\u062a\u064a\u0627\u0631\u064a\u0629 \u0627\u0644\u062a\u064a \u062a\u0631\u063a\u0628 \u0641\u064a \u0627\u0644\u0633\u0645\u0627\u062d \u0628\u0647\u0627.',
+    cookieCatEssential: '\u0623\u0633\u0627\u0633\u064a\u0629',
+    cookieCatEssentialDesc: '\u0645\u0637\u0644\u0648\u0628\u0629 \u0644\u0639\u0645\u0644 \u0627\u0644\u0623\u062f\u0627\u0629. \u0644\u0627 \u064a\u0645\u0643\u0646 \u062a\u0639\u0637\u064a\u0644\u0647\u0627.',
+    cookieCatFunctional: '\u0627\u0644\u062a\u0641\u0636\u064a\u0644\u0627\u062a',
+    cookieCatFunctionalDesc: '\u062a\u062d\u0641\u0638 \u0627\u0644\u0645\u0638\u0647\u0631 \u0648\u0627\u0644\u0644\u063a\u0629 \u0648\u0633\u062c\u0644 \u0627\u0644\u0646\u0637\u0627\u0642\u0627\u062a \u0627\u0644\u0623\u062e\u064a\u0631 \u0641\u064a \u0645\u062a\u0635\u0641\u062d\u0643.',
+    cookieCatAnalytics: '\u0627\u0644\u062a\u062d\u0644\u064a\u0644\u0627\u062a',
+    cookieCatAnalyticsDesc: '\u062a\u062a\u064a\u062d \u0627\u0644\u0645\u0642\u0627\u064a\u064a\u0633 \u0627\u0644\u0645\u062c\u0647\u0648\u0644\u0629 \u0648\u0645\u0644\u0641 \u062a\u0639\u0631\u064a\u0641 \u0627\u0644\u0627\u0631\u062a\u0628\u0627\u0637 \u0627\u0644\u0645\u0624\u0642\u062a \u0644\u062c\u0644\u0633\u0629 \u0627\u0644\u062a\u062d\u0644\u064a\u0644\u0627\u062a \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645 \u0644\u0625\u062c\u0645\u0627\u0644\u064a\u0627\u062a \u0627\u0644\u0627\u0633\u062a\u062e\u062f\u0627\u0645.',
+    cookieBtnReject: '\u0631\u0641\u0636 \u063a\u064a\u0631 \u0627\u0644\u0623\u0633\u0627\u0633\u064a\u0629',
+    cookieBtnSave: '\u062d\u0641\u0638 \u0627\u0644\u062a\u0641\u0636\u064a\u0644\u0627\u062a',
+    cookieBtnAcceptAll: '\u0642\u0628\u0648\u0644 \u0627\u0644\u0643\u0644'
   },
   'zh-CN': {
-    cookieSettings: 'Cookie ??',
-    cookieConsentTitle: 'Cookie ??',
-    cookieConsentDescription: '??????????????????????????????????????????????????????',
-    cookieCatEssential: '???',
-    cookieCatEssentialDesc: '?????????????',
-    cookieCatFunctional: '????',
-    cookieCatFunctionalDesc: '????????????????????????',
-    cookieCatAnalytics: '??',
-    cookieCatAnalyticsDesc: '????????????????????? Cookie?',
-    cookieBtnReject: '??????',
-    cookieBtnSave: '??????',
-    cookieBtnAcceptAll: '????'
+    cookieSettings: 'Cookie \u8bbe\u7f6e',
+    cookieConsentTitle: 'Cookie \u8bbe\u7f6e',
+    cookieConsentDescription: '\u672c\u5de5\u5177\u4f7f\u7528\u5fc5\u8981\u7684\u6d4f\u89c8\u5668\u5b58\u50a8\u4ee5\u63d0\u4f9b\u6838\u5fc3\u529f\u80fd\uff0c\u5e76\u63d0\u4f9b\u53ef\u9009\u7684\u5b58\u50a8\u7528\u4e8e\u504f\u597d\u8bbe\u7f6e\u548c\u533f\u540d\u5206\u6790\u3002\u60a8\u53ef\u4ee5\u9009\u62e9\u5141\u8bb8\u54ea\u4e9b\u53ef\u9009\u7c7b\u522b\u3002',
+    cookieCatEssential: '\u5fc5\u8981',
+    cookieCatEssentialDesc: '\u5de5\u5177\u8fd0\u884c\u6240\u5fc5\u9700\u3002\u65e0\u6cd5\u7981\u7528\u3002',
+    cookieCatFunctional: '\u504f\u597d\u8bbe\u7f6e',
+    cookieCatFunctionalDesc: '\u5728\u60a8\u7684\u6d4f\u89c8\u5668\u4e2d\u4fdd\u5b58\u4e3b\u9898\u3001\u8bed\u8a00\u548c\u6700\u8fd1\u7684\u57df\u540d\u5386\u53f2\u3002',
+    cookieCatAnalytics: '\u5206\u6790',
+    cookieCatAnalyticsDesc: '\u5141\u8bb8\u533f\u540d\u6307\u6807\u548c\u7528\u4e8e\u6c47\u603b\u4f7f\u7528\u6b21\u6570\u7684\u4e34\u65f6\u5206\u6790\u4f1a\u8bdd Cookie\u3002',
+    cookieBtnReject: '\u62d2\u7edd\u975e\u5fc5\u8981',
+    cookieBtnSave: '\u4fdd\u5b58\u504f\u597d',
+    cookieBtnAcceptAll: '\u5168\u90e8\u63a5\u53d7'
   },
   'hi-IN': {
-    cookieSettings: '???? ????????',
-    cookieConsentTitle: '???? ????????',
-    cookieConsentDescription: '?? ??? ????? ??????????? ?? ??? ?????? ???????? ??????? ?? ????? ???? ?? ?? ???????????? ??? ?????? ???????? ?? ??? ???????? ??????? ?????? ???? ??? ?? ??? ???? ??? ?? ??? ???????? ????????? ?? ?????? ???? ???',
-    cookieCatEssential: '??????',
-    cookieCatEssentialDesc: '??? ?? ??? ???? ?? ??? ??????? ?????? ??? ???? ???? ?? ?????',
-    cookieCatFunctional: '????????????',
-    cookieCatFunctionalDesc: '???? ???????? ??? ???, ???? ?? ??? ?? ????? ?????? ?????? ???',
-    cookieCatAnalytics: '????????',
-    cookieCatAnalyticsDesc: '?????? ??????? ?? ??? ?????? ?? ??? ????? ?? ???? ???? ??????? ???????? ???? ???? ?? ?????? ???? ???',
-    cookieBtnReject: '???-?????? ???????? ????',
-    cookieBtnSave: '???????????? ??????',
-    cookieBtnAcceptAll: '??? ??????? ????'
+    cookieSettings: '\u0915\u0941\u0915\u0940 \u0938\u0947\u091f\u093f\u0902\u0917\u094d\u0938',
+    cookieConsentTitle: '\u0915\u0941\u0915\u0940 \u0938\u0947\u091f\u093f\u0902\u0917\u094d\u0938',
+    cookieConsentDescription: '\u092f\u0939 \u0909\u092a\u0915\u0930\u0923 \u092e\u0941\u0916\u094d\u092f \u0915\u093e\u0930\u094d\u092f\u0915\u094d\u0937\u092e\u0924\u093e \u0915\u0947 \u0932\u093f\u090f \u0906\u0935\u0936\u094d\u092f\u0915 \u092c\u094d\u0930\u093e\u0909\u091c\u093c\u0930 \u0938\u0902\u0917\u094d\u0930\u0939\u0923 \u0915\u093e \u0909\u092a\u092f\u094b\u0917 \u0915\u0930\u0924\u093e \u0939\u0948 \u0914\u0930 \u092a\u094d\u0930\u093e\u0925\u092e\u093f\u0915\u0924\u093e\u0913\u0902 \u0924\u0925\u093e \u0905\u0928\u093e\u092e \u0935\u093f\u0936\u094d\u0932\u0947\u0937\u0923 \u0915\u0947 \u0932\u093f\u090f \u0935\u0948\u0915\u0932\u094d\u092a\u093f\u0915 \u0938\u0902\u0917\u094d\u0930\u0939\u0923 \u092a\u094d\u0930\u0926\u093e\u0928 \u0915\u0930\u0924\u093e \u0939\u0948\u0964 \u0906\u092a \u091a\u0941\u0928 \u0938\u0915\u0924\u0947 \u0939\u0948\u0902 \u0915\u093f \u0915\u094c\u0928-\u0938\u0940 \u0935\u0948\u0915\u0932\u094d\u092a\u093f\u0915 \u0936\u094d\u0930\u0947\u0923\u093f\u092f\u094b\u0902 \u0915\u0940 \u0905\u0928\u0941\u092e\u0924\u093f \u0926\u0940 \u091c\u093e\u090f\u0964',
+    cookieCatEssential: '\u0906\u0935\u0936\u094d\u092f\u0915',
+    cookieCatEssentialDesc: '\u0909\u092a\u0915\u0930\u0923 \u0915\u0947 \u0915\u093e\u092e \u0915\u0930\u0928\u0947 \u0915\u0947 \u0932\u093f\u090f \u0906\u0935\u0936\u094d\u092f\u0915\u0964 \u0907\u0928\u094d\u0939\u0947\u0902 \u0905\u0915\u094d\u0937\u092e \u0928\u0939\u0940\u0902 \u0915\u093f\u092f\u093e \u091c\u093e \u0938\u0915\u0924\u093e\u0964',
+    cookieCatFunctional: '\u092a\u094d\u0930\u093e\u0925\u092e\u093f\u0915\u0924\u093e\u090f\u0901',
+    cookieCatFunctionalDesc: '\u0906\u092a\u0915\u0947 \u092c\u094d\u0930\u093e\u0909\u091c\u093c\u0930 \u092e\u0947\u0902 \u0925\u0940\u092e, \u092d\u093e\u0937\u093e \u0914\u0930 \u0939\u093e\u0932 \u0915\u093e \u0921\u094b\u092e\u0947\u0928 \u0907\u0924\u093f\u0939\u093e\u0938 \u0938\u0939\u0947\u091c\u0924\u0940 \u0939\u0948\u0964',
+    cookieCatAnalytics: '\u0935\u093f\u0936\u094d\u0932\u0947\u0937\u0923',
+    cookieCatAnalyticsDesc: '\u0905\u0928\u093e\u092e \u092e\u0940\u091f\u094d\u0930\u093f\u0915 \u0914\u0930 \u0915\u0941\u0932 \u0909\u092a\u092f\u094b\u0917 \u0917\u0923\u0928\u093e \u0915\u0947 \u0932\u093f\u090f \u0909\u092a\u092f\u094b\u0917 \u0915\u0940 \u091c\u093e\u0928\u0947 \u0935\u093e\u0932\u0940 \u0905\u0938\u094d\u0925\u093e\u092f\u0940 \u0935\u093f\u0936\u094d\u0932\u0947\u0937\u0923 \u0938\u0924\u094d\u0930 \u0915\u0941\u0915\u0940 \u0915\u0940 \u0905\u0928\u0941\u092e\u0924\u093f \u0926\u0947\u0924\u093e \u0939\u0948\u0964',
+    cookieBtnReject: '\u0917\u0948\u0930-\u0906\u0935\u0936\u094d\u092f\u0915 \u0905\u0938\u094d\u0935\u0940\u0915\u093e\u0930 \u0915\u0930\u0947\u0902',
+    cookieBtnSave: '\u092a\u094d\u0930\u093e\u0925\u092e\u093f\u0915\u0924\u093e\u090f\u0901 \u0938\u0939\u0947\u091c\u0947\u0902',
+    cookieBtnAcceptAll: '\u0938\u092d\u0940 \u0938\u094d\u0935\u0940\u0915\u093e\u0930 \u0915\u0930\u0947\u0902'
   },
   'ja-JP': {
-    cookieSettings: 'Cookie??',
-    cookieConsentTitle: 'Cookie??',
-    cookieConsentDescription: '??????????????????????????????????????????????????????????????????????????',
-    cookieCatEssential: '??',
-    cookieCatEssentialDesc: '?????????????????????',
-    cookieCatFunctional: '??',
-    cookieCatFunctionalDesc: '?????????????????????????????',
-    cookieCatAnalytics: '??',
-    cookieCatAnalyticsDesc: '?????????????????????????????? Cookie ???????',
-    cookieBtnReject: '???????',
-    cookieBtnSave: '?????',
-    cookieBtnAcceptAll: '?????'
+    cookieSettings: 'Cookie \u8a2d\u5b9a',
+    cookieConsentTitle: 'Cookie \u8a2d\u5b9a',
+    cookieConsentDescription: '\u672c\u30c4\u30fc\u30eb\u306f\u4e3b\u8981\u306a\u6a5f\u80fd\u306e\u305f\u3081\u306b\u5fc5\u9808\u306e\u30d6\u30e9\u30a6\u30b6\u30fc \u30b9\u30c8\u30ec\u30fc\u30b8\u3092\u4f7f\u7528\u3057\u3001\u8a2d\u5b9a\u3084\u533f\u540d\u5206\u6790\u306e\u305f\u3081\u306b\u4efb\u610f\u306e\u30b9\u30c8\u30ec\u30fc\u30b8\u3092\u63d0\u4f9b\u3057\u307e\u3059\u3002\u8a31\u53ef\u3059\u308b\u4efb\u610f\u306e\u30ab\u30c6\u30b4\u30ea\u3092\u9078\u629e\u3067\u304d\u307e\u3059\u3002',
+    cookieCatEssential: '\u5fc5\u9808',
+    cookieCatEssentialDesc: '\u30c4\u30fc\u30eb\u306e\u52d5\u4f5c\u306b\u5fc5\u8981\u3067\u3059\u3002\u7121\u52b9\u306b\u3067\u304d\u307e\u305b\u3093\u3002',
+    cookieCatFunctional: '\u8a2d\u5b9a',
+    cookieCatFunctionalDesc: '\u30d6\u30e9\u30a6\u30b6\u30fc\u306b\u30c6\u30fc\u30de\u3001\u8a00\u8a9e\u3001\u6700\u8fd1\u306e\u30c9\u30e1\u30a4\u30f3\u5c65\u6b74\u3092\u4fdd\u5b58\u3057\u307e\u3059\u3002',
+    cookieCatAnalytics: '\u5206\u6790',
+    cookieCatAnalyticsDesc: '\u533f\u540d\u306e\u30e1\u30c8\u30ea\u30c3\u30af\u3068\u3001\u96c6\u8a08\u5229\u7528\u56de\u6570\u306e\u305f\u3081\u306b\u4f7f\u7528\u3055\u308c\u308b\u4e00\u6642\u7684\u306a\u5206\u6790\u30bb\u30c3\u30b7\u30e7\u30f3 Cookie \u3092\u8a31\u53ef\u3057\u307e\u3059\u3002',
+    cookieBtnReject: '\u5fc5\u9808\u4ee5\u5916\u3092\u62d2\u5426',
+    cookieBtnSave: '\u8a2d\u5b9a\u3092\u4fdd\u5b58',
+    cookieBtnAcceptAll: '\u3059\u3079\u3066\u53d7\u3051\u5165\u308c\u308b'
   },
   'ru-RU': {
-    cookieSettings: '????????? cookie',
-    cookieConsentTitle: '????????? cookie',
-    cookieConsentDescription: '???? ?????????? ?????????? ???????????? ????????? ???????? ??? ??????? ?????? ? ?????????? ?????????????? ????????? ??? ???????????? ? ????????? ?????????. ?? ?????? ???????, ????? ?????????????? ????????? ?????????.',
-    cookieCatEssential: '????????????',
-    cookieCatEssentialDesc: '?????????? ??? ?????? ???????????. ?? ?????? ?????????.',
-    cookieCatFunctional: '????????????',
-    cookieCatFunctionalDesc: '????????? ????, ???? ? ???????? ??????? ??????? ? ????? ????????.',
-    cookieCatAnalytics: '?????????',
-    cookieCatAnalyticsDesc: '????????? ????????? ??????? ? ????????? cookie ????????????? ?????? ??? ?????????????? ?????????.',
-    cookieBtnReject: '????????? ??????????????',
-    cookieBtnSave: '????????? ?????????',
-    cookieBtnAcceptAll: '??????? ???'
+    cookieSettings: '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 cookie',
+    cookieConsentTitle: '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 cookie',
+    cookieConsentDescription: '\u042d\u0442\u043e\u0442 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442 \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0435 \u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u0434\u043b\u044f \u043e\u0441\u043d\u043e\u0432\u043d\u044b\u0445 \u0444\u0443\u043d\u043a\u0446\u0438\u0439 \u0438 \u043f\u0440\u0435\u0434\u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0435 \u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u0434\u043b\u044f \u043f\u0440\u0435\u0434\u043f\u043e\u0447\u0442\u0435\u043d\u0438\u0439 \u0438 \u0430\u043d\u043e\u043d\u0438\u043c\u043d\u043e\u0439 \u0430\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0438. \u0412\u044b \u043c\u043e\u0436\u0435\u0442\u0435 \u0432\u044b\u0431\u0440\u0430\u0442\u044c, \u043a\u0430\u043a\u0438\u0435 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438 \u0440\u0430\u0437\u0440\u0435\u0448\u0438\u0442\u044c.',
+    cookieCatEssential: '\u041e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u044b\u0435',
+    cookieCatEssentialDesc: '\u041d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c\u044b \u0434\u043b\u044f \u0440\u0430\u0431\u043e\u0442\u044b \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442\u0430. \u0418\u0445 \u043d\u0435\u043b\u044c\u0437\u044f \u043e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u044c.',
+    cookieCatFunctional: '\u041f\u0440\u0435\u0434\u043f\u043e\u0447\u0442\u0435\u043d\u0438\u044f',
+    cookieCatFunctionalDesc: '\u0421\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442 \u0442\u0435\u043c\u0443, \u044f\u0437\u044b\u043a \u0438 \u043d\u0435\u0434\u0430\u0432\u043d\u044e\u044e \u0438\u0441\u0442\u043e\u0440\u0438\u044e \u0434\u043e\u043c\u0435\u043d\u043e\u0432 \u0432 \u0432\u0430\u0448\u0435\u043c \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435.',
+    cookieCatAnalytics: '\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430',
+    cookieCatAnalyticsDesc: '\u0420\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 \u0430\u043d\u043e\u043d\u0438\u043c\u043d\u044b\u0435 \u043c\u0435\u0442\u0440\u0438\u043a\u0438 \u0438 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u044b\u0439 cookie \u0430\u043d\u0430\u043b\u0438\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0439 \u0441\u0435\u0441\u0441\u0438\u0438 \u0434\u043b\u044f \u0441\u0432\u043e\u0434\u043d\u044b\u0445 \u043f\u043e\u0434\u0441\u0447\u0435\u0442\u043e\u0432.',
+    cookieBtnReject: '\u041e\u0442\u043a\u043b\u043e\u043d\u0438\u0442\u044c \u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u044b\u0435',
+    cookieBtnSave: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438',
+    cookieBtnAcceptAll: '\u041f\u0440\u0438\u043d\u044f\u0442\u044c \u0432\u0441\u0435'
   }
 };
 
@@ -14925,8 +15214,41 @@ function getLanguageButtonHtml(code) {
   const flagUrl = LANGUAGE_FLAG_URLS[code] || '';
   const name = getLanguageDisplayName(code);
   const safeName = escapeHtml(name);
-  const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="lazy" />` : '';
+  // Flag images live inside `.language-menu { display: none; }`. With
+  // `loading="lazy"` the browser defers the fetch until the element is in
+  // the viewport, but a `display:none` element never enters the viewport,
+  // so the flags only appeared when the dropdown was first opened. Using
+  // `loading="eager"` (and a paired call to preloadLanguageFlags() during
+  // page init) ensures the SVGs are already in the HTTP cache by the time
+  // the user opens the menu, eliminating the open-time flicker.
+  const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="eager" decoding="async" />` : '';
   return `${flagHtml}<span>${safeName}</span><span class="caret">&#x25BE;</span>`;
+}
+
+// Warm the browser cache for every language flag on page load. We construct
+// a transient `Image()` for each URL: the browser issues the GET, caches
+// the response, and the Image object then becomes garbage-collectible. This
+// is intentionally fire-and-forget -- failures are silent because a missing
+// flag must not break language switching. Idempotent: subsequent calls are
+// harmless because the responses come from cache.
+let __languageFlagsPreloaded = false;
+function preloadLanguageFlags() {
+  if (__languageFlagsPreloaded) return;
+  __languageFlagsPreloaded = true;
+  try {
+    if (typeof LANGUAGE_FLAG_URLS !== 'object' || LANGUAGE_FLAG_URLS === null) return;
+    Object.keys(LANGUAGE_FLAG_URLS).forEach(function (code) {
+      const url = LANGUAGE_FLAG_URLS[code];
+      if (!url) return;
+      try {
+        const img = new Image();
+        // decoding="async" matches the in-DOM <img> so the cached response
+        // is reusable without forcing a synchronous decode.
+        img.decoding = 'async';
+        img.src = url;
+      } catch (_) { /* ignore individual failures */ }
+    });
+  } catch (_) { /* ignore */ }
 }
 
 function closeLanguageMenu() {
@@ -14949,6 +15271,12 @@ function populateLanguageSelect() {
   const button = document.getElementById('languageSelectBtn');
   const menu = document.getElementById('languageSelectMenu');
   if (!button || !menu) return;
+
+  // Kick off the flag preload as soon as the language UI is wired up. This
+  // runs on initial page load (populateLanguageSelect is called from the
+  // boot path in applyLanguageToStaticUi) so the SVGs are cached before the
+  // user has a chance to open the dropdown.
+  preloadLanguageFlags();
 
   button.innerHTML = getLanguageButtonHtml(currentLanguage);
   button.setAttribute('aria-label', `${t('languageLabel')}: ${getLanguageDisplayName(currentLanguage)}`);
@@ -14974,7 +15302,7 @@ function applyLanguageToStaticUi() {
   const lookupBtn = document.getElementById('lookupBtn');
   if (lookupBtn) {
     lookupBtn.innerHTML = lookupInProgress
-      ? `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`
+      ? `${escapeHtml(t('gatheringData'))} <span class="spinner"></span>`
       : t('lookup');
   }
 
@@ -15047,6 +15375,13 @@ function applyLanguageToStaticUi() {
   populateLanguageSelect();
   loadHistory();
   renderAzureDiagnosticsUi();
+
+  // Re-render the live check-progress popover so its labels follow the
+  // newly selected language even if a lookup is currently in flight.
+  // Guarded with typeof to stay safe while the script is still bootstrapping.
+  if (typeof renderCheckProgressPopover === 'function') {
+    renderCheckProgressPopover();
+  }
 
   if (typeof updateAuthUI === 'function') {
     updateAuthUI(lastAuthData);
@@ -16225,6 +16560,100 @@ function reportIssue() {
 '@
 # ===== JavaScript Core UI (Lookup, Render, Events) =====
 $htmlPage += @'
+// ---- Live check-progress popover helpers ----
+//
+// While a domain lookup runs, the SPA fans out 8 parallel API calls. Some
+// finish in milliseconds (cached DNS), others (WHOIS/RDAP, DNSBL fan-out)
+// can take several seconds. The popover gives the user real-time visibility
+// into which checks are still in flight, which completed, and which failed.
+//
+// UX model: the popover is shown automatically whenever a lookup is in
+// flight (replacing the legacy "Checking {domain} ..." status text) and
+// hidden as soon as every backend call has resolved. It is rendered as a
+// centered card in normal document flow between the search box and the
+// results, so it cannot be hidden behind any other element.
+//
+// State is kept on a single `checkProgress` object so the popover can be
+// re-rendered cheaply (e.g. when the language changes mid-lookup) without
+// touching the lookup workflow itself. runId guards against late updates
+// from a previous lookup leaking into the popover for a newer one.
+const checkProgress = {
+  runId: 0,
+  tasks: [],
+  // Whether a lookup is currently in flight; controls popover visibility.
+  active: false
+};
+
+// Map from API task key -> translation key. We deliberately reuse existing
+// translation keys so this feature ships in all 10 supported languages
+// without needing new translation strings. 'dkim' has no plain key in the
+// translations file (only dkim1Title/dkim2Title), but "DKIM" is the
+// universally recognized name for the standard, so a literal is fine.
+const CHECK_PROGRESS_LABELS = {
+  base:       'domain',
+  mx:         'mxRecords',
+  records:    'dnsRecords',
+  whois:      'domainRegistration',
+  dmarc:      'dmarc',
+  dkim:       null,
+  cname:      'cname',
+  reputation: 'reputationDnsbl'
+};
+
+function getCheckProgressLabel(key) {
+  if (key === 'dkim') return 'DKIM';
+  const tKey = CHECK_PROGRESS_LABELS[key];
+  return tKey ? t(tKey) : key;
+}
+
+function renderCheckProgressPopover() {
+  const el = document.getElementById('checkProgressPopover');
+  if (!el || !checkProgress.tasks || !checkProgress.tasks.length) return;
+  // Static "Gathering Data" header. The per-row spinners already convey
+  // progress, so a duplicated header spinner would be visual noise.
+  const titleHtml = '<div class="check-progress-title">'
+    + escapeHtml(t('gatheringData'))
+    + '</div>';
+  const itemsHtml = checkProgress.tasks.map(function (task) {
+    // Status -> icon glyph: spinner is rendered via CSS ::after for
+    // 'pending', so we only need glyphs for terminal states.
+    let glyph = '';
+    if (task.status === 'done') glyph = '\u2713';   // check mark
+    else if (task.status === 'error') glyph = '\u2717'; // ballot X
+    return '<li class="check-progress-item ' + escapeHtml(task.status) + '">'
+      + '<span class="check-progress-icon ' + escapeHtml(task.status) + '">' + glyph + '</span>'
+      + '<span class="check-progress-label">' + escapeHtml(getCheckProgressLabel(task.key)) + '</span>'
+      + '</li>';
+  }).join('');
+  el.innerHTML = titleHtml + '<ul class="check-progress-list">' + itemsHtml + '</ul>';
+}
+
+function markCheckProgress(runId, key, status) {
+  // Drop late updates from a superseded lookup so the popover for the
+  // current run is never corrupted by stragglers.
+  if (runId !== checkProgress.runId) return;
+  if (!checkProgress.tasks) return;
+  for (let i = 0; i < checkProgress.tasks.length; i++) {
+    if (checkProgress.tasks[i].key === key) {
+      checkProgress.tasks[i].status = status;
+      break;
+    }
+  }
+  renderCheckProgressPopover();
+}
+
+function setCheckProgressActive(active) {
+  checkProgress.active = !!active;
+  const el = document.getElementById('checkProgressPopover');
+  if (!el) return;
+  if (checkProgress.active) {
+    renderCheckProgressPopover();
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+}
+
 function lookup(options = {}) {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
@@ -16278,7 +16707,7 @@ function lookup(options = {}) {
   // Keep Lookup clickable so another click can cancel/restart
   btn.disabled = false;
   if (screenshotBtn) screenshotBtn.disabled = true;
-  btn.innerHTML = `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`;
+  btn.innerHTML = `${escapeHtml(t('gatheringData'))} <span class="spinner"></span>`;
   // setStatus("Checking " + escapeHtml(domain) + " &#x23F3;");
 
   function parseHttpError(r, bodyText) {
@@ -16364,6 +16793,34 @@ function hideTopBarItem(element) {
     { key: "reputation", path: "/api/reputation" }
   ];
 
+  // ---- Live check-progress popover state ----
+  // Tracks the per-task status displayed in #checkProgressPopover so the
+  // user can see exactly which of the eight parallel backend calls is
+  // still in flight. We initialize the state here (per-lookup, not global)
+  // so a fresh run always starts with a clean slate. The popover is
+  // shown automatically while the lookup is active and hidden as soon
+  // as setCheckProgressActive(false) is called from the .finally() below.
+  //
+  // When this lookup runs as part of the page intro (bootstrap ?domain=),
+  // we defer revealing the popover until the staggered top-section
+  // animation finishes so the popover slides in *after* the search box
+  // settles instead of beating it to the screen. For ad-hoc lookups
+  // (user clicks Lookup) the page is already settled, so reveal
+  // immediately.
+  checkProgress.runId = runId;
+  checkProgress.tasks = requests.map(function (r) { return { key: r.key, status: 'pending' }; });
+  if (animateTopIntro && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const introDelayMs = getTopSectionAnimationDurationMs();
+    window.setTimeout(function () {
+      // Drop the deferred reveal if a newer lookup has already started
+      // (or this one was cancelled) so we never flash a stale popover.
+      if (runId !== activeLookup.runId) return;
+      setCheckProgressActive(true);
+    }, introDelayMs);
+  } else {
+    setCheckProgressActive(true);
+  }
+
   let savedHistory = false;
   let downloadShown = false;
 
@@ -16407,6 +16864,9 @@ function hideTopBarItem(element) {
       }
       lastResult._loaded[key] = true;
       delete lastResult._errors[key];
+      // Mark this task as completed in the live progress popover so the
+      // user gets immediate feedback that this specific check is done.
+      markCheckProgress(runId, key, 'done');
 
       if (!downloadShown) {
         const dlBtn2 = document.getElementById("downloadBtn");
@@ -16432,6 +16892,9 @@ function hideTopBarItem(element) {
       ensureResultObject();
       lastResult._loaded[key] = true;
       lastResult._errors[key] = reason;
+      // Surface the per-task failure in the popover too so the user knows
+      // which check failed without having to scroll through cards.
+      markCheckProgress(runId, key, 'error');
       recomputeDerived(lastResult);
       render(lastResult);
     }
@@ -16446,6 +16909,8 @@ function hideTopBarItem(element) {
       if (screenshotBtn) screenshotBtn.disabled = false;
       if (dlBtn) dlBtn.disabled = false;
       btn.innerHTML = t('lookup');
+      // Lookup finished: hide the progress popover.
+      setCheckProgressActive(false);
     });
 }
 
@@ -17892,7 +18357,10 @@ function render(r) {
   let statusText = "";
 
   if (!allLoaded) {
-    statusText = `${escapeHtml(t('statusChecking', { domain: r.domain || '' }))} <span class="loading-dots status-loading-dots"><span class="loading-dot active">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span></span>`;
+    // While the lookup is still in flight, the #checkProgressPopover ("Gathering Data")
+    // already shows per-task progress, so we deliberately leave the inline #status
+    // text empty to avoid duplicating the same information twice on screen.
+    statusText = "";
   } else if (anyError) {
     statusText = escapeHtml(t('statusSomeChecksFailed'));
   } else if (loaded.base && !txtLookupResolved) {
@@ -20280,26 +20748,96 @@ async function runAzureQueryTemplate(templateName) {
 </html>
 '@
 # ===== HTML Post-Processing (Template Replacements) =====
-$htmlPage = $htmlPage.Replace('__APP_VERSION__', $script:AppVersion)
+#
+# SECURITY: Every replacement target below lands inside a single-quoted
+# JavaScript string literal in 20a-HtmlScriptSetup.ps1. Without escaping, a
+# value containing `'`, `\`, `</script>`, or a newline could either:
+#   * break the surrounding JS literal (causing a runtime SyntaxError that
+#     breaks the entire SPA), or
+#   * end the inline <script> block early (`</script>` mid-literal closes
+#     the script in HTML's tokenizer, opening a script-injection sink).
+# We feed every value through ConvertTo-JsStringLiteralBody first to
+# eliminate both classes of bug. The function does NOT add the surrounding
+# quotes -- the template still owns those -- so it is a drop-in replacement
+# for the previous raw .Replace() calls.
+function ConvertTo-JsStringLiteralBody {
+  param([string]$Value)
+  if ($null -eq $Value) { return '' }
+  $sb = [System.Text.StringBuilder]::new($Value.Length + 8)
+  foreach ($ch in $Value.ToCharArray()) {
+    switch ($ch) {
+      '\' { [void]$sb.Append('\\') }
+      "'" { [void]$sb.Append("\'") }
+      '"' { [void]$sb.Append('\"') }
+      '`' { [void]$sb.Append('\u0060') }
+      "`r" { [void]$sb.Append('\r') }
+      "`n" { [void]$sb.Append('\n') }
+      "`t" { [void]$sb.Append('\t') }
+      "`0" { [void]$sb.Append('\u0000') }
+      '<' { [void]$sb.Append('\u003C') }   # neutralizes </script> sequences
+      '>' { [void]$sb.Append('\u003E') }
+      '&' { [void]$sb.Append('\u0026') }   # avoid HTML-entity confusion in attribute contexts
+      default {
+        $code = [int][char]$ch
+        if ($code -lt 0x20) {
+          [void]$sb.Append(('\u{0:X4}' -f $code))
+        } else {
+          [void]$sb.Append($ch)
+        }
+      }
+    }
+  }
+  return $sb.ToString()
+}
+
+$htmlPage = $htmlPage.Replace('__APP_VERSION__', (ConvertTo-JsStringLiteralBody $script:AppVersion))
 
 # Inject Entra ID (Azure AD) client ID for Microsoft employee authentication.
 # Set ACS_ENTRA_CLIENT_ID env var to an Azure AD app registration configured as a
 # Single-Page Application (SPA) with redirect URI matching this app's origin.
 $entraClientId = $env:ACS_ENTRA_CLIENT_ID
 if ([string]::IsNullOrWhiteSpace($entraClientId)) { $entraClientId = '' }
-$htmlPage = $htmlPage.Replace('__ENTRA_CLIENT_ID__', $entraClientId)
+$htmlPage = $htmlPage.Replace('__ENTRA_CLIENT_ID__', (ConvertTo-JsStringLiteralBody $entraClientId))
 
 $entraTenantId = $env:ACS_ENTRA_TENANT_ID
 if ([string]::IsNullOrWhiteSpace($entraTenantId)) { $entraTenantId = '' }
-$htmlPage = $htmlPage.Replace('__ENTRA_TENANT_ID__', $entraTenantId)
+$htmlPage = $htmlPage.Replace('__ENTRA_TENANT_ID__', (ConvertTo-JsStringLiteralBody $entraTenantId))
 
 $apiKey = $env:ACS_API_KEY
 if ([string]::IsNullOrWhiteSpace($apiKey)) { $apiKey = '' }
-$htmlPage = $htmlPage.Replace('__ACS_API_KEY__', $apiKey)
+$htmlPage = $htmlPage.Replace('__ACS_API_KEY__', (ConvertTo-JsStringLiteralBody $apiKey))
 
 $issueUrl = $env:ACS_ISSUE_URL
 if ([string]::IsNullOrWhiteSpace($issueUrl)) { $issueUrl = '' }
-$htmlPage = $htmlPage.Replace('__ACS_ISSUE_URL__', $issueUrl)
+$htmlPage = $htmlPage.Replace('__ACS_ISSUE_URL__', (ConvertTo-JsStringLiteralBody $issueUrl))
+
+# MSAL SRI map: optional JSON object whose keys are URLs in msalSources and
+# whose values are SRI integrity strings (e.g. "sha384-..."). When unset, no
+# SRI is applied (preserves prior behavior). When set, the SPA refuses to
+# execute a CDN copy whose bytes do not match.
+#
+# This value is parsed by JSON.parse() in the SPA, so it MUST land as a JSON
+# literal in JS -- we therefore inject it WITHOUT calling
+# ConvertTo-JsStringLiteralBody (otherwise the JSON quotes get escaped) but
+# we DO validate it as JSON first (round-trip via ConvertFrom-Json /
+# ConvertTo-Json) so a malformed env value can never break the page or
+# inject script. Angle brackets are stripped to neutralize any embedded
+# `</script>` sequence; backslashes and single quotes are then escaped so
+# the JSON literal stays well-formed inside its surrounding single-quoted
+# JS string.
+$msalSriRaw = $env:ACS_MSAL_SRI
+$msalSriJson = 'null'
+if (-not [string]::IsNullOrWhiteSpace($msalSriRaw)) {
+  try {
+    $parsed = $msalSriRaw | ConvertFrom-Json -ErrorAction Stop
+    $reSerialized = $parsed | ConvertTo-Json -Compress -Depth 4
+    $msalSriJson = $reSerialized.Replace('<', '\u003C').Replace('>', '\u003E')
+  } catch {
+    $msalSriJson = 'null'
+  }
+}
+$msalSriForJsLiteral = $msalSriJson.Replace('\', '\\').Replace("'", "\'")
+$htmlPage = $htmlPage.Replace('__ACS_MSAL_SRI__', $msalSriForJsLiteral)
 
 # ===== Static Pages (Terms of Service, Privacy) & MSAL Setup =====
 # ------------------- Embedded Terms of Service page -------------------
@@ -21511,8 +22049,22 @@ if ($metricsEnabled) {
   }
 }
 catch {
-  # Last-resort error handler: attempt to return a JSON error payload.
-  try { Write-Json -Context $ctx -Object @{ error = $_.Exception.Message } -StatusCode 500 } catch {}
+  # SECURITY: Do NOT echo $_.Exception.Message back to the client. PowerShell
+  # exception messages frequently include file paths, stack hints, env var
+  # values, or third-party library internals (e.g. "The remote name could
+  # not be resolved: 'rdap.nic.example' (proxy=10.1.2.3)"). Returning a
+  # generic error keeps the failure observable for the SPA without leaking
+  # those details to anonymous callers.
+  #
+  # The original message is still emitted to the server console via
+  # Write-Information so operators can correlate the request log line with
+  # the underlying exception when triaging.
+  try {
+    $errMsg = $null
+    try { $errMsg = [string]$_.Exception.Message } catch { $errMsg = '<unavailable>' }
+    Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] handler error for path '$path': $errMsg"
+  } catch { }
+  try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.' } -StatusCode 500 } catch {}
   try { if ($ctx -and $ctx.Response) { $ctx.Response.Close() } } catch {}
 }
 '@

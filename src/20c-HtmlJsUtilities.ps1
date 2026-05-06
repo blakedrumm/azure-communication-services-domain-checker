@@ -411,8 +411,41 @@ function getLanguageButtonHtml(code) {
   const flagUrl = LANGUAGE_FLAG_URLS[code] || '';
   const name = getLanguageDisplayName(code);
   const safeName = escapeHtml(name);
-  const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="lazy" />` : '';
+  // Flag images live inside `.language-menu { display: none; }`. With
+  // `loading="lazy"` the browser defers the fetch until the element is in
+  // the viewport, but a `display:none` element never enters the viewport,
+  // so the flags only appeared when the dropdown was first opened. Using
+  // `loading="eager"` (and a paired call to preloadLanguageFlags() during
+  // page init) ensures the SVGs are already in the HTTP cache by the time
+  // the user opens the menu, eliminating the open-time flicker.
+  const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="eager" decoding="async" />` : '';
   return `${flagHtml}<span>${safeName}</span><span class="caret">&#x25BE;</span>`;
+}
+
+// Warm the browser cache for every language flag on page load. We construct
+// a transient `Image()` for each URL: the browser issues the GET, caches
+// the response, and the Image object then becomes garbage-collectible. This
+// is intentionally fire-and-forget -- failures are silent because a missing
+// flag must not break language switching. Idempotent: subsequent calls are
+// harmless because the responses come from cache.
+let __languageFlagsPreloaded = false;
+function preloadLanguageFlags() {
+  if (__languageFlagsPreloaded) return;
+  __languageFlagsPreloaded = true;
+  try {
+    if (typeof LANGUAGE_FLAG_URLS !== 'object' || LANGUAGE_FLAG_URLS === null) return;
+    Object.keys(LANGUAGE_FLAG_URLS).forEach(function (code) {
+      const url = LANGUAGE_FLAG_URLS[code];
+      if (!url) return;
+      try {
+        const img = new Image();
+        // decoding="async" matches the in-DOM <img> so the cached response
+        // is reusable without forcing a synchronous decode.
+        img.decoding = 'async';
+        img.src = url;
+      } catch (_) { /* ignore individual failures */ }
+    });
+  } catch (_) { /* ignore */ }
 }
 
 function closeLanguageMenu() {
@@ -435,6 +468,12 @@ function populateLanguageSelect() {
   const button = document.getElementById('languageSelectBtn');
   const menu = document.getElementById('languageSelectMenu');
   if (!button || !menu) return;
+
+  // Kick off the flag preload as soon as the language UI is wired up. This
+  // runs on initial page load (populateLanguageSelect is called from the
+  // boot path in applyLanguageToStaticUi) so the SVGs are cached before the
+  // user has a chance to open the dropdown.
+  preloadLanguageFlags();
 
   button.innerHTML = getLanguageButtonHtml(currentLanguage);
   button.setAttribute('aria-label', `${t('languageLabel')}: ${getLanguageDisplayName(currentLanguage)}`);
@@ -460,7 +499,7 @@ function applyLanguageToStaticUi() {
   const lookupBtn = document.getElementById('lookupBtn');
   if (lookupBtn) {
     lookupBtn.innerHTML = lookupInProgress
-      ? `${escapeHtml(t('checkingShort'))} <span class="spinner"></span>`
+      ? `${escapeHtml(t('gatheringData'))} <span class="spinner"></span>`
       : t('lookup');
   }
 
@@ -533,6 +572,13 @@ function applyLanguageToStaticUi() {
   populateLanguageSelect();
   loadHistory();
   renderAzureDiagnosticsUi();
+
+  // Re-render the live check-progress popover so its labels follow the
+  // newly selected language even if a lookup is currently in flight.
+  // Guarded with typeof to stay safe while the script is still bootstrapping.
+  if (typeof renderCheckProgressPopover === 'function') {
+    renderCheckProgressPopover();
+  }
 
   if (typeof updateAuthUI === 'function') {
     updateAuthUI(lastAuthData);
