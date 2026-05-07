@@ -117,6 +117,7 @@ function Register-InflightInvocation {
   $item = [pscustomobject]@{
     Ps = $PowerShellInstance
     Async = $AsyncResult
+    StartedAt = [DateTime]::UtcNow
   }
 
   $null = $inflight.TryAdd($invocationId, $item)
@@ -125,8 +126,19 @@ function Register-InflightInvocation {
 }
 
 # Reap any completed async PowerShell invocations from the main runspace.
+# SECURITY (M6): Also Stop() invocations older than 90 seconds to prevent
+# resource exhaustion from stuck lookups (e.g., slow WHOIS servers, DNS timeouts).
 function Invoke-InflightCleanup {
+  $now = [DateTime]::UtcNow
   foreach ($invocationId in @($inflight.Keys)) {
+    # Force-stop invocations older than 90 seconds
+    $item = $null
+    if ($inflight.TryGetValue($invocationId, [ref]$item)) {
+      if ($item -and $item.StartedAt -and (($now - $item.StartedAt).TotalSeconds -gt 90)) {
+        Complete-InflightInvocation -InvocationId $invocationId -Force
+        continue
+      }
+    }
     Complete-InflightInvocation -InvocationId $invocationId
   }
 }

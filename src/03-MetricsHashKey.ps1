@@ -40,11 +40,14 @@ if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
 # Acquire a cross-process mutex to protect the metrics JSON file from concurrent writes.
 # Tries multiple mutex naming strategies for compatibility across Windows, Linux, and containers.
 # Returns the held mutex (caller must release), or $null if acquisition timed out.
+#
+# SECURITY: Uses Local\ scope (session-local) instead of Global\ to prevent cross-user
+# mutex squatting. A malicious low-privilege account cannot pre-create the Global mutex
+# and deny service to the metrics persistence layer.
 function Acquire-MetricsFileMutex {
   param([int]$TimeoutMs = 5000)
 
   $names = @(
-    'Global\\ACSAnonMetricsFileLock',
     'Local\\ACSAnonMetricsFileLock',
     'ACSAnonMetricsFileLock'
   )

@@ -144,6 +144,13 @@ function Set-NoCacheHeaders {
 # - Hard-cap timeout per request and the number of redirects we will follow.
 # - Centralize the outbound surface so future hardening (proxy, per-request
 #   call counter, IP allow-list) only has to land in one place.
+#
+# SECURITY (M2): MaximumRedirection is set to 0 (no redirects) by default to
+# prevent SSRF. A compromised IANA RDAP bootstrap or DoH endpoint could
+# redirect to internal metadata services (Azure IMDS, Kubernetes API, etc.).
+# Callers that genuinely need redirect support (e.g., rdap.org proxy) must
+# explicitly pass -MaximumRedirection.
+#
 # Returns the deserialized body when -ReturnRaw is omitted; throws on failure
 # so callers' existing try/catch flow keeps working.
 function Invoke-OutboundHttp {
@@ -157,7 +164,7 @@ function Invoke-OutboundHttp {
 
     [int]$TimeoutSec = 15,
 
-    [int]$MaximumRedirection = 3,
+    [int]$MaximumRedirection = 0,
 
     [switch]$ReturnRaw
   )

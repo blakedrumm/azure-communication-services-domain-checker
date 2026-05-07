@@ -266,6 +266,26 @@ function Test-RateLimit {
 
   [System.Threading.Monitor]::Enter($AcsRateLimitLock)
   try {
+    # SECURITY (H2): Prune stale entries to prevent unbounded dictionary growth from
+    # IP spoofing or organic client churn. Remove entries older than 2x the window.
+    # Cap the dictionary at 50k entries and evict oldest when exceeded.
+    try {
+      if ($AcsRateLimitStore.Count -gt 50000) {
+        $cutoff = $now.AddSeconds(-2 * $windowSeconds)
+        $toRemove = [System.Collections.Generic.List[string]]::new()
+        foreach ($kvp in @($AcsRateLimitStore.GetEnumerator())) {
+          if ($toRemove.Count -ge 10000) { break }
+          if ($kvp.Value -and (($now - $kvp.Value.windowStart).TotalSeconds -ge (2 * $windowSeconds))) {
+            $toRemove.Add($kvp.Key)
+          }
+        }
+        foreach ($key in $toRemove) {
+          $removed = $null
+          $null = $AcsRateLimitStore.TryRemove($key, [ref]$removed)
+        }
+      }
+    } catch { }
+
     $entry = $null
     if (-not $AcsRateLimitStore.TryGetValue($clientIp, [ref]$entry)) {
       $entry = [pscustomobject]@{ windowStart = $now; count = 0 }

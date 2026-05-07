@@ -392,15 +392,18 @@ function Get-DomainRegistrationStatus {
       -not [string]::IsNullOrWhiteSpace([string]$rawWhoisText)
 
     if (-not $usedFallback -and -not $hasExistingData) {
-      $err = 'RDAP lookup failed.'
-      if ($rdapError) { $err += " RDAP error: $rdapError." }
-      if ($goDaddyError) { $err += " GoDaddy error: $goDaddyError." }
-      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += ' GoDaddy not configured.' }
-      if ($sysWhoisError) { $err += " Sysinternals whois error: $sysWhoisError." }
-      if ($linuxWhoisError) { $err += " Linux whois error: $linuxWhoisError." }
-      if ($tcpWhoisError) { $err += " TCP whois error: $tcpWhoisError." }
-      if ($whoisXmlError) { $err += " WhoisXML error: $whoisXmlError." }
-      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += ' WhoisXML not configured.' }
+      # SECURITY (M5): Sanitize provider error messages to avoid leaking API URLs,
+      # provider names, or configuration details to anonymous clients. Map to
+      # generic failure strings instead.
+      $err = 'Domain registration lookup failed.'
+      if ($rdapError) { $err += " RDAP unavailable." }
+      if ($goDaddyError) { $err += " External API unavailable." }
+      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += ' External API not configured.' }
+      if ($sysWhoisError) { $err += " WHOIS unavailable." }
+      if ($linuxWhoisError) { $err += " WHOIS unavailable." }
+      if ($tcpWhoisError) { $err += " WHOIS unavailable." }
+      if ($whoisXmlError) { $err += " External API unavailable." }
+      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += ' External API not configured.' }
 
       $parentDomains = @(Get-ParentDomains -Domain $d)
       foreach ($parentDomain in $parentDomains) {

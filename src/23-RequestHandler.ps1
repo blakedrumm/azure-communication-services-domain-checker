@@ -95,6 +95,11 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
   # request burst against many distinct domains cannot balloon the dictionary
   # before the next prune fires; the prune walk itself is bounded so a very
   # large dictionary cannot pin the request thread either.
+  #
+  # SECURITY (H3): Don't Dispose removed semaphores to avoid ObjectDisposedException
+  # race if another worker calls TryGetValue+Wait between our CurrentCount check
+  # and TryRemove. Removal alone is sufficient to bound memory; GC reclaims the
+  # semaphore once all references drain.
   try {
     if ($domainLocks.Count -gt 1000) {
       $pruneBudget = 2000
@@ -105,9 +110,8 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
         if ($domainLocks.TryGetValue($existingKey, [ref]$existingSem)) {
           if ($existingSem -and $existingSem.CurrentCount -eq 1) {
             $removed = $null
-            if ($domainLocks.TryRemove($existingKey, [ref]$removed)) {
-              try { $removed.Dispose() } catch { }
-            }
+            $null = $domainLocks.TryRemove($existingKey, [ref]$removed)
+            # Do NOT Dispose here - let GC handle it after references drain
           }
         }
       }

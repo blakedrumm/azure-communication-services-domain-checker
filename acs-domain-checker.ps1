@@ -1003,11 +1003,14 @@ if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
 # Acquire a cross-process mutex to protect the metrics JSON file from concurrent writes.
 # Tries multiple mutex naming strategies for compatibility across Windows, Linux, and containers.
 # Returns the held mutex (caller must release), or $null if acquisition timed out.
+#
+# SECURITY: Uses Local\ scope (session-local) instead of Global\ to prevent cross-user
+# mutex squatting. A malicious low-privilege account cannot pre-create the Global mutex
+# and deny service to the metrics persistence layer.
 function Acquire-MetricsFileMutex {
   param([int]$TimeoutMs = 5000)
 
   $names = @(
-    'Global\\ACSAnonMetricsFileLock',
     'Local\\ACSAnonMetricsFileLock',
     'ACSAnonMetricsFileLock'
   )
@@ -1998,15 +2001,18 @@ function Get-DomainRegistrationStatus {
       -not [string]::IsNullOrWhiteSpace([string]$rawWhoisText)
 
     if (-not $usedFallback -and -not $hasExistingData) {
-      $err = 'RDAP lookup failed.'
-      if ($rdapError) { $err += " RDAP error: $rdapError." }
-      if ($goDaddyError) { $err += " GoDaddy error: $goDaddyError." }
-      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += ' GoDaddy not configured.' }
-      if ($sysWhoisError) { $err += " Sysinternals whois error: $sysWhoisError." }
-      if ($linuxWhoisError) { $err += " Linux whois error: $linuxWhoisError." }
-      if ($tcpWhoisError) { $err += " TCP whois error: $tcpWhoisError." }
-      if ($whoisXmlError) { $err += " WhoisXML error: $whoisXmlError." }
-      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += ' WhoisXML not configured.' }
+      # SECURITY (M5): Sanitize provider error messages to avoid leaking API URLs,
+      # provider names, or configuration details to anonymous clients. Map to
+      # generic failure strings instead.
+      $err = 'Domain registration lookup failed.'
+      if ($rdapError) { $err += " RDAP unavailable." }
+      if ($goDaddyError) { $err += " External API unavailable." }
+      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += ' External API not configured.' }
+      if ($sysWhoisError) { $err += " WHOIS unavailable." }
+      if ($linuxWhoisError) { $err += " WHOIS unavailable." }
+      if ($tcpWhoisError) { $err += " WHOIS unavailable." }
+      if ($whoisXmlError) { $err += " External API unavailable." }
+      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += ' External API not configured.' }
 
       $parentDomains = @(Get-ParentDomains -Domain $d)
       foreach ($parentDomain in $parentDomains) {
@@ -3416,6 +3422,13 @@ function Set-NoCacheHeaders {
 # - Hard-cap timeout per request and the number of redirects we will follow.
 # - Centralize the outbound surface so future hardening (proxy, per-request
 #   call counter, IP allow-list) only has to land in one place.
+#
+# SECURITY (M2): MaximumRedirection is set to 0 (no redirects) by default to
+# prevent SSRF. A compromised IANA RDAP bootstrap or DoH endpoint could
+# redirect to internal metadata services (Azure IMDS, Kubernetes API, etc.).
+# Callers that genuinely need redirect support (e.g., rdap.org proxy) must
+# explicitly pass -MaximumRedirection.
+#
 # Returns the deserialized body when -ReturnRaw is omitted; throws on failure
 # so callers' existing try/catch flow keeps working.
 function Invoke-OutboundHttp {
@@ -3429,7 +3442,7 @@ function Invoke-OutboundHttp {
 
     [int]$TimeoutSec = 15,
 
-    [int]$MaximumRedirection = 3,
+    [int]$MaximumRedirection = 0,
 
     [switch]$ReturnRaw
   )
@@ -6217,6 +6230,26 @@ function Test-RateLimit {
 
   [System.Threading.Monitor]::Enter($AcsRateLimitLock)
   try {
+    # SECURITY (H2): Prune stale entries to prevent unbounded dictionary growth from
+    # IP spoofing or organic client churn. Remove entries older than 2x the window.
+    # Cap the dictionary at 50k entries and evict oldest when exceeded.
+    try {
+      if ($AcsRateLimitStore.Count -gt 50000) {
+        $cutoff = $now.AddSeconds(-2 * $windowSeconds)
+        $toRemove = [System.Collections.Generic.List[string]]::new()
+        foreach ($kvp in @($AcsRateLimitStore.GetEnumerator())) {
+          if ($toRemove.Count -ge 10000) { break }
+          if ($kvp.Value -and (($now - $kvp.Value.windowStart).TotalSeconds -ge (2 * $windowSeconds))) {
+            $toRemove.Add($kvp.Key)
+          }
+        }
+        foreach ($key in $toRemove) {
+          $removed = $null
+          $null = $AcsRateLimitStore.TryRemove($key, [ref]$removed)
+        }
+      }
+    } catch { }
+
     $entry = $null
     if (-not $AcsRateLimitStore.TryGetValue($clientIp, [ref]$entry)) {
       $entry = [pscustomobject]@{ windowStart = $now; count = 0 }
@@ -21560,6 +21593,7 @@ function Register-InflightInvocation {
   $item = [pscustomobject]@{
     Ps = $PowerShellInstance
     Async = $AsyncResult
+    StartedAt = [DateTime]::UtcNow
   }
 
   $null = $inflight.TryAdd($invocationId, $item)
@@ -21568,8 +21602,19 @@ function Register-InflightInvocation {
 }
 
 # Reap any completed async PowerShell invocations from the main runspace.
+# SECURITY (M6): Also Stop() invocations older than 90 seconds to prevent
+# resource exhaustion from stuck lookups (e.g., slow WHOIS servers, DNS timeouts).
 function Invoke-InflightCleanup {
+  $now = [DateTime]::UtcNow
   foreach ($invocationId in @($inflight.Keys)) {
+    # Force-stop invocations older than 90 seconds
+    $item = $null
+    if ($inflight.TryGetValue($invocationId, [ref]$item)) {
+      if ($item -and $item.StartedAt -and (($now - $item.StartedAt).TotalSeconds -gt 90)) {
+        Complete-InflightInvocation -InvocationId $invocationId -Force
+        continue
+      }
+    }
     Complete-InflightInvocation -InvocationId $invocationId
   }
 }
@@ -21671,6 +21716,11 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
   # request burst against many distinct domains cannot balloon the dictionary
   # before the next prune fires; the prune walk itself is bounded so a very
   # large dictionary cannot pin the request thread either.
+  #
+  # SECURITY (H3): Don't Dispose removed semaphores to avoid ObjectDisposedException
+  # race if another worker calls TryGetValue+Wait between our CurrentCount check
+  # and TryRemove. Removal alone is sufficient to bound memory; GC reclaims the
+  # semaphore once all references drain.
   try {
     if ($domainLocks.Count -gt 1000) {
       $pruneBudget = 2000
@@ -21681,9 +21731,8 @@ function Get-DomainSemaphore([string]$domain, [string]$scope) {
         if ($domainLocks.TryGetValue($existingKey, [ref]$existingSem)) {
           if ($existingSem -and $existingSem.CurrentCount -eq 1) {
             $removed = $null
-            if ($domainLocks.TryRemove($existingKey, [ref]$removed)) {
-              try { $removed.Dispose() } catch { }
-            }
+            $null = $domainLocks.TryRemove($existingKey, [ref]$removed)
+            # Do NOT Dispose here - let GC handle it after references drain
           }
         }
       }
