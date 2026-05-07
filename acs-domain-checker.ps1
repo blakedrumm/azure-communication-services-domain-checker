@@ -18936,9 +18936,6 @@ function render(r) {
     if (r.whoisExpiryHuman) {
       addWhoisRow(t('domainExpiringIn'), r.whoisIsExpired === true ? t('wordExpired') : localizeDurationText(r.whoisExpiryHuman));
     }
-    if (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) {
-      addWhoisRow(t('daysUntilExpiry'), String(r.whoisExpiryDays));
-    }
     if (isExpired) {
       addWhoisRow(t('statusLabel'), localizeWhoisStatus(t('expired')));
     } else if (isVeryYoung) {
