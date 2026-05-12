@@ -189,6 +189,20 @@ $script:EnableAnonymousMetrics = $anonMetricsEnabled
 if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
   $AnonymousMetricsFile = $env:ACS_ANON_METRICS_FILE
 }
+if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
+  $AnonymousMetricsFile = Join-Path -Path $PSScriptRoot -ChildPath 'acs-anon-metrics.json'
+}
+$AnonymousMetricsFile = [System.IO.Path]::GetFullPath($AnonymousMetricsFile)
+$env:ACS_ANON_METRICS_FILE = $AnonymousMetricsFile
+
+# DoH endpoint: CLI parameter wins, otherwise honor ACS_DNS_DOH_ENDPOINT. Worker
+# runspaces read the env var directly inside Resolve-DohName, so we always
+# round-trip through the env var even when the CLI param wins.
+if ([string]::IsNullOrWhiteSpace($DohEndpoint)) {
+  if (-not [string]::IsNullOrWhiteSpace($env:ACS_DNS_DOH_ENDPOINT)) {
+    $DohEndpoint = $env:ACS_DNS_DOH_ENDPOINT
+  }
+}
 
 # Trusted reverse-proxy list. CLI parameter wins over environment variable.
 # Get-ClientIp consults `$env:ACS_TRUSTED_PROXIES` directly so the list is

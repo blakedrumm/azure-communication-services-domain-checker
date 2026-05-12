@@ -45,6 +45,7 @@ function Get-DomainRegistrationStatus {
       newDomainThresholdDays = $NewDomainWarnThresholdDays
       newDomainWarnThresholdDays = $NewDomainWarnThresholdDays
       newDomainErrorThresholdDays = $NewDomainErrorThresholdDays
+      registryWebForm = $null
       error = 'Missing domain'
     }
   }
@@ -63,6 +64,11 @@ function Get-DomainRegistrationStatus {
   $whoisError = $null
   $rawWhoisText = $null
   $rawRdapText = $null
+  # When the IANA upstream replies with the "This TLD has no whois server"
+  # referral (e.g. for .gr / .ελ), we capture the registry's advertised web-form
+  # URL here so the SPA can render a friendly clickable panel instead of the
+  # raw banner. Populated as we walk providers; the final return surfaces it.
+  $registryWebForm = $null
 
   $rdapError = $null
   $goDaddyError = $null
@@ -226,6 +232,21 @@ function Get-DomainRegistrationStatus {
           $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
+          # Some ccTLD registries (e.g. FORTH for .gr / .ελ) do not run a port-43
+          # WHOIS server. The Linux whois client prints a "This TLD has no whois
+          # server" notice pointing at the registry's web form. Capture that URL
+          # so the SPA can render a polished link panel, then treat this provider
+          # as having produced no usable data so the chain advances to any
+          # API-based fallback (WhoisXML / GoDaddy) that is configured.
+          if (-not $hasParsedFields -and $hasRawText) {
+            $maybeWebForm = Get-RegistryWebFormUrl -Text $raw.rawText -Domain $whoisDomain
+            if (-not [string]::IsNullOrWhiteSpace($maybeWebForm)) {
+              if ([string]::IsNullOrWhiteSpace($registryWebForm)) { $registryWebForm = $maybeWebForm }
+              $rawHasUsableData = $false
+              $rawWhoisText = $null
+            }
+          }
+
           if ($hasParsedFields) {
             $source = 'LinuxWhois'
             $usedFallback = $true
@@ -276,6 +297,16 @@ function Get-DomainRegistrationStatus {
           $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
 
+          # Same IANA "no whois server" referral capture as the Linux branch above.
+          if (-not $hasParsedFields -and $hasRawText) {
+            $maybeWebForm = Get-RegistryWebFormUrl -Text $raw.rawText -Domain $whoisDomain
+            if (-not [string]::IsNullOrWhiteSpace($maybeWebForm)) {
+              if ([string]::IsNullOrWhiteSpace($registryWebForm)) { $registryWebForm = $maybeWebForm }
+              $rawHasUsableData = $false
+              $rawWhoisText = $null
+            }
+          }
+
           if ($hasParsedFields) {
             $source = 'SysinternalsWhois'
             $usedFallback = $true
@@ -325,6 +356,16 @@ function Get-DomainRegistrationStatus {
           $hasParsedFields = $creation -or $expiry -or $registrar -or $registrant
           $hasRawText = -not [string]::IsNullOrWhiteSpace($raw.rawText)
           $rawHasUsableData = $hasRawText -and (Test-WhoisRawTextHasUsableData -Text $raw.rawText)
+
+          # Same IANA "no whois server" referral capture as the Linux branch above.
+          if (-not $hasParsedFields -and $hasRawText) {
+            $maybeWebForm = Get-RegistryWebFormUrl -Text $raw.rawText -Domain $whoisDomain
+            if (-not [string]::IsNullOrWhiteSpace($maybeWebForm)) {
+              if ([string]::IsNullOrWhiteSpace($registryWebForm)) { $registryWebForm = $maybeWebForm }
+              $rawHasUsableData = $false
+              $rawWhoisText = $null
+            }
+          }
 
           if ($hasParsedFields) {
             $source = 'TcpWhois'
@@ -383,6 +424,29 @@ function Get-DomainRegistrationStatus {
       }
     }
 
+    # TLD-aware safety net: some ccTLD registries (e.g. FORTH for .gr / .ελ) do
+    # not run a port-43 WHOIS or RDAP service at all. Different providers fail
+    # for this in different ways:
+    #   - Linux `whois` prints the IANA "This TLD has no whois server" referral
+    #     (caught by Get-RegistryWebFormUrl in the per-provider branches above).
+    #   - Sysinternals on Windows queries gr.whois-servers.net which routes to
+    #     RIPE and returns "%ERROR:101: no entries found" + "No such host is
+    #     known", which contains no marker phrase to detect.
+    # When we know the TLD is web-form-only, surface the canonical web-form URL
+    # and discard any misleading raw text and provider-specific error strings
+    # so the SPA renders the friendly link panel uniformly across platforms.
+    $knownWebForm = Get-KnownRegistryWebFormUrl -Domain $whoisDomain
+    if (-not [string]::IsNullOrWhiteSpace($knownWebForm) -and -not $usedFallback) {
+      if ([string]::IsNullOrWhiteSpace($registryWebForm)) { $registryWebForm = $knownWebForm }
+      $rawWhoisText = $null
+      # Clear the per-provider error strings so the no-data path below does not
+      # synthesize an "X unavailable" string for a TLD that legitimately has no
+      # X-style service.
+      $sysWhoisError = $null
+      $linuxWhoisError = $null
+      $tcpWhoisError = $null
+    }
+
     $hasExistingData =
       -not [string]::IsNullOrWhiteSpace([string]$source) -or
       -not [string]::IsNullOrWhiteSpace([string]$creation) -or
@@ -421,6 +485,30 @@ function Get-DomainRegistrationStatus {
         }
       }
 
+      # When every provider failed but at least one of them returned the IANA
+      # "This TLD has no whois server" referral, surface the registry's
+      # advertised web-form URL so the SPA can render a polished link panel
+      # instead of just an error string. We intentionally check this AFTER the
+      # parent-domain loop so a registrable parent that does have WHOIS still
+      # wins over a static "use our web form" notice.
+      if ([string]::IsNullOrWhiteSpace($registryWebForm)) {
+        foreach ($candidate in @($rawWhoisText, $rawRdapText)) {
+          if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+          $maybeUrl = Get-RegistryWebFormUrl -Text $candidate -Domain $whoisDomain
+          if (-not [string]::IsNullOrWhiteSpace($maybeUrl)) {
+            $registryWebForm = $maybeUrl
+            break
+          }
+        }
+      }
+
+      # When a registry-web-form URL is available the SPA renders a friendly
+      # link panel and a generic "WHOIS unavailable" error string would just be
+      # noise (and on the Email Quota row would render a misleading red ERROR
+      # state). Suppress it here so both the card and the summary use the
+      # neutral INFO presentation tied to the web-form panel.
+      $errToReturn = if ([string]::IsNullOrWhiteSpace($registryWebForm)) { $err.Trim() } else { $null }
+
       return [pscustomobject]@{
         domain = $d
         lookupDomain = $whoisDomain
@@ -437,7 +525,8 @@ function Get-DomainRegistrationStatus {
         newDomainWarnThresholdDays = $NewDomainWarnThresholdDays
         newDomainErrorThresholdDays = $NewDomainErrorThresholdDays
         rawRdapText = $null
-        error = $err.Trim()
+        registryWebForm = $registryWebForm
+        error = $errToReturn
       }
     }
   }
@@ -562,6 +651,7 @@ function Get-DomainRegistrationStatus {
     newDomainErrorThresholdDays = $NewDomainErrorThresholdDays
     rawWhoisText = $rawWhoisText
     rawRdapText = $rawRdapText
+    registryWebForm = $registryWebForm
     error = $whoisError
   }
 }

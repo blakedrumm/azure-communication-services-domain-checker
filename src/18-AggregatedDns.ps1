@@ -244,6 +244,7 @@ function Get-AcsDnsStatus {
         whoisExpiryUnavailableReason = $whois.expiryUnavailableReason
         whoisNewDomainWarnThresholdDays = $whois.newDomainWarnThresholdDays
         whoisNewDomainErrorThresholdDays = $whois.newDomainErrorThresholdDays
+        whoisRegistryWebForm = $whois.registryWebForm
         whoisError         = $whois.error
 
         dmarc      = $dmarc.dmarc

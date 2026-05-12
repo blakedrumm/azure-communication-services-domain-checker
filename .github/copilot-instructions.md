@@ -59,13 +59,13 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 | `01-DomainParsing.ps1` | ~77 | `Get-RegistrableDomain`, `Get-ParentDomains` — extract registrable domain from FQDN |
 | `02-WhoisProviders.ps1` | ~614 | Three WHOIS backends: `Invoke-SysinternalsWhoisLookup` (Windows), `Invoke-LinuxWhoisLookup` (Linux), `Invoke-TcpWhoisLookup` (raw TCP fallback) |
 | `04-RdapLookups.ps1` | ~225 | RDAP protocol lookups (`Invoke-RdapLookup`), plus WhoisXML and GoDaddy API fallbacks. `Invoke-WhoisXmlLookup` sends the API key in the `Authorization: Bearer` header by default so it never lands in proxy/access logs or `Referer` headers. Set `ACS_WHOISXML_KEY_IN_QUERY=1` to fall back to the legacy `?apiKey=...` query-string behavior on networks whose proxies strip Authorization headers. |
-| `07-DomainRegistration.ps1` | ~405 | `Get-DomainRegistrationStatus` — orchestrates RDAP → WHOIS → API fallback chain, returns creation/expiry dates; expose raw RDAP data when available. If raw WHOIS/RDAP data is the only available content, show it inline without a Raw button; only show the Raw WHOIS/RDAP button when structured WHOIS/RDAP fields are also present and the raw content is hidden behind a collapsible section. |
+| `07-DomainRegistration.ps1` | ~405 | `Get-DomainRegistrationStatus` — orchestrates RDAP → WHOIS → API fallback chain, returns creation/expiry dates; expose raw RDAP data when available. If raw WHOIS/RDAP data is the only available content, show it inline without a Raw button; only show the Raw WHOIS/RDAP button when structured WHOIS/RDAP fields are also present and the raw content is hidden behind a collapsible section. When the only response is the IANA "This TLD has no whois server" referral (e.g. `.gr` / `.ελ` via FORTH), the raw banner is suppressed and the registry's web-form URL is exposed via the `registryWebForm` field so the SPA can render a friendly link panel. |
 
 ### Metrics & Configuration
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.88`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.0.97`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics`. The `Secure` attribute on `acs_session` only honors the `X-Forwarded-Proto` header when the immediate TCP peer is in `ACS_TRUSTED_PROXIES` (mirrors `Get-ClientIp`); otherwise it falls back to `Request.Url.Scheme` so an untrusted client cannot trick the server into stamping `Secure` on a plaintext cookie. |
 

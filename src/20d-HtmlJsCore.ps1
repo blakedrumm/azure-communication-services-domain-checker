@@ -294,6 +294,7 @@ function hideTopBarItem(element) {
         lastResult.whoisError = data.error;
         lastResult.whoisRawText = data.rawWhoisText;
         lastResult.whoisRawRdapText = data.rawRdapText;
+        lastResult.whoisRegistryWebForm = data.registryWebForm || null;
       } else if (key === 'reputation') {
         lastResult.reputation = data;
       } else if (key === 'records') {
@@ -1849,7 +1850,11 @@ function render(r) {
     // 3. Registration
     const whoisErrorText = errors.whois || r.whoisError || '';
     const whoisHasData = !!(r.whoisSource || r.whoisCreationDateUtc || r.whoisExpiryDateUtc || r.whoisRegistrar || r.whoisRegistrant || r.whoisAgeHuman || r.whoisExpiryHuman);
-    if (whoisErrorText || !whoisHasData) {
+    // Treat web-form-only TLDs (e.g. .gr) as a neutral INFO, not a warning:
+    // the registry intentionally does not publish WHOIS/RDAP, so the absence
+    // of structured data is expected and shouldn't tarnish the overall state.
+    const whoisRegistryWebFormOnly = !!(typeof r.whoisRegistryWebForm === 'string' && r.whoisRegistryWebForm.trim() && !whoisHasData);
+    if (!whoisRegistryWebFormOnly && (whoisErrorText || !whoisHasData)) {
         quotaWarn = true; // missing/failed WHOIS should not show PASS
     }
     if (r.whoisIsExpired === true || r.whoisIsVeryYoungDomain === true || r.whoisIsYoungDomain === true) {
@@ -2045,10 +2050,21 @@ function render(r) {
   let regState = 'PENDING';
   const whoisErrorText = errors.whois || r.whoisError || '';
   const whoisHasData = !!(r.whoisSource || r.whoisCreationDateUtc || r.whoisExpiryDateUtc || r.whoisRegistrar || r.whoisRegistrant || r.whoisAgeHuman || r.whoisExpiryHuman);
+  // When the registry doesn't operate WHOIS/RDAP at all (e.g. .gr / .ελ via
+  // FORTH) we render a friendly link panel in the card. The Email Quota row
+  // for the same check should not display a misleading red ERROR; instead use
+  // a neutral INFO state with a localized "registry-only web form" message.
+  const whoisRegistryWebFormUrl = (typeof r.whoisRegistryWebForm === 'string' && r.whoisRegistryWebForm.trim()) ? r.whoisRegistryWebForm.trim() : '';
 
   if (!loaded.whois && !errors.whois) {
     quotaItems.push(quotaRow(t('domainRegistration'), 'pending', t('loadingValue'), null, 'whois'));
     regState = 'PENDING';
+  } else if (whoisRegistryWebFormUrl && !whoisHasData) {
+    const msg = t('registryNoWhoisShort');
+    quotaItems.push(quotaRow(t('domainRegistration'), 'info', msg, null, 'whois'));
+    regState = 'INFO';
+    quotaLines.push(`**Domain Registration:** ${regState} - ${msg}`);
+    quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)} - ${escapeHtml(msg)}`);
   } else if (whoisErrorText) {
     quotaItems.push(quotaRow(t('domainRegistration'), 'error', whoisErrorText, null, 'whois'));
     regState = 'ERROR';
@@ -2365,6 +2381,30 @@ function render(r) {
       isYoung ||
       isVeryYoung
     );
+
+    // Some ccTLD registries (e.g. FORTH for .gr / .ελ) do not run a port-43
+    // WHOIS server, and the IANA upstream replies with a referral pointing at
+    // the registry's web form. The PowerShell side captures that URL into
+    // `whoisRegistryWebForm`. Render it as a friendly INFO panel with a
+    // clickable link instead of dumping the raw "This TLD has no whois server"
+    // banner, so users have a clear next step. Localized strings fall back to
+    // English via t() when a language doesn't override them yet.
+    const registryWebFormUrl = (typeof r.whoisRegistryWebForm === 'string' && r.whoisRegistryWebForm.trim()) ? r.whoisRegistryWebForm.trim() : '';
+    const showRegistryWebFormPanel = !!registryWebFormUrl && !hasStructuredWhoisDetails;
+    let registryWebFormHtml = '';
+    if (showRegistryWebFormPanel) {
+      let displayUrl = registryWebFormUrl;
+      try { displayUrl = new URL(registryWebFormUrl).host || registryWebFormUrl; } catch (_) { /* keep raw */ }
+      registryWebFormHtml = `
+        <div class="rdap-digest-section" style="margin-top:10px;">
+          <div class="rdap-digest-title">${escapeHtml(t('registryNoWhoisHeading'))}</div>
+          <div style="margin-top:6px;">${escapeHtml(t('registryNoWhoisExplanation', { domain: r.whoisLookupDomain || r.domain || '' }))}</div>
+          <div style="margin-top:8px;">
+            <a href="${escapeHtml(registryWebFormUrl)}" target="_blank" rel="noopener noreferrer" class="external-link">${escapeHtml(t('registryWebFormCta', { host: displayUrl }))}</a>
+          </div>
+        </div>`;
+    }
+
     const rawSectionHtml = [];
     if (r.whoisRawRdapText) {
       rawSectionHtml.push(renderRdapDigest(r.whoisRawRdapText));
@@ -2382,7 +2422,10 @@ function render(r) {
     const rawWhoisHtml = hasRawRegistrationData
       ? `<div id="whoisRawData" class="whois-raw-panel" style="margin-top:10px;${showRawInline ? '' : ' display:none;'}">${rawSectionHtml.join('')}</div>`
       : '';
-    const whoisErrorHtml = r.whoisError
+    // Suppress the bare "Domain registration lookup failed." error string when
+    // we already have a friendly registry web-form panel to show; the panel
+    // explains the situation more clearly than a generic error line.
+    const whoisErrorHtml = (r.whoisError && !showRegistryWebFormPanel)
       ? `<div class="code" style="margin-top:10px;">${escapeHtml(t('error'))}: ${escapeHtml(r.whoisError)}</div>`
       : '';
 
@@ -2409,6 +2452,7 @@ function render(r) {
     </div>
     <div id="field-whois" class="card-content">
       ${whoisRows.length > 0 ? `<div class="kv-grid">${whoisRows.join('')}</div>` : `<div class="code">${escapeHtml(t('noRegistrationInformation'))}</div>`}
+      ${registryWebFormHtml}
       ${rawWhoisButtonHtml}
       ${rawWhoisHtml}
       ${whoisErrorHtml}
