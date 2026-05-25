@@ -486,11 +486,16 @@ function Get-WhoisCreationDateLabelRegex {
   # emit lines like 'Registered: yes' or 'Registered: contact@example.com', which
   # silently produced bogus creation dates. Use the more specific 'Registered On'
   # / 'Registered on' variants instead.
-  '(?im)^(Creation Date|Created On|Registered On|Registered on|Registration Date|Domain Create Date|Creation date|Domain record activated):\s*(.+)$'
+  #
+  # The optional '[.\s]*' between the label and the colon lets us match the
+  # dotted padding TRABIS (nic.tr) emits, e.g. 'Created on..............:'.
+  '(?im)^(Creation Date|Created On|Created on|Registered On|Registered on|Registration Date|Domain Create Date|Creation date|Domain record activated)[.\s]*:\s*(.+)$'
 }
 
 function Get-WhoisExpiryDateLabelRegex {
-  '(?im)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date|Domain expires):\s*(.+)$'
+  # 'Expires on' (with optional dotted padding) is the label TRABIS (.tr) uses;
+  # the rest of the alternatives cover gTLD/ICANN templates.
+  '(?im)^(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date|Domain expires|Expires on)[.\s]*:\s*(.+)$'
 }
 
 # Lazy-initialize compiled regex objects once per script process. The previous
@@ -514,11 +519,16 @@ function Initialize-WhoisFieldRegexes {
      -bor [System.Text.RegularExpressions.RegexOptions]::Compiled
 
   # Field-line patterns. Each pattern matches the entire trimmed line and
-  # captures the value into group 1.
-  $script:WhoisCreationRegexCompiled        = [regex]::new('^(?:Creation Date|Created On|Registered On|Registered on|Registration Date|Domain Create Date|Creation date|Domain record activated):\s*(.+)$', $opt)
-  $script:WhoisExpiryRegexCompiled          = [regex]::new('^(?:Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date|Domain expires):\s*(.+)$', $opt)
-  $script:WhoisRegistrarRegexCompiled       = [regex]::new('^(?:Registrar|Registrar name|Registrar Name|Sponsoring Registrar):\s*(.+)$', $opt)
-  $script:WhoisRegistrantRegexCompiled      = [regex]::new('^(?:Registrant Name|Registrant Organisation|Registrant Organization):\s*(.+)$', $opt)
+  # captures the value into group 1. The optional '[.\s]*' between the label
+  # and the colon lets us match TRABIS (.tr) lines such as
+  # 'Created on..............: 2014-Dec-30.' where the registry pads the label
+  # out with dots. 'Created on' / 'Expires on' (lowercase 'on') and
+  # 'Organization Name' (the registrar line inside nic.tr's '** Registrar:'
+  # block) are added as additional aliases for the same reason.
+  $script:WhoisCreationRegexCompiled        = [regex]::new('^(?:Creation Date|Created On|Created on|Registered On|Registered on|Registration Date|Domain Create Date|Creation date|Domain record activated)[.\s]*:\s*(.+)$', $opt)
+  $script:WhoisExpiryRegexCompiled          = [regex]::new('^(?:Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Registrar Registration Expiration date|Domain expires|Expires on)[.\s]*:\s*(.+)$', $opt)
+  $script:WhoisRegistrarRegexCompiled       = [regex]::new('^(?:Registrar|Registrar name|Registrar Name|Sponsoring Registrar|Organization Name)[.\s]*:\s*(.+)$', $opt)
+  $script:WhoisRegistrantRegexCompiled      = [regex]::new('^(?:Registrant Name|Registrant Organisation|Registrant Organization)[.\s]*:\s*(.+)$', $opt)
   $script:WhoisRegistrantBlockRegexCompiled = [regex]::new('^Registrant:\s*$', $opt)
   # Heuristic: any line that starts with an alphabetic label followed by a colon
   # is a structured field. Used by the EDUCAUSE-style block-Registrant parser to
@@ -572,10 +582,13 @@ function Get-WhoisParsedRegistrationData {
     if (-not $creation) {
       $m = $script:WhoisCreationRegexCompiled.Match($trimmed)
       if ($m.Success) {
-        $val = $m.Groups[1].Value.Trim()
         # ConvertTo-NullableUtcIso8601 is documented to return $null on parse
         # failure, so a try/catch fallback is dead code; assigning the raw
         # string into a date field would also corrupt downstream consumers.
+        # TRABIS (.tr) terminates date values with a trailing period
+        # (e.g. '2014-Dec-30.') which DateTimeOffset.TryParse rejects, so
+        # strip any trailing periods/whitespace before parsing.
+        $val = $m.Groups[1].Value.Trim().TrimEnd('.', ' ', "`t")
         $creation = ConvertTo-NullableUtcIso8601 $val
         continue
       }
@@ -584,7 +597,7 @@ function Get-WhoisParsedRegistrationData {
     if (-not $expiry) {
       $m = $script:WhoisExpiryRegexCompiled.Match($trimmed)
       if ($m.Success) {
-        $val = $m.Groups[1].Value.Trim()
+        $val = $m.Groups[1].Value.Trim().TrimEnd('.', ' ', "`t")
         $expiry = ConvertTo-NullableUtcIso8601 $val
         continue
       }
@@ -1388,7 +1401,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.97'
+$script:AppVersion = '2.0.98'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
