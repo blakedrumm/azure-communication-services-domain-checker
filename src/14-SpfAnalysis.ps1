@@ -207,6 +207,332 @@ function Find-SpfOutlookRequirementMatch {
   return $null
 }
 
+# ----- Dynamic Exchange Online Protection (EOP) range detection -----
+# SPF-flattening / Dynamic SPF services (OnDMARC, Valimail, Sendmarc, EasyDMARC,
+# Sparkpost, etc.) inline the IP ranges published by spf.protection.outlook.com
+# instead of preserving the literal "include:spf.protection.outlook.com" token.
+# To still recognize Microsoft 365 / Exchange Online authorization in that case
+# we resolve spf.protection.outlook.com ourselves at runtime, collect every
+# ip4:/ip6: CIDR it publishes (including any nested includes such as
+# spfa.hotmail.com), and compare them against the customer's expanded SPF chain.
+# Result is cached in $script:OutlookSpfCanonicalCache for the lifetime of the
+# process so we only do this lookup once per server run. Cache returns $null
+# arrays on failure so the literal-include detection still works offline.
+
+# Convert an IPv4 CIDR string ("a.b.c.d/n") into an integer (start, prefix)
+# pair, or $null if the input is not a valid IPv4 CIDR. Host-only addresses
+# without a prefix length are treated as /32.
+function ConvertTo-Ipv4CidrRange {
+  param([string]$Cidr)
+
+  if ([string]::IsNullOrWhiteSpace($Cidr)) { return $null }
+  $text = ([string]$Cidr).Trim()
+  $prefix = 32
+  $slashIndex = $text.IndexOf('/')
+  if ($slashIndex -ge 0) {
+    $prefixText = $text.Substring($slashIndex + 1)
+    $text = $text.Substring(0, $slashIndex)
+    if (-not [int]::TryParse($prefixText, [ref]$prefix)) { return $null }
+    if ($prefix -lt 0 -or $prefix -gt 32) { return $null }
+  }
+
+  $addr = $null
+  if (-not [System.Net.IPAddress]::TryParse($text, [ref]$addr)) { return $null }
+  if ($addr.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { return $null }
+
+  $bytes = $addr.GetAddressBytes()
+  # GetAddressBytes returns network-byte order (big-endian) for IPv4. Use
+  # [bigint] for the mask arithmetic so PowerShell's signed -shl / -bnot
+  # operators (which silently force [int] / produce negative values for
+  # high-bit masks) can't corrupt the result.
+  $value = [System.Numerics.BigInteger]::new(([uint32]$bytes[0] -shl 24) -bor ([uint32]$bytes[1] -shl 16) -bor ([uint32]$bytes[2] -shl 8) -bor ([uint32]$bytes[3]))
+  $hostBits = 32 - $prefix
+  $all = ([System.Numerics.BigInteger]::Pow(2, 32) - 1)
+  $mask = if ($prefix -eq 0) { [System.Numerics.BigInteger]::Zero } else {
+    $all - ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  }
+  $start = $value -band $mask
+  $end = $start + ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  $startUint = [uint32]$start
+  $startBytes = New-Object byte[] 4
+  $startBytes[0] = [byte](($startUint -shr 24) -band 0xFF)
+  $startBytes[1] = [byte](($startUint -shr 16) -band 0xFF)
+  $startBytes[2] = [byte](($startUint -shr 8) -band 0xFF)
+  $startBytes[3] = [byte]($startUint -band 0xFF)
+  $startAddr = [System.Net.IPAddress]::new($startBytes)
+  return [pscustomobject]@{
+    family = 'IPv4'
+    start  = $start
+    end    = $end
+    prefix = $prefix
+    text   = "$($startAddr.ToString())/$prefix"
+  }
+}
+
+# Convert an IPv6 CIDR string into a (start, end) [bigint] pair, or $null when
+# the input is not a valid IPv6 CIDR. A missing prefix length is treated as /128.
+function ConvertTo-Ipv6CidrRange {
+  param([string]$Cidr)
+
+  if ([string]::IsNullOrWhiteSpace($Cidr)) { return $null }
+  $text = ([string]$Cidr).Trim()
+  $prefix = 128
+  $slashIndex = $text.IndexOf('/')
+  if ($slashIndex -ge 0) {
+    $prefixText = $text.Substring($slashIndex + 1)
+    $text = $text.Substring(0, $slashIndex)
+    if (-not [int]::TryParse($prefixText, [ref]$prefix)) { return $null }
+    if ($prefix -lt 0 -or $prefix -gt 128) { return $null }
+  }
+
+  $addr = $null
+  if (-not [System.Net.IPAddress]::TryParse($text, [ref]$addr)) { return $null }
+  if ($addr.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) { return $null }
+
+  # Construct a 17-byte buffer with a leading zero byte so [bigint] interprets
+  # the value as unsigned (otherwise a leading 0x80+ byte would flip the sign).
+  $bytes = $addr.GetAddressBytes()
+  $unsigned = New-Object byte[] 17
+  for ($i = 0; $i -lt 16; $i++) { $unsigned[15 - $i] = $bytes[$i] }
+  $unsigned[16] = 0
+  $value = [System.Numerics.BigInteger]::new($unsigned)
+
+  $hostBits = 128 - $prefix
+  $mask = if ($prefix -eq 0) { [System.Numerics.BigInteger]::Zero } else {
+    ([System.Numerics.BigInteger]::Pow(2, 128) - 1) - ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  }
+  $start = $value -band $mask
+  $end = $start + ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  return [pscustomobject]@{
+    family = 'IPv6'
+    start  = $start
+    end    = $end
+    prefix = $prefix
+    text   = "$($addr.ToString())/$prefix"
+  }
+}
+
+# Convert any ip4:/ip6: SPF token value into a normalized range object, or
+# $null if it cannot be parsed. The leading "ip4:" / "ip6:" prefix is optional.
+function ConvertTo-SpfIpRange {
+  param([string]$Token)
+
+  if ([string]::IsNullOrWhiteSpace($Token)) { return $null }
+  $text = ([string]$Token).Trim()
+  if ($text -match '^(?i)ip4:(.+)$') { return ConvertTo-Ipv4CidrRange -Cidr $Matches[1] }
+  if ($text -match '^(?i)ip6:(.+)$') { return ConvertTo-Ipv6CidrRange -Cidr $Matches[1] }
+  if ($text.Contains(':')) { return ConvertTo-Ipv6CidrRange -Cidr $text }
+  return ConvertTo-Ipv4CidrRange -Cidr $text
+}
+
+# Return $true when $Inner is fully contained within $Outer (same family,
+# Outer.start <= Inner.start and Outer.end >= Inner.end).
+function Test-IpRangeContains {
+  param([object]$Outer, [object]$Inner)
+
+  if (-not $Outer -or -not $Inner) { return $false }
+  if ($Outer.family -ne $Inner.family) { return $false }
+  return ($Outer.start -le $Inner.start) -and ($Outer.end -ge $Inner.end)
+}
+
+# Resolve spf.protection.outlook.com live, recursively expand any nested
+# includes it publishes, and return every ip4:/ip6: CIDR as a parsed range
+# object. Result is cached for the process lifetime in
+# $script:OutlookSpfCanonicalCache. Returns $null when the lookup fails so
+# the caller can gracefully fall back to literal-include detection.
+function Get-OutlookSpfCanonicalRanges {
+  param([int]$MaxAgeMinutes = 1440)
+
+  $now = [DateTime]::UtcNow
+  if ($script:OutlookSpfCanonicalCache -and
+      $script:OutlookSpfCanonicalCache.fetchedAt -and
+      ($now - [DateTime]$script:OutlookSpfCanonicalCache.fetchedAt).TotalMinutes -lt $MaxAgeMinutes -and
+      $script:OutlookSpfCanonicalCache.ranges) {
+    return $script:OutlookSpfCanonicalCache
+  }
+
+  $ranges = New-Object System.Collections.Generic.List[object]
+  $visited = @{}
+  $queue = New-Object System.Collections.Generic.Queue[string]
+  $queue.Enqueue('spf.protection.outlook.com')
+
+  $success = $false
+  while ($queue.Count -gt 0) {
+    $target = $queue.Dequeue()
+    $key = ([string]$target).Trim().TrimEnd('.').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+    if ($visited.ContainsKey($key)) { continue }
+    $visited[$key] = $true
+
+    $txtRecords = $null
+    try { $txtRecords = ResolveSafely $key 'TXT' } catch { $txtRecords = $null }
+    if (-not $txtRecords) { continue }
+
+    foreach ($txt in @($txtRecords)) {
+      $joined = ($txt.Strings -join '').Trim()
+      if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
+        $joined = $joined.Substring(1, $joined.Length - 2)
+      }
+      if ($joined -notmatch '(?i)^v=spf1\b') { continue }
+      $success = $true
+
+      foreach ($token in @(Get-SpfTokens -SpfRecord $joined)) {
+        $normalized = ([string]$token).Trim() -replace '^[\+\-~\?]', ''
+        if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+
+        if ($normalized -match '^(?i)ip4:(.+)$') {
+          $range = ConvertTo-Ipv4CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+        elseif ($normalized -match '^(?i)ip6:(.+)$') {
+          $range = ConvertTo-Ipv6CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+        elseif ($normalized -match '^(?i)include:(.+)$') {
+          $nested = ([string]$Matches[1]).Trim().TrimEnd('.')
+          if (-not [string]::IsNullOrWhiteSpace($nested)) { $queue.Enqueue($nested) }
+        }
+        elseif ($normalized -match '^(?i)redirect=(.+)$') {
+          $nested = ([string]$Matches[1]).Trim().TrimEnd('.')
+          if (-not [string]::IsNullOrWhiteSpace($nested)) { $queue.Enqueue($nested) }
+        }
+      }
+    }
+  }
+
+  if (-not $success) {
+    # Keep any prior cached value so transient DNS failures don't disable
+    # coverage detection completely.
+    if ($script:OutlookSpfCanonicalCache) { return $script:OutlookSpfCanonicalCache }
+    return $null
+  }
+
+  $ipv4Ranges = @($ranges | Where-Object { $_.family -eq 'IPv4' })
+  $ipv6Ranges = @($ranges | Where-Object { $_.family -eq 'IPv6' })
+
+  $script:OutlookSpfCanonicalCache = [pscustomobject]@{
+    fetchedAt = $now
+    ranges    = $ranges.ToArray()
+    ipv4      = $ipv4Ranges
+    ipv6      = $ipv6Ranges
+  }
+  return $script:OutlookSpfCanonicalCache
+}
+
+# Walk the SPF analysis tree and collect every ip4:/ip6: CIDR authorized by
+# the expanded chain. We use the raw "record" string at each node (which is
+# the actual TXT content of that include) and parse its ip4:/ip6: tokens
+# directly, including via redirect targets. This is the data that flattening
+# services such as OnDMARC inline.
+function Get-SpfChainAuthorizedRanges {
+  param([object]$Analysis)
+
+  $ranges = New-Object System.Collections.Generic.List[object]
+  if (-not $Analysis) { return $ranges.ToArray() }
+
+  $stack = New-Object System.Collections.Stack
+  $stack.Push($Analysis)
+
+  while ($stack.Count -gt 0) {
+    $node = $stack.Pop()
+    if (-not $node) { continue }
+
+    $record = [string]$node.record
+    if (-not [string]::IsNullOrWhiteSpace($record)) {
+      foreach ($token in @(Get-SpfTokens -SpfRecord $record)) {
+        $normalized = ([string]$token).Trim() -replace '^[\+\-~\?]', ''
+        if ($normalized -match '^(?i)ip4:(.+)$') {
+          $range = ConvertTo-Ipv4CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+        elseif ($normalized -match '^(?i)ip6:(.+)$') {
+          $range = ConvertTo-Ipv6CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+      }
+    }
+
+    foreach ($include in @($node.includes)) {
+      if ($include -and $include.analysis) { $stack.Push($include.analysis) }
+    }
+    if ($node.redirect -and $node.redirect.analysis) {
+      $stack.Push($node.redirect.analysis)
+    }
+  }
+
+  return $ranges.ToArray()
+}
+
+# Compare the expanded SPF chain's authorized IP ranges against the canonical
+# Exchange Online Protection ranges currently published by
+# spf.protection.outlook.com. Returns an object describing how many canonical
+# ranges are covered (each canonical range counts as covered when any single
+# authorized range fully contains it, OR when the union of authorized ranges
+# fully covers it via tiled sub-CIDRs that together span the canonical
+# block). We require full coverage of every canonical IPv4 range before
+# reporting a flattened-include match so we don't false-positive on domains
+# that merely list one or two EOP IPs.
+function Test-SpfChainCoversOutlookRanges {
+  param(
+    [object]$Analysis,
+    [object]$CanonicalCache
+  )
+
+  if (-not $Analysis -or -not $CanonicalCache -or -not $CanonicalCache.ranges) {
+    return [pscustomobject]@{
+      isCovered      = $false
+      matchedIpv4    = @()
+      missingIpv4    = @()
+      authorizedCount = 0
+    }
+  }
+
+  $authorized = @(Get-SpfChainAuthorizedRanges -Analysis $Analysis)
+  $authorizedIpv4 = @($authorized | Where-Object { $_.family -eq 'IPv4' })
+
+  $canonicalIpv4 = @($CanonicalCache.ipv4)
+  $matched = New-Object System.Collections.Generic.List[object]
+  $missing = New-Object System.Collections.Generic.List[object]
+
+  foreach ($canon in $canonicalIpv4) {
+    # Fast path: any single authorized range that fully contains the canonical block.
+    $covered = $false
+    foreach ($auth in $authorizedIpv4) {
+      if (Test-IpRangeContains -Outer $auth -Inner $canon) { $covered = $true; break }
+    }
+
+    if (-not $covered) {
+      # Slow path: tile the canonical range with overlapping authorized
+      # sub-ranges and check whether their union covers it. Sort by start,
+      # walk through, and extend a running cursor.
+      $candidates = @($authorizedIpv4 | Where-Object {
+        ($_.end -ge $canon.start) -and ($_.start -le $canon.end)
+      } | Sort-Object -Property start)
+
+      $cursor = $canon.start
+      foreach ($cand in $candidates) {
+        if ($cand.start -gt $cursor) { break }
+        if ($cand.end -ge $cursor) {
+          $cursor = $cand.end + 1
+        }
+        if ($cursor -gt $canon.end) { break }
+      }
+      if ($cursor -gt $canon.end) { $covered = $true }
+    }
+
+    if ($covered) { $matched.Add($canon) } else { $missing.Add($canon) }
+  }
+
+  $isCovered = ($canonicalIpv4.Count -gt 0) -and ($missing.Count -eq 0)
+
+  return [pscustomobject]@{
+    isCovered      = $isCovered
+    matchedIpv4    = $matched.ToArray()
+    missingIpv4    = $missing.ToArray()
+    authorizedCount = $authorizedIpv4.Count
+  }
+}
+
 # Determine whether the ACS-required "include:spf.protection.outlook.com" is present
 # in the domain's SPF record (directly or through nested includes/redirects).
 # Returns an object with isPresent, matchType, detail, and error.
@@ -266,6 +592,30 @@ function Get-SpfOutlookRequirementStatus {
   }
 
   $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
+
+  # Final fallback: SPF-flattening / Dynamic SPF services (OnDMARC, Valimail,
+  # Sendmarc, EasyDMARC, Sparkpost, etc.) inline the IP ranges published by
+  # spf.protection.outlook.com instead of preserving the literal include
+  # token. Resolve spf.protection.outlook.com live and check whether the
+  # expanded SPF chain still authorizes the full set of canonical Exchange
+  # Online Protection ranges. When every canonical IPv4 EOP range is
+  # covered we treat the Outlook requirement as satisfied via flattening.
+  $canonical = $null
+  try { $canonical = Get-OutlookSpfCanonicalRanges } catch { $canonical = $null }
+  if ($canonical -and $canonical.ipv4 -and @($canonical.ipv4).Count -gt 0) {
+    $coverage = Test-SpfChainCoversOutlookRanges -Analysis $SpfAnalysis -CanonicalCache $canonical
+    if ($coverage -and $coverage.isCovered) {
+      $matchedCount = @($coverage.matchedIpv4).Count
+      $totalCount = @($canonical.ipv4).Count
+      return [pscustomobject]@{
+        isPresent = $true
+        matchType = 'flattened-include'
+        detail = "SPF for $targetDomain inlines the Exchange Online IP ranges currently published by spf.protection.outlook.com ($matchedCount of $totalCount canonical IPv4 ranges covered). This is typical of SPF-flattening / Dynamic SPF services such as OnDMARC, Valimail, Sendmarc, or EasyDMARC."
+        error = $null
+      }
+    }
+  }
+
   $analysisScope = if ($SpfAnalysis -and $SpfAnalysis.analysisScope) { [string]$SpfAnalysis.analysisScope } else { 'full-static' }
   $error = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
     "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."

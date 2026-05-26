@@ -1026,7 +1026,22 @@ function localizeWhoisStatus(status) {
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
   if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
-  if (result.spfHasRequiredInclude === true) return t('spfOutlookRequirementPresent');
+  if (result.spfHasRequiredInclude === true) {
+    // Base verdict ("Required Outlook SPF include detected for ACS.") is the
+    // same regardless of how the requirement was matched. When the customer
+    // is using an SPF-flattening / Dynamic SPF service (OnDMARC, Valimail,
+    // Sendmarc, EasyDMARC, Sparkpost) the literal include token is missing
+    // and the upstream Exchange Online IP ranges are inlined instead. In
+    // that case we append a short suffix so operators can see at a glance
+    // whether the requirement was met via the actual DNS include name or
+    // via the flattened IP ranges.
+    const base = t('spfOutlookRequirementPresent');
+    const matchType = String((result && result.spfRequiredIncludeMatchType) || '').trim().toLowerCase();
+    if (matchType === 'flattened-include') {
+      return base + ' ' + t('spfOutlookRequirementFlattenedSuffix');
+    }
+    return base;
+  }
   return null;
 }
 

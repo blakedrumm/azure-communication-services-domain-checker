@@ -369,6 +369,28 @@ function Test-WhoisRawTextHasUsableData {
     return $false
   }
 
+  # IANA's own TLD-level WHOIS record. When IANA has no `whois:` referral for a
+  # TLD (e.g. .gr / .ελ via FORTH, where the registry runs no port-43 service
+  # at all), `whois.iana.org` simply returns its delegation record FOR THE TLD
+  # ITSELF — registry contacts, nameservers, the TLD's 1986/1989 creation date,
+  # etc. — instead of an error or a "no whois server" notice. The TCP whois
+  # provider then has nothing to follow and would otherwise treat this as a
+  # legitimate response, surfacing IANA's TLD record as if it were registration
+  # data for the queried second-level domain (the WHOIS card would show
+  # `domain: GR` / `source: IANA` / `created: 1989-02-19` for any .gr lookup,
+  # and the Email Quota row would correctly report ERROR because none of the
+  # parsed fields belong to the actual queried domain). Detect this shape and
+  # mark it not-usable so the provider chain continues on to the registry
+  # web-form fallback. Markers we require together (any one alone is too weak):
+  #   - `% IANA WHOIS server` header comment line
+  #   - `source: IANA` field
+  # Both must be present so a future registry that legitimately echoes one of
+  # these strings (e.g. a disclaimer mentioning IANA) is not falsely flagged.
+  if ($Text -match '(?im)^%\s*IANA\s+WHOIS\s+server\b' -and `
+      $Text -match '(?im)^\s*source:\s*IANA\b') {
+    return $false
+  }
+
   # Treat registry refusal/rate-limit responses as not-usable so the chain continues.
   if (Test-WhoisResponseIsRegistryBlock -Text $Text) {
     return $false
@@ -1401,7 +1423,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.0.98'
+$script:AppVersion = '2.1.5'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -5831,6 +5853,332 @@ function Find-SpfOutlookRequirementMatch {
   return $null
 }
 
+# ----- Dynamic Exchange Online Protection (EOP) range detection -----
+# SPF-flattening / Dynamic SPF services (OnDMARC, Valimail, Sendmarc, EasyDMARC,
+# Sparkpost, etc.) inline the IP ranges published by spf.protection.outlook.com
+# instead of preserving the literal "include:spf.protection.outlook.com" token.
+# To still recognize Microsoft 365 / Exchange Online authorization in that case
+# we resolve spf.protection.outlook.com ourselves at runtime, collect every
+# ip4:/ip6: CIDR it publishes (including any nested includes such as
+# spfa.hotmail.com), and compare them against the customer's expanded SPF chain.
+# Result is cached in $script:OutlookSpfCanonicalCache for the lifetime of the
+# process so we only do this lookup once per server run. Cache returns $null
+# arrays on failure so the literal-include detection still works offline.
+
+# Convert an IPv4 CIDR string ("a.b.c.d/n") into an integer (start, prefix)
+# pair, or $null if the input is not a valid IPv4 CIDR. Host-only addresses
+# without a prefix length are treated as /32.
+function ConvertTo-Ipv4CidrRange {
+  param([string]$Cidr)
+
+  if ([string]::IsNullOrWhiteSpace($Cidr)) { return $null }
+  $text = ([string]$Cidr).Trim()
+  $prefix = 32
+  $slashIndex = $text.IndexOf('/')
+  if ($slashIndex -ge 0) {
+    $prefixText = $text.Substring($slashIndex + 1)
+    $text = $text.Substring(0, $slashIndex)
+    if (-not [int]::TryParse($prefixText, [ref]$prefix)) { return $null }
+    if ($prefix -lt 0 -or $prefix -gt 32) { return $null }
+  }
+
+  $addr = $null
+  if (-not [System.Net.IPAddress]::TryParse($text, [ref]$addr)) { return $null }
+  if ($addr.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { return $null }
+
+  $bytes = $addr.GetAddressBytes()
+  # GetAddressBytes returns network-byte order (big-endian) for IPv4. Use
+  # [bigint] for the mask arithmetic so PowerShell's signed -shl / -bnot
+  # operators (which silently force [int] / produce negative values for
+  # high-bit masks) can't corrupt the result.
+  $value = [System.Numerics.BigInteger]::new(([uint32]$bytes[0] -shl 24) -bor ([uint32]$bytes[1] -shl 16) -bor ([uint32]$bytes[2] -shl 8) -bor ([uint32]$bytes[3]))
+  $hostBits = 32 - $prefix
+  $all = ([System.Numerics.BigInteger]::Pow(2, 32) - 1)
+  $mask = if ($prefix -eq 0) { [System.Numerics.BigInteger]::Zero } else {
+    $all - ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  }
+  $start = $value -band $mask
+  $end = $start + ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  $startUint = [uint32]$start
+  $startBytes = New-Object byte[] 4
+  $startBytes[0] = [byte](($startUint -shr 24) -band 0xFF)
+  $startBytes[1] = [byte](($startUint -shr 16) -band 0xFF)
+  $startBytes[2] = [byte](($startUint -shr 8) -band 0xFF)
+  $startBytes[3] = [byte]($startUint -band 0xFF)
+  $startAddr = [System.Net.IPAddress]::new($startBytes)
+  return [pscustomobject]@{
+    family = 'IPv4'
+    start  = $start
+    end    = $end
+    prefix = $prefix
+    text   = "$($startAddr.ToString())/$prefix"
+  }
+}
+
+# Convert an IPv6 CIDR string into a (start, end) [bigint] pair, or $null when
+# the input is not a valid IPv6 CIDR. A missing prefix length is treated as /128.
+function ConvertTo-Ipv6CidrRange {
+  param([string]$Cidr)
+
+  if ([string]::IsNullOrWhiteSpace($Cidr)) { return $null }
+  $text = ([string]$Cidr).Trim()
+  $prefix = 128
+  $slashIndex = $text.IndexOf('/')
+  if ($slashIndex -ge 0) {
+    $prefixText = $text.Substring($slashIndex + 1)
+    $text = $text.Substring(0, $slashIndex)
+    if (-not [int]::TryParse($prefixText, [ref]$prefix)) { return $null }
+    if ($prefix -lt 0 -or $prefix -gt 128) { return $null }
+  }
+
+  $addr = $null
+  if (-not [System.Net.IPAddress]::TryParse($text, [ref]$addr)) { return $null }
+  if ($addr.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) { return $null }
+
+  # Construct a 17-byte buffer with a leading zero byte so [bigint] interprets
+  # the value as unsigned (otherwise a leading 0x80+ byte would flip the sign).
+  $bytes = $addr.GetAddressBytes()
+  $unsigned = New-Object byte[] 17
+  for ($i = 0; $i -lt 16; $i++) { $unsigned[15 - $i] = $bytes[$i] }
+  $unsigned[16] = 0
+  $value = [System.Numerics.BigInteger]::new($unsigned)
+
+  $hostBits = 128 - $prefix
+  $mask = if ($prefix -eq 0) { [System.Numerics.BigInteger]::Zero } else {
+    ([System.Numerics.BigInteger]::Pow(2, 128) - 1) - ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  }
+  $start = $value -band $mask
+  $end = $start + ([System.Numerics.BigInteger]::Pow(2, $hostBits) - 1)
+  return [pscustomobject]@{
+    family = 'IPv6'
+    start  = $start
+    end    = $end
+    prefix = $prefix
+    text   = "$($addr.ToString())/$prefix"
+  }
+}
+
+# Convert any ip4:/ip6: SPF token value into a normalized range object, or
+# $null if it cannot be parsed. The leading "ip4:" / "ip6:" prefix is optional.
+function ConvertTo-SpfIpRange {
+  param([string]$Token)
+
+  if ([string]::IsNullOrWhiteSpace($Token)) { return $null }
+  $text = ([string]$Token).Trim()
+  if ($text -match '^(?i)ip4:(.+)$') { return ConvertTo-Ipv4CidrRange -Cidr $Matches[1] }
+  if ($text -match '^(?i)ip6:(.+)$') { return ConvertTo-Ipv6CidrRange -Cidr $Matches[1] }
+  if ($text.Contains(':')) { return ConvertTo-Ipv6CidrRange -Cidr $text }
+  return ConvertTo-Ipv4CidrRange -Cidr $text
+}
+
+# Return $true when $Inner is fully contained within $Outer (same family,
+# Outer.start <= Inner.start and Outer.end >= Inner.end).
+function Test-IpRangeContains {
+  param([object]$Outer, [object]$Inner)
+
+  if (-not $Outer -or -not $Inner) { return $false }
+  if ($Outer.family -ne $Inner.family) { return $false }
+  return ($Outer.start -le $Inner.start) -and ($Outer.end -ge $Inner.end)
+}
+
+# Resolve spf.protection.outlook.com live, recursively expand any nested
+# includes it publishes, and return every ip4:/ip6: CIDR as a parsed range
+# object. Result is cached for the process lifetime in
+# $script:OutlookSpfCanonicalCache. Returns $null when the lookup fails so
+# the caller can gracefully fall back to literal-include detection.
+function Get-OutlookSpfCanonicalRanges {
+  param([int]$MaxAgeMinutes = 1440)
+
+  $now = [DateTime]::UtcNow
+  if ($script:OutlookSpfCanonicalCache -and
+      $script:OutlookSpfCanonicalCache.fetchedAt -and
+      ($now - [DateTime]$script:OutlookSpfCanonicalCache.fetchedAt).TotalMinutes -lt $MaxAgeMinutes -and
+      $script:OutlookSpfCanonicalCache.ranges) {
+    return $script:OutlookSpfCanonicalCache
+  }
+
+  $ranges = New-Object System.Collections.Generic.List[object]
+  $visited = @{}
+  $queue = New-Object System.Collections.Generic.Queue[string]
+  $queue.Enqueue('spf.protection.outlook.com')
+
+  $success = $false
+  while ($queue.Count -gt 0) {
+    $target = $queue.Dequeue()
+    $key = ([string]$target).Trim().TrimEnd('.').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($key)) { continue }
+    if ($visited.ContainsKey($key)) { continue }
+    $visited[$key] = $true
+
+    $txtRecords = $null
+    try { $txtRecords = ResolveSafely $key 'TXT' } catch { $txtRecords = $null }
+    if (-not $txtRecords) { continue }
+
+    foreach ($txt in @($txtRecords)) {
+      $joined = ($txt.Strings -join '').Trim()
+      if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
+        $joined = $joined.Substring(1, $joined.Length - 2)
+      }
+      if ($joined -notmatch '(?i)^v=spf1\b') { continue }
+      $success = $true
+
+      foreach ($token in @(Get-SpfTokens -SpfRecord $joined)) {
+        $normalized = ([string]$token).Trim() -replace '^[\+\-~\?]', ''
+        if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+
+        if ($normalized -match '^(?i)ip4:(.+)$') {
+          $range = ConvertTo-Ipv4CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+        elseif ($normalized -match '^(?i)ip6:(.+)$') {
+          $range = ConvertTo-Ipv6CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+        elseif ($normalized -match '^(?i)include:(.+)$') {
+          $nested = ([string]$Matches[1]).Trim().TrimEnd('.')
+          if (-not [string]::IsNullOrWhiteSpace($nested)) { $queue.Enqueue($nested) }
+        }
+        elseif ($normalized -match '^(?i)redirect=(.+)$') {
+          $nested = ([string]$Matches[1]).Trim().TrimEnd('.')
+          if (-not [string]::IsNullOrWhiteSpace($nested)) { $queue.Enqueue($nested) }
+        }
+      }
+    }
+  }
+
+  if (-not $success) {
+    # Keep any prior cached value so transient DNS failures don't disable
+    # coverage detection completely.
+    if ($script:OutlookSpfCanonicalCache) { return $script:OutlookSpfCanonicalCache }
+    return $null
+  }
+
+  $ipv4Ranges = @($ranges | Where-Object { $_.family -eq 'IPv4' })
+  $ipv6Ranges = @($ranges | Where-Object { $_.family -eq 'IPv6' })
+
+  $script:OutlookSpfCanonicalCache = [pscustomobject]@{
+    fetchedAt = $now
+    ranges    = $ranges.ToArray()
+    ipv4      = $ipv4Ranges
+    ipv6      = $ipv6Ranges
+  }
+  return $script:OutlookSpfCanonicalCache
+}
+
+# Walk the SPF analysis tree and collect every ip4:/ip6: CIDR authorized by
+# the expanded chain. We use the raw "record" string at each node (which is
+# the actual TXT content of that include) and parse its ip4:/ip6: tokens
+# directly, including via redirect targets. This is the data that flattening
+# services such as OnDMARC inline.
+function Get-SpfChainAuthorizedRanges {
+  param([object]$Analysis)
+
+  $ranges = New-Object System.Collections.Generic.List[object]
+  if (-not $Analysis) { return $ranges.ToArray() }
+
+  $stack = New-Object System.Collections.Stack
+  $stack.Push($Analysis)
+
+  while ($stack.Count -gt 0) {
+    $node = $stack.Pop()
+    if (-not $node) { continue }
+
+    $record = [string]$node.record
+    if (-not [string]::IsNullOrWhiteSpace($record)) {
+      foreach ($token in @(Get-SpfTokens -SpfRecord $record)) {
+        $normalized = ([string]$token).Trim() -replace '^[\+\-~\?]', ''
+        if ($normalized -match '^(?i)ip4:(.+)$') {
+          $range = ConvertTo-Ipv4CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+        elseif ($normalized -match '^(?i)ip6:(.+)$') {
+          $range = ConvertTo-Ipv6CidrRange -Cidr $Matches[1]
+          if ($range) { $ranges.Add($range) }
+        }
+      }
+    }
+
+    foreach ($include in @($node.includes)) {
+      if ($include -and $include.analysis) { $stack.Push($include.analysis) }
+    }
+    if ($node.redirect -and $node.redirect.analysis) {
+      $stack.Push($node.redirect.analysis)
+    }
+  }
+
+  return $ranges.ToArray()
+}
+
+# Compare the expanded SPF chain's authorized IP ranges against the canonical
+# Exchange Online Protection ranges currently published by
+# spf.protection.outlook.com. Returns an object describing how many canonical
+# ranges are covered (each canonical range counts as covered when any single
+# authorized range fully contains it, OR when the union of authorized ranges
+# fully covers it via tiled sub-CIDRs that together span the canonical
+# block). We require full coverage of every canonical IPv4 range before
+# reporting a flattened-include match so we don't false-positive on domains
+# that merely list one or two EOP IPs.
+function Test-SpfChainCoversOutlookRanges {
+  param(
+    [object]$Analysis,
+    [object]$CanonicalCache
+  )
+
+  if (-not $Analysis -or -not $CanonicalCache -or -not $CanonicalCache.ranges) {
+    return [pscustomobject]@{
+      isCovered      = $false
+      matchedIpv4    = @()
+      missingIpv4    = @()
+      authorizedCount = 0
+    }
+  }
+
+  $authorized = @(Get-SpfChainAuthorizedRanges -Analysis $Analysis)
+  $authorizedIpv4 = @($authorized | Where-Object { $_.family -eq 'IPv4' })
+
+  $canonicalIpv4 = @($CanonicalCache.ipv4)
+  $matched = New-Object System.Collections.Generic.List[object]
+  $missing = New-Object System.Collections.Generic.List[object]
+
+  foreach ($canon in $canonicalIpv4) {
+    # Fast path: any single authorized range that fully contains the canonical block.
+    $covered = $false
+    foreach ($auth in $authorizedIpv4) {
+      if (Test-IpRangeContains -Outer $auth -Inner $canon) { $covered = $true; break }
+    }
+
+    if (-not $covered) {
+      # Slow path: tile the canonical range with overlapping authorized
+      # sub-ranges and check whether their union covers it. Sort by start,
+      # walk through, and extend a running cursor.
+      $candidates = @($authorizedIpv4 | Where-Object {
+        ($_.end -ge $canon.start) -and ($_.start -le $canon.end)
+      } | Sort-Object -Property start)
+
+      $cursor = $canon.start
+      foreach ($cand in $candidates) {
+        if ($cand.start -gt $cursor) { break }
+        if ($cand.end -ge $cursor) {
+          $cursor = $cand.end + 1
+        }
+        if ($cursor -gt $canon.end) { break }
+      }
+      if ($cursor -gt $canon.end) { $covered = $true }
+    }
+
+    if ($covered) { $matched.Add($canon) } else { $missing.Add($canon) }
+  }
+
+  $isCovered = ($canonicalIpv4.Count -gt 0) -and ($missing.Count -eq 0)
+
+  return [pscustomobject]@{
+    isCovered      = $isCovered
+    matchedIpv4    = $matched.ToArray()
+    missingIpv4    = $missing.ToArray()
+    authorizedCount = $authorizedIpv4.Count
+  }
+}
+
 # Determine whether the ACS-required "include:spf.protection.outlook.com" is present
 # in the domain's SPF record (directly or through nested includes/redirects).
 # Returns an object with isPresent, matchType, detail, and error.
@@ -5890,6 +6238,30 @@ function Get-SpfOutlookRequirementStatus {
   }
 
   $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
+
+  # Final fallback: SPF-flattening / Dynamic SPF services (OnDMARC, Valimail,
+  # Sendmarc, EasyDMARC, Sparkpost, etc.) inline the IP ranges published by
+  # spf.protection.outlook.com instead of preserving the literal include
+  # token. Resolve spf.protection.outlook.com live and check whether the
+  # expanded SPF chain still authorizes the full set of canonical Exchange
+  # Online Protection ranges. When every canonical IPv4 EOP range is
+  # covered we treat the Outlook requirement as satisfied via flattening.
+  $canonical = $null
+  try { $canonical = Get-OutlookSpfCanonicalRanges } catch { $canonical = $null }
+  if ($canonical -and $canonical.ipv4 -and @($canonical.ipv4).Count -gt 0) {
+    $coverage = Test-SpfChainCoversOutlookRanges -Analysis $SpfAnalysis -CanonicalCache $canonical
+    if ($coverage -and $coverage.isCovered) {
+      $matchedCount = @($coverage.matchedIpv4).Count
+      $totalCount = @($canonical.ipv4).Count
+      return [pscustomobject]@{
+        isPresent = $true
+        matchType = 'flattened-include'
+        detail = "SPF for $targetDomain inlines the Exchange Online IP ranges currently published by spf.protection.outlook.com ($matchedCount of $totalCount canonical IPv4 ranges covered). This is typical of SPF-flattening / Dynamic SPF services such as OnDMARC, Valimail, Sendmarc, or EasyDMARC."
+        error = $null
+      }
+    }
+  }
+
   $analysisScope = if ($SpfAnalysis -and $SpfAnalysis.analysisScope) { [string]$SpfAnalysis.analysisScope } else { 'full-static' }
   $error = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
     "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
@@ -8238,14 +8610,21 @@ function Get-AcsDnsStatus {
   $recoveredAddressesFromDetailedRecords = ($recoveredIpv4Addresses.Count -gt 0) -or ($recoveredIpv6Addresses.Count -gt 0)
   $effectiveDnsFailed = $base.dnsFailed -and -not $recoveredFromDetailedRecords
   $effectiveDnsError = if ($effectiveDnsFailed) { $base.dnsError } else { $null }
-  $effectiveTxtRecords = if ($recoveredFromDetailedRecords) { $recoveredTxtRecords } else { @($base.txtRecords) }
-  $effectiveIpv4Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv4Addresses } else { @($base.ipv4Addresses) }
-  $effectiveIpv6Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv6Addresses } else { @($base.ipv6Addresses) }
+  $effectiveTxtRecords = @(if ($recoveredFromDetailedRecords) { $recoveredTxtRecords } else { $base.txtRecords })
+  $effectiveIpv4Addresses = @(if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv4Addresses } else { $base.ipv4Addresses })
+  $effectiveIpv6Addresses = @(if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv6Addresses } else { $base.ipv6Addresses })
   $effectiveIpLookupDomain = if ($recoveredAddressesFromDetailedRecords) { $Domain } else { $base.ipLookupDomain }
   $effectiveIpUsedParent = if ($recoveredAddressesFromDetailedRecords) { $false } else { $base.ipUsedParent }
-  $effectiveSpf = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1) } else { @($base.spfValue) }
+  # PowerShell collapses a single-element array returned from an `if` expression
+  # back into a scalar. That breaks the `@(...)` array protection on each branch:
+  # the resulting `$effectiveSpf` becomes the raw SPF string, and indexing `[0]`
+  # on a string returns the first character (e.g. 'v' from "v=spf1 ..."), which
+  # was producing `"spfValue": "v"` in the CLI output. Wrap the entire `if`
+  # expression in `@(...)` so the 1-element array survives assignment, then
+  # index it normally. Same fix applies to `$effectiveAcs` below.
+  $effectiveSpf = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1 } else { $base.spfValue })
   $effectiveSpfValue = if ($effectiveSpf.Count -gt 0) { $effectiveSpf[0] } else { $null }
-  $effectiveAcs = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1) } else { @($base.acsValue) }
+  $effectiveAcs = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1 } else { $base.acsValue })
   $effectiveAcsValue = if ($effectiveAcs.Count -gt 0) { $effectiveAcs[0] } else { $null }
   $effectiveSpfPresent = [bool]$effectiveSpfValue
   $effectiveAcsPresent = [bool]$effectiveAcsValue
@@ -9116,6 +9495,60 @@ button.primary:disabled {
   visibility: visible;
 }
 
+/* Click-to-expand "i" button beside ip4/ip6 values in the SPF Explained
+   table. Visually mirrors .info-dot (small round badge) but does NOT use a
+   hover tooltip; instead toggleSpfCidrDetail() unhides a sibling table row
+   placed directly under the row that owns the button. The expanded row
+   renders a pre-formatted Network/CIDR prefix/Subnet mask/Range/Size block
+   inside .spf-cidr-detail-pre (monospace + preserved whitespace) so the
+   padded labels stay column-aligned. The detail cell shares the same
+   green-tint treatment as the SPF Expansion explain row for visual
+   consistency with the rest of the SPF UI. */
+.spf-cidr-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--status);
+  margin-left: 6px;
+  cursor: pointer;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  vertical-align: middle;
+}
+.spf-cidr-info-btn:hover,
+.spf-cidr-info-btn:focus,
+.spf-cidr-info-btn:focus-visible {
+  color: var(--fg);
+  border-color: var(--status);
+  outline: none;
+}
+.spf-cidr-info-btn--open {
+  background: rgba(46, 204, 113, 0.18);
+  border-color: rgba(46, 204, 113, 0.55);
+  color: var(--fg);
+}
+.spf-explained-table tr.spf-cidr-detail-row > td {
+  background: rgba(46, 204, 113, 0.04);
+  padding: 8px 12px;
+  border-top: 0;
+}
+.spf-cidr-detail-pre {
+  margin: 0;
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  background: transparent;
+  color: var(--fg);
+}
+
 .code {
   background: var(--code-bg);
   color: var(--code-fg);
@@ -9289,6 +9722,248 @@ button.primary:disabled {
   -webkit-overflow-scrolling: touch;
 }
 
+/* SPF Explained table. Mirrors the column structure of MXToolbox's SPF Record
+   Lookup view: Prefix / Type / Value / PrefixDesc / Description. Inherits the
+   base layout from .mx-table; we just keep the enum columns single-line and
+   let the Value / Description columns wrap so long include targets stay
+   readable. The leading record box highlights the exact SPF string being
+   decomposed so users can correlate row-by-row. */
+.spf-explained-record {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(46, 204, 113, 0.10);
+  border: 1px solid rgba(46, 204, 113, 0.35);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.spf-explained-legend {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 6px;
+}
+/* Optional contextual notes rendered above the record box inside the SPF
+   Explained panel. Surfaced here so hiding the card body while the panel
+   is open does not drop these signals:
+   - .spf-explained-inherited: the "resolved using parent domain" hint
+     shown when SPF was inherited from a parent domain (amber tint).
+   - .spf-explained-requirement: the ACS Outlook requirement summary
+     verdict (neutral tint). */
+.spf-explained-inherited {
+  font-size: 12px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(241, 196, 15, 0.10);
+  border: 1px solid rgba(241, 196, 15, 0.35);
+  color: inherit;
+  opacity: 0.95;
+}
+.spf-explained-requirement {
+  font-size: 12px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(46, 204, 113, 0.08);
+  border: 1px solid rgba(46, 204, 113, 0.30);
+  color: inherit;
+  opacity: 0.95;
+}
+.spf-explained-table {
+  table-layout: auto;
+  font-family: inherit;
+  width: 100%;
+}
+.spf-explained-table th,
+.spf-explained-table td {
+  font-family: inherit;
+  vertical-align: top;
+}
+.spf-explained-table th {
+  white-space: nowrap;
+}
+.spf-explained-table td.spf-col-prefix,
+.spf-explained-table td.spf-col-type,
+.spf-explained-table td.spf-col-prefixdesc {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.spf-explained-table td.spf-col-value {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  word-break: break-all;
+  min-width: 200px;
+}
+.spf-explained-table td.spf-col-description {
+  min-width: 240px;
+}
+
+/* DMARC Explained reuses the SPF Explained visual language so the two
+ * card-level "Explained" panels read as siblings. We keep dedicated class
+ * names (.dmarc-explained-*) so future styling can diverge without
+ * inadvertently affecting the SPF panel. The Tag and TagDesc columns stay
+ * single-line, Value wraps for long URI lists (rua=mailto:..., https:...),
+ * and ValueDesc has the same generous min-width as the SPF Description column. */
+.dmarc-explained-record {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(46, 204, 113, 0.10);
+  border: 1px solid rgba(46, 204, 113, 0.35);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.dmarc-explained-legend {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 6px;
+}
+.dmarc-explained-table {
+  table-layout: auto;
+  font-family: inherit;
+  width: 100%;
+}
+.dmarc-explained-table th,
+.dmarc-explained-table td {
+  font-family: inherit;
+  vertical-align: top;
+}
+.dmarc-explained-table th {
+  white-space: nowrap;
+}
+.dmarc-explained-table td.dmarc-col-tag,
+.dmarc-explained-table td.dmarc-col-tagdesc {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dmarc-explained-table td.dmarc-col-value {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  word-break: break-all;
+  min-width: 200px;
+}
+.dmarc-explained-table td.dmarc-col-valuedesc {
+  min-width: 240px;
+}
+.dmarc-explained-table tbody tr {
+  cursor: default;
+  transition: background-color 0.12s ease;
+}
+.dmarc-explained-table tbody tr:hover,
+.dmarc-explained-table tbody tr.dmarc-explained-row-active {
+  background: rgba(46, 204, 113, 0.10);
+}
+/* Hover highlight wiring for DMARC Explained. Each tag=value pair inside
+   .dmarc-explained-record is wrapped in .dmarc-record-token, and hovering
+   a corresponding table row sets .dmarc-record-token-active on the matching
+   token (see setDmarcTokenHighlight in 20d-HtmlJsCore.ps1). Mirrors the
+   SPF Explained .spf-record-token / .spf-record-token-active pattern so the
+   two "Explained" panels behave identically. */
+.dmarc-record-token {
+  display: inline;
+  padding: 0 1px;
+  border-radius: 3px;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.dmarc-record-token-active {
+  background: rgba(46, 204, 113, 0.45);
+  box-shadow: 0 0 0 1px rgba(46, 204, 113, 0.75) inset;
+  color: inherit;
+  font-weight: 600;
+}
+/* Optional "inherited policy" note rendered above the record box inside
+   the DMARC Explained panel. Surfaced here so hiding the card body while
+   the panel is open does not drop the context that the DMARC policy came
+   from a parent domain. */
+.dmarc-explained-inherited {
+  font-size: 12px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(241, 196, 15, 0.10);
+  border: 1px solid rgba(241, 196, 15, 0.35);
+  color: inherit;
+  opacity: 0.95;
+}
+
+/* Per-row Explain button + inline detail row inside the SPF Expansion
+   Records table. The button is small and unobtrusive in the last column;
+   the detail row spans the full table width and tints its background so
+   the breakdown reads as a child of the row above it. */
+.spf-expansion-table th.spf-col-explain,
+.spf-expansion-table td.spf-col-explain {
+  white-space: nowrap;
+  text-align: right;
+  width: 1%;
+}
+.spf-expansion-explain-btn {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #555);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.spf-expansion-explain-btn:hover,
+.spf-expansion-explain-btn:focus {
+  background: rgba(46, 204, 113, 0.10);
+  border-color: rgba(46, 204, 113, 0.55);
+  outline: none;
+}
+.spf-expansion-table tr.spf-expansion-explain-row > td {
+  background: rgba(46, 204, 113, 0.04);
+  padding: 10px 12px;
+  border-top: 0;
+}
+.spf-expansion-table tr.spf-expansion-explain-row .spf-explained-record {
+  margin-top: 0;
+}
+
+/* Hover highlight wiring. Each token inside .spf-explained-record is wrapped
+   in .spf-record-token, and hovering a corresponding table row sets
+   .spf-record-token-active on the matching token (see
+   setSpfTokenHighlight / setSpfExpansionHighlight in 20d-HtmlJsCore.ps1).
+   The .spf-explained-row-active class mirrors the highlight onto the row
+   itself so the visual association is bidirectional. The :hover fallback on
+   .spf-explained-table rows keeps a subtle row tint even when no token can
+   be located (e.g., synthetic rows). */
+.spf-explained-table tbody tr {
+  cursor: default;
+  transition: background-color 0.12s ease;
+}
+.spf-explained-table tbody tr:hover,
+.spf-explained-table tbody tr.spf-explained-row-active {
+  background: rgba(46, 204, 113, 0.10);
+}
+.spf-record-token {
+  /* Inline so it flows within the record box without inserting line breaks. */
+  display: inline;
+  padding: 0 1px;
+  border-radius: 3px;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.spf-record-token-active {
+  background: rgba(46, 204, 113, 0.45);
+  box-shadow: 0 0 0 1px rgba(46, 204, 113, 0.75) inset;
+  color: inherit;
+  font-weight: 600;
+}
+.spf-expansion-table tbody tr {
+  cursor: default;
+  transition: background-color 0.12s ease;
+}
+.spf-expansion-table tbody tr:not(.spf-expansion-explain-row):hover,
+.spf-expansion-table tbody tr.spf-expansion-row-active {
+  background: rgba(46, 204, 113, 0.08);
+}
+
 .dns-records-toolbar {
   /* Explicit grid: labels on row 1, controls on row 2, chips on row 3.
      This avoids nested grids so labels and controls always align. */
@@ -9320,6 +9995,19 @@ button.primary:disabled {
   /* Own stacking context so suggestions paint above sibling grid items */
   z-index: 2;
   overflow: visible;
+  /* The suggestions popup is positioned at `top: 100%` of THIS wrapper. The
+   * wrapper has to hug the input height exactly or the popup ends up floating
+   * far below the input. Plain block layout caused the wrapper to grow taller
+   * than the input because the template-literal whitespace between
+   * `<input>` and the absolutely-positioned suggestions `<div>` produced an
+   * anonymous inline line-box around the input. Combined with the toolbar's
+   * `align-items: center` on a 32px grid row, that pushed the wrapper's
+   * intrinsic height above 32px and the popup landed well below the input
+   * edge. Flex layout removes anonymous inline whitespace from the layout
+   * math and forces the wrapper to match the input's box exactly. */
+  display: flex;
+  align-items: stretch;
+  line-height: 0; /* belt-and-braces: also kills the strut for inline edge cases */
 }
 
 input.dns-records-search-input,
@@ -9978,6 +10666,20 @@ ul.guidance li {
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
   .mx-table, .dns-records-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  /* On mobile the DNS records table is horizontally scrollable. Without an
+   * explicit min-width on the Data cell, the long fully-qualified Name labels
+   * (e.g., DKIM selectors like `selector1-...-_domainkey.<tenant>.onmicrosoft.com`)
+   * consume nearly the whole viewport row, leaving the Data column a sliver
+   * that wraps every few base64 characters and turns the DKIM public key into
+   * a tall vertical ribbon. Give the Data column enough room to render its
+   * contents legibly; the table's `overflow-x: auto` handles the resulting
+   * horizontal scroll. `dns-record-data` keeps its `pre-wrap` + `word-break`
+   * behavior so individual very-long tokens still wrap inside the wider cell
+   * instead of forcing the viewport to scroll dozens of additional pixels. */
+  .dns-records-table td.dns-record-data {
+    min-width: 280px;
+    max-width: 420px;
+  }
   .dns-records-toolbar { grid-template-columns: 1fr; }
   .dns-records-filter-summary { margin-left: 0; justify-self: start; }
   .dns-records-clear-btn { justify-self: start; }
@@ -10968,6 +11670,94 @@ const TRANSLATIONS = {
     spfExpansionWithinLimit: 'within the SPF 10-lookup limit',
     spfExpansionExceededLimit: 'exceeds the SPF 10-lookup limit',
     spfExpansionParentRepeatHint: 'Same as the previous row\u0027s target (continued chain).',
+    // SPF Explained (per-record decomposition, no DNS). Inspired by MXToolbox's
+    // SPF Record Lookup table. The toggle button label flips between Show / Hide
+    // via toggleSpfExplained() when the user expands the panel.
+    spfExplainedShow: 'SPF Explained',
+    spfExplainedHide: 'Hide SPF Explained',
+    spfExplainedTooltip: 'Decompose this SPF record into prefix, type, value, and a short description of each mechanism.',
+    spfExplainedEmpty: 'No SPF record available to explain.',
+    // Per-row Explain toggle inside the SPF Expansion Records table. The
+    // button label flips between Show / Hide as the inline panel opens.
+    spfExpansionExplain: 'Explain',
+    spfExpansionExplainHide: 'Hide',
+    spfExpansionExplainTooltip: 'Show a per-mechanism breakdown of this resolved SPF record.',
+    spfExpansionExplainColumn: 'Information',
+    spfExplainedPrefix: 'Prefix',
+    spfExplainedType: 'Type',
+    spfExplainedValue: 'Value',
+    spfExplainedPrefixDesc: 'PrefixDesc',
+    spfExplainedDescription: 'Description',
+    spfExplainedLegend: 'Prefix qualifiers: + Pass (default), - HardFail, ~ SoftFail, ? Neutral.',
+    // CIDR info tooltip beside ip4/ip6 values in the SPF Explained table.
+    // The labels are padded to the same width by formatSpfCidrInfo so the
+    // tooltip column-aligns under a monospace font.
+    spfExplainedCidrInfoLabel: 'Show network/range/size details for this CIDR.',
+    spfCidrLabelNetwork: 'Network:',
+    spfCidrLabelPrefix: 'CIDR prefix:',
+    spfCidrLabelMask: 'Subnet mask:',
+    spfCidrLabelRange: 'Range:',
+    spfCidrLabelSize: 'Size:',
+    spfCidrLabelAddresses: 'IP addresses',
+    spfCidrRangeThrough: 'through',
+    spfPrefixPass: 'Pass',
+    spfPrefixFail: 'HardFail',
+    spfPrefixSoftFail: 'SoftFail',
+    spfPrefixNeutral: 'Neutral',
+    spfDescVersion: 'The SPF record version.',
+    spfDescAll: 'Always matches. It goes at the end of your record.',
+    spfDescInclude: 'The specified domain is searched for an \u0027allow\u0027.',
+    spfDescA: 'Matches if the sender IP is one of the domain\u0027s A/AAAA records.',
+    spfDescMx: 'Matches if the sender IP is one of the domain\u0027s MX hosts.',
+    spfDescPtr: 'Matches if the sender\u0027s reverse DNS resolves to the domain (discouraged).',
+    spfDescIp4: 'Authorizes the listed IPv4 address or CIDR range.',
+    spfDescIp6: 'Authorizes the listed IPv6 address or CIDR range.',
+    spfDescExists: 'Matches if a DNS A lookup on the expanded target returns any record.',
+    spfDescRedirect: 'Replaces the current record with the SPF record of the named domain.',
+    spfDescExp: 'Provides an explanation string returned with Fail results.',
+    spfDescUnknown: 'Unrecognized SPF term. Check for typos or unsupported syntax.',
+    // DMARC Explained (per-record decomposition, no DNS). Mirrors the SPF
+    // Explained UI: decompose the queried-domain DMARC record into a Tag /
+    // Value / TagDesc / ValueDesc table inspired by MXToolbox's DMARC Record
+    // Lookup. The toggle button label flips between Show / Hide via
+    // toggleDmarcExplained() when the user expands the panel.
+    dmarcExplainedShow: 'DMARC Explained',
+    dmarcExplainedHide: 'Hide DMARC Explained',
+    dmarcExplainedTooltip: 'Decompose this DMARC record into tag, value, and a short description of each tag and its value.',
+    dmarcExplainedEmpty: 'No DMARC record available to explain.',
+    dmarcExplainedTag: 'Tag',
+    dmarcExplainedValue: 'Value',
+    dmarcExplainedTagDesc: 'TagDesc',
+    dmarcExplainedValueDesc: 'ValueDesc',
+    dmarcExplainedLegend: 'DMARC tags are semicolon-separated key=value pairs. v= and p= are required; the rest are optional but recommended for reporting and alignment.',
+    // Per-tag descriptions (the "TagDesc" column).
+    dmarcTagDescVersion: 'DMARC version. Must be DMARC1 and must appear first.',
+    dmarcTagDescPolicy: 'Policy for the domain itself. Tells receivers what to do with messages that fail DMARC.',
+    dmarcTagDescSubdomainPolicy: 'Policy for subdomains. Overrides p= for subdomains when present.',
+    dmarcTagDescPercent: 'Percentage of failing messages the policy applies to during rollout. Defaults to 100.',
+    dmarcTagDescRua: 'Aggregate report destination(s). Comma-separated mailto: or https: URIs that receive daily XML reports.',
+    dmarcTagDescRuf: 'Forensic / failure report destination(s). Comma-separated URIs that receive per-message failure reports.',
+    dmarcTagDescFo: 'Forensic reporting options. Controls which failures trigger a ruf= report.',
+    dmarcTagDescAdkim: 'DKIM identifier alignment mode. s = strict (exact match), r = relaxed (organizational domain match).',
+    dmarcTagDescAspf: 'SPF identifier alignment mode. s = strict (exact match), r = relaxed (organizational domain match).',
+    dmarcTagDescRi: 'Requested interval between aggregate reports, in seconds. Defaults to 86400 (one day).',
+    dmarcTagDescRf: 'Format for forensic reports. Defaults to afrf (Authentication Failure Reporting Format).',
+    dmarcTagDescUnknown: 'Unrecognized DMARC tag. Check for typos or unsupported syntax.',
+    // Per-value descriptions (the "ValueDesc" column) for tags whose value
+    // itself has well-defined semantics. Falls back to an empty string when
+    // the value is free-form (e.g., rua=mailto:...).
+    dmarcValueDescPolicyNone: 'Monitor only. Receivers do not act on failures, but still send reports.',
+    dmarcValueDescPolicyQuarantine: 'Quarantine failing messages (typically deliver to Junk / Spam).',
+    dmarcValueDescPolicyReject: 'Reject failing messages outright at the SMTP layer.',
+    dmarcValueDescAlignRelaxed: 'Relaxed: the From: domain and the authenticated domain must share the same organizational domain.',
+    dmarcValueDescAlignStrict: 'Strict: the From: domain and the authenticated domain must match exactly.',
+    dmarcValueDescFoZero: '0: generate a report only when ALL underlying mechanisms (SPF and DKIM) fail.',
+    dmarcValueDescFoOne: '1: generate a report when ANY underlying mechanism fails (recommended).',
+    dmarcValueDescFoD: 'd: generate a DKIM failure report when DKIM signing fails, regardless of alignment.',
+    dmarcValueDescFoS: 's: generate an SPF failure report when SPF evaluation fails, regardless of alignment.',
+    dmarcValueDescRfAfrf: 'Authentication Failure Reporting Format (RFC 6591). The only widely-supported value.',
+    dmarcValueDescPercentFull: 'Applied to 100% of failing messages (full enforcement).',
+    dmarcValueDescPercentPartial: 'Partial rollout. The policy only applies to {percent}% of failing messages.',
     dmarcRecordBasics: 'DMARC Record Basics',
     dkimRecordBasics: 'DKIM Record Basics',
     mxRecordBasics: 'MX Record Basics',
@@ -12690,6 +13480,7 @@ const UI_TRANSLATION_OVERRIDES = {
     listedOnZone: 'IP {ip} listed on {zone}{suffix}',
     spfOutlookRequirementPresent: 'Required Outlook SPF include detected for ACS.',
     spfOutlookRequirementMissing: 'Required Outlook SPF include was not detected for ACS.',
+    spfOutlookRequirementFlattenedSuffix: '(Flattened DNS record being utilized)',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -12703,6 +13494,7 @@ const UI_TRANSLATION_OVERRIDES = {
     listedOnZone: 'La IP {ip} figura en {zone}{suffix}',
     spfOutlookRequirementPresent: 'Se detect\u00F3 el include SPF de Outlook requerido para ACS.',
     spfOutlookRequirementMissing: 'No se detect\u00F3 el include SPF de Outlook requerido para ACS.',
+    spfOutlookRequirementFlattenedSuffix: '(Se utiliza un registro DNS aplanado)',
     unitYearOne: 'a\u00F1o',
     unitYearMany: 'a\u00F1os',
     unitMonthOne: 'mes',
@@ -12734,6 +13526,7 @@ const UI_TRANSLATION_OVERRIDES = {
     listedOnZone: 'IP {ip} list\u00E9e sur {zone}{suffix}',
     spfOutlookRequirementPresent: 'L\u2019inclusion SPF Outlook requise pour ACS a \u00E9t\u00E9 d\u00E9tect\u00E9e.',
     spfOutlookRequirementMissing: 'L\u2019inclusion SPF Outlook requise pour ACS n\u2019a pas \u00E9t\u00E9 d\u00E9tect\u00E9e.',
+    spfOutlookRequirementFlattenedSuffix: '(Enregistrement DNS aplati utilis\u00E9)',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -12747,6 +13540,7 @@ const UI_TRANSLATION_OVERRIDES = {
     listedOnZone: 'IP {ip} ist auf {zone} gelistet{suffix}',
     spfOutlookRequirementPresent: 'Der f\u00FCr ACS erforderliche Outlook-SPF-Include wurde erkannt.',
     spfOutlookRequirementMissing: 'Der f\u00FCr ACS erforderliche Outlook-SPF-Include wurde nicht erkannt.',
+    spfOutlookRequirementFlattenedSuffix: '(Abgeflachter DNS-Eintrag wird verwendet)',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -12760,6 +13554,7 @@ const UI_TRANSLATION_OVERRIDES = {
     listedOnZone: 'IP {ip} listada em {zone}{suffix}',
     spfOutlookRequirementPresent: 'O include SPF do Outlook exigido para ACS foi detectado.',
     spfOutlookRequirementMissing: 'O include SPF do Outlook exigido para ACS n\u00E3o foi detectado.',
+    spfOutlookRequirementFlattenedSuffix: '(Registro DNS achatado em uso)',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -12773,6 +13568,7 @@ const UI_TRANSLATION_OVERRIDES = {
     listedOnZone: '\u062A\u0645 \u0625\u062F\u0631\u0627\u062C IP \u200F{ip} \u0641\u064A {zone}{suffix}',
     spfOutlookRequirementPresent: '\u062A\u0645 \u0627\u0643\u062A\u0634\u0627\u0641 \u062A\u0636\u0645\u064A\u0646 Outlook SPF \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0644\u0640 ACS.',
     spfOutlookRequirementMissing: '\u0644\u0645 \u064A\u062A\u0645 \u0627\u0643\u062A\u0634\u0627\u0641 \u062A\u0636\u0645\u064A\u0646 Outlook SPF \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0644\u0640 ACS.',
+    spfOutlookRequirementFlattenedSuffix: '(\u064A\u062A\u0645 \u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0633\u062C\u0644 DNS \u0645\u0633\u0637\u062D)',
     unitYearOne: '\u0633\u0646\u0629',
     unitYearMany: '\u0633\u0646\u0648\u0627\u062A',
     unitMonthOne: '\u0634\u0647\u0631',
@@ -12801,7 +13597,8 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: '\u7236\u57DF {lookupDomain} \u7684 TXT \u8BB0\u5F55\uFF08\u4EC5\u4F9B\u53C2\u8003\uFF09\uFF1A',
     listedOnZone: 'IP {ip} \u5DF2\u5728 {zone} \u4E2D\u5217\u51FA{suffix}',
     spfOutlookRequirementPresent: '\u5DF2\u68C0\u6D4B\u5230 ACS \u6240\u9700\u7684 Outlook SPF include\u3002',
-    spfOutlookRequirementMissing: '\u672A\u68C0\u6D4B\u5230 ACS \u6240\u9700\u7684 Outlook SPF include\u3002'
+    spfOutlookRequirementMissing: '\u672A\u68C0\u6D4B\u5230 ACS \u6240\u9700\u7684 Outlook SPF include\u3002',
+    spfOutlookRequirementFlattenedSuffix: '(\u4F7F\u7528\u4E86\u626B\u5E73\u7684 DNS \u8BB0\u5F55)'
   },
   'hi-IN': {
     removeLabel: '\u0939\u091F\u093E\u090F\u0901',
@@ -12812,7 +13609,8 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: '\u092E\u0942\u0932 \u0921\u094B\u092E\u0947\u0928 {lookupDomain} \u0915\u0947 TXT \u0930\u093F\u0915\u0949\u0930\u094D\u0921 (\u0915\u0947\u0935\u0932 \u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u0915\u0947 \u0932\u093F\u090F):',
     listedOnZone: 'IP {ip} {zone} \u092A\u0930 \u0938\u0942\u091A\u0940\u092C\u0926\u094D\u0927 \u0939\u0948{suffix}',
     spfOutlookRequirementPresent: 'ACS \u0915\u0947 \u0932\u093F\u090F \u0906\u0935\u0936\u094D\u092F\u0915 Outlook SPF include \u092E\u093F\u0932 \u0917\u092F\u093E\u0964',
-    spfOutlookRequirementMissing: 'ACS \u0915\u0947 \u0932\u093F\u090F \u0906\u0935\u0936\u094D\u092F\u0915 Outlook SPF include \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u093E\u0964'
+    spfOutlookRequirementMissing: 'ACS \u0915\u0947 \u0932\u093F\u090F \u0906\u0935\u0936\u094D\u092F\u0915 Outlook SPF include \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u093E\u0964',
+    spfOutlookRequirementFlattenedSuffix: '(\u0938\u092A\u093E\u091F \u0915\u093F\u090F \u0917\u090F DNS \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0915\u093E \u0909\u092A\u092F\u094B\u0917)'
   },
   'ja-JP': {
     removeLabel: '\u524A\u9664',
@@ -12823,7 +13621,8 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: '\u89AA\u30C9\u30E1\u30A4\u30F3 {lookupDomain} \u306E TXT \u30EC\u30B3\u30FC\u30C9\uFF08\u53C2\u8003\u60C5\u5831\u306E\u307F\uFF09:',
     listedOnZone: 'IP {ip} \u306F {zone} \u306B\u63B2\u8F09\u3055\u308C\u3066\u3044\u307E\u3059{suffix}',
     spfOutlookRequirementPresent: 'ACS \u306B\u5FC5\u8981\u306A Outlook SPF include \u304C\u691C\u51FA\u3055\u308C\u307E\u3057\u305F\u3002',
-    spfOutlookRequirementMissing: 'ACS \u306B\u5FC5\u8981\u306A Outlook SPF include \u304C\u691C\u51FA\u3055\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002'
+    spfOutlookRequirementMissing: 'ACS \u306B\u5FC5\u8981\u306A Outlook SPF include \u304C\u691C\u51FA\u3055\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002',
+    spfOutlookRequirementFlattenedSuffix: '(\u5E73\u5766\u5316\u3055\u308C\u305F DNS \u30EC\u30B3\u30FC\u30C9\u3092\u4F7F\u7528\u4E2D)'
   },
   'ru-RU': {
     removeLabel: '\u0423\u0434\u0430\u043B\u0438\u0442\u044C',
@@ -12834,7 +13633,8 @@ const UI_TRANSLATION_OVERRIDES = {
     parentDomainTxtRecordsInfo: 'TXT-\u0437\u0430\u043F\u0438\u0441\u0438 \u0440\u043E\u0434\u0438\u0442\u0435\u043B\u044C\u0441\u043A\u043E\u0433\u043E \u0434\u043E\u043C\u0435\u043D\u0430 {lookupDomain} (\u0442\u043E\u043B\u044C\u043A\u043E \u0434\u043B\u044F \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u0438):',
     listedOnZone: 'IP {ip} \u0432\u043D\u0435\u0441\u0451\u043D \u0432 \u0441\u043F\u0438\u0441\u043E\u043A {zone}{suffix}',
     spfOutlookRequirementPresent: '\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439 Outlook SPF include \u0434\u043B\u044F ACS.',
-    spfOutlookRequirementMissing: '\u041E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439 Outlook SPF include \u0434\u043B\u044F ACS \u043D\u0435 \u043E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D.'
+    spfOutlookRequirementMissing: '\u041E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439 Outlook SPF include \u0434\u043B\u044F ACS \u043D\u0435 \u043E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D.',
+    spfOutlookRequirementFlattenedSuffix: '(\u0418\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442\u0441\u044F \u0440\u0430\u0437\u0432\u0451\u0440\u043D\u0443\u0442\u0430\u044F DNS-\u0437\u0430\u043F\u0438\u0441\u044C)'
   }
 };
 
@@ -15297,6 +16097,448 @@ Object.keys(COOKIE_CONSENT_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, COOKIE_CONSENT_TRANSLATION_OVERRIDES[code]);
 });
 
+// ===== SPF Explained / DMARC Explained translations =====
+// Keys consumed by buildSpfExplainedHtml / buildDmarcExplainedHtml plus the
+// associated toggles, per-row expansion explain, CIDR info panel, and the
+// SPF / DMARC mechanism + tag + value description helpers. English already
+// lives in the base TRANSLATIONS block above; this override block fills in
+// the other 9 supported languages so the breakdown tables read in the
+// user's selected language instead of falling back to English. All
+// non-ASCII text uses \uXXXX escapes to stay safe under non-UTF-8 locales.
+const EXPLAINED_TRANSLATION_OVERRIDES = {
+  es: {
+    spfExplainedShow: 'SPF explicado',
+    spfExplainedHide: 'Ocultar SPF explicado',
+    spfExplainedTooltip: 'Descomponer este registro SPF en prefijo, tipo, valor y una breve descripci\u00F3n de cada mecanismo.',
+    spfExplainedEmpty: 'No hay registro SPF disponible para explicar.',
+    spfExpansionExplain: 'Explicar',
+    spfExpansionExplainHide: 'Ocultar',
+    spfExpansionExplainTooltip: 'Mostrar un desglose por mecanismo de este registro SPF resuelto.',
+    spfExpansionExplainColumn: 'Informaci\u00F3n',
+    spfExplainedPrefix: 'Prefijo',
+    spfExplainedType: 'Tipo',
+    spfExplainedValue: 'Valor',
+    spfExplainedPrefixDesc: 'Desc. del prefijo',
+    spfExplainedDescription: 'Descripci\u00F3n',
+    spfExplainedLegend: 'Calificadores de prefijo: + Pass (predeterminado), - HardFail, ~ SoftFail, ? Neutral.',
+    spfExplainedCidrInfoLabel: 'Mostrar detalles de red, rango y tama\u00F1o para este CIDR.',
+    spfCidrLabelNetwork: 'Red:',
+    spfCidrLabelPrefix: 'Prefijo CIDR:',
+    spfCidrLabelMask: 'M\u00E1scara de subred:',
+    spfCidrLabelRange: 'Rango:',
+    spfCidrLabelSize: 'Tama\u00F1o:',
+    spfCidrLabelAddresses: 'direcciones IP',
+    spfCidrRangeThrough: 'a',
+    spfPrefixPass: 'Pass',
+    spfPrefixFail: 'HardFail',
+    spfPrefixSoftFail: 'SoftFail',
+    spfPrefixNeutral: 'Neutral',
+    spfDescVersion: 'La versi\u00F3n del registro SPF.',
+    spfDescAll: 'Siempre coincide. Debe ir al final del registro.',
+    spfDescInclude: 'Se consulta el dominio indicado en busca de una autorizaci\u00F3n.',
+    spfDescA: 'Coincide si la IP del remitente es uno de los registros A/AAAA del dominio.',
+    spfDescMx: 'Coincide si la IP del remitente es uno de los hosts MX del dominio.',
+    spfDescPtr: 'Coincide si el DNS inverso del remitente apunta al dominio (no recomendado).',
+    spfDescIp4: 'Autoriza la direcci\u00F3n IPv4 o el rango CIDR indicado.',
+    spfDescIp6: 'Autoriza la direcci\u00F3n IPv6 o el rango CIDR indicado.',
+    spfDescExists: 'Coincide si una consulta DNS A sobre el destino expandido devuelve cualquier registro.',
+    spfDescRedirect: 'Reemplaza el registro actual con el registro SPF del dominio indicado.',
+    spfDescExp: 'Proporciona una cadena de explicaci\u00F3n devuelta junto con los resultados Fail.',
+    spfDescUnknown: 'T\u00E9rmino SPF no reconocido. Verifique errores tipogr\u00E1ficos o sintaxis no admitida.',
+    dmarcExplainedShow: 'DMARC explicado',
+    dmarcExplainedHide: 'Ocultar DMARC explicado',
+    dmarcExplainedTooltip: 'Descomponer este registro DMARC en etiqueta, valor y una breve descripci\u00F3n de cada etiqueta y su valor.',
+    dmarcExplainedEmpty: 'No hay registro DMARC disponible para explicar.',
+    dmarcExplainedTag: 'Etiqueta',
+    dmarcExplainedValue: 'Valor',
+    dmarcExplainedTagDesc: 'Desc. de la etiqueta',
+    dmarcExplainedValueDesc: 'Desc. del valor',
+    dmarcExplainedLegend: 'Las etiquetas DMARC son pares clave=valor separados por punto y coma. v= y p= son obligatorios; el resto es opcional pero se recomienda para informes y alineaci\u00F3n.',
+    dmarcTagDescVersion: 'Versi\u00F3n de DMARC. Debe ser DMARC1 y aparecer en primer lugar.',
+    dmarcTagDescPolicy: 'Pol\u00EDtica para el dominio. Indica a los receptores qu\u00E9 hacer con los mensajes que fallan DMARC.',
+    dmarcTagDescSubdomainPolicy: 'Pol\u00EDtica para subdominios. Anula p= para subdominios cuando est\u00E1 presente.',
+    dmarcTagDescPercent: 'Porcentaje de mensajes fallidos al que se aplica la pol\u00EDtica durante el despliegue. Predeterminado: 100.',
+    dmarcTagDescRua: 'Destinos de informes agregados. URIs mailto: o https: separados por comas que reciben informes XML diarios.',
+    dmarcTagDescRuf: 'Destinos de informes forenses / de fallos. URIs separados por comas que reciben informes por mensaje fallido.',
+    dmarcTagDescFo: 'Opciones de informes forenses. Controla qu\u00E9 fallos generan un informe ruf=.',
+    dmarcTagDescAdkim: 'Modo de alineaci\u00F3n del identificador DKIM. s = estricto (coincidencia exacta), r = relajado (mismo dominio organizativo).',
+    dmarcTagDescAspf: 'Modo de alineaci\u00F3n del identificador SPF. s = estricto (coincidencia exacta), r = relajado (mismo dominio organizativo).',
+    dmarcTagDescRi: 'Intervalo solicitado entre informes agregados, en segundos. Predeterminado: 86400 (un d\u00EDa).',
+    dmarcTagDescRf: 'Formato para los informes forenses. Predeterminado: afrf (Authentication Failure Reporting Format).',
+    dmarcTagDescUnknown: 'Etiqueta DMARC no reconocida. Verifique errores tipogr\u00E1ficos o sintaxis no admitida.',
+    dmarcValueDescPolicyNone: 'Solo monitorizar. Los receptores no act\u00FAan ante fallos, pero a\u00FAn env\u00EDan informes.',
+    dmarcValueDescPolicyQuarantine: 'Cuarentena para mensajes fallidos (normalmente entregar en Correo no deseado).',
+    dmarcValueDescPolicyReject: 'Rechazar de forma definitiva los mensajes fallidos en la capa SMTP.',
+    dmarcValueDescAlignRelaxed: 'Relajado: el dominio From: y el dominio autenticado deben compartir el mismo dominio organizativo.',
+    dmarcValueDescAlignStrict: 'Estricto: el dominio From: y el dominio autenticado deben coincidir exactamente.',
+    dmarcValueDescFoZero: '0: generar un informe solo cuando fallan TODOS los mecanismos subyacentes (SPF y DKIM).',
+    dmarcValueDescFoOne: '1: generar un informe cuando falla CUALQUIER mecanismo subyacente (recomendado).',
+    dmarcValueDescFoD: 'd: generar un informe de fallo DKIM cuando la firma DKIM falla, independientemente de la alineaci\u00F3n.',
+    dmarcValueDescFoS: 's: generar un informe de fallo SPF cuando la evaluaci\u00F3n SPF falla, independientemente de la alineaci\u00F3n.',
+    dmarcValueDescRfAfrf: 'Authentication Failure Reporting Format (RFC 6591). El \u00FAnico valor ampliamente compatible.',
+    dmarcValueDescPercentFull: 'Aplicado al 100% de los mensajes fallidos (aplicaci\u00F3n total).',
+    dmarcValueDescPercentPartial: 'Despliegue parcial. La pol\u00EDtica solo se aplica al {percent}% de los mensajes fallidos.'
+  },
+  fr: {
+    spfExplainedShow: 'SPF expliqu\u00E9',
+    spfExplainedHide: 'Masquer SPF expliqu\u00E9',
+    spfExplainedTooltip: 'D\u00E9composer cet enregistrement SPF en pr\u00E9fixe, type, valeur et une br\u00E8ve description de chaque m\u00E9canisme.',
+    spfExplainedEmpty: 'Aucun enregistrement SPF disponible \u00E0 expliquer.',
+    spfExpansionExplain: 'Expliquer',
+    spfExpansionExplainHide: 'Masquer',
+    spfExpansionExplainTooltip: 'Afficher une ventilation par m\u00E9canisme de cet enregistrement SPF r\u00E9solu.',
+    spfExpansionExplainColumn: 'Informations',
+    spfExplainedPrefix: 'Pr\u00E9fixe',
+    spfExplainedType: 'Type',
+    spfExplainedValue: 'Valeur',
+    spfExplainedPrefixDesc: 'Desc. du pr\u00E9fixe',
+    spfExplainedDescription: 'Description',
+    spfExplainedLegend: 'Qualificateurs de pr\u00E9fixe\u00A0: + Pass (par d\u00E9faut), - HardFail, ~ SoftFail, ? Neutral.',
+    spfExplainedCidrInfoLabel: 'Afficher les d\u00E9tails r\u00E9seau, plage et taille pour ce CIDR.',
+    spfCidrLabelNetwork: 'R\u00E9seau\u00A0:',
+    spfCidrLabelPrefix: 'Pr\u00E9fixe CIDR\u00A0:',
+    spfCidrLabelMask: 'Masque de sous-r\u00E9seau\u00A0:',
+    spfCidrLabelRange: 'Plage\u00A0:',
+    spfCidrLabelSize: 'Taille\u00A0:',
+    spfCidrLabelAddresses: 'adresses IP',
+    spfCidrRangeThrough: '\u00E0',
+    spfPrefixPass: 'Pass',
+    spfPrefixFail: 'HardFail',
+    spfPrefixSoftFail: 'SoftFail',
+    spfPrefixNeutral: 'Neutral',
+    spfDescVersion: 'Version de l\u2019enregistrement SPF.',
+    spfDescAll: 'Correspond toujours. Doit appara\u00EEtre \u00E0 la fin de l\u2019enregistrement.',
+    spfDescInclude: 'Le domaine indiqu\u00E9 est interrog\u00E9 pour une autorisation.',
+    spfDescA: 'Correspond si l\u2019IP de l\u2019exp\u00E9diteur figure parmi les enregistrements A/AAAA du domaine.',
+    spfDescMx: 'Correspond si l\u2019IP de l\u2019exp\u00E9diteur figure parmi les h\u00F4tes MX du domaine.',
+    spfDescPtr: 'Correspond si le DNS inverse de l\u2019exp\u00E9diteur pointe vers le domaine (d\u00E9conseill\u00E9).',
+    spfDescIp4: 'Autorise l\u2019adresse IPv4 ou la plage CIDR indiqu\u00E9e.',
+    spfDescIp6: 'Autorise l\u2019adresse IPv6 ou la plage CIDR indiqu\u00E9e.',
+    spfDescExists: 'Correspond si une requ\u00EAte DNS A sur la cible \u00E9tendue renvoie un enregistrement.',
+    spfDescRedirect: 'Remplace l\u2019enregistrement courant par l\u2019enregistrement SPF du domaine indiqu\u00E9.',
+    spfDescExp: 'Fournit une cha\u00EEne d\u2019explication renvoy\u00E9e avec les r\u00E9sultats Fail.',
+    spfDescUnknown: 'Terme SPF non reconnu. V\u00E9rifiez les fautes de frappe ou la syntaxe non prise en charge.',
+    dmarcExplainedShow: 'DMARC expliqu\u00E9',
+    dmarcExplainedHide: 'Masquer DMARC expliqu\u00E9',
+    dmarcExplainedTooltip: 'D\u00E9composer cet enregistrement DMARC en balise, valeur et une br\u00E8ve description de chaque balise et sa valeur.',
+    dmarcExplainedEmpty: 'Aucun enregistrement DMARC disponible \u00E0 expliquer.',
+    dmarcExplainedTag: 'Balise',
+    dmarcExplainedValue: 'Valeur',
+    dmarcExplainedTagDesc: 'Desc. de la balise',
+    dmarcExplainedValueDesc: 'Desc. de la valeur',
+    dmarcExplainedLegend: 'Les balises DMARC sont des paires cl\u00E9=valeur s\u00E9par\u00E9es par des points-virgules. v= et p= sont obligatoires\u00A0; les autres sont facultatives mais recommand\u00E9es pour les rapports et l\u2019alignement.',
+    dmarcTagDescVersion: 'Version DMARC. Doit \u00EAtre DMARC1 et appara\u00EEtre en premier.',
+    dmarcTagDescPolicy: 'Politique pour le domaine lui-m\u00EAme. Indique aux destinataires quoi faire des messages \u00E9chouant \u00E0 DMARC.',
+    dmarcTagDescSubdomainPolicy: 'Politique pour les sous-domaines. Remplace p= pour les sous-domaines lorsqu\u2019elle est pr\u00E9sente.',
+    dmarcTagDescPercent: 'Pourcentage de messages en \u00E9chec auxquels la politique s\u2019applique lors du d\u00E9ploiement. Par d\u00E9faut\u00A0: 100.',
+    dmarcTagDescRua: 'Destinataires des rapports agr\u00E9g\u00E9s. URIs mailto: ou https: s\u00E9par\u00E9s par des virgules qui re\u00E7oivent des rapports XML quotidiens.',
+    dmarcTagDescRuf: 'Destinataires des rapports forensiques / d\u2019\u00E9chec. URIs s\u00E9par\u00E9s par des virgules recevant un rapport par message en \u00E9chec.',
+    dmarcTagDescFo: 'Options de rapports forensiques. Contr\u00F4le quels \u00E9checs d\u00E9clenchent un rapport ruf=.',
+    dmarcTagDescAdkim: 'Mode d\u2019alignement de l\u2019identifiant DKIM. s = strict (correspondance exacte), r = relax\u00E9 (m\u00EAme domaine organisationnel).',
+    dmarcTagDescAspf: 'Mode d\u2019alignement de l\u2019identifiant SPF. s = strict (correspondance exacte), r = relax\u00E9 (m\u00EAme domaine organisationnel).',
+    dmarcTagDescRi: 'Intervalle demand\u00E9 entre les rapports agr\u00E9g\u00E9s, en secondes. Par d\u00E9faut\u00A0: 86400 (un jour).',
+    dmarcTagDescRf: 'Format des rapports forensiques. Par d\u00E9faut\u00A0: afrf (Authentication Failure Reporting Format).',
+    dmarcTagDescUnknown: 'Balise DMARC non reconnue. V\u00E9rifiez les fautes de frappe ou la syntaxe non prise en charge.',
+    dmarcValueDescPolicyNone: 'Surveillance uniquement. Les destinataires n\u2019agissent pas sur les \u00E9checs, mais envoient quand m\u00EAme des rapports.',
+    dmarcValueDescPolicyQuarantine: 'Mettre en quarantaine les messages en \u00E9chec (g\u00E9n\u00E9ralement livraison dans Ind�sirables).',
+    dmarcValueDescPolicyReject: 'Rejeter purement et simplement les messages en \u00E9chec au niveau SMTP.',
+    dmarcValueDescAlignRelaxed: 'Relax\u00E9\u00A0: le domaine From: et le domaine authentifi\u00E9 doivent partager le m\u00EAme domaine organisationnel.',
+    dmarcValueDescAlignStrict: 'Strict\u00A0: le domaine From: et le domaine authentifi\u00E9 doivent correspondre exactement.',
+    dmarcValueDescFoZero: '0\u00A0: g\u00E9n\u00E9rer un rapport uniquement quand TOUS les m\u00E9canismes sous-jacents (SPF et DKIM) \u00E9chouent.',
+    dmarcValueDescFoOne: '1\u00A0: g\u00E9n\u00E9rer un rapport quand UN m\u00E9canisme sous-jacent \u00E9choue (recommand\u00E9).',
+    dmarcValueDescFoD: 'd\u00A0: g\u00E9n\u00E9rer un rapport d\u2019\u00E9chec DKIM quand la signature DKIM \u00E9choue, ind\u00E9pendamment de l\u2019alignement.',
+    dmarcValueDescFoS: 's\u00A0: g\u00E9n\u00E9rer un rapport d\u2019\u00E9chec SPF quand l\u2019\u00E9valuation SPF \u00E9choue, ind\u00E9pendamment de l\u2019alignement.',
+    dmarcValueDescRfAfrf: 'Authentication Failure Reporting Format (RFC 6591). La seule valeur largement support\u00E9e.',
+    dmarcValueDescPercentFull: 'Appliqu\u00E9 \u00E0 100\u00A0% des messages en \u00E9chec (application compl\u00E8te).',
+    dmarcValueDescPercentPartial: 'D\u00E9ploiement partiel. La politique ne s\u2019applique qu\u2019\u00E0 {percent}\u00A0% des messages en \u00E9chec.'
+  },
+  de: {
+    spfExplainedShow: 'SPF erkl\u00E4rt',
+    spfExplainedHide: 'SPF-Erkl\u00E4rung ausblenden',
+    spfExplainedTooltip: 'Diesen SPF-Eintrag in Pr\u00E4fix, Typ, Wert und eine kurze Beschreibung jedes Mechanismus zerlegen.',
+    spfExplainedEmpty: 'Kein SPF-Eintrag zum Erkl\u00E4ren verf\u00FCgbar.',
+    spfExpansionExplain: 'Erkl\u00E4ren',
+    spfExpansionExplainHide: 'Ausblenden',
+    spfExpansionExplainTooltip: 'Mechanismus-Aufschl\u00FCsselung dieses aufgel\u00F6sten SPF-Eintrags anzeigen.',
+    spfExpansionExplainColumn: 'Informationen',
+    spfExplainedPrefix: 'Pr\u00E4fix',
+    spfExplainedType: 'Typ',
+    spfExplainedValue: 'Wert',
+    spfExplainedPrefixDesc: 'Pr\u00E4fix-Beschr.',
+    spfExplainedDescription: 'Beschreibung',
+    spfExplainedLegend: 'Pr\u00E4fix-Qualifizierer: + Pass (Standard), - HardFail, ~ SoftFail, ? Neutral.',
+    spfExplainedCidrInfoLabel: 'Netzwerk-, Bereichs- und Gr\u00F6\u00DFendetails f\u00FCr dieses CIDR anzeigen.',
+    spfCidrLabelNetwork: 'Netzwerk:',
+    spfCidrLabelPrefix: 'CIDR-Pr\u00E4fix:',
+    spfCidrLabelMask: 'Subnetzmaske:',
+    spfCidrLabelRange: 'Bereich:',
+    spfCidrLabelSize: 'Gr\u00F6\u00DFe:',
+    spfCidrLabelAddresses: 'IP-Adressen',
+    spfCidrRangeThrough: 'bis',
+    spfPrefixPass: 'Pass',
+    spfPrefixFail: 'HardFail',
+    spfPrefixSoftFail: 'SoftFail',
+    spfPrefixNeutral: 'Neutral',
+    spfDescVersion: 'Version des SPF-Eintrags.',
+    spfDescAll: 'Trifft immer zu. Muss am Ende des Eintrags stehen.',
+    spfDescInclude: 'Die angegebene Dom\u00E4ne wird nach einer Freigabe durchsucht.',
+    spfDescA: 'Trifft zu, wenn die Absender-IP einer der A/AAAA-Eintr\u00E4ge der Dom\u00E4ne ist.',
+    spfDescMx: 'Trifft zu, wenn die Absender-IP einer der MX-Hosts der Dom\u00E4ne ist.',
+    spfDescPtr: 'Trifft zu, wenn das Reverse-DNS des Absenders auf die Dom\u00E4ne verweist (nicht empfohlen).',
+    spfDescIp4: 'Autorisiert die angegebene IPv4-Adresse oder den CIDR-Bereich.',
+    spfDescIp6: 'Autorisiert die angegebene IPv6-Adresse oder den CIDR-Bereich.',
+    spfDescExists: 'Trifft zu, wenn eine DNS-A-Abfrage f\u00FCr das erweiterte Ziel einen Eintrag liefert.',
+    spfDescRedirect: 'Ersetzt den aktuellen Eintrag durch den SPF-Eintrag der angegebenen Dom\u00E4ne.',
+    spfDescExp: 'Liefert einen Erkl\u00E4rungstext, der mit Fail-Ergebnissen zur\u00FCckgegeben wird.',
+    spfDescUnknown: 'Unbekannter SPF-Begriff. Pr\u00FCfen Sie auf Tippfehler oder nicht unterst\u00FCtzte Syntax.',
+    dmarcExplainedShow: 'DMARC erkl\u00E4rt',
+    dmarcExplainedHide: 'DMARC-Erkl\u00E4rung ausblenden',
+    dmarcExplainedTooltip: 'Diesen DMARC-Eintrag in Tag, Wert und eine kurze Beschreibung jedes Tags und seines Werts zerlegen.',
+    dmarcExplainedEmpty: 'Kein DMARC-Eintrag zum Erkl\u00E4ren verf\u00FCgbar.',
+    dmarcExplainedTag: 'Tag',
+    dmarcExplainedValue: 'Wert',
+    dmarcExplainedTagDesc: 'Tag-Beschr.',
+    dmarcExplainedValueDesc: 'Wert-Beschr.',
+    dmarcExplainedLegend: 'DMARC-Tags sind durch Semikolons getrennte Schl\u00FCssel=Wert-Paare. v= und p= sind erforderlich; die \u00FCbrigen sind optional, aber f\u00FCr Berichte und Ausrichtung empfohlen.',
+    dmarcTagDescVersion: 'DMARC-Version. Muss DMARC1 sein und an erster Stelle stehen.',
+    dmarcTagDescPolicy: 'Richtlinie f\u00FCr die Dom\u00E4ne selbst. Teilt Empf\u00E4ngern mit, was mit Nachrichten zu tun ist, die DMARC nicht bestehen.',
+    dmarcTagDescSubdomainPolicy: 'Richtlinie f\u00FCr Subdom\u00E4nen. \u00DCberschreibt p= f\u00FCr Subdom\u00E4nen, sofern vorhanden.',
+    dmarcTagDescPercent: 'Prozentsatz fehlgeschlagener Nachrichten, auf den die Richtlinie w\u00E4hrend des Rollouts angewendet wird. Standard: 100.',
+    dmarcTagDescRua: 'Empf\u00E4nger f\u00FCr aggregierte Berichte. Durch Kommas getrennte mailto:- oder https:-URIs, die t\u00E4gliche XML-Berichte erhalten.',
+    dmarcTagDescRuf: 'Empf\u00E4nger f\u00FCr forensische / Fehlerberichte. Durch Kommas getrennte URIs, die Pro-Nachricht-Fehlerberichte erhalten.',
+    dmarcTagDescFo: 'Optionen f\u00FCr forensische Berichte. Steuert, welche Fehler einen ruf=-Bericht ausl\u00F6sen.',
+    dmarcTagDescAdkim: 'DKIM-Identifier-Ausrichtungsmodus. s = strikt (exakte \u00DCbereinstimmung), r = entspannt (gleiche Organisationsdom\u00E4ne).',
+    dmarcTagDescAspf: 'SPF-Identifier-Ausrichtungsmodus. s = strikt (exakte \u00DCbereinstimmung), r = entspannt (gleiche Organisationsdom\u00E4ne).',
+    dmarcTagDescRi: 'Gew\u00FCnschtes Intervall zwischen aggregierten Berichten in Sekunden. Standard: 86400 (ein Tag).',
+    dmarcTagDescRf: 'Format f\u00FCr forensische Berichte. Standard: afrf (Authentication Failure Reporting Format).',
+    dmarcTagDescUnknown: 'Unbekannter DMARC-Tag. Pr\u00FCfen Sie auf Tippfehler oder nicht unterst\u00FCtzte Syntax.',
+    dmarcValueDescPolicyNone: 'Nur \u00FCberwachen. Empf\u00E4nger reagieren nicht auf Fehler, senden aber dennoch Berichte.',
+    dmarcValueDescPolicyQuarantine: 'Fehlerhafte Nachrichten in Quarant\u00E4ne (typischerweise Zustellung in Junk / Spam).',
+    dmarcValueDescPolicyReject: 'Fehlerhafte Nachrichten direkt auf SMTP-Ebene ablehnen.',
+    dmarcValueDescAlignRelaxed: 'Entspannt: Die From:-Dom\u00E4ne und die authentifizierte Dom\u00E4ne m\u00FCssen dieselbe Organisationsdom\u00E4ne teilen.',
+    dmarcValueDescAlignStrict: 'Strikt: Die From:-Dom\u00E4ne und die authentifizierte Dom\u00E4ne m\u00FCssen exakt \u00FCbereinstimmen.',
+    dmarcValueDescFoZero: '0: Bericht nur erzeugen, wenn ALLE zugrunde liegenden Mechanismen (SPF und DKIM) fehlschlagen.',
+    dmarcValueDescFoOne: '1: Bericht erzeugen, wenn IRGENDEIN zugrunde liegender Mechanismus fehlschl\u00E4gt (empfohlen).',
+    dmarcValueDescFoD: 'd: DKIM-Fehlerbericht erzeugen, wenn die DKIM-Signatur fehlschl\u00E4gt, unabh\u00E4ngig von der Ausrichtung.',
+    dmarcValueDescFoS: 's: SPF-Fehlerbericht erzeugen, wenn die SPF-Auswertung fehlschl\u00E4gt, unabh\u00E4ngig von der Ausrichtung.',
+    dmarcValueDescRfAfrf: 'Authentication Failure Reporting Format (RFC 6591). Der einzige weit verbreitete Wert.',
+    dmarcValueDescPercentFull: 'Auf 100\u00A0% der fehlgeschlagenen Nachrichten angewendet (vollst\u00E4ndige Durchsetzung).',
+    dmarcValueDescPercentPartial: 'Teilweiser Rollout. Die Richtlinie gilt nur f\u00FCr {percent}\u00A0% der fehlgeschlagenen Nachrichten.'
+  },
+  ar: {
+    spfExplainedShow: '\u0634\u0631\u062D SPF',
+    spfExplainedHide: '\u0625\u062E\u0641\u0627\u0621 \u0634\u0631\u062D SPF',
+    spfExplainedEmpty: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0633\u062C\u0644 SPF \u0644\u0644\u0634\u0631\u062D.',
+    spfExpansionExplain: '\u0634\u0631\u062D',
+    spfExpansionExplainHide: '\u0625\u062E\u0641\u0627\u0621',
+    spfExpansionExplainColumn: '\u0645\u0639\u0644\u0648\u0645\u0627\u062A',
+    spfExplainedPrefix: '\u0627\u0644\u0628\u0627\u062F\u0626\u0629',
+    spfExplainedType: '\u0627\u0644\u0646\u0648\u0639',
+    spfExplainedValue: '\u0627\u0644\u0642\u064A\u0645\u0629',
+    spfExplainedPrefixDesc: '\u0648\u0635\u0641 \u0627\u0644\u0628\u0627\u062F\u0626\u0629',
+    spfExplainedDescription: '\u0627\u0644\u0648\u0635\u0641',
+    spfCidrLabelNetwork: '\u0627\u0644\u0634\u0628\u0643\u0629:',
+    spfCidrLabelPrefix: '\u0628\u0627\u062F\u0626\u0629 CIDR:',
+    spfCidrLabelMask: '\u0642\u0646\u0627\u0639 \u0627\u0644\u0634\u0628\u0643\u0629:',
+    spfCidrLabelRange: '\u0627\u0644\u0646\u0637\u0627\u0642:',
+    spfCidrLabelSize: '\u0627\u0644\u062D\u062C\u0645:',
+    spfCidrLabelAddresses: '\u0639\u0646\u0627\u0648\u064A\u0646 IP',
+    spfCidrRangeThrough: '\u0625\u0644\u0649',
+    dmarcExplainedShow: '\u0634\u0631\u062D DMARC',
+    dmarcExplainedHide: '\u0625\u062E\u0641\u0627\u0621 \u0634\u0631\u062D DMARC',
+    dmarcExplainedEmpty: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0633\u062C\u0644 DMARC \u0644\u0644\u0634\u0631\u062D.',
+    dmarcExplainedTag: '\u0627\u0644\u0648\u0633\u0645',
+    dmarcExplainedValue: '\u0627\u0644\u0642\u064A\u0645\u0629',
+    dmarcExplainedTagDesc: '\u0648\u0635\u0641 \u0627\u0644\u0648\u0633\u0645',
+    dmarcExplainedValueDesc: '\u0648\u0635\u0641 \u0627\u0644\u0642\u064A\u0645\u0629'
+  },
+  'pt-BR': {
+    spfExplainedShow: 'SPF explicado',
+    spfExplainedHide: 'Ocultar SPF explicado',
+    spfExplainedTooltip: 'Decompor este registro SPF em prefixo, tipo, valor e uma breve descri\u00E7\u00E3o de cada mecanismo.',
+    spfExplainedEmpty: 'Nenhum registro SPF dispon\u00EDvel para explicar.',
+    spfExpansionExplain: 'Explicar',
+    spfExpansionExplainHide: 'Ocultar',
+    spfExpansionExplainTooltip: 'Mostrar um detalhamento por mecanismo deste registro SPF resolvido.',
+    spfExpansionExplainColumn: 'Informa\u00E7\u00F5es',
+    spfExplainedPrefix: 'Prefixo',
+    spfExplainedType: 'Tipo',
+    spfExplainedValue: 'Valor',
+    spfExplainedPrefixDesc: 'Desc. do prefixo',
+    spfExplainedDescription: 'Descri\u00E7\u00E3o',
+    spfExplainedLegend: 'Qualificadores de prefixo: + Pass (padr\u00E3o), - HardFail, ~ SoftFail, ? Neutral.',
+    spfExplainedCidrInfoLabel: 'Mostrar detalhes de rede, intervalo e tamanho para este CIDR.',
+    spfCidrLabelNetwork: 'Rede:',
+    spfCidrLabelPrefix: 'Prefixo CIDR:',
+    spfCidrLabelMask: 'M\u00E1scara de sub-rede:',
+    spfCidrLabelRange: 'Intervalo:',
+    spfCidrLabelSize: 'Tamanho:',
+    spfCidrLabelAddresses: 'endere\u00E7os IP',
+    spfCidrRangeThrough: 'at\u00E9',
+    spfPrefixPass: 'Pass',
+    spfPrefixFail: 'HardFail',
+    spfPrefixSoftFail: 'SoftFail',
+    spfPrefixNeutral: 'Neutral',
+    spfDescVersion: 'A vers\u00E3o do registro SPF.',
+    spfDescAll: 'Sempre corresponde. Deve ficar no final do registro.',
+    spfDescInclude: 'O dom\u00EDnio especificado \u00E9 consultado para uma autoriza\u00E7\u00E3o.',
+    spfDescA: 'Corresponde se o IP do remetente for um dos registros A/AAAA do dom\u00EDnio.',
+    spfDescMx: 'Corresponde se o IP do remetente for um dos hosts MX do dom\u00EDnio.',
+    spfDescPtr: 'Corresponde se o DNS reverso do remetente resolver para o dom\u00EDnio (n\u00E3o recomendado).',
+    spfDescIp4: 'Autoriza o endere\u00E7o IPv4 ou intervalo CIDR listado.',
+    spfDescIp6: 'Autoriza o endere\u00E7o IPv6 ou intervalo CIDR listado.',
+    spfDescExists: 'Corresponde se uma consulta DNS A no destino expandido retornar qualquer registro.',
+    spfDescRedirect: 'Substitui o registro atual pelo registro SPF do dom\u00EDnio indicado.',
+    spfDescExp: 'Fornece uma cadeia de explica\u00E7\u00E3o retornada com resultados Fail.',
+    spfDescUnknown: 'Termo SPF n\u00E3o reconhecido. Verifique erros de digita\u00E7\u00E3o ou sintaxe n\u00E3o suportada.',
+    dmarcExplainedShow: 'DMARC explicado',
+    dmarcExplainedHide: 'Ocultar DMARC explicado',
+    dmarcExplainedTooltip: 'Decompor este registro DMARC em tag, valor e uma breve descri\u00E7\u00E3o de cada tag e seu valor.',
+    dmarcExplainedEmpty: 'Nenhum registro DMARC dispon\u00EDvel para explicar.',
+    dmarcExplainedTag: 'Tag',
+    dmarcExplainedValue: 'Valor',
+    dmarcExplainedTagDesc: 'Desc. da tag',
+    dmarcExplainedValueDesc: 'Desc. do valor',
+    dmarcExplainedLegend: 'Tags DMARC s\u00E3o pares chave=valor separados por ponto e v\u00EDrgula. v= e p= s\u00E3o obrigat\u00F3rios; o restante \u00E9 opcional, mas recomendado para relat\u00F3rios e alinhamento.',
+    dmarcTagDescVersion: 'Vers\u00E3o do DMARC. Deve ser DMARC1 e aparecer em primeiro lugar.',
+    dmarcTagDescPolicy: 'Pol\u00EDtica para o pr\u00F3prio dom\u00EDnio. Diz aos receptores o que fazer com mensagens que falham no DMARC.',
+    dmarcTagDescSubdomainPolicy: 'Pol\u00EDtica para subdom\u00EDnios. Sobrep\u00F5e p= para subdom\u00EDnios quando presente.',
+    dmarcTagDescPercent: 'Porcentagem de mensagens com falha \u00E0 qual a pol\u00EDtica se aplica durante o rollout. Padr\u00E3o: 100.',
+    dmarcTagDescRua: 'Destinat\u00E1rios de relat\u00F3rios agregados. URIs mailto: ou https: separados por v\u00EDrgulas que recebem relat\u00F3rios XML di\u00E1rios.',
+    dmarcTagDescRuf: 'Destinat\u00E1rios de relat\u00F3rios forenses / de falha. URIs separados por v\u00EDrgulas que recebem relat\u00F3rios por mensagem com falha.',
+    dmarcTagDescFo: 'Op\u00E7\u00F5es de relat\u00F3rios forenses. Controla quais falhas disparam um relat\u00F3rio ruf=.',
+    dmarcTagDescAdkim: 'Modo de alinhamento do identificador DKIM. s = estrito (correspond\u00EAncia exata), r = relaxado (mesmo dom\u00EDnio organizacional).',
+    dmarcTagDescAspf: 'Modo de alinhamento do identificador SPF. s = estrito (correspond\u00EAncia exata), r = relaxado (mesmo dom\u00EDnio organizacional).',
+    dmarcTagDescRi: 'Intervalo solicitado entre relat\u00F3rios agregados, em segundos. Padr\u00E3o: 86400 (um dia).',
+    dmarcTagDescRf: 'Formato para relat\u00F3rios forenses. Padr\u00E3o: afrf (Authentication Failure Reporting Format).',
+    dmarcTagDescUnknown: 'Tag DMARC n\u00E3o reconhecida. Verifique erros de digita\u00E7\u00E3o ou sintaxe n\u00E3o suportada.',
+    dmarcValueDescPolicyNone: 'Apenas monitorar. Os receptores n\u00E3o agem sobre falhas, mas ainda enviam relat\u00F3rios.',
+    dmarcValueDescPolicyQuarantine: 'Colocar em quarentena mensagens com falha (normalmente entregue em Lixo / Spam).',
+    dmarcValueDescPolicyReject: 'Rejeitar imediatamente as mensagens com falha na camada SMTP.',
+    dmarcValueDescAlignRelaxed: 'Relaxado: o dom\u00EDnio From: e o dom\u00EDnio autenticado devem compartilhar o mesmo dom\u00EDnio organizacional.',
+    dmarcValueDescAlignStrict: 'Estrito: o dom\u00EDnio From: e o dom\u00EDnio autenticado devem corresponder exatamente.',
+    dmarcValueDescFoZero: '0: gerar um relat\u00F3rio somente quando TODOS os mecanismos subjacentes (SPF e DKIM) falharem.',
+    dmarcValueDescFoOne: '1: gerar um relat\u00F3rio quando QUALQUER mecanismo subjacente falhar (recomendado).',
+    dmarcValueDescFoD: 'd: gerar um relat\u00F3rio de falha DKIM quando a assinatura DKIM falhar, independentemente do alinhamento.',
+    dmarcValueDescFoS: 's: gerar um relat\u00F3rio de falha SPF quando a avalia\u00E7\u00E3o SPF falhar, independentemente do alinhamento.',
+    dmarcValueDescRfAfrf: 'Authentication Failure Reporting Format (RFC 6591). O \u00FAnico valor amplamente suportado.',
+    dmarcValueDescPercentFull: 'Aplicado a 100% das mensagens com falha (aplica\u00E7\u00E3o total).',
+    dmarcValueDescPercentPartial: 'Rollout parcial. A pol\u00EDtica se aplica apenas a {percent}% das mensagens com falha.'
+  },
+  'zh-CN': {
+    spfExplainedShow: 'SPF \u8BE6\u89E3',
+    spfExplainedHide: '\u9690\u85CF SPF \u8BE6\u89E3',
+    spfExplainedEmpty: '\u6CA1\u6709\u53EF\u89E3\u91CA\u7684 SPF \u8BB0\u5F55\u3002',
+    spfExpansionExplain: '\u8BE6\u89E3',
+    spfExpansionExplainHide: '\u9690\u85CF',
+    spfExpansionExplainColumn: '\u4FE1\u606F',
+    spfExplainedPrefix: '\u524D\u7F00',
+    spfExplainedType: '\u7C7B\u578B',
+    spfExplainedValue: '\u503C',
+    spfExplainedPrefixDesc: '\u524D\u7F00\u8BF4\u660E',
+    spfExplainedDescription: '\u8BF4\u660E',
+    spfCidrLabelNetwork: '\u7F51\u7EDC\uFF1A',
+    spfCidrLabelPrefix: 'CIDR \u524D\u7F00\uFF1A',
+    spfCidrLabelMask: '\u5B50\u7F51\u63A9\u7801\uFF1A',
+    spfCidrLabelRange: '\u8303\u56F4\uFF1A',
+    spfCidrLabelSize: '\u5927\u5C0F\uFF1A',
+    spfCidrLabelAddresses: '\u4E2A IP \u5730\u5740',
+    spfCidrRangeThrough: '\u81F3',
+    dmarcExplainedShow: 'DMARC \u8BE6\u89E3',
+    dmarcExplainedHide: '\u9690\u85CF DMARC \u8BE6\u89E3',
+    dmarcExplainedEmpty: '\u6CA1\u6709\u53EF\u89E3\u91CA\u7684 DMARC \u8BB0\u5F55\u3002',
+    dmarcExplainedTag: '\u6807\u7B7E',
+    dmarcExplainedValue: '\u503C',
+    dmarcExplainedTagDesc: '\u6807\u7B7E\u8BF4\u660E',
+    dmarcExplainedValueDesc: '\u503C\u8BF4\u660E'
+  },
+  'hi-IN': {
+    spfExplainedShow: 'SPF \u0935\u093F\u0935\u0930\u0923',
+    spfExplainedHide: 'SPF \u0935\u093F\u0935\u0930\u0923 \u091B\u093F\u092A\u093E\u090F\u0902',
+    spfExplainedEmpty: '\u0935\u093F\u0935\u0930\u0923 \u0915\u0947 \u0932\u093F\u090F \u0915\u094B\u0908 SPF \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0909\u092A\u0932\u092C\u094D\u0927 \u0928\u0939\u0940\u0902\u0964',
+    spfExpansionExplain: '\u0935\u093F\u0935\u0930\u0923',
+    spfExpansionExplainHide: '\u091B\u093F\u092A\u093E\u090F\u0902',
+    spfExpansionExplainColumn: '\u091C\u093E\u0928\u0915\u093E\u0930\u0940',
+    spfExplainedPrefix: '\u0909\u092A\u0938\u0930\u094D\u0917',
+    spfExplainedType: '\u092A\u094D\u0930\u0915\u093E\u0930',
+    spfExplainedValue: '\u092E\u093E\u0928',
+    spfExplainedPrefixDesc: '\u0909\u092A\u0938\u0930\u094D\u0917 \u0935\u093F\u0935\u0930\u0923',
+    spfExplainedDescription: '\u0935\u093F\u0935\u0930\u0923',
+    spfCidrLabelNetwork: '\u0928\u0947\u091F\u0935\u0930\u094D\u0915:',
+    spfCidrLabelPrefix: 'CIDR \u0909\u092A\u0938\u0930\u094D\u0917:',
+    spfCidrLabelMask: '\u0938\u092C\u0928\u0947\u091F \u092E\u093E\u0938\u094D\u0915:',
+    spfCidrLabelRange: '\u0930\u0947\u0902\u091C:',
+    spfCidrLabelSize: '\u0906\u0915\u093E\u0930:',
+    spfCidrLabelAddresses: 'IP \u092A\u0924\u0947',
+    spfCidrRangeThrough: '\u0938\u0947',
+    dmarcExplainedShow: 'DMARC \u0935\u093F\u0935\u0930\u0923',
+    dmarcExplainedHide: 'DMARC \u0935\u093F\u0935\u0930\u0923 \u091B\u093F\u092A\u093E\u090F\u0902',
+    dmarcExplainedEmpty: '\u0935\u093F\u0935\u0930\u0923 \u0915\u0947 \u0932\u093F\u090F \u0915\u094B\u0908 DMARC \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0909\u092A\u0932\u092C\u094D\u0927 \u0928\u0939\u0940\u0902\u0964',
+    dmarcExplainedTag: '\u091F\u0948\u0917',
+    dmarcExplainedValue: '\u092E\u093E\u0928',
+    dmarcExplainedTagDesc: '\u091F\u0948\u0917 \u0935\u093F\u0935\u0930\u0923',
+    dmarcExplainedValueDesc: '\u092E\u093E\u0928 \u0935\u093F\u0935\u0930\u0923'
+  },
+  'ja-JP': {
+    spfExplainedShow: 'SPF \u306E\u8A73\u7D30',
+    spfExplainedHide: 'SPF \u306E\u8A73\u7D30\u3092\u975E\u8868\u793A',
+    spfExplainedEmpty: '\u8AAC\u660E\u3067\u304D\u308B SPF \u30EC\u30B3\u30FC\u30C9\u304C\u3042\u308A\u307E\u305B\u3093\u3002',
+    spfExpansionExplain: '\u8AAC\u660E',
+    spfExpansionExplainHide: '\u975E\u8868\u793A',
+    spfExpansionExplainColumn: '\u60C5\u5831',
+    spfExplainedPrefix: '\u30D7\u30EC\u30D5\u30A3\u30C3\u30AF\u30B9',
+    spfExplainedType: '\u30BF\u30A4\u30D7',
+    spfExplainedValue: '\u5024',
+    spfExplainedPrefixDesc: '\u30D7\u30EC\u30D5\u30A3\u30C3\u30AF\u30B9\u8AAC\u660E',
+    spfExplainedDescription: '\u8AAC\u660E',
+    spfCidrLabelNetwork: '\u30CD\u30C3\u30C8\u30EF\u30FC\u30AF\uFF1A',
+    spfCidrLabelPrefix: 'CIDR \u30D7\u30EC\u30D5\u30A3\u30C3\u30AF\u30B9\uFF1A',
+    spfCidrLabelMask: '\u30B5\u30D6\u30CD\u30C3\u30C8\u30DE\u30B9\u30AF\uFF1A',
+    spfCidrLabelRange: '\u7BC4\u56F2\uFF1A',
+    spfCidrLabelSize: '\u30B5\u30A4\u30BA\uFF1A',
+    spfCidrLabelAddresses: 'IP \u30A2\u30C9\u30EC\u30B9',
+    spfCidrRangeThrough: '\u304B\u3089',
+    dmarcExplainedShow: 'DMARC \u306E\u8A73\u7D30',
+    dmarcExplainedHide: 'DMARC \u306E\u8A73\u7D30\u3092\u975E\u8868\u793A',
+    dmarcExplainedEmpty: '\u8AAC\u660E\u3067\u304D\u308B DMARC \u30EC\u30B3\u30FC\u30C9\u304C\u3042\u308A\u307E\u305B\u3093\u3002',
+    dmarcExplainedTag: '\u30BF\u30B0',
+    dmarcExplainedValue: '\u5024',
+    dmarcExplainedTagDesc: '\u30BF\u30B0\u306E\u8AAC\u660E',
+    dmarcExplainedValueDesc: '\u5024\u306E\u8AAC\u660E'
+  },
+  'ru-RU': {
+    spfExplainedShow: 'SPF \u043F\u043E\u0434\u0440\u043E\u0431\u043D\u043E',
+    spfExplainedHide: '\u0421\u043A\u0440\u044B\u0442\u044C \u043F\u043E\u0434\u0440\u043E\u0431\u043D\u043E\u0441\u0442\u0438 SPF',
+    spfExplainedEmpty: '\u041D\u0435\u0442 \u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E\u0439 \u0437\u0430\u043F\u0438\u0441\u0438 SPF \u0434\u043B\u044F \u043F\u043E\u044F\u0441\u043D\u0435\u043D\u0438\u044F.',
+    spfExpansionExplain: '\u041F\u043E\u044F\u0441\u043D\u0438\u0442\u044C',
+    spfExpansionExplainHide: '\u0421\u043A\u0440\u044B\u0442\u044C',
+    spfExpansionExplainColumn: '\u0418\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u044F',
+    spfExplainedPrefix: '\u041F\u0440\u0435\u0444\u0438\u043A\u0441',
+    spfExplainedType: '\u0422\u0438\u043F',
+    spfExplainedValue: '\u0417\u043D\u0430\u0447\u0435\u043D\u0438\u0435',
+    spfExplainedPrefixDesc: '\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043F\u0440\u0435\u0444\u0438\u043A\u0441\u0430',
+    spfExplainedDescription: '\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435',
+    spfCidrLabelNetwork: '\u0421\u0435\u0442\u044C:',
+    spfCidrLabelPrefix: '\u041F\u0440\u0435\u0444\u0438\u043A\u0441 CIDR:',
+    spfCidrLabelMask: '\u041C\u0430\u0441\u043A\u0430 \u043F\u043E\u0434\u0441\u0435\u0442\u0438:',
+    spfCidrLabelRange: '\u0414\u0438\u0430\u043F\u0430\u0437\u043E\u043D:',
+    spfCidrLabelSize: '\u0420\u0430\u0437\u043C\u0435\u0440:',
+    spfCidrLabelAddresses: '\u0430\u0434\u0440\u0435\u0441\u043E\u0432 IP',
+    spfCidrRangeThrough: '\u0434\u043E',
+    dmarcExplainedShow: 'DMARC \u043F\u043E\u0434\u0440\u043E\u0431\u043D\u043E',
+    dmarcExplainedHide: '\u0421\u043A\u0440\u044B\u0442\u044C \u043F\u043E\u0434\u0440\u043E\u0431\u043D\u043E\u0441\u0442\u0438 DMARC',
+    dmarcExplainedEmpty: '\u041D\u0435\u0442 \u0437\u0430\u043F\u0438\u0441\u0438 DMARC \u0434\u043B\u044F \u043F\u043E\u044F\u0441\u043D\u0435\u043D\u0438\u044F.',
+    dmarcExplainedTag: '\u0422\u0435\u0433',
+    dmarcExplainedValue: '\u0417\u043D\u0430\u0447\u0435\u043D\u0438\u0435',
+    dmarcExplainedTagDesc: '\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0442\u0435\u0433\u0430',
+    dmarcExplainedValueDesc: '\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u044F'
+  }
+};
+
+Object.keys(EXPLAINED_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, EXPLAINED_TRANSLATION_OVERRIDES[code]);
+});
+
 const LANG_PARAM = 'lang';
 const LANGUAGE_OPTIONS = ['en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU'];
 const RTL_LANGUAGES = new Set(['ar']);
@@ -16363,7 +17605,22 @@ function localizeWhoisStatus(status) {
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
   if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
-  if (result.spfHasRequiredInclude === true) return t('spfOutlookRequirementPresent');
+  if (result.spfHasRequiredInclude === true) {
+    // Base verdict ("Required Outlook SPF include detected for ACS.") is the
+    // same regardless of how the requirement was matched. When the customer
+    // is using an SPF-flattening / Dynamic SPF service (OnDMARC, Valimail,
+    // Sendmarc, EasyDMARC, Sparkpost) the literal include token is missing
+    // and the upstream Exchange Online IP ranges are inlined instead. In
+    // that case we append a short suffix so operators can see at a glance
+    // whether the requirement was met via the actual DNS include name or
+    // via the flattened IP ranges.
+    const base = t('spfOutlookRequirementPresent');
+    const matchType = String((result && result.spfRequiredIncludeMatchType) || '').trim().toLowerCase();
+    if (matchType === 'flattened-include') {
+      return base + ' ' + t('spfOutlookRequirementFlattenedSuffix');
+    }
+    return base;
+  }
   return null;
 }
 
@@ -17787,6 +19044,14 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
   // constrained via CSS (.spf-col-record) so it wraps instead of dragging
   // the table to ridiculous widths. A scroll wrapper around the table lets
   // very wide SPF chains scroll horizontally on narrow viewports.
+  //
+  // Adds an "Explain" column at the end with a small button per row. Clicking
+  // it expands a hidden sibling <tr> containing the SPF Explained breakdown
+  // (Prefix / Type / Value / PrefixDesc / Description) for THAT row's
+  // resolved SPF record. This gives users a per-record decomposition without
+  // having to copy the record out and run the queried-domain SPF Explained
+  // toggle separately. The expanded row is purely client-side and reuses
+  // buildSpfExplainedHtml so the formatting stays in sync with the SPF card.
   const header = `
     <thead>
       <tr>
@@ -17796,13 +19061,14 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
         <th>${escapeHtml(t('spfExpansionTarget'))}</th>
         <th style="text-align:right;" title="${escapeHtml(t('spfExpansionLookupsHint'))}">${escapeHtml(t('spfExpansionLookups'))}</th>
         <th>${escapeHtml(t('spfExpansionRecord'))}</th>
+        <th class="spf-col-explain" aria-label="${escapeHtml(t('spfExpansionExplainTooltip'))}">${escapeHtml(t('spfExpansionExplainColumn'))}</th>
       </tr>
     </thead>`;
 
   // Track the previous row's target so nested rows can dim a repeated parent
   // value (chain continuation) to reduce visual noise.
   let previousTarget = '';
-  const body = rows.map((row) => {
+  const body = rows.map((row, idx) => {
     const recordCellHtml = row.error
       ? `<span style="color: var(--fail-fg, #d33);">${escapeHtml(row.error)}</span>`
       : (row.record ? escapeHtml(row.record) : `<span style="opacity:0.6;">${escapeHtml(t('noRecordsAvailable'))}</span>`);
@@ -17849,15 +19115,40 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
 
     previousTarget = row.target || '';
 
+    // Per-row Explain button. Only render an interactive control when the
+    // row carries a usable SPF record (no error, non-empty record string).
+    // The detail row directly below shares the same id suffix so
+    // toggleSpfExpansionExplain() can find it by id.
+    const detailId = `spfExpansionExplain-${idx}`;
+    const hasRecord = !row.error && row.record && /^v=spf1\b/i.test(String(row.record).trim());
+    const explainBtnHtml = hasRecord
+      ? `<button type="button" class="spf-expansion-explain-btn hide-on-screenshot" onclick="toggleSpfExpansionExplain(this, '${detailId}')" title="${escapeHtml(t('spfExpansionExplainTooltip'))}">${escapeHtml(t('spfExpansionExplain'))}</button>`
+      : '';
+
+    // Hidden details row. The colspan covers every column so the explained
+    // table renders edge-to-edge under the row it explains. buildSpfExplainedHtml
+    // already produces the full record box, breakdown table, and legend.
+    const detailRowHtml = hasRecord
+      ? `<tr id="${detailId}" class="spf-expansion-explain-row" style="display:none;"><td colspan="7" class="spf-expansion-explain-cell">${buildSpfExplainedHtml(row.record)}</td></tr>`
+      : '';
+
+    // data-spf-mech / data-spf-target let setSpfExpansionHighlight find every
+    // matching `.spf-record-token[data-spf-type=...][data-spf-value=...]`
+    // anywhere on the page so hovering this row lights up the corresponding
+    // include/redirect token inside any open SPF Explained panel (the
+    // queried-domain panel and the per-row Explain panels).
+    const safeMech = escapeHtml(String(row.mechanism || ''));
+    const safeTarget = escapeHtml(String(row.target || ''));
     return `
-      <tr>
+      <tr data-spf-mech="${safeMech}" data-spf-target="${safeTarget}" onmouseenter="setSpfExpansionHighlight(this, true)" onmouseleave="setSpfExpansionHighlight(this, false)">
         <td class="spf-col-depth">${escapeHtml(String(row.depth))}</td>
         <td class="spf-col-mechanism">${escapeHtml(row.mechanism)}</td>
         <td class="spf-col-parent">${parentCellHtml}</td>
         <td class="spf-col-target">${indentHtml}${escapeHtml(row.target)}</td>
         <td class="spf-col-lookups">${lookupsCellHtml}</td>
         <td class="spf-col-record">${recordCellHtml}</td>
-      </tr>`;
+        <td class="spf-col-explain">${explainBtnHtml}</td>
+      </tr>${detailRowHtml}`;
   }).join('');
 
   const rowsCountHtml = `<div style="font-size:12px; opacity:0.75;">${escapeHtml(t('spfExpansionRowsCount', { count: String(rows.length) }))}</div>`;
@@ -17869,6 +19160,747 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
   }
   const summary = `<div style="margin-bottom:6px;">${rowsCountHtml}${limitSummaryHtml}</div>`;
   return `${summary}<div class="spf-expansion-scroll"><table class="mx-table spf-expansion-table">${header}<tbody>${body}</tbody></table></div>`;
+}
+
+// Parse a single SPF record string into a flat array of mechanism descriptors.
+// Each descriptor is shaped { qualifier, type, value, raw } where:
+//   - qualifier: '+', '-', '~', '?' or '' (empty when no qualifier prefix was set).
+//     Note: the SPF spec defaults to '+' (Pass) when no qualifier is present.
+//   - type     : the canonical mechanism/modifier keyword, lowercased.
+//                Mechanisms (RFC 7208 \u00A75): all, include, a, mx, ptr, ip4, ip6, exists.
+//                Modifiers  (RFC 7208 \u00A76): redirect, exp.
+//                The synthetic type 'v'   is emitted for the leading 'v=spf1' tag so the
+//                Explained table can describe the record version on the very first row.
+//                The synthetic type 'unknown' is emitted for tokens that match no known
+//                SPF keyword so the table can still surface them rather than silently
+//                dropping malformed input.
+//   - value    : the right-hand side of the mechanism (after ':' or '='), or '' when
+//                the mechanism has no value (e.g., 'all', bare 'a', bare 'mx').
+//   - raw      : the original token as it appeared in the record, for diagnostics.
+//
+// This parser is purely textual; it does NOT perform DNS lookups. The expanded
+// SPF chain (with live DNS results) is rendered by the sibling
+// "SPF Expansion Records" card via buildSpfExpansionCardHtml. The Explained
+// view is intentionally a per-record decomposition mirroring the MXToolbox
+// "SPF Record Lookup" Prefix / Type / Value / PrefixDesc / Description layout.
+
+// Module-level counter used to mint unique ids for the per-row CIDR detail
+// rows generated by buildSpfExplainedHtml. Multiple SPF Explained panels can
+// coexist on the page (the queried-domain panel plus every per-row Expansion
+// Explain panel) and each ip4/ip6 row gets its own toggleable detail row, so
+// the ids must be globally unique to keep toggleSpfCidrDetail's
+// document.getElementById lookup deterministic.
+let __spfCidrDetailCounter = 0;
+
+function parseSpfMechanisms(spfRecord) {
+  const out = [];
+  if (!spfRecord) return out;
+
+  // The card body sometimes embeds a localized "ACS Outlook requirement satisfied"
+  // verdict joined to the raw record with a blank line. Take only the first line
+  // so the parser sees pure SPF tokens and not localized prose.
+  const firstLine = String(spfRecord).split(/\r?\n/)[0] || '';
+  const tokens = firstLine.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return out;
+
+  for (const tok of tokens) {
+    // The 'v=spf1' tag is technically a key=value pair, not a mechanism. Emit
+    // it as a synthetic 'v' row so the Explained table can describe the SPF
+    // version on the first line (matches MXToolbox's presentation).
+    if (/^v=/i.test(tok)) {
+      out.push({ qualifier: '', type: 'v', value: tok.replace(/^v=/i, ''), raw: tok });
+      continue;
+    }
+
+    // 'redirect=' and 'exp=' are modifiers, not mechanisms, and never carry a
+    // qualifier prefix. Treat them separately so we don't strip a leading '-'
+    // from a domain name that happens to start with a hyphen.
+    if (/^redirect=/i.test(tok)) {
+      out.push({ qualifier: '', type: 'redirect', value: tok.replace(/^redirect=/i, ''), raw: tok });
+      continue;
+    }
+    if (/^exp=/i.test(tok)) {
+      out.push({ qualifier: '', type: 'exp', value: tok.replace(/^exp=/i, ''), raw: tok });
+      continue;
+    }
+
+    // Mechanism: optional qualifier (+, -, ~, ?), then a keyword, then an
+    // optional ':value' (or no value at all for 'all', bare 'a', bare 'mx').
+    const m = tok.match(/^([+\-~?])?(all|include|a|mx|ptr|ip4|ip6|exists)(?::(.*))?$/i);
+    if (m) {
+      out.push({
+        qualifier: m[1] || '',
+        type: m[2].toLowerCase(),
+        value: typeof m[3] === 'undefined' ? '' : m[3],
+        raw: tok
+      });
+      continue;
+    }
+
+    // Unknown token. Surface it so users notice typos / malformed records.
+    out.push({ qualifier: '', type: 'unknown', value: '', raw: tok });
+  }
+
+  return out;
+}
+
+// Translate an SPF qualifier character (+/-/~/?) into a short label suitable
+// for the "PrefixDesc" column of the Explained table. Returns '' when the
+// mechanism does not carry a qualifier (modifiers like redirect=, and the
+// synthetic 'v' row).
+//
+// Note on `-` => 'HardFail': the SPF spec only defines four qualifiers
+// (Pass/Fail/SoftFail/Neutral), but MXToolbox and most receiver
+// documentation refer to `-` as "HardFail" to clearly distinguish it from
+// `~all` (SoftFail). We surface the "HardFail" wording in the UI so users
+// can immediately tell a strict `-all` apart from a lenient `~all`.
+function getSpfQualifierDescription(qualifier) {
+  switch (qualifier) {
+    case '+': return t('spfPrefixPass');
+    case '-': return t('spfPrefixFail');
+    case '~': return t('spfPrefixSoftFail');
+    case '?': return t('spfPrefixNeutral');
+    default:  return '';
+  }
+}
+
+// Translate an SPF mechanism/modifier keyword into a one-line human-readable
+// description for the rightmost "Description" column. Falls back to the
+// 'unknown' description for tokens parseSpfMechanisms could not classify.
+function getSpfMechanismDescription(type) {
+  switch (type) {
+    case 'v':        return t('spfDescVersion');
+    case 'all':      return t('spfDescAll');
+    case 'include':  return t('spfDescInclude');
+    case 'a':        return t('spfDescA');
+    case 'mx':       return t('spfDescMx');
+    case 'ptr':      return t('spfDescPtr');
+    case 'ip4':      return t('spfDescIp4');
+    case 'ip6':      return t('spfDescIp6');
+    case 'exists':   return t('spfDescExists');
+    case 'redirect': return t('spfDescRedirect');
+    case 'exp':      return t('spfDescExp');
+    default:         return t('spfDescUnknown');
+  }
+}
+
+// Parse an IPv4 CIDR (e.g., "40.107.0.0/16") or bare address into structured
+// pieces used by formatSpfCidrInfo. Returns null when the input is not a
+// well-formed IPv4 value, so the caller can decide to skip the info button
+// for tokens like include:domain or unparseable malformed addresses.
+function parseSpfIpv4(value) {
+  if (!value) return null;
+  const m = String(value).trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/);
+  if (!m) return null;
+  const octets = [m[1], m[2], m[3], m[4]].map(Number);
+  if (octets.some(n => n < 0 || n > 255)) return null;
+  // Default to /32 when no prefix is supplied so a bare address still shows
+  // a single-host range and a 255.255.255.255 mask.
+  let prefix = (typeof m[5] === 'undefined') ? 32 : parseInt(m[5], 10);
+  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 32) return null;
+  // Convert to a 32-bit unsigned integer using BigInt to sidestep JS signed
+  // right-shift surprises around /0 and /1.
+  const addrInt = (BigInt(octets[0]) << 24n) | (BigInt(octets[1]) << 16n) | (BigInt(octets[2]) << 8n) | BigInt(octets[3]);
+  const hostBits = 32 - prefix;
+  const maskInt = (hostBits === 32) ? 0n : (((1n << BigInt(prefix)) - 1n) << BigInt(hostBits));
+  const networkInt = addrInt & maskInt;
+  const broadcastInt = networkInt | ((1n << BigInt(hostBits)) - 1n);
+  const size = 1n << BigInt(hostBits);
+  const toDotted = (n) => `${Number((n >> 24n) & 0xFFn)}.${Number((n >> 16n) & 0xFFn)}.${Number((n >> 8n) & 0xFFn)}.${Number(n & 0xFFn)}`;
+  return {
+    family: 'ip4',
+    prefix,
+    network: toDotted(networkInt),
+    mask: toDotted(maskInt),
+    firstAddress: toDotted(networkInt),
+    lastAddress: toDotted(broadcastInt),
+    size
+  };
+}
+
+// Parse an IPv6 CIDR (e.g., "2a01:111:f400::/48") or bare address. Handles
+// the "::" compressed form and falls back to a /128 host route when no
+// prefix is supplied. Returns null for malformed input so the caller can
+// skip rendering the info button.
+function parseSpfIpv6(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const slash = raw.indexOf('/');
+  const addrPart = slash >= 0 ? raw.substring(0, slash) : raw;
+  let prefix = slash >= 0 ? parseInt(raw.substring(slash + 1), 10) : 128;
+  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 128) return null;
+  // Expand the "::" shorthand by counting the explicit groups on either side.
+  if (addrPart.indexOf(':::') >= 0) return null;
+  const doubleColonIdx = addrPart.indexOf('::');
+  let groups;
+  if (doubleColonIdx >= 0) {
+    const left = addrPart.substring(0, doubleColonIdx).split(':').filter(s => s !== '');
+    const right = addrPart.substring(doubleColonIdx + 2).split(':').filter(s => s !== '');
+    const missing = 8 - (left.length + right.length);
+    if (missing < 0) return null;
+    groups = left.concat(new Array(missing).fill('0'), right);
+  } else {
+    groups = addrPart.split(':');
+  }
+  if (groups.length !== 8) return null;
+  // Validate each group is a 1-4 char hex string.
+  for (const g of groups) {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
+  }
+  // Pack into a 128-bit BigInt for prefix-mask math.
+  let addrInt = 0n;
+  for (const g of groups) {
+    addrInt = (addrInt << 16n) | BigInt(parseInt(g, 16));
+  }
+  const hostBits = 128 - prefix;
+  const maskInt = (hostBits === 128) ? 0n : (((1n << BigInt(prefix)) - 1n) << BigInt(hostBits));
+  const networkInt = addrInt & maskInt;
+  const broadcastInt = networkInt | ((1n << BigInt(hostBits)) - 1n);
+  const size = 1n << BigInt(hostBits);
+  // Format back to compressed canonical IPv6. We render the lowercased
+  // 4-hex-digit form first and then collapse the longest run of "0" groups
+  // into "::" so addresses match what users typically see in tooling.
+  const toIpv6 = (n) => {
+    const parts = [];
+    for (let i = 7; i >= 0; i--) {
+      parts.push(((n >> BigInt(i * 16)) & 0xFFFFn).toString(16));
+    }
+    // Find the longest run of consecutive "0" groups (length >= 2) to
+    // compress with "::". RFC 5952 picks the leftmost when ties occur.
+    let bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i] === '0') {
+        if (curStart < 0) { curStart = i; curLen = 1; } else { curLen++; }
+        if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+      } else {
+        curStart = -1; curLen = 0;
+      }
+    }
+    if (bestLen >= 2) {
+      const head = parts.slice(0, bestStart).join(':');
+      const tail = parts.slice(bestStart + bestLen).join(':');
+      return `${head}::${tail}`.replace(/^:/, '::').replace(/:$/, '::');
+    }
+    return parts.join(':');
+  };
+  return {
+    family: 'ip6',
+    prefix,
+    network: toIpv6(networkInt),
+    mask: null, // IPv6 traditionally uses prefix length; subnet masks are rare.
+    firstAddress: toIpv6(networkInt),
+    lastAddress: toIpv6(broadcastInt),
+    size
+  };
+}
+
+// Format an ip4/ip6 mechanism value into the multi-line HTML block shown
+// inside the click-to-expand CIDR detail row beneath an SPF Explained
+// table row. Returns '' when the value is not a parseable IP/CIDR so the
+// caller can suppress the button entirely.
+//
+// The output is HTML (NOT plain text) so the labels can be wrapped in
+// <strong>. The detail row uses a monospace font with `white-space: pre`
+// in CSS, so we pad each line with regular spaces AFTER the (visible)
+// label to keep the value columns column-aligned. All user/value-derived
+// strings are HTML-escaped inline; label translations are passed through
+// escapeHtml as well so a hostile/edge-case translation string can't
+// inject markup.
+function formatSpfCidrInfo(type, value) {
+  const info = (type === 'ip4') ? parseSpfIpv4(value) : (type === 'ip6') ? parseSpfIpv6(value) : null;
+  if (!info) return '';
+  // Localized labels fall back to English via t() so untranslated locales
+  // still render readable text instead of the raw key name.
+  const lblNetwork = t('spfCidrLabelNetwork');
+  const lblPrefix  = t('spfCidrLabelPrefix');
+  const lblMask    = t('spfCidrLabelMask');
+  const lblRange   = t('spfCidrLabelRange');
+  const lblSize    = t('spfCidrLabelSize');
+  const lblAddrs   = t('spfCidrLabelAddresses');
+  const lblThrough = t('spfCidrRangeThrough');
+  // Use locale-aware grouping for the address count. BigInt -> Number is
+  // safe up to 2^53; /0 (2^32 / 2^128) is unrealistic in SPF records, but
+  // we fall back to toString() if the value exceeds Number.MAX_SAFE_INTEGER.
+  let sizeStr;
+  if (info.size <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    try {
+      sizeStr = Number(info.size).toLocaleString();
+    } catch (_) {
+      sizeStr = info.size.toString();
+    }
+  } else {
+    sizeStr = info.size.toString();
+  }
+  // Compute the longest label so the value columns line up regardless of
+  // which locale is active. We pad with plain spaces between the closing
+  // </strong> and the value text; the surrounding <pre> preserves them.
+  const labels = [lblNetwork, lblPrefix, lblMask, lblRange, lblSize];
+  const labelWidth = labels.reduce((max, s) => Math.max(max, s.length), 0) + 1;
+  const lineHtml = (label, valueHtml) => {
+    const pad = ' '.repeat(Math.max(1, labelWidth - label.length));
+    return `<strong>${escapeHtml(label)}</strong>${pad}${valueHtml}`;
+  };
+  const lines = [];
+  lines.push(lineHtml(lblNetwork, escapeHtml(info.network)));
+  lines.push(lineHtml(lblPrefix,  escapeHtml('/' + info.prefix)));
+  if (info.mask) {
+    lines.push(lineHtml(lblMask, escapeHtml(info.mask)));
+  }
+  lines.push(lineHtml(lblRange, `${escapeHtml(info.firstAddress)} ${escapeHtml(lblThrough)} ${escapeHtml(info.lastAddress)}`));
+  lines.push(lineHtml(lblSize,  `${escapeHtml(sizeStr)} ${escapeHtml(lblAddrs)}`));
+  return lines.join('\n');
+}
+
+// Build the inner HTML for the SPF Explained collapsible section. Returns
+// either a Prefix / Type / Value / PrefixDesc / Description table or a short
+// localized note explaining that no SPF record was found. The raw record is
+// rendered above the table inside a highlighted box so users can see the
+// exact string the table is decomposing.
+//
+// Hover behavior: each <tr> in the table carries `data-token-idx="N"` and
+// fires onmouseenter/onmouseleave to call setSpfTokenHighlight(). Each
+// token inside the green record box is wrapped in a
+// `<span class="spf-record-token" data-token-idx="N">` whose index matches
+// the corresponding mechanism row. The whole block is wrapped in
+// `.spf-explained-block` so the hover handler can scope its querySelector
+// to the nearest ancestor (lets the queried-domain SPF Explained panel and
+// every per-row Explain panel coexist without cross-talk).
+function buildSpfExplainedHtml(spfRecord) {
+  const trimmed = spfRecord ? String(spfRecord).split(/\r?\n/)[0].trim() : '';
+  if (!trimmed) {
+    return `<div class="code">${escapeHtml(t('spfExplainedEmpty'))}</div>`;
+  }
+
+  const mechs = parseSpfMechanisms(trimmed);
+  if (mechs.length === 0) {
+    return `<div class="code">${escapeHtml(t('spfExplainedEmpty'))}</div>`;
+  }
+
+  const header = `
+    <thead>
+      <tr>
+        <th>${escapeHtml(t('spfExplainedPrefix'))}</th>
+        <th>${escapeHtml(t('spfExplainedType'))}</th>
+        <th>${escapeHtml(t('spfExplainedValue'))}</th>
+        <th>${escapeHtml(t('spfExplainedPrefixDesc'))}</th>
+        <th>${escapeHtml(t('spfExplainedDescription'))}</th>
+      </tr>
+    </thead>`;
+
+  const body = mechs.map((m, idx) => {
+    // For ip4/ip6 mechanisms whose value is a parseable address or CIDR,
+    // attach a small "i" button beside the value that toggles a hidden
+    // sibling row right beneath this one. The sibling row spans all five
+    // columns and renders the Network/CIDR prefix/Subnet mask/Range/Size
+    // breakdown inside a <pre> so the padded labels stay column-aligned.
+    // This is the same pattern used by per-row Explain inside the SPF
+    // Expansion Records table (see toggleSpfExpansionExplain).
+    //
+    // Each detail row gets a unique id derived from a module-level counter
+    // so that multiple SPF Explained panels on the same page (the
+    // queried-domain panel plus every per-row Expansion Explain panel) do
+    // not collide.
+    const cidrInfo = (m.type === 'ip4' || m.type === 'ip6') ? formatSpfCidrInfo(m.type, m.value) : '';
+    let valueExtraHtml = '';
+    let cidrDetailRowHtml = '';
+    if (cidrInfo) {
+      const detailId = `spfCidrDetail-${++__spfCidrDetailCounter}`;
+      valueExtraHtml = ` <button type="button" class="spf-cidr-info-btn" aria-expanded="false" aria-controls="${detailId}" title="${escapeHtml(t('spfExplainedCidrInfoLabel'))}" onclick="toggleSpfCidrDetail(this, '${detailId}')">i</button>`;
+      // formatSpfCidrInfo returns already-escaped HTML (it wraps the labels
+      // in <strong> so they render bold inside the <pre>). Insert as-is.
+      cidrDetailRowHtml = `<tr id="${detailId}" class="spf-cidr-detail-row" style="display:none;"><td colspan="5" class="spf-cidr-detail-cell"><pre class="spf-cidr-detail-pre">${cidrInfo}</pre></td></tr>`;
+    }
+    return `
+      <tr data-token-idx="${idx}" onmouseenter="setSpfTokenHighlight(this, true)" onmouseleave="setSpfTokenHighlight(this, false)">
+        <td class="spf-col-prefix">${escapeHtml(m.qualifier)}</td>
+        <td class="spf-col-type">${escapeHtml(m.type)}</td>
+        <td class="spf-col-value">${escapeHtml(m.value)}${valueExtraHtml}</td>
+        <td class="spf-col-prefixdesc">${escapeHtml(getSpfQualifierDescription(m.qualifier))}</td>
+        <td class="spf-col-description">${escapeHtml(getSpfMechanismDescription(m.type))}</td>
+      </tr>${cidrDetailRowHtml}`;
+  }).join('');
+
+  // Tokenize the raw record into spans whose index matches the table row
+  // index. parseSpfMechanisms emits one entry per whitespace-separated token
+  // in document order, so joining `m.raw` with single spaces reproduces the
+  // canonical record while letting us wrap each token in an addressable span.
+  // `data-spf-type` / `data-spf-value` are mirrored onto the span so the
+  // outer SPF Expansion Records table can also highlight tokens by
+  // type+value (e.g., include:spf.crsend.com).
+  const tokenSpans = mechs.map((m, idx) =>
+    `<span class="spf-record-token" data-token-idx="${idx}" data-spf-type="${escapeHtml(m.type)}" data-spf-value="${escapeHtml(m.value)}">${escapeHtml(m.raw)}</span>`
+  ).join(' ');
+
+  // Box the raw record above the table so the breakdown reads naturally as
+  // "here is the record, here is what each piece means". The legend below the
+  // table summarizes qualifier semantics for users new to SPF.
+  const recordBox = `<div class="spf-explained-record">${tokenSpans}</div>`;
+  const legend = `<div class="spf-explained-legend">${escapeHtml(t('spfExplainedLegend'))}</div>`;
+  const table = `<div class="spf-expansion-scroll"><table class="mx-table spf-explained-table">${header}<tbody>${body}</tbody></table></div>`;
+  return `<div class="spf-explained-block">${recordBox}${table}${legend}</div>`;
+}
+
+// Show/hide the SPF Explained section attached to the SPF card. Mirrors the
+// toggleMxDetails / toggleWhoisRaw pattern, and additionally toggles the
+// visibility of the card body (#field-spf). The Explained panel already
+// renders the raw record inside its green token box at the top, so leaving
+// #field-spf visible would show the same record twice. Hiding the body
+// while the panel is open removes the redundancy; the body is restored
+// when the user clicks "Show SPF Explained" again (label flips back) or
+// collapses the card. The requirement summary and any parent-domain
+// inheritance note are already mirrored INSIDE the panel by the wiring
+// site, so no context is lost while the body is hidden.
+function toggleSpfExplained(element) {
+  const el = document.getElementById('spfExplained');
+  if (!el || !element) return;
+
+  const body = document.getElementById('field-spf');
+
+  const header = element.closest ? element.closest('.card-header') : null;
+  const content = header ? header.nextElementSibling : null;
+  const isCollapsed = !!(header && header.classList && header.classList.contains('collapsed-header')) ||
+                      !!(content && content.classList && content.classList.contains('collapsed'));
+  if (isCollapsed && header) {
+    toggleCard(header);
+    el.style.display = 'block';
+    if (body) body.style.display = 'none';
+    element.textContent = t('spfExplainedHide');
+    return;
+  }
+
+  const current = el.style.display;
+  const isOpen = (!current || current === 'none');
+  element.textContent = isOpen ? t('spfExplainedHide') : t('spfExplainedShow');
+  el.style.display = isOpen ? 'block' : 'none';
+  if (body) body.style.display = isOpen ? 'none' : '';
+}
+
+// Per-row Explain toggle inside the SPF Expansion Records table. Each row
+// has a hidden sibling <tr> (id passed via detailId) containing the full
+// SPF Explained breakdown for THAT row's resolved record. Clicking the
+// button reveals or hides that row in place, mirroring the show/hide
+// pattern used by toggleSpfExplained but scoped to a single table row so
+// users can drill into any include / redirect target inline without
+// re-running the queried-domain breakdown.
+function toggleSpfExpansionExplain(element, detailId) {
+  if (!element || !detailId) return;
+  const row = document.getElementById(detailId);
+  if (!row) return;
+  const current = row.style.display;
+  const isOpen = (!current || current === 'none');
+  row.style.display = isOpen ? 'table-row' : 'none';
+  element.textContent = isOpen ? t('spfExpansionExplainHide') : t('spfExpansionExplain');
+  if (element.setAttribute) {
+    element.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  }
+}
+
+// Click handler for the "i" button beside an ip4/ip6 value inside an SPF
+// Explained table. Toggles the visibility of the sibling detail row that
+// holds the Network/CIDR prefix/Subnet mask/Range/Size breakdown. Mirrors
+// the toggleSpfExpansionExplain pattern: flip aria-expanded and the
+// `.spf-cidr-info-btn--open` class so the button can visually indicate the
+// open state via CSS. We only swap display + state; we never re-render the
+// table because buildSpfExplainedHtml already emitted the detail row in the
+// closed state at render time.
+function toggleSpfCidrDetail(element, detailId) {
+  if (!element || !detailId) return;
+  const row = document.getElementById(detailId);
+  if (!row) return;
+  const current = row.style.display;
+  const isOpen = (!current || current === 'none');
+  row.style.display = isOpen ? 'table-row' : 'none';
+  if (element.setAttribute) {
+    element.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  }
+  if (element.classList) {
+    element.classList.toggle('spf-cidr-info-btn--open', isOpen);
+  }
+}
+
+// ===== DMARC Explained =====
+// Parser + descriptive helpers + builder + toggle. Mirrors the SPF Explained
+// pattern: take a single DMARC record string and decompose it into a table of
+// Tag / Value / TagDesc / ValueDesc rows. No DNS is involved -- the parser
+// operates purely on the text of `r.dmarc`. Tag order is preserved from the
+// record so users can read the breakdown left-to-right against the green
+// record box above the table. Unknown tags are surfaced as their own row so
+// typos / non-standard tags are visible rather than silently dropped.
+function parseDmarcTags(dmarcRecord) {
+  const out = [];
+  if (!dmarcRecord) return out;
+
+  // The card body sometimes embeds a localized "inherited policy" note joined
+  // to the raw record with a blank line. Take only the first line so the
+  // parser sees pure DMARC tokens and not localized prose.
+  const firstLine = String(dmarcRecord).split(/\r?\n/)[0] || '';
+
+  // DMARC tags are semicolon-separated key=value pairs. Whitespace around
+  // tokens, the '=', and around values is all ignored per RFC 7489 sec 6.4.
+  const segments = firstLine.split(';');
+  for (const seg of segments) {
+    const part = seg.trim();
+    if (!part) continue;
+    const eq = part.indexOf('=');
+    if (eq < 0) {
+      // Token without '='. Surface as unknown so users see it instead of
+      // silently dropping it.
+      out.push({ name: part.toLowerCase(), value: '', raw: part });
+      continue;
+    }
+    const name = part.substring(0, eq).trim().toLowerCase();
+    const value = part.substring(eq + 1).trim();
+    out.push({ name: name, value: value, raw: part });
+  }
+
+  return out;
+}
+
+// Translate a DMARC tag name into a short human-readable description for the
+// "TagDesc" column. Unknown tags fall back to the 'unknown' description so the
+// table still renders consistently.
+function getDmarcTagDescription(name) {
+  switch (String(name || '').toLowerCase()) {
+    case 'v':     return t('dmarcTagDescVersion');
+    case 'p':     return t('dmarcTagDescPolicy');
+    case 'sp':    return t('dmarcTagDescSubdomainPolicy');
+    case 'pct':   return t('dmarcTagDescPercent');
+    case 'rua':   return t('dmarcTagDescRua');
+    case 'ruf':   return t('dmarcTagDescRuf');
+    case 'fo':    return t('dmarcTagDescFo');
+    case 'adkim': return t('dmarcTagDescAdkim');
+    case 'aspf':  return t('dmarcTagDescAspf');
+    case 'ri':    return t('dmarcTagDescRi');
+    case 'rf':    return t('dmarcTagDescRf');
+    default:      return t('dmarcTagDescUnknown');
+  }
+}
+
+// Translate a DMARC tag VALUE into a more specific description for the
+// "ValueDesc" column. Several tags have well-defined enum values (p, sp,
+// adkim, aspf, rf, pct, fo) -- for those we surface the exact semantic
+// meaning. For free-form tags (rua, ruf, ri) the value is just a URI list /
+// integer so we return an empty string and let the row read naturally with
+// only the TagDesc column populated.
+function getDmarcValueDescription(name, value) {
+  const n = String(name || '').toLowerCase();
+  const v = String(value || '').trim().toLowerCase();
+  if (!v) return '';
+
+  switch (n) {
+    case 'p':
+    case 'sp':
+      if (v === 'none')       return t('dmarcValueDescPolicyNone');
+      if (v === 'quarantine') return t('dmarcValueDescPolicyQuarantine');
+      if (v === 'reject')     return t('dmarcValueDescPolicyReject');
+      return '';
+    case 'adkim':
+    case 'aspf':
+      if (v === 'r') return t('dmarcValueDescAlignRelaxed');
+      if (v === 's') return t('dmarcValueDescAlignStrict');
+      return '';
+    case 'fo': {
+      // fo= is a colon-separated list (e.g., "0:1:d:s"). Describe each piece
+      // on its own line so multi-value fo= reads as a structured list.
+      const parts = v.split(':').map(s => s.trim()).filter(Boolean);
+      const descs = parts.map(p => {
+        if (p === '0') return t('dmarcValueDescFoZero');
+        if (p === '1') return t('dmarcValueDescFoOne');
+        if (p === 'd') return t('dmarcValueDescFoD');
+        if (p === 's') return t('dmarcValueDescFoS');
+        return '';
+      }).filter(Boolean);
+      return descs.join('\n');
+    }
+    case 'rf':
+      if (v === 'afrf') return t('dmarcValueDescRfAfrf');
+      return '';
+    case 'pct': {
+      const n2 = parseInt(v, 10);
+      if (!Number.isFinite(n2)) return '';
+      if (n2 === 100) return t('dmarcValueDescPercentFull');
+      return t('dmarcValueDescPercentPartial', { percent: String(n2) });
+    }
+    default:
+      return '';
+  }
+}
+
+// Build the inner HTML for the DMARC Explained panel. Returns either a small
+// "no DMARC record" note or a record box + tag table + legend block. Mirrors
+// the buildSpfExplainedHtml structure so the two panels look like siblings.
+function buildDmarcExplainedHtml(dmarcRecord) {
+  const trimmed = dmarcRecord ? String(dmarcRecord).split(/\r?\n/)[0].trim() : '';
+  if (!trimmed) {
+    return `<div class="code">${escapeHtml(t('dmarcExplainedEmpty'))}</div>`;
+  }
+
+  const tags = parseDmarcTags(trimmed);
+  if (tags.length === 0) {
+    return `<div class="code">${escapeHtml(t('dmarcExplainedEmpty'))}</div>`;
+  }
+
+  const header = `
+    <thead>
+      <tr>
+        <th>${escapeHtml(t('dmarcExplainedTag'))}</th>
+        <th>${escapeHtml(t('dmarcExplainedValue'))}</th>
+        <th>${escapeHtml(t('dmarcExplainedTagDesc'))}</th>
+        <th>${escapeHtml(t('dmarcExplainedValueDesc'))}</th>
+      </tr>
+    </thead>`;
+
+  // Build the table body. Each <tr> carries `data-token-idx="N"` and
+  // onmouseenter/onmouseleave handlers so hovering a row highlights the
+  // matching tag=value token in the record box above (and vice-versa).
+  // This mirrors the SPF Explained hover wiring exactly.
+  const body = tags.map((tag, idx) => {
+    // ValueDesc can contain newline-separated descriptions for multi-value
+    // tags like fo=. Convert \n to <br> after escaping so the per-piece
+    // descriptions render as a small inline list inside the same cell.
+    const valueDesc = getDmarcValueDescription(tag.name, tag.value);
+    const valueDescHtml = valueDesc ? escapeHtml(valueDesc).replace(/\n/g, '<br>') : '';
+    return `
+      <tr data-token-idx="${idx}" onmouseenter="setDmarcTokenHighlight(this, true)" onmouseleave="setDmarcTokenHighlight(this, false)">
+        <td class="dmarc-col-tag">${escapeHtml(tag.name)}</td>
+        <td class="dmarc-col-value">${escapeHtml(tag.value)}</td>
+        <td class="dmarc-col-tagdesc">${escapeHtml(getDmarcTagDescription(tag.name))}</td>
+        <td class="dmarc-col-valuedesc">${valueDescHtml}</td>
+      </tr>`;
+  }).join('');
+
+  // Tokenize the raw record into spans whose index matches the table row
+  // index. parseDmarcTags preserves each tag's original `raw` substring in
+  // document order, so rejoining with "; " reproduces a canonical DMARC
+  // record while letting us wrap each tag=value pair in an addressable
+  // span. If the original record ended with a trailing ";", preserve it so
+  // the rendered record box matches what users typically publish.
+  const hadTrailingSemicolon = /;\s*$/.test(trimmed);
+  const tokenSpans = tags
+    .map((tag, idx) => `<span class="dmarc-record-token" data-token-idx="${idx}">${escapeHtml(tag.raw)}</span>`)
+    .join('; ') + (hadTrailingSemicolon ? ';' : '');
+
+  // Box the raw record above the table so the breakdown reads naturally as
+  // "here is the record, here is what each piece means". The legend below the
+  // table summarizes DMARC tag rules for users new to DMARC.
+  const recordBox = `<div class="dmarc-explained-record">${tokenSpans}</div>`;
+  const legend = `<div class="dmarc-explained-legend">${escapeHtml(t('dmarcExplainedLegend'))}</div>`;
+  const table = `<div class="spf-expansion-scroll"><table class="mx-table dmarc-explained-table">${header}<tbody>${body}</tbody></table></div>`;
+  return `<div class="dmarc-explained-block">${recordBox}${table}${legend}</div>`;
+}
+
+// Hover handler for rows inside a buildDmarcExplainedHtml() table. The
+// matching `.dmarc-record-token` span in the same `.dmarc-explained-block`
+// is highlighted (or un-highlighted) so users can visually correlate a
+// table row with the exact tag=value substring inside the record box above.
+// Scoped to the nearest `.dmarc-explained-block` so future panels do not
+// cross-talk -- mirrors setSpfTokenHighlight's scoping pattern.
+function setDmarcTokenHighlight(rowEl, isOn) {
+  if (!rowEl || !rowEl.getAttribute) return;
+  const idx = rowEl.getAttribute('data-token-idx');
+  if (idx === null || typeof idx === 'undefined') return;
+  const block = rowEl.closest ? rowEl.closest('.dmarc-explained-block') : null;
+  if (!block) return;
+  const tok = block.querySelector(`.dmarc-record-token[data-token-idx="${idx}"]`);
+  if (!tok || !tok.classList) return;
+  if (isOn) {
+    tok.classList.add('dmarc-record-token-active');
+    rowEl.classList.add('dmarc-explained-row-active');
+  } else {
+    tok.classList.remove('dmarc-record-token-active');
+    rowEl.classList.remove('dmarc-explained-row-active');
+  }
+}
+
+// Show/hide the DMARC Explained section attached to the DMARC card. Mirrors
+// toggleSpfExplained but also toggles the visibility of the card body
+// (#field-dmarc). The Explained panel already renders the raw record inside
+// its green box at the top, so leaving #field-dmarc visible would show the
+// same text twice. Hiding the body while the panel is open removes the
+// redundancy; the body is restored when the user clicks "Show DMARC
+// Explained" again (label flips back) or collapses it.
+function toggleDmarcExplained(element) {
+  const el = document.getElementById('dmarcExplained');
+  if (!el || !element) return;
+
+  const body = document.getElementById('field-dmarc');
+
+  const header = element.closest ? element.closest('.card-header') : null;
+  const content = header ? header.nextElementSibling : null;
+  const isCollapsed = !!(header && header.classList && header.classList.contains('collapsed-header')) ||
+                      !!(content && content.classList && content.classList.contains('collapsed'));
+  if (isCollapsed && header) {
+    toggleCard(header);
+    el.style.display = 'block';
+    if (body) body.style.display = 'none';
+    element.textContent = t('dmarcExplainedHide');
+    return;
+  }
+
+  const current = el.style.display;
+  const isOpen = (!current || current === 'none');
+  element.textContent = isOpen ? t('dmarcExplainedHide') : t('dmarcExplainedShow');
+  el.style.display = isOpen ? 'block' : 'none';
+  if (body) body.style.display = isOpen ? 'none' : '';
+}
+
+// Hover handler for rows inside a buildSpfExplainedHtml() table. The matching
+// `.spf-record-token` span in the same `.spf-explained-block` is highlighted
+// (or un-highlighted) so users can visually correlate a table row with the
+// exact substring inside the green record box above. Scoped to the nearest
+// `.spf-explained-block` so multiple Explained panels on the page (the
+// queried-domain SPF Explained panel plus every per-row Explain panel
+// inside the SPF Expansion Records card) do not cross-talk.
+function setSpfTokenHighlight(rowEl, isOn) {
+  if (!rowEl || !rowEl.getAttribute) return;
+  const idx = rowEl.getAttribute('data-token-idx');
+  if (idx === null || typeof idx === 'undefined') return;
+  const block = rowEl.closest ? rowEl.closest('.spf-explained-block') : null;
+  if (!block) return;
+  const tok = block.querySelector(`.spf-record-token[data-token-idx="${idx}"]`);
+  if (!tok || !tok.classList) return;
+  if (isOn) {
+    tok.classList.add('spf-record-token-active');
+    rowEl.classList.add('spf-explained-row-active');
+  } else {
+    tok.classList.remove('spf-record-token-active');
+    rowEl.classList.remove('spf-explained-row-active');
+  }
+}
+
+// Hover handler for rows inside the SPF Expansion Records table. Highlights
+// every `.spf-record-token` (across any open Explained panel on the page)
+// whose data-spf-type+value matches this expansion row's mechanism/target
+// (e.g., include:spf.crsend.com). This lets users hover an entry in the
+// expansion table and immediately see where it appears inside the queried-
+// domain SPF Explained record box. Tokens are matched globally rather than
+// scoped to a single block because the expansion row references targets
+// from ANY ancestor SPF record, not just the queried one.
+function setSpfExpansionHighlight(rowEl, isOn) {
+  if (!rowEl || !rowEl.getAttribute) return;
+  const mech = (rowEl.getAttribute('data-spf-mech') || '').toLowerCase();
+  const target = rowEl.getAttribute('data-spf-target') || '';
+  if (!mech || !target) return;
+  // Build a CSS-attribute-selector-safe value. We escape backslashes and
+  // double quotes; SPF targets are DNS names and won't contain either in
+  // practice, but guard against weird inputs anyway.
+  const safeTarget = target.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const selector = `.spf-record-token[data-spf-type="${mech}"][data-spf-value="${safeTarget}"]`;
+  let matches = [];
+  try {
+    matches = Array.from(document.querySelectorAll(selector));
+  } catch (_) { /* invalid selector; bail silently */ }
+  for (const tok of matches) {
+    if (!tok || !tok.classList) continue;
+    if (isOn) tok.classList.add('spf-record-token-active');
+    else tok.classList.remove('spf-record-token-active');
+  }
+  // Also mirror the row highlight so users can tell at a glance which
+  // expansion row drove the highlight.
+  if (rowEl.classList) {
+    if (isOn) rowEl.classList.add('spf-expansion-row-active');
+    else rowEl.classList.remove('spf-expansion-row-active');
+  }
 }
 
 // Toggle for MX additional details
@@ -19143,7 +21175,27 @@ function render(r) {
   // 3) Domain Registration
   let regState = 'PENDING';
   const whoisErrorText = errors.whois || r.whoisError || '';
-  const whoisHasData = !!(r.whoisSource || r.whoisCreationDateUtc || r.whoisExpiryDateUtc || r.whoisRegistrar || r.whoisRegistrant || r.whoisAgeHuman || r.whoisExpiryHuman);
+  // Structured WHOIS/RDAP signal must come from real registration fields, NOT
+  // just `whoisSource` (provider name) or `whoisRawText` (raw banner). A
+  // provider that returns partial data — e.g., DENIC for .de returns only
+  // "Last Changed" + nameservers with no creation/expiry/registrar — was
+  // previously slipping into the PASS branch below and rendering a green
+  // "Resolved successfully." badge despite having no real registration age or
+  // expiry to show. Mirror the SPA card's `hasStructuredWhoisDetails` check so
+  // the Email Quota row agrees with the card header.
+  const whoisHasData = !!(
+    r.whoisCreationDateUtc ||
+    r.whoisExpiryDateUtc ||
+    r.whoisRegistrar ||
+    r.whoisRegistrant ||
+    r.whoisAgeHuman ||
+    r.whoisExpiryHuman ||
+    (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) ||
+    (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) ||
+    r.whoisIsExpired === true ||
+    r.whoisIsVeryYoungDomain === true ||
+    r.whoisIsYoungDomain === true
+  );
   // When the registry doesn't operate WHOIS/RDAP at all (e.g. .gr / .ελ via
   // FORTH) we render a friendly link panel in the card. The Email Quota row
   // for the same check should not display a misleading red ERROR; instead use
@@ -19195,11 +21247,23 @@ function render(r) {
       const parts = [];
       if (localizedWhoisAgeHuman) { parts.push(`${t('ageLabel')}: ${localizedWhoisAgeHuman}`); }
       if (localizedWhoisExpiryHuman) { parts.push(`${t('expiresInLabel')}: ${localizedWhoisExpiryHuman}`); }
-      const ageText = parts.join(' | ') || t('resolvedSuccessfully');
-      quotaItems.push(quotaRow(t('domainRegistration'), 'pass', ageText, null, 'whois'));
-      regState = 'PASS';
-      quotaLines.push(`**Domain Registration:** ${regState}${ageText ? ' - ' + ageText : ''}`);
-      quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${ageText ? ' - ' + escapeHtml(ageText) : ''}`);
+      // Only emit PASS when we actually have a registration age or expiry to
+      // show. If neither is known (e.g., a thin RDAP/WHOIS response that
+      // returned no creation/expiry dates), downgrade to INFO so we don't
+      // claim "Resolved successfully." with no underlying evidence.
+      if (parts.length === 0) {
+        const msg = t('registrationDetailsUnavailable');
+        quotaItems.push(quotaRow(t('domainRegistration'), 'info', msg, null, 'whois'));
+        regState = 'INFO';
+        quotaLines.push(`**Domain Registration:** ${regState} - ${msg}`);
+        quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)} - ${escapeHtml(msg)}`);
+      } else {
+        const ageText = parts.join(' | ');
+        quotaItems.push(quotaRow(t('domainRegistration'), 'pass', ageText, null, 'whois'));
+        regState = 'PASS';
+        quotaLines.push(`**Domain Registration:** ${regState}${ageText ? ' - ' + ageText : ''}`);
+        quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${ageText ? ' - ' + escapeHtml(ageText) : ''}`);
+      }
     }
   }
 
@@ -19219,7 +21283,7 @@ function render(r) {
   } else {
     const spfPassesRequirement = !!(effectiveSpfPresent && effectiveSpfHasRequiredInclude === true);
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n"))
+      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n"))
       : t('noSpfRecordDetected');
     quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : 'fail', spfDetail, null, 'spf'));
     const spfState = spfPassesRequirement ? 'PASS' : 'FAIL';
@@ -19781,7 +21845,7 @@ function render(r) {
   const spfCardBaseValue = loaded.base
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -19789,12 +21853,71 @@ function render(r) {
   // duplicating the same data here as an indented text dump just adds
   // visual noise. (The server still emits r.spfExpandedText for raw API
   // consumers.)
+  //
+  // The "Explained" toggle below decomposes the queried-domain SPF record
+  // into a Prefix / Type / Value / PrefixDesc / Description table inspired
+  // by MXToolbox's SPF Record Lookup. It only operates on the local record
+  // string, so no DNS is involved. We hand the toggle button to card() via
+  // titleSuffixHtml (placed next to the title) and the hidden details panel
+  // via appendHtml (placed after the card body but outside field-spf, so
+  // the Copy button does not include the explained markup in the clipboard).
+  //
+  // When the panel is open, toggleSpfExplained() also hides #field-spf to
+  // avoid showing the raw record twice (once in the card body, once at the
+  // top of the panel). Any contextual notes that lived in the card body --
+  // the ACS Outlook requirement summary, and the "resolved using parent
+  // domain" line when SPF was inherited -- are mirrored INSIDE the panel
+  // above the record box so hiding the body does not drop that context.
+  //
+  // The CLOSED card body is also upgraded to render the raw record in the
+  // same green token-style box and the requirement verdict in the same
+  // green note box used by the Explained panel, so the two views stay
+  // visually consistent. Built only when a real v=spf1 record is present;
+  // missing/error/loading states still fall back to the plain text body so
+  // their messaging stays unchanged.
+  let spfExplainedTitleSuffix = '';
+  let spfExplainedAppend = '';
+  let spfBodyHtml = '';
+  if (loaded.base && spfCardBaseValue) {
+    const spfRawForParse = (effectiveSpfValue || (r.parentSpfPresent && r.txtUsedParent ? r.parentSpfValue : '') || '').split(/\r?\n/)[0].trim();
+    if (spfRawForParse && /^v=spf1/i.test(spfRawForParse)) {
+      // Mirror the "resolved using parent domain" note inside the panel so
+      // operators still see why an inherited SPF record is being explained.
+      const isInheritedFromParent = !!(r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain);
+      const spfInheritedNote = isInheritedFromParent
+        ? `<div class="spf-explained-inherited">${escapeHtml(t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain }))}</div>`
+        : '';
+      // Mirror the ACS Outlook requirement verdict inside the panel. This
+      // is the same string the card body would normally show under the raw
+      // record. Empty when no verdict is available (e.g., no SPF at all).
+      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType });
+      const spfRequirementNote = spfRequirementText
+        ? `<div class="spf-explained-requirement">${escapeHtml(spfRequirementText)}</div>`
+        : '';
+      const explainedHtml = spfInheritedNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
+      spfExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleSpfExplained(this)" title="${escapeHtml(t('spfExplainedTooltip'))}">${escapeHtml(t('spfExplainedShow'))}</button>`;
+      spfExplainedAppend = `<div id="spfExplained" class="card-content" style="display:none;">${explainedHtml}</div>`;
+
+      // Closed-card body: same boxed presentation as the Explained panel
+      // minus the breakdown table and legend. We intentionally do NOT
+      // tokenize the record here (no hover-highlight targets exist when
+      // the table isn't rendered), so a plain pre-formatted green box is
+      // sufficient. innerText of #field-spf still reads as clean plain
+      // text for the Copy button.
+      const spfRecordBoxHtml = `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
+      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfRequirementNote;
+    }
+  }
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
     basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : "FAIL")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
-    "spf"
+    "spf",
+    true,
+    spfExplainedTitleSuffix,
+    spfExplainedAppend,
+    spfBodyHtml
   ));
 
   // Sibling card listing every include/redirect target the SPF expansion resolved,
@@ -19831,12 +21954,41 @@ function render(r) {
     false
   ));
 
+  // DMARC Explained toggle. Mirrors the SPF Explained pattern: when the
+  // DMARC record is present, decompose it into a Tag / Value / TagDesc /
+  // ValueDesc table inspired by MXToolbox's DMARC Record Lookup. The button
+  // is rendered via titleSuffixHtml so it sits next to the title; the hidden
+  // panel is appended OUTSIDE the field-dmarc div via appendHtml so the
+  // Copy button (which reads innerText of field-dmarc) does not include the
+  // explained markup in the clipboard.
+  //
+  // When the panel is open, toggleDmarcExplained() also hides #field-dmarc
+  // to avoid showing the raw record twice (once in the card body, once at
+  // the top of the panel). If the DMARC policy was inherited from a parent
+  // domain, we surface that note inside the panel as well so hiding the
+  // body does not drop that context.
+  let dmarcExplainedTitleSuffix = '';
+  let dmarcExplainedAppend = '';
+  if (loaded.dmarc && r.dmarc) {
+    const dmarcRawForParse = String(r.dmarc).split(/\r?\n/)[0].trim();
+    if (dmarcRawForParse && /^v=DMARC1/i.test(dmarcRawForParse)) {
+      const inheritedNote = (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain)
+        ? `<div class="dmarc-explained-inherited">${escapeHtml(t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain }))}</div>`
+        : '';
+      const dmarcExplainedHtml = inheritedNote + buildDmarcExplainedHtml(dmarcRawForParse);
+      dmarcExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleDmarcExplained(this)" title="${escapeHtml(t('dmarcExplainedTooltip'))}">${escapeHtml(t('dmarcExplainedShow'))}</button>`;
+      dmarcExplainedAppend = `<div id="dmarcExplained" class="card-content" style="display:none;">${dmarcExplainedHtml}</div>`;
+    }
+  }
   cards.push(card(
     t('dmarc'),
     loaded.dmarc ? (r.dmarc ? (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain ? (`${r.dmarc}\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`) : r.dmarc) : null) : (errors.dmarc ? errors.dmarc : t('loadingValue')),
     (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (r.dmarc ? "PASS" : "OPTIONAL")),
     (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info")),
-    "dmarc"
+    "dmarc",
+    true,
+    dmarcExplainedTitleSuffix,
+    dmarcExplainedAppend
   ));
 
   // include full selector host with domain in title.
@@ -22043,7 +24195,7 @@ $functionNames = @(
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Test-WhoisDomainNameSafe','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Invoke-WhoisProcess','Initialize-WhoisFieldRegexes','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly',
-  'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
+  'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',

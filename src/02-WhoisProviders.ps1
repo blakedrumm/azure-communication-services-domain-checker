@@ -64,6 +64,28 @@ function Test-WhoisRawTextHasUsableData {
     return $false
   }
 
+  # IANA's own TLD-level WHOIS record. When IANA has no `whois:` referral for a
+  # TLD (e.g. .gr / .ελ via FORTH, where the registry runs no port-43 service
+  # at all), `whois.iana.org` simply returns its delegation record FOR THE TLD
+  # ITSELF — registry contacts, nameservers, the TLD's 1986/1989 creation date,
+  # etc. — instead of an error or a "no whois server" notice. The TCP whois
+  # provider then has nothing to follow and would otherwise treat this as a
+  # legitimate response, surfacing IANA's TLD record as if it were registration
+  # data for the queried second-level domain (the WHOIS card would show
+  # `domain: GR` / `source: IANA` / `created: 1989-02-19` for any .gr lookup,
+  # and the Email Quota row would correctly report ERROR because none of the
+  # parsed fields belong to the actual queried domain). Detect this shape and
+  # mark it not-usable so the provider chain continues on to the registry
+  # web-form fallback. Markers we require together (any one alone is too weak):
+  #   - `% IANA WHOIS server` header comment line
+  #   - `source: IANA` field
+  # Both must be present so a future registry that legitimately echoes one of
+  # these strings (e.g. a disclaimer mentioning IANA) is not falsely flagged.
+  if ($Text -match '(?im)^%\s*IANA\s+WHOIS\s+server\b' -and `
+      $Text -match '(?im)^\s*source:\s*IANA\b') {
+    return $false
+  }
+
   # Treat registry refusal/rate-limit responses as not-usable so the chain continues.
   if (Test-WhoisResponseIsRegistryBlock -Text $Text) {
     return $false

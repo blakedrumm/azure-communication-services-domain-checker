@@ -693,6 +693,14 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
   // constrained via CSS (.spf-col-record) so it wraps instead of dragging
   // the table to ridiculous widths. A scroll wrapper around the table lets
   // very wide SPF chains scroll horizontally on narrow viewports.
+  //
+  // Adds an "Explain" column at the end with a small button per row. Clicking
+  // it expands a hidden sibling <tr> containing the SPF Explained breakdown
+  // (Prefix / Type / Value / PrefixDesc / Description) for THAT row's
+  // resolved SPF record. This gives users a per-record decomposition without
+  // having to copy the record out and run the queried-domain SPF Explained
+  // toggle separately. The expanded row is purely client-side and reuses
+  // buildSpfExplainedHtml so the formatting stays in sync with the SPF card.
   const header = `
     <thead>
       <tr>
@@ -702,13 +710,14 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
         <th>${escapeHtml(t('spfExpansionTarget'))}</th>
         <th style="text-align:right;" title="${escapeHtml(t('spfExpansionLookupsHint'))}">${escapeHtml(t('spfExpansionLookups'))}</th>
         <th>${escapeHtml(t('spfExpansionRecord'))}</th>
+        <th class="spf-col-explain" aria-label="${escapeHtml(t('spfExpansionExplainTooltip'))}">${escapeHtml(t('spfExpansionExplainColumn'))}</th>
       </tr>
     </thead>`;
 
   // Track the previous row's target so nested rows can dim a repeated parent
   // value (chain continuation) to reduce visual noise.
   let previousTarget = '';
-  const body = rows.map((row) => {
+  const body = rows.map((row, idx) => {
     const recordCellHtml = row.error
       ? `<span style="color: var(--fail-fg, #d33);">${escapeHtml(row.error)}</span>`
       : (row.record ? escapeHtml(row.record) : `<span style="opacity:0.6;">${escapeHtml(t('noRecordsAvailable'))}</span>`);
@@ -755,15 +764,40 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
 
     previousTarget = row.target || '';
 
+    // Per-row Explain button. Only render an interactive control when the
+    // row carries a usable SPF record (no error, non-empty record string).
+    // The detail row directly below shares the same id suffix so
+    // toggleSpfExpansionExplain() can find it by id.
+    const detailId = `spfExpansionExplain-${idx}`;
+    const hasRecord = !row.error && row.record && /^v=spf1\b/i.test(String(row.record).trim());
+    const explainBtnHtml = hasRecord
+      ? `<button type="button" class="spf-expansion-explain-btn hide-on-screenshot" onclick="toggleSpfExpansionExplain(this, '${detailId}')" title="${escapeHtml(t('spfExpansionExplainTooltip'))}">${escapeHtml(t('spfExpansionExplain'))}</button>`
+      : '';
+
+    // Hidden details row. The colspan covers every column so the explained
+    // table renders edge-to-edge under the row it explains. buildSpfExplainedHtml
+    // already produces the full record box, breakdown table, and legend.
+    const detailRowHtml = hasRecord
+      ? `<tr id="${detailId}" class="spf-expansion-explain-row" style="display:none;"><td colspan="7" class="spf-expansion-explain-cell">${buildSpfExplainedHtml(row.record)}</td></tr>`
+      : '';
+
+    // data-spf-mech / data-spf-target let setSpfExpansionHighlight find every
+    // matching `.spf-record-token[data-spf-type=...][data-spf-value=...]`
+    // anywhere on the page so hovering this row lights up the corresponding
+    // include/redirect token inside any open SPF Explained panel (the
+    // queried-domain panel and the per-row Explain panels).
+    const safeMech = escapeHtml(String(row.mechanism || ''));
+    const safeTarget = escapeHtml(String(row.target || ''));
     return `
-      <tr>
+      <tr data-spf-mech="${safeMech}" data-spf-target="${safeTarget}" onmouseenter="setSpfExpansionHighlight(this, true)" onmouseleave="setSpfExpansionHighlight(this, false)">
         <td class="spf-col-depth">${escapeHtml(String(row.depth))}</td>
         <td class="spf-col-mechanism">${escapeHtml(row.mechanism)}</td>
         <td class="spf-col-parent">${parentCellHtml}</td>
         <td class="spf-col-target">${indentHtml}${escapeHtml(row.target)}</td>
         <td class="spf-col-lookups">${lookupsCellHtml}</td>
         <td class="spf-col-record">${recordCellHtml}</td>
-      </tr>`;
+        <td class="spf-col-explain">${explainBtnHtml}</td>
+      </tr>${detailRowHtml}`;
   }).join('');
 
   const rowsCountHtml = `<div style="font-size:12px; opacity:0.75;">${escapeHtml(t('spfExpansionRowsCount', { count: String(rows.length) }))}</div>`;
@@ -775,6 +809,747 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
   }
   const summary = `<div style="margin-bottom:6px;">${rowsCountHtml}${limitSummaryHtml}</div>`;
   return `${summary}<div class="spf-expansion-scroll"><table class="mx-table spf-expansion-table">${header}<tbody>${body}</tbody></table></div>`;
+}
+
+// Parse a single SPF record string into a flat array of mechanism descriptors.
+// Each descriptor is shaped { qualifier, type, value, raw } where:
+//   - qualifier: '+', '-', '~', '?' or '' (empty when no qualifier prefix was set).
+//     Note: the SPF spec defaults to '+' (Pass) when no qualifier is present.
+//   - type     : the canonical mechanism/modifier keyword, lowercased.
+//                Mechanisms (RFC 7208 \u00A75): all, include, a, mx, ptr, ip4, ip6, exists.
+//                Modifiers  (RFC 7208 \u00A76): redirect, exp.
+//                The synthetic type 'v'   is emitted for the leading 'v=spf1' tag so the
+//                Explained table can describe the record version on the very first row.
+//                The synthetic type 'unknown' is emitted for tokens that match no known
+//                SPF keyword so the table can still surface them rather than silently
+//                dropping malformed input.
+//   - value    : the right-hand side of the mechanism (after ':' or '='), or '' when
+//                the mechanism has no value (e.g., 'all', bare 'a', bare 'mx').
+//   - raw      : the original token as it appeared in the record, for diagnostics.
+//
+// This parser is purely textual; it does NOT perform DNS lookups. The expanded
+// SPF chain (with live DNS results) is rendered by the sibling
+// "SPF Expansion Records" card via buildSpfExpansionCardHtml. The Explained
+// view is intentionally a per-record decomposition mirroring the MXToolbox
+// "SPF Record Lookup" Prefix / Type / Value / PrefixDesc / Description layout.
+
+// Module-level counter used to mint unique ids for the per-row CIDR detail
+// rows generated by buildSpfExplainedHtml. Multiple SPF Explained panels can
+// coexist on the page (the queried-domain panel plus every per-row Expansion
+// Explain panel) and each ip4/ip6 row gets its own toggleable detail row, so
+// the ids must be globally unique to keep toggleSpfCidrDetail's
+// document.getElementById lookup deterministic.
+let __spfCidrDetailCounter = 0;
+
+function parseSpfMechanisms(spfRecord) {
+  const out = [];
+  if (!spfRecord) return out;
+
+  // The card body sometimes embeds a localized "ACS Outlook requirement satisfied"
+  // verdict joined to the raw record with a blank line. Take only the first line
+  // so the parser sees pure SPF tokens and not localized prose.
+  const firstLine = String(spfRecord).split(/\r?\n/)[0] || '';
+  const tokens = firstLine.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return out;
+
+  for (const tok of tokens) {
+    // The 'v=spf1' tag is technically a key=value pair, not a mechanism. Emit
+    // it as a synthetic 'v' row so the Explained table can describe the SPF
+    // version on the first line (matches MXToolbox's presentation).
+    if (/^v=/i.test(tok)) {
+      out.push({ qualifier: '', type: 'v', value: tok.replace(/^v=/i, ''), raw: tok });
+      continue;
+    }
+
+    // 'redirect=' and 'exp=' are modifiers, not mechanisms, and never carry a
+    // qualifier prefix. Treat them separately so we don't strip a leading '-'
+    // from a domain name that happens to start with a hyphen.
+    if (/^redirect=/i.test(tok)) {
+      out.push({ qualifier: '', type: 'redirect', value: tok.replace(/^redirect=/i, ''), raw: tok });
+      continue;
+    }
+    if (/^exp=/i.test(tok)) {
+      out.push({ qualifier: '', type: 'exp', value: tok.replace(/^exp=/i, ''), raw: tok });
+      continue;
+    }
+
+    // Mechanism: optional qualifier (+, -, ~, ?), then a keyword, then an
+    // optional ':value' (or no value at all for 'all', bare 'a', bare 'mx').
+    const m = tok.match(/^([+\-~?])?(all|include|a|mx|ptr|ip4|ip6|exists)(?::(.*))?$/i);
+    if (m) {
+      out.push({
+        qualifier: m[1] || '',
+        type: m[2].toLowerCase(),
+        value: typeof m[3] === 'undefined' ? '' : m[3],
+        raw: tok
+      });
+      continue;
+    }
+
+    // Unknown token. Surface it so users notice typos / malformed records.
+    out.push({ qualifier: '', type: 'unknown', value: '', raw: tok });
+  }
+
+  return out;
+}
+
+// Translate an SPF qualifier character (+/-/~/?) into a short label suitable
+// for the "PrefixDesc" column of the Explained table. Returns '' when the
+// mechanism does not carry a qualifier (modifiers like redirect=, and the
+// synthetic 'v' row).
+//
+// Note on `-` => 'HardFail': the SPF spec only defines four qualifiers
+// (Pass/Fail/SoftFail/Neutral), but MXToolbox and most receiver
+// documentation refer to `-` as "HardFail" to clearly distinguish it from
+// `~all` (SoftFail). We surface the "HardFail" wording in the UI so users
+// can immediately tell a strict `-all` apart from a lenient `~all`.
+function getSpfQualifierDescription(qualifier) {
+  switch (qualifier) {
+    case '+': return t('spfPrefixPass');
+    case '-': return t('spfPrefixFail');
+    case '~': return t('spfPrefixSoftFail');
+    case '?': return t('spfPrefixNeutral');
+    default:  return '';
+  }
+}
+
+// Translate an SPF mechanism/modifier keyword into a one-line human-readable
+// description for the rightmost "Description" column. Falls back to the
+// 'unknown' description for tokens parseSpfMechanisms could not classify.
+function getSpfMechanismDescription(type) {
+  switch (type) {
+    case 'v':        return t('spfDescVersion');
+    case 'all':      return t('spfDescAll');
+    case 'include':  return t('spfDescInclude');
+    case 'a':        return t('spfDescA');
+    case 'mx':       return t('spfDescMx');
+    case 'ptr':      return t('spfDescPtr');
+    case 'ip4':      return t('spfDescIp4');
+    case 'ip6':      return t('spfDescIp6');
+    case 'exists':   return t('spfDescExists');
+    case 'redirect': return t('spfDescRedirect');
+    case 'exp':      return t('spfDescExp');
+    default:         return t('spfDescUnknown');
+  }
+}
+
+// Parse an IPv4 CIDR (e.g., "40.107.0.0/16") or bare address into structured
+// pieces used by formatSpfCidrInfo. Returns null when the input is not a
+// well-formed IPv4 value, so the caller can decide to skip the info button
+// for tokens like include:domain or unparseable malformed addresses.
+function parseSpfIpv4(value) {
+  if (!value) return null;
+  const m = String(value).trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/);
+  if (!m) return null;
+  const octets = [m[1], m[2], m[3], m[4]].map(Number);
+  if (octets.some(n => n < 0 || n > 255)) return null;
+  // Default to /32 when no prefix is supplied so a bare address still shows
+  // a single-host range and a 255.255.255.255 mask.
+  let prefix = (typeof m[5] === 'undefined') ? 32 : parseInt(m[5], 10);
+  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 32) return null;
+  // Convert to a 32-bit unsigned integer using BigInt to sidestep JS signed
+  // right-shift surprises around /0 and /1.
+  const addrInt = (BigInt(octets[0]) << 24n) | (BigInt(octets[1]) << 16n) | (BigInt(octets[2]) << 8n) | BigInt(octets[3]);
+  const hostBits = 32 - prefix;
+  const maskInt = (hostBits === 32) ? 0n : (((1n << BigInt(prefix)) - 1n) << BigInt(hostBits));
+  const networkInt = addrInt & maskInt;
+  const broadcastInt = networkInt | ((1n << BigInt(hostBits)) - 1n);
+  const size = 1n << BigInt(hostBits);
+  const toDotted = (n) => `${Number((n >> 24n) & 0xFFn)}.${Number((n >> 16n) & 0xFFn)}.${Number((n >> 8n) & 0xFFn)}.${Number(n & 0xFFn)}`;
+  return {
+    family: 'ip4',
+    prefix,
+    network: toDotted(networkInt),
+    mask: toDotted(maskInt),
+    firstAddress: toDotted(networkInt),
+    lastAddress: toDotted(broadcastInt),
+    size
+  };
+}
+
+// Parse an IPv6 CIDR (e.g., "2a01:111:f400::/48") or bare address. Handles
+// the "::" compressed form and falls back to a /128 host route when no
+// prefix is supplied. Returns null for malformed input so the caller can
+// skip rendering the info button.
+function parseSpfIpv6(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const slash = raw.indexOf('/');
+  const addrPart = slash >= 0 ? raw.substring(0, slash) : raw;
+  let prefix = slash >= 0 ? parseInt(raw.substring(slash + 1), 10) : 128;
+  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 128) return null;
+  // Expand the "::" shorthand by counting the explicit groups on either side.
+  if (addrPart.indexOf(':::') >= 0) return null;
+  const doubleColonIdx = addrPart.indexOf('::');
+  let groups;
+  if (doubleColonIdx >= 0) {
+    const left = addrPart.substring(0, doubleColonIdx).split(':').filter(s => s !== '');
+    const right = addrPart.substring(doubleColonIdx + 2).split(':').filter(s => s !== '');
+    const missing = 8 - (left.length + right.length);
+    if (missing < 0) return null;
+    groups = left.concat(new Array(missing).fill('0'), right);
+  } else {
+    groups = addrPart.split(':');
+  }
+  if (groups.length !== 8) return null;
+  // Validate each group is a 1-4 char hex string.
+  for (const g of groups) {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
+  }
+  // Pack into a 128-bit BigInt for prefix-mask math.
+  let addrInt = 0n;
+  for (const g of groups) {
+    addrInt = (addrInt << 16n) | BigInt(parseInt(g, 16));
+  }
+  const hostBits = 128 - prefix;
+  const maskInt = (hostBits === 128) ? 0n : (((1n << BigInt(prefix)) - 1n) << BigInt(hostBits));
+  const networkInt = addrInt & maskInt;
+  const broadcastInt = networkInt | ((1n << BigInt(hostBits)) - 1n);
+  const size = 1n << BigInt(hostBits);
+  // Format back to compressed canonical IPv6. We render the lowercased
+  // 4-hex-digit form first and then collapse the longest run of "0" groups
+  // into "::" so addresses match what users typically see in tooling.
+  const toIpv6 = (n) => {
+    const parts = [];
+    for (let i = 7; i >= 0; i--) {
+      parts.push(((n >> BigInt(i * 16)) & 0xFFFFn).toString(16));
+    }
+    // Find the longest run of consecutive "0" groups (length >= 2) to
+    // compress with "::". RFC 5952 picks the leftmost when ties occur.
+    let bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i] === '0') {
+        if (curStart < 0) { curStart = i; curLen = 1; } else { curLen++; }
+        if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+      } else {
+        curStart = -1; curLen = 0;
+      }
+    }
+    if (bestLen >= 2) {
+      const head = parts.slice(0, bestStart).join(':');
+      const tail = parts.slice(bestStart + bestLen).join(':');
+      return `${head}::${tail}`.replace(/^:/, '::').replace(/:$/, '::');
+    }
+    return parts.join(':');
+  };
+  return {
+    family: 'ip6',
+    prefix,
+    network: toIpv6(networkInt),
+    mask: null, // IPv6 traditionally uses prefix length; subnet masks are rare.
+    firstAddress: toIpv6(networkInt),
+    lastAddress: toIpv6(broadcastInt),
+    size
+  };
+}
+
+// Format an ip4/ip6 mechanism value into the multi-line HTML block shown
+// inside the click-to-expand CIDR detail row beneath an SPF Explained
+// table row. Returns '' when the value is not a parseable IP/CIDR so the
+// caller can suppress the button entirely.
+//
+// The output is HTML (NOT plain text) so the labels can be wrapped in
+// <strong>. The detail row uses a monospace font with `white-space: pre`
+// in CSS, so we pad each line with regular spaces AFTER the (visible)
+// label to keep the value columns column-aligned. All user/value-derived
+// strings are HTML-escaped inline; label translations are passed through
+// escapeHtml as well so a hostile/edge-case translation string can't
+// inject markup.
+function formatSpfCidrInfo(type, value) {
+  const info = (type === 'ip4') ? parseSpfIpv4(value) : (type === 'ip6') ? parseSpfIpv6(value) : null;
+  if (!info) return '';
+  // Localized labels fall back to English via t() so untranslated locales
+  // still render readable text instead of the raw key name.
+  const lblNetwork = t('spfCidrLabelNetwork');
+  const lblPrefix  = t('spfCidrLabelPrefix');
+  const lblMask    = t('spfCidrLabelMask');
+  const lblRange   = t('spfCidrLabelRange');
+  const lblSize    = t('spfCidrLabelSize');
+  const lblAddrs   = t('spfCidrLabelAddresses');
+  const lblThrough = t('spfCidrRangeThrough');
+  // Use locale-aware grouping for the address count. BigInt -> Number is
+  // safe up to 2^53; /0 (2^32 / 2^128) is unrealistic in SPF records, but
+  // we fall back to toString() if the value exceeds Number.MAX_SAFE_INTEGER.
+  let sizeStr;
+  if (info.size <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    try {
+      sizeStr = Number(info.size).toLocaleString();
+    } catch (_) {
+      sizeStr = info.size.toString();
+    }
+  } else {
+    sizeStr = info.size.toString();
+  }
+  // Compute the longest label so the value columns line up regardless of
+  // which locale is active. We pad with plain spaces between the closing
+  // </strong> and the value text; the surrounding <pre> preserves them.
+  const labels = [lblNetwork, lblPrefix, lblMask, lblRange, lblSize];
+  const labelWidth = labels.reduce((max, s) => Math.max(max, s.length), 0) + 1;
+  const lineHtml = (label, valueHtml) => {
+    const pad = ' '.repeat(Math.max(1, labelWidth - label.length));
+    return `<strong>${escapeHtml(label)}</strong>${pad}${valueHtml}`;
+  };
+  const lines = [];
+  lines.push(lineHtml(lblNetwork, escapeHtml(info.network)));
+  lines.push(lineHtml(lblPrefix,  escapeHtml('/' + info.prefix)));
+  if (info.mask) {
+    lines.push(lineHtml(lblMask, escapeHtml(info.mask)));
+  }
+  lines.push(lineHtml(lblRange, `${escapeHtml(info.firstAddress)} ${escapeHtml(lblThrough)} ${escapeHtml(info.lastAddress)}`));
+  lines.push(lineHtml(lblSize,  `${escapeHtml(sizeStr)} ${escapeHtml(lblAddrs)}`));
+  return lines.join('\n');
+}
+
+// Build the inner HTML for the SPF Explained collapsible section. Returns
+// either a Prefix / Type / Value / PrefixDesc / Description table or a short
+// localized note explaining that no SPF record was found. The raw record is
+// rendered above the table inside a highlighted box so users can see the
+// exact string the table is decomposing.
+//
+// Hover behavior: each <tr> in the table carries `data-token-idx="N"` and
+// fires onmouseenter/onmouseleave to call setSpfTokenHighlight(). Each
+// token inside the green record box is wrapped in a
+// `<span class="spf-record-token" data-token-idx="N">` whose index matches
+// the corresponding mechanism row. The whole block is wrapped in
+// `.spf-explained-block` so the hover handler can scope its querySelector
+// to the nearest ancestor (lets the queried-domain SPF Explained panel and
+// every per-row Explain panel coexist without cross-talk).
+function buildSpfExplainedHtml(spfRecord) {
+  const trimmed = spfRecord ? String(spfRecord).split(/\r?\n/)[0].trim() : '';
+  if (!trimmed) {
+    return `<div class="code">${escapeHtml(t('spfExplainedEmpty'))}</div>`;
+  }
+
+  const mechs = parseSpfMechanisms(trimmed);
+  if (mechs.length === 0) {
+    return `<div class="code">${escapeHtml(t('spfExplainedEmpty'))}</div>`;
+  }
+
+  const header = `
+    <thead>
+      <tr>
+        <th>${escapeHtml(t('spfExplainedPrefix'))}</th>
+        <th>${escapeHtml(t('spfExplainedType'))}</th>
+        <th>${escapeHtml(t('spfExplainedValue'))}</th>
+        <th>${escapeHtml(t('spfExplainedPrefixDesc'))}</th>
+        <th>${escapeHtml(t('spfExplainedDescription'))}</th>
+      </tr>
+    </thead>`;
+
+  const body = mechs.map((m, idx) => {
+    // For ip4/ip6 mechanisms whose value is a parseable address or CIDR,
+    // attach a small "i" button beside the value that toggles a hidden
+    // sibling row right beneath this one. The sibling row spans all five
+    // columns and renders the Network/CIDR prefix/Subnet mask/Range/Size
+    // breakdown inside a <pre> so the padded labels stay column-aligned.
+    // This is the same pattern used by per-row Explain inside the SPF
+    // Expansion Records table (see toggleSpfExpansionExplain).
+    //
+    // Each detail row gets a unique id derived from a module-level counter
+    // so that multiple SPF Explained panels on the same page (the
+    // queried-domain panel plus every per-row Expansion Explain panel) do
+    // not collide.
+    const cidrInfo = (m.type === 'ip4' || m.type === 'ip6') ? formatSpfCidrInfo(m.type, m.value) : '';
+    let valueExtraHtml = '';
+    let cidrDetailRowHtml = '';
+    if (cidrInfo) {
+      const detailId = `spfCidrDetail-${++__spfCidrDetailCounter}`;
+      valueExtraHtml = ` <button type="button" class="spf-cidr-info-btn" aria-expanded="false" aria-controls="${detailId}" title="${escapeHtml(t('spfExplainedCidrInfoLabel'))}" onclick="toggleSpfCidrDetail(this, '${detailId}')">i</button>`;
+      // formatSpfCidrInfo returns already-escaped HTML (it wraps the labels
+      // in <strong> so they render bold inside the <pre>). Insert as-is.
+      cidrDetailRowHtml = `<tr id="${detailId}" class="spf-cidr-detail-row" style="display:none;"><td colspan="5" class="spf-cidr-detail-cell"><pre class="spf-cidr-detail-pre">${cidrInfo}</pre></td></tr>`;
+    }
+    return `
+      <tr data-token-idx="${idx}" onmouseenter="setSpfTokenHighlight(this, true)" onmouseleave="setSpfTokenHighlight(this, false)">
+        <td class="spf-col-prefix">${escapeHtml(m.qualifier)}</td>
+        <td class="spf-col-type">${escapeHtml(m.type)}</td>
+        <td class="spf-col-value">${escapeHtml(m.value)}${valueExtraHtml}</td>
+        <td class="spf-col-prefixdesc">${escapeHtml(getSpfQualifierDescription(m.qualifier))}</td>
+        <td class="spf-col-description">${escapeHtml(getSpfMechanismDescription(m.type))}</td>
+      </tr>${cidrDetailRowHtml}`;
+  }).join('');
+
+  // Tokenize the raw record into spans whose index matches the table row
+  // index. parseSpfMechanisms emits one entry per whitespace-separated token
+  // in document order, so joining `m.raw` with single spaces reproduces the
+  // canonical record while letting us wrap each token in an addressable span.
+  // `data-spf-type` / `data-spf-value` are mirrored onto the span so the
+  // outer SPF Expansion Records table can also highlight tokens by
+  // type+value (e.g., include:spf.crsend.com).
+  const tokenSpans = mechs.map((m, idx) =>
+    `<span class="spf-record-token" data-token-idx="${idx}" data-spf-type="${escapeHtml(m.type)}" data-spf-value="${escapeHtml(m.value)}">${escapeHtml(m.raw)}</span>`
+  ).join(' ');
+
+  // Box the raw record above the table so the breakdown reads naturally as
+  // "here is the record, here is what each piece means". The legend below the
+  // table summarizes qualifier semantics for users new to SPF.
+  const recordBox = `<div class="spf-explained-record">${tokenSpans}</div>`;
+  const legend = `<div class="spf-explained-legend">${escapeHtml(t('spfExplainedLegend'))}</div>`;
+  const table = `<div class="spf-expansion-scroll"><table class="mx-table spf-explained-table">${header}<tbody>${body}</tbody></table></div>`;
+  return `<div class="spf-explained-block">${recordBox}${table}${legend}</div>`;
+}
+
+// Show/hide the SPF Explained section attached to the SPF card. Mirrors the
+// toggleMxDetails / toggleWhoisRaw pattern, and additionally toggles the
+// visibility of the card body (#field-spf). The Explained panel already
+// renders the raw record inside its green token box at the top, so leaving
+// #field-spf visible would show the same record twice. Hiding the body
+// while the panel is open removes the redundancy; the body is restored
+// when the user clicks "Show SPF Explained" again (label flips back) or
+// collapses the card. The requirement summary and any parent-domain
+// inheritance note are already mirrored INSIDE the panel by the wiring
+// site, so no context is lost while the body is hidden.
+function toggleSpfExplained(element) {
+  const el = document.getElementById('spfExplained');
+  if (!el || !element) return;
+
+  const body = document.getElementById('field-spf');
+
+  const header = element.closest ? element.closest('.card-header') : null;
+  const content = header ? header.nextElementSibling : null;
+  const isCollapsed = !!(header && header.classList && header.classList.contains('collapsed-header')) ||
+                      !!(content && content.classList && content.classList.contains('collapsed'));
+  if (isCollapsed && header) {
+    toggleCard(header);
+    el.style.display = 'block';
+    if (body) body.style.display = 'none';
+    element.textContent = t('spfExplainedHide');
+    return;
+  }
+
+  const current = el.style.display;
+  const isOpen = (!current || current === 'none');
+  element.textContent = isOpen ? t('spfExplainedHide') : t('spfExplainedShow');
+  el.style.display = isOpen ? 'block' : 'none';
+  if (body) body.style.display = isOpen ? 'none' : '';
+}
+
+// Per-row Explain toggle inside the SPF Expansion Records table. Each row
+// has a hidden sibling <tr> (id passed via detailId) containing the full
+// SPF Explained breakdown for THAT row's resolved record. Clicking the
+// button reveals or hides that row in place, mirroring the show/hide
+// pattern used by toggleSpfExplained but scoped to a single table row so
+// users can drill into any include / redirect target inline without
+// re-running the queried-domain breakdown.
+function toggleSpfExpansionExplain(element, detailId) {
+  if (!element || !detailId) return;
+  const row = document.getElementById(detailId);
+  if (!row) return;
+  const current = row.style.display;
+  const isOpen = (!current || current === 'none');
+  row.style.display = isOpen ? 'table-row' : 'none';
+  element.textContent = isOpen ? t('spfExpansionExplainHide') : t('spfExpansionExplain');
+  if (element.setAttribute) {
+    element.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  }
+}
+
+// Click handler for the "i" button beside an ip4/ip6 value inside an SPF
+// Explained table. Toggles the visibility of the sibling detail row that
+// holds the Network/CIDR prefix/Subnet mask/Range/Size breakdown. Mirrors
+// the toggleSpfExpansionExplain pattern: flip aria-expanded and the
+// `.spf-cidr-info-btn--open` class so the button can visually indicate the
+// open state via CSS. We only swap display + state; we never re-render the
+// table because buildSpfExplainedHtml already emitted the detail row in the
+// closed state at render time.
+function toggleSpfCidrDetail(element, detailId) {
+  if (!element || !detailId) return;
+  const row = document.getElementById(detailId);
+  if (!row) return;
+  const current = row.style.display;
+  const isOpen = (!current || current === 'none');
+  row.style.display = isOpen ? 'table-row' : 'none';
+  if (element.setAttribute) {
+    element.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  }
+  if (element.classList) {
+    element.classList.toggle('spf-cidr-info-btn--open', isOpen);
+  }
+}
+
+// ===== DMARC Explained =====
+// Parser + descriptive helpers + builder + toggle. Mirrors the SPF Explained
+// pattern: take a single DMARC record string and decompose it into a table of
+// Tag / Value / TagDesc / ValueDesc rows. No DNS is involved -- the parser
+// operates purely on the text of `r.dmarc`. Tag order is preserved from the
+// record so users can read the breakdown left-to-right against the green
+// record box above the table. Unknown tags are surfaced as their own row so
+// typos / non-standard tags are visible rather than silently dropped.
+function parseDmarcTags(dmarcRecord) {
+  const out = [];
+  if (!dmarcRecord) return out;
+
+  // The card body sometimes embeds a localized "inherited policy" note joined
+  // to the raw record with a blank line. Take only the first line so the
+  // parser sees pure DMARC tokens and not localized prose.
+  const firstLine = String(dmarcRecord).split(/\r?\n/)[0] || '';
+
+  // DMARC tags are semicolon-separated key=value pairs. Whitespace around
+  // tokens, the '=', and around values is all ignored per RFC 7489 sec 6.4.
+  const segments = firstLine.split(';');
+  for (const seg of segments) {
+    const part = seg.trim();
+    if (!part) continue;
+    const eq = part.indexOf('=');
+    if (eq < 0) {
+      // Token without '='. Surface as unknown so users see it instead of
+      // silently dropping it.
+      out.push({ name: part.toLowerCase(), value: '', raw: part });
+      continue;
+    }
+    const name = part.substring(0, eq).trim().toLowerCase();
+    const value = part.substring(eq + 1).trim();
+    out.push({ name: name, value: value, raw: part });
+  }
+
+  return out;
+}
+
+// Translate a DMARC tag name into a short human-readable description for the
+// "TagDesc" column. Unknown tags fall back to the 'unknown' description so the
+// table still renders consistently.
+function getDmarcTagDescription(name) {
+  switch (String(name || '').toLowerCase()) {
+    case 'v':     return t('dmarcTagDescVersion');
+    case 'p':     return t('dmarcTagDescPolicy');
+    case 'sp':    return t('dmarcTagDescSubdomainPolicy');
+    case 'pct':   return t('dmarcTagDescPercent');
+    case 'rua':   return t('dmarcTagDescRua');
+    case 'ruf':   return t('dmarcTagDescRuf');
+    case 'fo':    return t('dmarcTagDescFo');
+    case 'adkim': return t('dmarcTagDescAdkim');
+    case 'aspf':  return t('dmarcTagDescAspf');
+    case 'ri':    return t('dmarcTagDescRi');
+    case 'rf':    return t('dmarcTagDescRf');
+    default:      return t('dmarcTagDescUnknown');
+  }
+}
+
+// Translate a DMARC tag VALUE into a more specific description for the
+// "ValueDesc" column. Several tags have well-defined enum values (p, sp,
+// adkim, aspf, rf, pct, fo) -- for those we surface the exact semantic
+// meaning. For free-form tags (rua, ruf, ri) the value is just a URI list /
+// integer so we return an empty string and let the row read naturally with
+// only the TagDesc column populated.
+function getDmarcValueDescription(name, value) {
+  const n = String(name || '').toLowerCase();
+  const v = String(value || '').trim().toLowerCase();
+  if (!v) return '';
+
+  switch (n) {
+    case 'p':
+    case 'sp':
+      if (v === 'none')       return t('dmarcValueDescPolicyNone');
+      if (v === 'quarantine') return t('dmarcValueDescPolicyQuarantine');
+      if (v === 'reject')     return t('dmarcValueDescPolicyReject');
+      return '';
+    case 'adkim':
+    case 'aspf':
+      if (v === 'r') return t('dmarcValueDescAlignRelaxed');
+      if (v === 's') return t('dmarcValueDescAlignStrict');
+      return '';
+    case 'fo': {
+      // fo= is a colon-separated list (e.g., "0:1:d:s"). Describe each piece
+      // on its own line so multi-value fo= reads as a structured list.
+      const parts = v.split(':').map(s => s.trim()).filter(Boolean);
+      const descs = parts.map(p => {
+        if (p === '0') return t('dmarcValueDescFoZero');
+        if (p === '1') return t('dmarcValueDescFoOne');
+        if (p === 'd') return t('dmarcValueDescFoD');
+        if (p === 's') return t('dmarcValueDescFoS');
+        return '';
+      }).filter(Boolean);
+      return descs.join('\n');
+    }
+    case 'rf':
+      if (v === 'afrf') return t('dmarcValueDescRfAfrf');
+      return '';
+    case 'pct': {
+      const n2 = parseInt(v, 10);
+      if (!Number.isFinite(n2)) return '';
+      if (n2 === 100) return t('dmarcValueDescPercentFull');
+      return t('dmarcValueDescPercentPartial', { percent: String(n2) });
+    }
+    default:
+      return '';
+  }
+}
+
+// Build the inner HTML for the DMARC Explained panel. Returns either a small
+// "no DMARC record" note or a record box + tag table + legend block. Mirrors
+// the buildSpfExplainedHtml structure so the two panels look like siblings.
+function buildDmarcExplainedHtml(dmarcRecord) {
+  const trimmed = dmarcRecord ? String(dmarcRecord).split(/\r?\n/)[0].trim() : '';
+  if (!trimmed) {
+    return `<div class="code">${escapeHtml(t('dmarcExplainedEmpty'))}</div>`;
+  }
+
+  const tags = parseDmarcTags(trimmed);
+  if (tags.length === 0) {
+    return `<div class="code">${escapeHtml(t('dmarcExplainedEmpty'))}</div>`;
+  }
+
+  const header = `
+    <thead>
+      <tr>
+        <th>${escapeHtml(t('dmarcExplainedTag'))}</th>
+        <th>${escapeHtml(t('dmarcExplainedValue'))}</th>
+        <th>${escapeHtml(t('dmarcExplainedTagDesc'))}</th>
+        <th>${escapeHtml(t('dmarcExplainedValueDesc'))}</th>
+      </tr>
+    </thead>`;
+
+  // Build the table body. Each <tr> carries `data-token-idx="N"` and
+  // onmouseenter/onmouseleave handlers so hovering a row highlights the
+  // matching tag=value token in the record box above (and vice-versa).
+  // This mirrors the SPF Explained hover wiring exactly.
+  const body = tags.map((tag, idx) => {
+    // ValueDesc can contain newline-separated descriptions for multi-value
+    // tags like fo=. Convert \n to <br> after escaping so the per-piece
+    // descriptions render as a small inline list inside the same cell.
+    const valueDesc = getDmarcValueDescription(tag.name, tag.value);
+    const valueDescHtml = valueDesc ? escapeHtml(valueDesc).replace(/\n/g, '<br>') : '';
+    return `
+      <tr data-token-idx="${idx}" onmouseenter="setDmarcTokenHighlight(this, true)" onmouseleave="setDmarcTokenHighlight(this, false)">
+        <td class="dmarc-col-tag">${escapeHtml(tag.name)}</td>
+        <td class="dmarc-col-value">${escapeHtml(tag.value)}</td>
+        <td class="dmarc-col-tagdesc">${escapeHtml(getDmarcTagDescription(tag.name))}</td>
+        <td class="dmarc-col-valuedesc">${valueDescHtml}</td>
+      </tr>`;
+  }).join('');
+
+  // Tokenize the raw record into spans whose index matches the table row
+  // index. parseDmarcTags preserves each tag's original `raw` substring in
+  // document order, so rejoining with "; " reproduces a canonical DMARC
+  // record while letting us wrap each tag=value pair in an addressable
+  // span. If the original record ended with a trailing ";", preserve it so
+  // the rendered record box matches what users typically publish.
+  const hadTrailingSemicolon = /;\s*$/.test(trimmed);
+  const tokenSpans = tags
+    .map((tag, idx) => `<span class="dmarc-record-token" data-token-idx="${idx}">${escapeHtml(tag.raw)}</span>`)
+    .join('; ') + (hadTrailingSemicolon ? ';' : '');
+
+  // Box the raw record above the table so the breakdown reads naturally as
+  // "here is the record, here is what each piece means". The legend below the
+  // table summarizes DMARC tag rules for users new to DMARC.
+  const recordBox = `<div class="dmarc-explained-record">${tokenSpans}</div>`;
+  const legend = `<div class="dmarc-explained-legend">${escapeHtml(t('dmarcExplainedLegend'))}</div>`;
+  const table = `<div class="spf-expansion-scroll"><table class="mx-table dmarc-explained-table">${header}<tbody>${body}</tbody></table></div>`;
+  return `<div class="dmarc-explained-block">${recordBox}${table}${legend}</div>`;
+}
+
+// Hover handler for rows inside a buildDmarcExplainedHtml() table. The
+// matching `.dmarc-record-token` span in the same `.dmarc-explained-block`
+// is highlighted (or un-highlighted) so users can visually correlate a
+// table row with the exact tag=value substring inside the record box above.
+// Scoped to the nearest `.dmarc-explained-block` so future panels do not
+// cross-talk -- mirrors setSpfTokenHighlight's scoping pattern.
+function setDmarcTokenHighlight(rowEl, isOn) {
+  if (!rowEl || !rowEl.getAttribute) return;
+  const idx = rowEl.getAttribute('data-token-idx');
+  if (idx === null || typeof idx === 'undefined') return;
+  const block = rowEl.closest ? rowEl.closest('.dmarc-explained-block') : null;
+  if (!block) return;
+  const tok = block.querySelector(`.dmarc-record-token[data-token-idx="${idx}"]`);
+  if (!tok || !tok.classList) return;
+  if (isOn) {
+    tok.classList.add('dmarc-record-token-active');
+    rowEl.classList.add('dmarc-explained-row-active');
+  } else {
+    tok.classList.remove('dmarc-record-token-active');
+    rowEl.classList.remove('dmarc-explained-row-active');
+  }
+}
+
+// Show/hide the DMARC Explained section attached to the DMARC card. Mirrors
+// toggleSpfExplained but also toggles the visibility of the card body
+// (#field-dmarc). The Explained panel already renders the raw record inside
+// its green box at the top, so leaving #field-dmarc visible would show the
+// same text twice. Hiding the body while the panel is open removes the
+// redundancy; the body is restored when the user clicks "Show DMARC
+// Explained" again (label flips back) or collapses it.
+function toggleDmarcExplained(element) {
+  const el = document.getElementById('dmarcExplained');
+  if (!el || !element) return;
+
+  const body = document.getElementById('field-dmarc');
+
+  const header = element.closest ? element.closest('.card-header') : null;
+  const content = header ? header.nextElementSibling : null;
+  const isCollapsed = !!(header && header.classList && header.classList.contains('collapsed-header')) ||
+                      !!(content && content.classList && content.classList.contains('collapsed'));
+  if (isCollapsed && header) {
+    toggleCard(header);
+    el.style.display = 'block';
+    if (body) body.style.display = 'none';
+    element.textContent = t('dmarcExplainedHide');
+    return;
+  }
+
+  const current = el.style.display;
+  const isOpen = (!current || current === 'none');
+  element.textContent = isOpen ? t('dmarcExplainedHide') : t('dmarcExplainedShow');
+  el.style.display = isOpen ? 'block' : 'none';
+  if (body) body.style.display = isOpen ? 'none' : '';
+}
+
+// Hover handler for rows inside a buildSpfExplainedHtml() table. The matching
+// `.spf-record-token` span in the same `.spf-explained-block` is highlighted
+// (or un-highlighted) so users can visually correlate a table row with the
+// exact substring inside the green record box above. Scoped to the nearest
+// `.spf-explained-block` so multiple Explained panels on the page (the
+// queried-domain SPF Explained panel plus every per-row Explain panel
+// inside the SPF Expansion Records card) do not cross-talk.
+function setSpfTokenHighlight(rowEl, isOn) {
+  if (!rowEl || !rowEl.getAttribute) return;
+  const idx = rowEl.getAttribute('data-token-idx');
+  if (idx === null || typeof idx === 'undefined') return;
+  const block = rowEl.closest ? rowEl.closest('.spf-explained-block') : null;
+  if (!block) return;
+  const tok = block.querySelector(`.spf-record-token[data-token-idx="${idx}"]`);
+  if (!tok || !tok.classList) return;
+  if (isOn) {
+    tok.classList.add('spf-record-token-active');
+    rowEl.classList.add('spf-explained-row-active');
+  } else {
+    tok.classList.remove('spf-record-token-active');
+    rowEl.classList.remove('spf-explained-row-active');
+  }
+}
+
+// Hover handler for rows inside the SPF Expansion Records table. Highlights
+// every `.spf-record-token` (across any open Explained panel on the page)
+// whose data-spf-type+value matches this expansion row's mechanism/target
+// (e.g., include:spf.crsend.com). This lets users hover an entry in the
+// expansion table and immediately see where it appears inside the queried-
+// domain SPF Explained record box. Tokens are matched globally rather than
+// scoped to a single block because the expansion row references targets
+// from ANY ancestor SPF record, not just the queried one.
+function setSpfExpansionHighlight(rowEl, isOn) {
+  if (!rowEl || !rowEl.getAttribute) return;
+  const mech = (rowEl.getAttribute('data-spf-mech') || '').toLowerCase();
+  const target = rowEl.getAttribute('data-spf-target') || '';
+  if (!mech || !target) return;
+  // Build a CSS-attribute-selector-safe value. We escape backslashes and
+  // double quotes; SPF targets are DNS names and won't contain either in
+  // practice, but guard against weird inputs anyway.
+  const safeTarget = target.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const selector = `.spf-record-token[data-spf-type="${mech}"][data-spf-value="${safeTarget}"]`;
+  let matches = [];
+  try {
+    matches = Array.from(document.querySelectorAll(selector));
+  } catch (_) { /* invalid selector; bail silently */ }
+  for (const tok of matches) {
+    if (!tok || !tok.classList) continue;
+    if (isOn) tok.classList.add('spf-record-token-active');
+    else tok.classList.remove('spf-record-token-active');
+  }
+  // Also mirror the row highlight so users can tell at a glance which
+  // expansion row drove the highlight.
+  if (rowEl.classList) {
+    if (isOn) rowEl.classList.add('spf-expansion-row-active');
+    else rowEl.classList.remove('spf-expansion-row-active');
+  }
 }
 
 // Toggle for MX additional details
@@ -2049,7 +2824,27 @@ function render(r) {
   // 3) Domain Registration
   let regState = 'PENDING';
   const whoisErrorText = errors.whois || r.whoisError || '';
-  const whoisHasData = !!(r.whoisSource || r.whoisCreationDateUtc || r.whoisExpiryDateUtc || r.whoisRegistrar || r.whoisRegistrant || r.whoisAgeHuman || r.whoisExpiryHuman);
+  // Structured WHOIS/RDAP signal must come from real registration fields, NOT
+  // just `whoisSource` (provider name) or `whoisRawText` (raw banner). A
+  // provider that returns partial data — e.g., DENIC for .de returns only
+  // "Last Changed" + nameservers with no creation/expiry/registrar — was
+  // previously slipping into the PASS branch below and rendering a green
+  // "Resolved successfully." badge despite having no real registration age or
+  // expiry to show. Mirror the SPA card's `hasStructuredWhoisDetails` check so
+  // the Email Quota row agrees with the card header.
+  const whoisHasData = !!(
+    r.whoisCreationDateUtc ||
+    r.whoisExpiryDateUtc ||
+    r.whoisRegistrar ||
+    r.whoisRegistrant ||
+    r.whoisAgeHuman ||
+    r.whoisExpiryHuman ||
+    (r.whoisAgeDays !== null && r.whoisAgeDays !== undefined) ||
+    (r.whoisExpiryDays !== null && r.whoisExpiryDays !== undefined) ||
+    r.whoisIsExpired === true ||
+    r.whoisIsVeryYoungDomain === true ||
+    r.whoisIsYoungDomain === true
+  );
   // When the registry doesn't operate WHOIS/RDAP at all (e.g. .gr / .ελ via
   // FORTH) we render a friendly link panel in the card. The Email Quota row
   // for the same check should not display a misleading red ERROR; instead use
@@ -2101,11 +2896,23 @@ function render(r) {
       const parts = [];
       if (localizedWhoisAgeHuman) { parts.push(`${t('ageLabel')}: ${localizedWhoisAgeHuman}`); }
       if (localizedWhoisExpiryHuman) { parts.push(`${t('expiresInLabel')}: ${localizedWhoisExpiryHuman}`); }
-      const ageText = parts.join(' | ') || t('resolvedSuccessfully');
-      quotaItems.push(quotaRow(t('domainRegistration'), 'pass', ageText, null, 'whois'));
-      regState = 'PASS';
-      quotaLines.push(`**Domain Registration:** ${regState}${ageText ? ' - ' + ageText : ''}`);
-      quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${ageText ? ' - ' + escapeHtml(ageText) : ''}`);
+      // Only emit PASS when we actually have a registration age or expiry to
+      // show. If neither is known (e.g., a thin RDAP/WHOIS response that
+      // returned no creation/expiry dates), downgrade to INFO so we don't
+      // claim "Resolved successfully." with no underlying evidence.
+      if (parts.length === 0) {
+        const msg = t('registrationDetailsUnavailable');
+        quotaItems.push(quotaRow(t('domainRegistration'), 'info', msg, null, 'whois'));
+        regState = 'INFO';
+        quotaLines.push(`**Domain Registration:** ${regState} - ${msg}`);
+        quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)} - ${escapeHtml(msg)}`);
+      } else {
+        const ageText = parts.join(' | ');
+        quotaItems.push(quotaRow(t('domainRegistration'), 'pass', ageText, null, 'whois'));
+        regState = 'PASS';
+        quotaLines.push(`**Domain Registration:** ${regState}${ageText ? ' - ' + ageText : ''}`);
+        quotaLinesHtml.push(`<strong>Domain Registration:</strong> ${escapeHtml(regState)}${ageText ? ' - ' + escapeHtml(ageText) : ''}`);
+      }
     }
   }
 
@@ -2125,7 +2932,7 @@ function render(r) {
   } else {
     const spfPassesRequirement = !!(effectiveSpfPresent && effectiveSpfHasRequiredInclude === true);
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n"))
+      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n"))
       : t('noSpfRecordDetected');
     quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : 'fail', spfDetail, null, 'spf'));
     const spfState = spfPassesRequirement ? 'PASS' : 'FAIL';
@@ -2687,7 +3494,7 @@ function render(r) {
   const spfCardBaseValue = loaded.base
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -2695,12 +3502,71 @@ function render(r) {
   // duplicating the same data here as an indented text dump just adds
   // visual noise. (The server still emits r.spfExpandedText for raw API
   // consumers.)
+  //
+  // The "Explained" toggle below decomposes the queried-domain SPF record
+  // into a Prefix / Type / Value / PrefixDesc / Description table inspired
+  // by MXToolbox's SPF Record Lookup. It only operates on the local record
+  // string, so no DNS is involved. We hand the toggle button to card() via
+  // titleSuffixHtml (placed next to the title) and the hidden details panel
+  // via appendHtml (placed after the card body but outside field-spf, so
+  // the Copy button does not include the explained markup in the clipboard).
+  //
+  // When the panel is open, toggleSpfExplained() also hides #field-spf to
+  // avoid showing the raw record twice (once in the card body, once at the
+  // top of the panel). Any contextual notes that lived in the card body --
+  // the ACS Outlook requirement summary, and the "resolved using parent
+  // domain" line when SPF was inherited -- are mirrored INSIDE the panel
+  // above the record box so hiding the body does not drop that context.
+  //
+  // The CLOSED card body is also upgraded to render the raw record in the
+  // same green token-style box and the requirement verdict in the same
+  // green note box used by the Explained panel, so the two views stay
+  // visually consistent. Built only when a real v=spf1 record is present;
+  // missing/error/loading states still fall back to the plain text body so
+  // their messaging stays unchanged.
+  let spfExplainedTitleSuffix = '';
+  let spfExplainedAppend = '';
+  let spfBodyHtml = '';
+  if (loaded.base && spfCardBaseValue) {
+    const spfRawForParse = (effectiveSpfValue || (r.parentSpfPresent && r.txtUsedParent ? r.parentSpfValue : '') || '').split(/\r?\n/)[0].trim();
+    if (spfRawForParse && /^v=spf1/i.test(spfRawForParse)) {
+      // Mirror the "resolved using parent domain" note inside the panel so
+      // operators still see why an inherited SPF record is being explained.
+      const isInheritedFromParent = !!(r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain);
+      const spfInheritedNote = isInheritedFromParent
+        ? `<div class="spf-explained-inherited">${escapeHtml(t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain }))}</div>`
+        : '';
+      // Mirror the ACS Outlook requirement verdict inside the panel. This
+      // is the same string the card body would normally show under the raw
+      // record. Empty when no verdict is available (e.g., no SPF at all).
+      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType });
+      const spfRequirementNote = spfRequirementText
+        ? `<div class="spf-explained-requirement">${escapeHtml(spfRequirementText)}</div>`
+        : '';
+      const explainedHtml = spfInheritedNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
+      spfExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleSpfExplained(this)" title="${escapeHtml(t('spfExplainedTooltip'))}">${escapeHtml(t('spfExplainedShow'))}</button>`;
+      spfExplainedAppend = `<div id="spfExplained" class="card-content" style="display:none;">${explainedHtml}</div>`;
+
+      // Closed-card body: same boxed presentation as the Explained panel
+      // minus the breakdown table and legend. We intentionally do NOT
+      // tokenize the record here (no hover-highlight targets exist when
+      // the table isn't rendered), so a plain pre-formatted green box is
+      // sufficient. innerText of #field-spf still reads as clean plain
+      // text for the Copy button.
+      const spfRecordBoxHtml = `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
+      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfRequirementNote;
+    }
+  }
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
     basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : "FAIL")),
     basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
-    "spf"
+    "spf",
+    true,
+    spfExplainedTitleSuffix,
+    spfExplainedAppend,
+    spfBodyHtml
   ));
 
   // Sibling card listing every include/redirect target the SPF expansion resolved,
@@ -2737,12 +3603,41 @@ function render(r) {
     false
   ));
 
+  // DMARC Explained toggle. Mirrors the SPF Explained pattern: when the
+  // DMARC record is present, decompose it into a Tag / Value / TagDesc /
+  // ValueDesc table inspired by MXToolbox's DMARC Record Lookup. The button
+  // is rendered via titleSuffixHtml so it sits next to the title; the hidden
+  // panel is appended OUTSIDE the field-dmarc div via appendHtml so the
+  // Copy button (which reads innerText of field-dmarc) does not include the
+  // explained markup in the clipboard.
+  //
+  // When the panel is open, toggleDmarcExplained() also hides #field-dmarc
+  // to avoid showing the raw record twice (once in the card body, once at
+  // the top of the panel). If the DMARC policy was inherited from a parent
+  // domain, we surface that note inside the panel as well so hiding the
+  // body does not drop that context.
+  let dmarcExplainedTitleSuffix = '';
+  let dmarcExplainedAppend = '';
+  if (loaded.dmarc && r.dmarc) {
+    const dmarcRawForParse = String(r.dmarc).split(/\r?\n/)[0].trim();
+    if (dmarcRawForParse && /^v=DMARC1/i.test(dmarcRawForParse)) {
+      const inheritedNote = (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain)
+        ? `<div class="dmarc-explained-inherited">${escapeHtml(t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain }))}</div>`
+        : '';
+      const dmarcExplainedHtml = inheritedNote + buildDmarcExplainedHtml(dmarcRawForParse);
+      dmarcExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleDmarcExplained(this)" title="${escapeHtml(t('dmarcExplainedTooltip'))}">${escapeHtml(t('dmarcExplainedShow'))}</button>`;
+      dmarcExplainedAppend = `<div id="dmarcExplained" class="card-content" style="display:none;">${dmarcExplainedHtml}</div>`;
+    }
+  }
   cards.push(card(
     t('dmarc'),
     loaded.dmarc ? (r.dmarc ? (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain ? (`${r.dmarc}\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`) : r.dmarc) : null) : (errors.dmarc ? errors.dmarc : t('loadingValue')),
     (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (r.dmarc ? "PASS" : "OPTIONAL")),
     (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info")),
-    "dmarc"
+    "dmarc",
+    true,
+    dmarcExplainedTitleSuffix,
+    dmarcExplainedAppend
   ));
 
   // include full selector host with domain in title.

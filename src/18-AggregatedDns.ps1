@@ -61,14 +61,21 @@ function Get-AcsDnsStatus {
   $recoveredAddressesFromDetailedRecords = ($recoveredIpv4Addresses.Count -gt 0) -or ($recoveredIpv6Addresses.Count -gt 0)
   $effectiveDnsFailed = $base.dnsFailed -and -not $recoveredFromDetailedRecords
   $effectiveDnsError = if ($effectiveDnsFailed) { $base.dnsError } else { $null }
-  $effectiveTxtRecords = if ($recoveredFromDetailedRecords) { $recoveredTxtRecords } else { @($base.txtRecords) }
-  $effectiveIpv4Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv4Addresses } else { @($base.ipv4Addresses) }
-  $effectiveIpv6Addresses = if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv6Addresses } else { @($base.ipv6Addresses) }
+  $effectiveTxtRecords = @(if ($recoveredFromDetailedRecords) { $recoveredTxtRecords } else { $base.txtRecords })
+  $effectiveIpv4Addresses = @(if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv4Addresses } else { $base.ipv4Addresses })
+  $effectiveIpv6Addresses = @(if ($recoveredAddressesFromDetailedRecords) { $recoveredIpv6Addresses } else { $base.ipv6Addresses })
   $effectiveIpLookupDomain = if ($recoveredAddressesFromDetailedRecords) { $Domain } else { $base.ipLookupDomain }
   $effectiveIpUsedParent = if ($recoveredAddressesFromDetailedRecords) { $false } else { $base.ipUsedParent }
-  $effectiveSpf = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1) } else { @($base.spfValue) }
+  # PowerShell collapses a single-element array returned from an `if` expression
+  # back into a scalar. That breaks the `@(...)` array protection on each branch:
+  # the resulting `$effectiveSpf` becomes the raw SPF string, and indexing `[0]`
+  # on a string returns the first character (e.g. 'v' from "v=spf1 ..."), which
+  # was producing `"spfValue": "v"` in the CLI output. Wrap the entire `if`
+  # expression in `@(...)` so the 1-element array survives assignment, then
+  # index it normally. Same fix applies to `$effectiveAcs` below.
+  $effectiveSpf = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1 } else { $base.spfValue })
   $effectiveSpfValue = if ($effectiveSpf.Count -gt 0) { $effectiveSpf[0] } else { $null }
-  $effectiveAcs = if ($recoveredFromDetailedRecords) { @($effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1) } else { @($base.acsValue) }
+  $effectiveAcs = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1 } else { $base.acsValue })
   $effectiveAcsValue = if ($effectiveAcs.Count -gt 0) { $effectiveAcs[0] } else { $null }
   $effectiveSpfPresent = [bool]$effectiveSpfValue
   $effectiveAcsPresent = [bool]$effectiveAcsValue

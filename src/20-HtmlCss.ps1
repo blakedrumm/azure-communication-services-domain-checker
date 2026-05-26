@@ -639,6 +639,60 @@ button.primary:disabled {
   visibility: visible;
 }
 
+/* Click-to-expand "i" button beside ip4/ip6 values in the SPF Explained
+   table. Visually mirrors .info-dot (small round badge) but does NOT use a
+   hover tooltip; instead toggleSpfCidrDetail() unhides a sibling table row
+   placed directly under the row that owns the button. The expanded row
+   renders a pre-formatted Network/CIDR prefix/Subnet mask/Range/Size block
+   inside .spf-cidr-detail-pre (monospace + preserved whitespace) so the
+   padded labels stay column-aligned. The detail cell shares the same
+   green-tint treatment as the SPF Expansion explain row for visual
+   consistency with the rest of the SPF UI. */
+.spf-cidr-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--status);
+  margin-left: 6px;
+  cursor: pointer;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  vertical-align: middle;
+}
+.spf-cidr-info-btn:hover,
+.spf-cidr-info-btn:focus,
+.spf-cidr-info-btn:focus-visible {
+  color: var(--fg);
+  border-color: var(--status);
+  outline: none;
+}
+.spf-cidr-info-btn--open {
+  background: rgba(46, 204, 113, 0.18);
+  border-color: rgba(46, 204, 113, 0.55);
+  color: var(--fg);
+}
+.spf-explained-table tr.spf-cidr-detail-row > td {
+  background: rgba(46, 204, 113, 0.04);
+  padding: 8px 12px;
+  border-top: 0;
+}
+.spf-cidr-detail-pre {
+  margin: 0;
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  background: transparent;
+  color: var(--fg);
+}
+
 .code {
   background: var(--code-bg);
   color: var(--code-fg);
@@ -812,6 +866,248 @@ button.primary:disabled {
   -webkit-overflow-scrolling: touch;
 }
 
+/* SPF Explained table. Mirrors the column structure of MXToolbox's SPF Record
+   Lookup view: Prefix / Type / Value / PrefixDesc / Description. Inherits the
+   base layout from .mx-table; we just keep the enum columns single-line and
+   let the Value / Description columns wrap so long include targets stay
+   readable. The leading record box highlights the exact SPF string being
+   decomposed so users can correlate row-by-row. */
+.spf-explained-record {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(46, 204, 113, 0.10);
+  border: 1px solid rgba(46, 204, 113, 0.35);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.spf-explained-legend {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 6px;
+}
+/* Optional contextual notes rendered above the record box inside the SPF
+   Explained panel. Surfaced here so hiding the card body while the panel
+   is open does not drop these signals:
+   - .spf-explained-inherited: the "resolved using parent domain" hint
+     shown when SPF was inherited from a parent domain (amber tint).
+   - .spf-explained-requirement: the ACS Outlook requirement summary
+     verdict (neutral tint). */
+.spf-explained-inherited {
+  font-size: 12px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(241, 196, 15, 0.10);
+  border: 1px solid rgba(241, 196, 15, 0.35);
+  color: inherit;
+  opacity: 0.95;
+}
+.spf-explained-requirement {
+  font-size: 12px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(46, 204, 113, 0.08);
+  border: 1px solid rgba(46, 204, 113, 0.30);
+  color: inherit;
+  opacity: 0.95;
+}
+.spf-explained-table {
+  table-layout: auto;
+  font-family: inherit;
+  width: 100%;
+}
+.spf-explained-table th,
+.spf-explained-table td {
+  font-family: inherit;
+  vertical-align: top;
+}
+.spf-explained-table th {
+  white-space: nowrap;
+}
+.spf-explained-table td.spf-col-prefix,
+.spf-explained-table td.spf-col-type,
+.spf-explained-table td.spf-col-prefixdesc {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.spf-explained-table td.spf-col-value {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  word-break: break-all;
+  min-width: 200px;
+}
+.spf-explained-table td.spf-col-description {
+  min-width: 240px;
+}
+
+/* DMARC Explained reuses the SPF Explained visual language so the two
+ * card-level "Explained" panels read as siblings. We keep dedicated class
+ * names (.dmarc-explained-*) so future styling can diverge without
+ * inadvertently affecting the SPF panel. The Tag and TagDesc columns stay
+ * single-line, Value wraps for long URI lists (rua=mailto:..., https:...),
+ * and ValueDesc has the same generous min-width as the SPF Description column. */
+.dmarc-explained-record {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(46, 204, 113, 0.10);
+  border: 1px solid rgba(46, 204, 113, 0.35);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.dmarc-explained-legend {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 6px;
+}
+.dmarc-explained-table {
+  table-layout: auto;
+  font-family: inherit;
+  width: 100%;
+}
+.dmarc-explained-table th,
+.dmarc-explained-table td {
+  font-family: inherit;
+  vertical-align: top;
+}
+.dmarc-explained-table th {
+  white-space: nowrap;
+}
+.dmarc-explained-table td.dmarc-col-tag,
+.dmarc-explained-table td.dmarc-col-tagdesc {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.dmarc-explained-table td.dmarc-col-value {
+  font-family: Consolas, "SF Mono", Menlo, monospace;
+  word-break: break-all;
+  min-width: 200px;
+}
+.dmarc-explained-table td.dmarc-col-valuedesc {
+  min-width: 240px;
+}
+.dmarc-explained-table tbody tr {
+  cursor: default;
+  transition: background-color 0.12s ease;
+}
+.dmarc-explained-table tbody tr:hover,
+.dmarc-explained-table tbody tr.dmarc-explained-row-active {
+  background: rgba(46, 204, 113, 0.10);
+}
+/* Hover highlight wiring for DMARC Explained. Each tag=value pair inside
+   .dmarc-explained-record is wrapped in .dmarc-record-token, and hovering
+   a corresponding table row sets .dmarc-record-token-active on the matching
+   token (see setDmarcTokenHighlight in 20d-HtmlJsCore.ps1). Mirrors the
+   SPF Explained .spf-record-token / .spf-record-token-active pattern so the
+   two "Explained" panels behave identically. */
+.dmarc-record-token {
+  display: inline;
+  padding: 0 1px;
+  border-radius: 3px;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.dmarc-record-token-active {
+  background: rgba(46, 204, 113, 0.45);
+  box-shadow: 0 0 0 1px rgba(46, 204, 113, 0.75) inset;
+  color: inherit;
+  font-weight: 600;
+}
+/* Optional "inherited policy" note rendered above the record box inside
+   the DMARC Explained panel. Surfaced here so hiding the card body while
+   the panel is open does not drop the context that the DMARC policy came
+   from a parent domain. */
+.dmarc-explained-inherited {
+  font-size: 12px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(241, 196, 15, 0.10);
+  border: 1px solid rgba(241, 196, 15, 0.35);
+  color: inherit;
+  opacity: 0.95;
+}
+
+/* Per-row Explain button + inline detail row inside the SPF Expansion
+   Records table. The button is small and unobtrusive in the last column;
+   the detail row spans the full table width and tints its background so
+   the breakdown reads as a child of the row above it. */
+.spf-expansion-table th.spf-col-explain,
+.spf-expansion-table td.spf-col-explain {
+  white-space: nowrap;
+  text-align: right;
+  width: 1%;
+}
+.spf-expansion-explain-btn {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #555);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.spf-expansion-explain-btn:hover,
+.spf-expansion-explain-btn:focus {
+  background: rgba(46, 204, 113, 0.10);
+  border-color: rgba(46, 204, 113, 0.55);
+  outline: none;
+}
+.spf-expansion-table tr.spf-expansion-explain-row > td {
+  background: rgba(46, 204, 113, 0.04);
+  padding: 10px 12px;
+  border-top: 0;
+}
+.spf-expansion-table tr.spf-expansion-explain-row .spf-explained-record {
+  margin-top: 0;
+}
+
+/* Hover highlight wiring. Each token inside .spf-explained-record is wrapped
+   in .spf-record-token, and hovering a corresponding table row sets
+   .spf-record-token-active on the matching token (see
+   setSpfTokenHighlight / setSpfExpansionHighlight in 20d-HtmlJsCore.ps1).
+   The .spf-explained-row-active class mirrors the highlight onto the row
+   itself so the visual association is bidirectional. The :hover fallback on
+   .spf-explained-table rows keeps a subtle row tint even when no token can
+   be located (e.g., synthetic rows). */
+.spf-explained-table tbody tr {
+  cursor: default;
+  transition: background-color 0.12s ease;
+}
+.spf-explained-table tbody tr:hover,
+.spf-explained-table tbody tr.spf-explained-row-active {
+  background: rgba(46, 204, 113, 0.10);
+}
+.spf-record-token {
+  /* Inline so it flows within the record box without inserting line breaks. */
+  display: inline;
+  padding: 0 1px;
+  border-radius: 3px;
+  transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+.spf-record-token-active {
+  background: rgba(46, 204, 113, 0.45);
+  box-shadow: 0 0 0 1px rgba(46, 204, 113, 0.75) inset;
+  color: inherit;
+  font-weight: 600;
+}
+.spf-expansion-table tbody tr {
+  cursor: default;
+  transition: background-color 0.12s ease;
+}
+.spf-expansion-table tbody tr:not(.spf-expansion-explain-row):hover,
+.spf-expansion-table tbody tr.spf-expansion-row-active {
+  background: rgba(46, 204, 113, 0.08);
+}
+
 .dns-records-toolbar {
   /* Explicit grid: labels on row 1, controls on row 2, chips on row 3.
      This avoids nested grids so labels and controls always align. */
@@ -843,6 +1139,19 @@ button.primary:disabled {
   /* Own stacking context so suggestions paint above sibling grid items */
   z-index: 2;
   overflow: visible;
+  /* The suggestions popup is positioned at `top: 100%` of THIS wrapper. The
+   * wrapper has to hug the input height exactly or the popup ends up floating
+   * far below the input. Plain block layout caused the wrapper to grow taller
+   * than the input because the template-literal whitespace between
+   * `<input>` and the absolutely-positioned suggestions `<div>` produced an
+   * anonymous inline line-box around the input. Combined with the toolbar's
+   * `align-items: center` on a 32px grid row, that pushed the wrapper's
+   * intrinsic height above 32px and the popup landed well below the input
+   * edge. Flex layout removes anonymous inline whitespace from the layout
+   * math and forces the wrapper to match the input's box exactly. */
+  display: flex;
+  align-items: stretch;
+  line-height: 0; /* belt-and-braces: also kills the strut for inline edge cases */
 }
 
 input.dns-records-search-input,
@@ -1501,6 +1810,20 @@ ul.guidance li {
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
   .mx-table, .dns-records-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  /* On mobile the DNS records table is horizontally scrollable. Without an
+   * explicit min-width on the Data cell, the long fully-qualified Name labels
+   * (e.g., DKIM selectors like `selector1-...-_domainkey.<tenant>.onmicrosoft.com`)
+   * consume nearly the whole viewport row, leaving the Data column a sliver
+   * that wraps every few base64 characters and turns the DKIM public key into
+   * a tall vertical ribbon. Give the Data column enough room to render its
+   * contents legibly; the table's `overflow-x: auto` handles the resulting
+   * horizontal scroll. `dns-record-data` keeps its `pre-wrap` + `word-break`
+   * behavior so individual very-long tokens still wrap inside the wider cell
+   * instead of forcing the viewport to scroll dozens of additional pixels. */
+  .dns-records-table td.dns-record-data {
+    min-width: 280px;
+    max-width: 420px;
+  }
   .dns-records-toolbar { grid-template-columns: 1fr; }
   .dns-records-filter-summary { margin-left: 0; justify-self: start; }
   .dns-records-clear-btn { justify-self: start; }
