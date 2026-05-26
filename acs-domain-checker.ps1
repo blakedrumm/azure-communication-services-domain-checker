@@ -9121,6 +9121,10 @@ html {
   width: 100%;
   overflow-x: hidden;
   -webkit-text-size-adjust: 100%;
+  /* Scale the entire UI 10% larger for improved readability. Using `zoom`
+     (widely supported across modern Chromium, WebKit, and Firefox) avoids
+     having to retune the many px-based font-size / spacing rules below. */
+  zoom: 1.1;
 }
 
 body {
