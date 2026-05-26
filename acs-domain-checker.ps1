@@ -1423,7 +1423,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.1.5'
+$script:AppVersion = '2.1.6'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -23065,7 +23065,21 @@ function renderAzureDiagnosticsUi() {
   if (!card) return;
 
   const signedIn = !!(msAuthAccount && msalInstance);
-  card.style.display = (getMsalConfig() && signedIn) ? '' : 'none';
+  const shouldShow = !!(getMsalConfig() && signedIn);
+  card.style.display = shouldShow ? '' : 'none';
+  // The card carries the .engage-section class so it participates in the
+  // staggered fade-in animation on initial page load. When the card is
+  // hidden at that time (no signed-in user yet), animateTopSections()
+  // filters it out and never applies the `engage-in` class. The CSS rule
+  // `body.section-fade-enabled .engage-section { opacity: 0; transform:
+  // translateY(20px); }` then keeps the card invisible even after we
+  // flip display back on at sign-in. Add `engage-in` here so the card
+  // becomes fully visible the moment it is revealed post-auth.
+  if (shouldShow) {
+    card.classList.add('engage-in');
+  } else {
+    card.classList.remove('engage-in');
+  }
 
   const switchRow = document.getElementById('azureSwitchDirectoryRow');
   if (switchRow) switchRow.style.display = signedIn ? '' : 'none';
