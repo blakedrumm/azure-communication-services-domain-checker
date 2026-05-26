@@ -228,6 +228,16 @@ switch -Regex ($mxHost) {
             $result.mxProviderHint = 'MX points to Microsoft filtering service.'
             break
           }
+          '(^|\.)mail\.protection\.office365\.us\.?$|(^|\.)protection\.office365\.us\.?$' {
+            $result.mxProvider = 'Microsoft 365 GCC High / DoD'
+            $result.mxProviderHint = 'MX points to Microsoft 365 US Government (GCC High / DoD).'
+            break
+          }
+          '(^|\.)mail\.protection\.partner\.outlook\.cn\.?$|(^|\.)protection\.partner\.outlook\.cn\.?$' {
+            $result.mxProvider = 'Microsoft 365 China (21Vianet)'
+            $result.mxProviderHint = 'MX points to Microsoft 365 operated by 21Vianet (China).'
+            break
+          }
           'aspmx\.l\.google\.com\.?$|\.aspmx\.l\.google\.com\.?$|google\.com\.?$' {
             $result.mxProvider = 'Google Workspace / Gmail'
             $result.mxProviderHint = 'MX points to Google mail exchangers.'
@@ -379,9 +389,9 @@ switch -Regex ($mxHost) {
             $result.mxProviderHint = 'MX points to Hornetsecurity cloud filtering.'
             break
           }
-          '(^|\.)fortinet\.com\.?$' {
+          '(^|\.)fortinet\.com\.?$|(^|\.)fortimail\.com\.?$' {
             $result.mxProvider = 'Fortinet FortiMail'
-            $result.mxProviderHint = 'MX points to Fortinet email security.'
+            $result.mxProviderHint = 'MX points to Fortinet FortiMail email security gateway.'
             break
           }
           '(^|\.)trustifi\.com\.?$' {
@@ -397,6 +407,76 @@ switch -Regex ($mxHost) {
           '(^|\.)fireeye\.com\.?$' {
             $result.mxProvider = 'FireEye'
             $result.mxProviderHint = 'MX points to FireEye Email Security.'
+            break
+          }
+          '(^|\.)avanan\.net\.?$|(^|\.)avanan\.com\.?$' {
+            $result.mxProvider = 'Avanan (Check Point)'
+            $result.mxProviderHint = 'MX points to Avanan / Check Point Harmony Email & Collaboration.'
+            break
+          }
+          '(^|\.)vadesecure\.com\.?$|(^|\.)vade-secure\.com\.?$' {
+            $result.mxProvider = 'Vade Secure'
+            $result.mxProviderHint = 'MX points to Vade Secure email protection.'
+            break
+          }
+          '(^|\.)abnormal\.security\.?$|(^|\.)abnormalsecurity\.com\.?$' {
+            $result.mxProvider = 'Abnormal Security'
+            $result.mxProviderHint = 'MX points to Abnormal Security cloud email protection.'
+            break
+          }
+          '(^|\.)ironscales\.com\.?$' {
+            $result.mxProvider = 'IRONSCALES'
+            $result.mxProviderHint = 'MX points to IRONSCALES anti-phishing platform.'
+            break
+          }
+          '(^|\.)material\.security\.?$' {
+            $result.mxProvider = 'Material Security'
+            $result.mxProviderHint = 'MX points to Material Security email protection.'
+            break
+          }
+          '(^|\.)coro\.net\.?$' {
+            $result.mxProvider = 'Coro'
+            $result.mxProviderHint = 'MX points to Coro cybersecurity platform.'
+            break
+          }
+          '(^|\.)libraesva\.com\.?$|(^|\.)libra-esva\.com\.?$' {
+            $result.mxProvider = 'Libraesva'
+            $result.mxProviderHint = 'MX points to Libraesva Email Security Gateway.'
+            break
+          }
+          '(^|\.)retarus\.com\.?$|(^|\.)retarus\.net\.?$|(^|\.)retarus\.de\.?$' {
+            $result.mxProvider = 'Retarus'
+            $result.mxProviderHint = 'MX points to Retarus managed email services.'
+            break
+          }
+          '(^|\.)gfihosted\.com\.?$|(^|\.)gfi\.com\.?$' {
+            $result.mxProvider = 'GFI MailEssentials Online'
+            $result.mxProviderHint = 'MX points to GFI hosted email security.'
+            break
+          }
+          '(^|\.)vipreemail\.com\.?$|(^|\.)vipre\.com\.?$' {
+            $result.mxProvider = 'Vipre Email Security'
+            $result.mxProviderHint = 'MX points to Vipre Email Security.'
+            break
+          }
+          '(^|\.)spambrella\.com\.?$' {
+            $result.mxProvider = 'Spambrella'
+            $result.mxProviderHint = 'MX points to Spambrella email security.'
+            break
+          }
+          '(^|\.)mailroute\.net\.?$' {
+            $result.mxProvider = 'MailRoute'
+            $result.mxProviderHint = 'MX points to MailRoute hosted email filtering.'
+            break
+          }
+          '(^|\.)rxcloud\.net\.?$|(^|\.)reflexion\.net\.?$' {
+            $result.mxProvider = 'Sophos Reflexion'
+            $result.mxProviderHint = 'MX points to Sophos Reflexion (formerly Reflexion Networks).'
+            break
+          }
+          '(^|\.)nospamproxy\.com\.?$|(^|\.)nospamproxy\.de\.?$' {
+            $result.mxProvider = 'NoSpamProxy'
+            $result.mxProviderHint = 'MX points to NoSpamProxy Cloud.'
             break
           }
 
@@ -434,6 +514,41 @@ switch -Regex ($mxHost) {
           '(^|\.)hubspotemail\.net\.?$' {
             $result.mxProvider = 'HubSpot'
             $result.mxProviderHint = 'MX points to HubSpot inbound routing.'
+            break
+          }
+          '(^|\.)mailjet\.com\.?$' {
+            $result.mxProvider = 'Mailjet (Sinch)'
+            $result.mxProviderHint = 'MX points to Mailjet inbound parsing.'
+            break
+          }
+          '(^|\.)mailersend\.com\.?$|(^|\.)mailersend\.net\.?$' {
+            $result.mxProvider = 'MailerSend'
+            $result.mxProviderHint = 'MX points to MailerSend inbound routing.'
+            break
+          }
+          '(^|\.)mandrillapp\.com\.?$' {
+            $result.mxProvider = 'Mandrill (Mailchimp Transactional)'
+            $result.mxProviderHint = 'MX points to Mandrill / Mailchimp Transactional inbound.'
+            break
+          }
+          '(^|\.)resend\.com\.?$|(^|\.)inbound\.resend\.com\.?$' {
+            $result.mxProvider = 'Resend'
+            $result.mxProviderHint = 'MX points to Resend inbound routing.'
+            break
+          }
+          '(^|\.)brevo\.com\.?$|(^|\.)sendinblue\.com\.?$|(^|\.)mail-brevo\.com\.?$' {
+            $result.mxProvider = 'Brevo (Sendinblue)'
+            $result.mxProviderHint = 'MX points to Brevo (formerly Sendinblue).'
+            break
+          }
+          '(^|\.)loops\.so\.?$' {
+            $result.mxProvider = 'Loops'
+            $result.mxProviderHint = 'MX points to Loops email platform.'
+            break
+          }
+          '(^|\.)zeptomail\.com\.?$|(^|\.)zeptomail\.zoho\.com\.?$' {
+            $result.mxProvider = 'Zoho ZeptoMail'
+            $result.mxProviderHint = 'MX points to Zoho ZeptoMail transactional email.'
             break
           }
 
@@ -558,6 +673,46 @@ switch -Regex ($mxHost) {
             $result.mxProviderHint = 'MX points to Squarespace default routing.'
             break
           }
+          '(^|\.)hetzner\.com\.?$|(^|\.)hetzner\.company\.?$|(^|\.)your-server\.de\.?$|(^|\.)mailbox\.org\.?$' {
+            $result.mxProvider = 'Hetzner Mail'
+            $result.mxProviderHint = 'MX points to Hetzner-hosted mail.'
+            break
+          }
+          '(^|\.)servercow\.de\.?$|(^|\.)mailcow\.email\.?$' {
+            $result.mxProvider = 'Mailcow Hosted'
+            $result.mxProviderHint = 'MX points to a hosted Mailcow deployment.'
+            break
+          }
+          '(^|\.)migadu\.com\.?$' {
+            $result.mxProvider = 'Migadu'
+            $result.mxProviderHint = 'MX points to Migadu privacy-focused email.'
+            break
+          }
+          '(^|\.)posteo\.de\.?$|(^|\.)posteo\.net\.?$' {
+            $result.mxProvider = 'Posteo'
+            $result.mxProviderHint = 'MX points to Posteo privacy-focused email.'
+            break
+          }
+          '(^|\.)soverin\.net\.?$' {
+            $result.mxProvider = 'Soverin'
+            $result.mxProviderHint = 'MX points to Soverin privacy-focused email.'
+            break
+          }
+          '(^|\.)purelymail\.com\.?$' {
+            $result.mxProvider = 'PurelyMail'
+            $result.mxProviderHint = 'MX points to PurelyMail.'
+            break
+          }
+          '(^|\.)mailbaby\.net\.?$' {
+            $result.mxProvider = 'Mailbaby'
+            $result.mxProviderHint = 'MX points to Mailbaby email service.'
+            break
+          }
+          '(^|\.)dnsexit\.com\.?$|(^|\.)dnsexit\.net\.?$' {
+            $result.mxProvider = 'DNSExit Mail'
+            $result.mxProviderHint = 'MX points to DNSExit hosted email.'
+            break
+          }
 
           # --- International & ISPs ---
           '(^|\.)yandex\.(ru|net|com)\.?$' {
@@ -608,6 +763,51 @@ switch -Regex ($mxHost) {
           '(^|\.)telstra\.com\.?$' {
             $result.mxProvider = 'Telstra'
             $result.mxProviderHint = 'MX points to Telstra (Australia).'
+            break
+          }
+          '(^|\.)gmx\.net\.?$|(^|\.)gmx\.com\.?$|(^|\.)gmx\.de\.?$' {
+            $result.mxProvider = 'GMX / 1&1 Mail'
+            $result.mxProviderHint = 'MX points to GMX / 1&1 Mail (consumer).'
+            break
+          }
+          '(^|\.)web\.de\.?$' {
+            $result.mxProvider = 'Web.de'
+            $result.mxProviderHint = 'MX points to Web.de (consumer, Germany).'
+            break
+          }
+          '(^|\.)free\.fr\.?$' {
+            $result.mxProvider = 'Free.fr'
+            $result.mxProviderHint = 'MX points to Free.fr (ISP, France).'
+            break
+          }
+          '(^|\.)orange\.fr\.?$|(^|\.)wanadoo\.fr\.?$' {
+            $result.mxProvider = 'Orange / Wanadoo'
+            $result.mxProviderHint = 'MX points to Orange / Wanadoo (ISP, France).'
+            break
+          }
+          '(^|\.)rogers\.com\.?$' {
+            $result.mxProvider = 'Rogers Communications'
+            $result.mxProviderHint = 'MX points to Rogers (ISP, Canada).'
+            break
+          }
+          '(^|\.)bell\.ca\.?$|(^|\.)bell\.net\.?$|(^|\.)sympatico\.ca\.?$' {
+            $result.mxProvider = 'Bell Canada'
+            $result.mxProviderHint = 'MX points to Bell Canada (ISP).'
+            break
+          }
+          '(^|\.)ocn\.ad\.jp\.?$' {
+            $result.mxProvider = 'NTT OCN'
+            $result.mxProviderHint = 'MX points to NTT OCN (ISP, Japan).'
+            break
+          }
+          '(^|\.)ezweb\.ne\.jp\.?$' {
+            $result.mxProvider = 'KDDI au'
+            $result.mxProviderHint = 'MX points to KDDI au (ISP, Japan).'
+            break
+          }
+          '(^|\.)iinet\.net\.au\.?$' {
+            $result.mxProvider = 'iiNet'
+            $result.mxProviderHint = 'MX points to iiNet (ISP, Australia).'
             break
           }
 
