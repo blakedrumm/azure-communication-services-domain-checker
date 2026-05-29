@@ -5,7 +5,9 @@
 .DESCRIPTION
   Fetches the Lucide toolbar/status icons and the flag-icons SVG files used by the
   ACS Email Domain Checker SPA so they can be served from same-origin `/assets/*`
-  paths instead of loading from public CDNs.
+  paths instead of loading from public CDNs. It also refreshes the local Public
+  Suffix List cache (`public_suffix_list.dat`) used by the registrable-domain
+  resolver for WHOIS/RDAP lookups.
 
   By default, files are stored under:
     assets/vendor/lucide-static/icons
@@ -30,6 +32,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Public Suffix List cache file. Lives at the repository root next to the bundled
+# acs-domain-checker.ps1 so the runtime resolver ($env:ACS_PSL_FILE in 00-Header.ps1)
+# finds it via $PSScriptRoot. Used by Get-RegistrableDomain to derive registrable
+# domains for WHOIS/RDAP across thousands of multi-label public suffixes.
+$publicSuffixListPath = Join-Path -Path $PSScriptRoot -ChildPath 'public_suffix_list.dat'
+$publicSuffixListUrl = 'https://publicsuffix.org/list/public_suffix_list.dat'
 
 function Save-RemoteFile {
   param(
@@ -114,6 +123,11 @@ foreach ($flagFile in $flagFiles) {
   $result = Save-RemoteFile -Uri $uri -Path $path -ForceDownload:$Force
   if ($result -eq 'Downloaded') { $downloaded++ } else { $skipped++ }
 }
+
+Write-Host ''
+Write-Host 'Downloading Public Suffix List...' -ForegroundColor Green
+$result = Save-RemoteFile -Uri $publicSuffixListUrl -Path $publicSuffixListPath -ForceDownload:$Force
+if ($result -eq 'Downloaded') { $downloaded++ } else { $skipped++ }
 
 Write-Host ''
 Write-Host 'UI asset download complete.' -ForegroundColor Green

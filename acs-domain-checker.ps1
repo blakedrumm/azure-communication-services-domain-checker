@@ -195,6 +195,16 @@ if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
 $AnonymousMetricsFile = [System.IO.Path]::GetFullPath($AnonymousMetricsFile)
 $env:ACS_ANON_METRICS_FILE = $AnonymousMetricsFile
 
+# Public Suffix List (PSL) cache file. Used by Get-RegistrableDomain to derive the
+# registrable domain for WHOIS/RDAP lookups across thousands of multi-label zones.
+# The file is refreshed at build time (Download-UiAssets.ps1) and lazily refreshed
+# at runtime when missing/stale. Worker runspaces read $env:ACS_PSL_FILE directly,
+# so we always round-trip through the env var. Honors an existing override.
+if ([string]::IsNullOrWhiteSpace($env:ACS_PSL_FILE)) {
+  $env:ACS_PSL_FILE = Join-Path -Path $PSScriptRoot -ChildPath 'public_suffix_list.dat'
+}
+try { $env:ACS_PSL_FILE = [System.IO.Path]::GetFullPath($env:ACS_PSL_FILE) } catch { }
+
 # DoH endpoint: CLI parameter wins, otherwise honor ACS_DNS_DOH_ENDPOINT. Worker
 # runspaces read the env var directly inside Resolve-DohName, so we always
 # round-trip through the env var even when the CLI param wins.
@@ -228,9 +238,206 @@ $env:ACS_MAX_REQUEST_BODY_BYTES = $bodyCap.ToString()
 
 # ===== Domain Parsing Utilities =====
 # ------------------- DOMAIN PARSING UTILITIES -------------------
-# Heuristic: derive a registrable ("pay-level") domain from an arbitrary subdomain.
-# Uses a small hardcoded subset of the Public Suffix List (PSL) to handle common
-# two-level TLDs like co.uk, com.au, etc.  Falls back to the last two labels.
+# Deriving a registrable ("pay-level") domain from an arbitrary subdomain requires
+# the Public Suffix List (PSL) so multi-label zones like co.uk, com.au, co.th, and
+# thousands of long-tail country/registry suffixes are handled correctly.
+#
+# Strategy:
+#   1. Prefer a downloaded/cached copy of the official PSL (public_suffix_list.dat).
+#      The file is refreshed at build time by Download-UiAssets.ps1 and, optionally,
+#      lazily refreshed at runtime when it goes stale (TTL) or is missing.
+#   2. If the PSL file is unavailable (offline build, download disabled, parse
+#      failure), fall back to a small embedded subset of common multi-label zones
+#      so the tool still produces sane results without network access.
+#
+# The parsed PSL is cached in-process (per runspace) keyed by file path + last
+# write time so workers parse it at most once and re-parse only after a refresh.
+
+# In-memory parsed-PSL cache (per runspace). Shape:
+#   @{ key = '<path>|<lastWriteTicks>'; exact = HashSet; wildcards = HashSet; exceptions = HashSet }
+$script:PublicSuffixCache = $null
+
+# Resolve the on-disk PSL cache path. Worker runspaces read $env:ACS_PSL_FILE
+# (set by 00-Header.ps1); standalone/CLI use falls back to a file next to the script.
+function Get-PublicSuffixListPath {
+  $configured = $env:ACS_PSL_FILE
+  if (-not [string]::IsNullOrWhiteSpace($configured)) { return $configured }
+
+  $root = $PSScriptRoot
+  if ([string]::IsNullOrWhiteSpace($root)) { $root = (Get-Location).Path }
+  return (Join-Path -Path $root -ChildPath 'public_suffix_list.dat')
+}
+
+# Best-effort runtime download of the PSL to the cache path. Controlled by env vars:
+#   ACS_PSL_DISABLE_DOWNLOAD=1  -> never download at runtime (offline/locked-down)
+#   ACS_PSL_URL                 -> override the source URL
+# Returns $true when a usable file exists at $Path afterwards.
+function Update-PublicSuffixListFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [int]$TimeoutSec = 15
+  )
+
+  if ($env:ACS_PSL_DISABLE_DOWNLOAD -eq '1') { return (Test-Path -LiteralPath $Path -PathType Leaf) }
+
+  $url = $env:ACS_PSL_URL
+  if ([string]::IsNullOrWhiteSpace($url)) { $url = 'https://publicsuffix.org/list/public_suffix_list.dat' }
+
+  try {
+    $dir = Split-Path -Path $Path -Parent
+    if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) {
+      $null = New-Item -ItemType Directory -Path $dir -Force
+    }
+    Invoke-WebRequest -Uri $url -OutFile $Path -TimeoutSec $TimeoutSec -Headers @{ 'User-Agent' = 'ACS-DomainChecker/PSL' } -ErrorAction Stop
+    return (Test-Path -LiteralPath $Path -PathType Leaf)
+  } catch {
+    # Network/offline failure: keep any existing file, otherwise signal unavailable.
+    return (Test-Path -LiteralPath $Path -PathType Leaf)
+  }
+}
+
+# Parse a PSL .dat file into rule sets. Only the ICANN section is consulted so the
+# registrable domain stays WHOIS-queryable (PRIVATE domains like blogspot.com are
+# intentionally skipped). Returns $null when the file is missing or yields no rules.
+function ConvertFrom-PublicSuffixListFile {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+
+  $exact      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  $wildcards  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  $exceptions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+  try {
+    $lines = [System.IO.File]::ReadAllLines($Path, [System.Text.Encoding]::UTF8)
+  } catch {
+    return $null
+  }
+
+  foreach ($raw in $lines) {
+    $line = ([string]$raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    # Stop at the private-domains section; we only want ICANN suffixes.
+    if ($line -match '(?i)===BEGIN PRIVATE DOMAINS===') { break }
+    if ($line.StartsWith('//')) { continue }
+
+    # A rule ends at the first whitespace (the PSL format keeps one rule per line).
+    $rule = ($line -split '\s+')[0]
+    if ([string]::IsNullOrWhiteSpace($rule)) { continue }
+    $rule = $rule.ToLowerInvariant()
+
+    if ($rule.StartsWith('!')) {
+      # Exception rule: the labels after '!' are NOT a public suffix.
+      $null = $exceptions.Add($rule.Substring(1))
+    }
+    elseif ($rule.StartsWith('*.')) {
+      # Wildcard rule: store only the fixed remainder after '*.'.
+      $null = $wildcards.Add($rule.Substring(2))
+    }
+    else {
+      $null = $exact.Add($rule)
+    }
+  }
+
+  if ($exact.Count -eq 0 -and $wildcards.Count -eq 0) { return $null }
+
+  return @{ exact = $exact; wildcards = $wildcards; exceptions = $exceptions }
+}
+
+# Load (and lazily refresh) the parsed PSL rule sets, caching in-process. Returns
+# $null when no PSL file can be loaded so callers fall back to the embedded list.
+function Get-PublicSuffixData {
+  $path = Get-PublicSuffixListPath
+
+  # Lazily refresh when missing or stale (TTL via ACS_PSL_MAX_AGE_DAYS, default 30).
+  $needsDownload = $false
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    $needsDownload = $true
+  } else {
+    $maxAgeDays = 30
+    if (-not [string]::IsNullOrWhiteSpace($env:ACS_PSL_MAX_AGE_DAYS)) {
+      [int]::TryParse($env:ACS_PSL_MAX_AGE_DAYS, [ref]$maxAgeDays) | Out-Null
+    }
+    try {
+      $age = [DateTime]::UtcNow - ([System.IO.File]::GetLastWriteTimeUtc($path))
+      if ($age.TotalDays -ge $maxAgeDays) { $needsDownload = $true }
+    } catch { $needsDownload = $false }
+  }
+  if ($needsDownload) { $null = Update-PublicSuffixListFile -Path $path }
+
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+
+  # Cache keyed by path + last write time so a refresh invalidates the parse.
+  $lastWriteTicks = 0
+  try { $lastWriteTicks = ([System.IO.File]::GetLastWriteTimeUtc($path)).Ticks } catch { $lastWriteTicks = 0 }
+  $cacheKey = '{0}|{1}' -f $path, $lastWriteTicks
+
+  if ($script:PublicSuffixCache -and $script:PublicSuffixCache.key -eq $cacheKey) {
+    return $script:PublicSuffixCache
+  }
+
+  $parsed = ConvertFrom-PublicSuffixListFile -Path $path
+  if (-not $parsed) { return $null }
+
+  $script:PublicSuffixCache = @{
+    key        = $cacheKey
+    exact      = $parsed.exact
+    wildcards  = $parsed.wildcards
+    exceptions = $parsed.exceptions
+  }
+  return $script:PublicSuffixCache
+}
+
+# Apply the official PSL matching algorithm (https://publicsuffix.org/list/) to the
+# given lowercase labels and return the public suffix as a dotted string.
+# $Data is the rule-set hashtable from Get-PublicSuffixData.
+function Get-PublicSuffixFromLabels {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Labels,
+    [Parameter(Mandatory = $true)][hashtable]$Data
+  )
+
+  $n = $Labels.Count
+
+  # 1. Exception rules win: the prevailing suffix is the rule minus its leftmost label.
+  for ($i = 0; $i -lt $n; $i++) {
+    $candidate = ($Labels[$i..($n - 1)] -join '.')
+    if ($Data.exceptions.Contains($candidate)) {
+      if (($i + 1) -le ($n - 1)) {
+        return ($Labels[($i + 1)..($n - 1)] -join '.')
+      }
+      return $candidate
+    }
+  }
+
+  # 2. Longest matching normal/wildcard rule wins.
+  $bestLen = 0
+  for ($i = 0; $i -lt $n; $i++) {
+    $candidate = ($Labels[$i..($n - 1)] -join '.')
+    $len = $n - $i
+
+    if ($Data.exact.Contains($candidate)) {
+      if ($len -gt $bestLen) { $bestLen = $len }
+    }
+
+    # Wildcard '*.<rest>' matches when the labels to the right of the wildcard
+    # position equal a stored fixed remainder.
+    if (($i + 1) -le ($n - 1)) {
+      $rest = ($Labels[($i + 1)..($n - 1)] -join '.')
+      if ($Data.wildcards.Contains($rest)) {
+        if ($len -gt $bestLen) { $bestLen = $len }
+      }
+    }
+  }
+
+  # 3. Default rule '*' => the rightmost label is the public suffix.
+  if ($bestLen -eq 0) { $bestLen = 1 }
+
+  return ($Labels[($n - $bestLen)..($n - 1)] -join '.')
+}
+
+# Derive a registrable ("pay-level") domain from an arbitrary subdomain using the
+# Public Suffix List when available, otherwise the embedded fallback list.
 function Get-RegistrableDomain {
   param([string]$Domain)
 
@@ -238,15 +445,30 @@ function Get-RegistrableDomain {
 
   $d = ([string]$Domain).Trim().Trim('.')
   if ([string]::IsNullOrWhiteSpace($d)) { return $null }
+  $d = $d.ToLowerInvariant()
 
   $labels = $d.Split('.')
-  if ($labels.Count -lt 2) { return $d.ToLowerInvariant() }
+  if ($labels.Count -lt 2) { return $d }
+  $n = $labels.Count
 
-  $tld = $labels[$labels.Count - 1].ToLowerInvariant()
-  $sld = $labels[$labels.Count - 2].ToLowerInvariant()
-  $last3 = if ($labels.Count -ge 3) { ($labels[$labels.Count - 3] + '.' + $sld + '.' + $tld).ToLowerInvariant() } else { $null }
+  # --- Preferred path: full PSL ---
+  $psl = $null
+  try { $psl = Get-PublicSuffixData } catch { $psl = $null }
+  if ($psl) {
+    $publicSuffix = Get-PublicSuffixFromLabels -Labels $labels -Data $psl
+    $psLabelCount = ($publicSuffix.Split('.')).Count
+    # Registrable domain = public suffix + exactly one more label.
+    if ($n -gt $psLabelCount) {
+      return ($labels[($n - $psLabelCount - 1)..($n - 1)] -join '.')
+    }
+    # The domain is itself a public suffix; return it unchanged.
+    return $d
+  }
 
-  $threeLabelZones = @(
+  # --- Fallback path: embedded multi-label suffix list ---
+  # Defined inline so it is available inside worker runspaces (only function
+  # definitions are copied into the RunspacePool, not top-level script variables).
+  $fallbackPublicSuffixes = @(
     'co.uk','org.uk','ac.uk','gov.uk',
     'co.jp','or.jp','ne.jp',
     'com.au','net.au','org.au',
@@ -255,15 +477,26 @@ function Get-RegistrableDomain {
     'com.mx',
     'com.sg','net.sg','org.sg',
     'com.tr','net.tr','org.tr',
-    'com.hk','net.hk','org.hk'
+    'com.hk','net.hk','org.hk',
+    'co.th','or.th','ac.th','go.th','in.th','net.th','mi.th',
+    'co.kr','or.kr','ne.kr','re.kr','pe.kr','go.kr','ac.kr',
+    'co.id','or.id','ac.id','go.id','web.id','net.id',
+    'co.in','net.in','org.in','gen.in','firm.in','ind.in',
+    'com.cn','net.cn','org.cn','gov.cn',
+    'com.tw','net.tw','org.tw',
+    'com.my','net.my','org.my',
+    'co.za','org.za','net.za',
+    'com.ph','net.ph','org.ph',
+    'co.il','org.il','net.il','ac.il'
   )
-
-  if ($last3 -and $threeLabelZones -contains ($sld + '.' + $tld)) {
-    return ($labels[($labels.Count - 3)..($labels.Count - 1)] -join '.').ToLowerInvariant()
+  $tld = $labels[$n - 1]
+  $sld = $labels[$n - 2]
+  if ($n -ge 3 -and ($fallbackPublicSuffixes -contains ($sld + '.' + $tld))) {
+    return ($labels[($n - 3)..($n - 1)] -join '.')
   }
 
-  # Default: use last two labels (e.g., example.com)
-  return ($labels[($labels.Count - 2)..($labels.Count - 1)] -join '.').ToLowerInvariant()
+  # Default: last two labels (e.g., example.com).
+  return ($labels[($n - 2)..($n - 1)] -join '.')
 }
 
 # Walk up the label hierarchy of a domain and return all parent domains.
@@ -1423,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.1.6'
+$script:AppVersion = '2.3.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -9481,6 +9714,134 @@ html[dir="rtl"] .check-progress-popover {
   }
 }
 
+.intake-form-card .intake-form-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--input-border);
+  border-bottom: none;
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+  background: var(--card-bg, transparent);
+}
+.intake-form-card .intake-form-toolbar button {
+  background: transparent;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: inherit;
+  min-width: 28px;
+}
+.intake-form-card .intake-form-toolbar button:hover,
+.intake-form-card .intake-form-toolbar button.is-active {
+  background: rgba(127, 127, 127, 0.18);
+}
+.intake-form-card .intake-toolbar-sep {
+  width: 1px;
+  background: var(--input-border);
+  margin: 2px 4px;
+}
+.intake-form-card .intake-rich-editor {
+  min-height: 320px;
+  max-height: 70vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--input-border);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  font-family: inherit;
+  background: var(--input-bg, transparent);
+  outline: none;
+  white-space: normal;
+  word-wrap: break-word;
+}
+.intake-form-card .intake-rich-editor:focus {
+  border-color: #2f80ed;
+  box-shadow: 0 0 0 2px rgba(47, 128, 237, 0.25);
+}
+.intake-form-card .intake-rich-editor:empty::before {
+  content: attr(data-placeholder);
+  opacity: 0.55;
+  pointer-events: none;
+}
+.intake-form-card .intake-rich-editor img { max-width: 100%; height: auto; }
+.intake-form-card .intake-rich-editor table { border-collapse: collapse; }
+.intake-form-card .intake-rich-editor table td,
+.intake-form-card .intake-rich-editor table th { border: 1px solid var(--input-border); padding: 4px 8px; }
+.intake-form-card .intake-rich-editor blockquote {
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--input-border);
+  opacity: 0.9;
+}
+.intake-form-card .intake-rich-editor pre {
+  background: rgba(127, 127, 127, 0.12);
+  padding: 8px 10px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+}
+.intake-form-card .intake-process-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 4px 0;
+}
+.intake-form-card .intake-process-status {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.intake-form-card .intake-extracted-wrap {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--input-border);
+}
+.intake-form-card .intake-extracted-title {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+}
+.intake-form-card .intake-extracted-hint {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  opacity: 0.8;
+}
+.intake-form-card .intake-extracted-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.intake-form-card .intake-extracted-table th,
+.intake-form-card .intake-extracted-table td {
+  border: 1px solid var(--input-border);
+  padding: 6px 8px;
+  vertical-align: top;
+  text-align: left;
+}
+.intake-form-card .intake-extracted-table th {
+  background: rgba(127, 127, 127, 0.10);
+  font-weight: 600;
+}
+.intake-form-card .intake-extracted-table td[contenteditable="true"] {
+  cursor: text;
+  min-height: 18px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.intake-form-card .intake-extracted-table td[contenteditable="true"]:focus {
+  outline: 2px solid #2f80ed;
+  outline-offset: -2px;
+}
+.intake-form-card .intake-extracted-table tr.intake-extracted-empty td {
+  opacity: 0.55;
+  font-style: italic;
+}
+
 input[type=text] {
   flex: 1;
   height: 38px;
@@ -11674,44 +12035,82 @@ async function ensureMsalLoaded() {
 </div>
 <div id="checkProgressPopover" class="check-progress-popover hide-on-screenshot" role="status" aria-live="polite" hidden></div>
 <div id="status" class="engage-section"></div>
-<div id="azureDiagnosticsCard" class="card hide-on-screenshot engage-section" style="display:none; margin-bottom: 12px;">
-  <div class="card-header" onclick="toggleCard(this)">
+
+<!--
+  Intake Information form (hidden from screenshots).
+  Values entered here are persisted to localStorage (only when the user has
+  granted functional-cookie consent) and are appended to the "Copy Email
+  Quota" output so support staff can paste a full request package in one
+  go. Field set matches the standard ACS email-quota-increase intake form.
+-->
+<!--
+  Visibility is gated to users signed in with a Microsoft account (see
+  updateIntakeFormVisibility in 20d-HtmlJsCore.ps1, called from
+  updateAuthUI). Hidden by default so anonymous users never see it; the
+  auth flow reveals it once a Microsoft account is signed in.
+-->
+<div id="intakeFormCard" class="card intake-form-card" style="margin-bottom: 12px; display: none;">
+  <div class="card-header collapsed-header" onclick="toggleCard(this)">
     <span class="chevron">&#x25BC;</span>
-    <span class="tag tag-info" id="azureDiagnosticsTag">AZURE</span>
-    <strong id="azureDiagnosticsTitle">Azure Workspace Diagnostics</strong>
+    <span class="tag tag-info">Form</span>
+    <strong id="intakeFormTitle">Customer Intake Information (optional)</strong>
+    <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); prefillIntakeForm();">Insert template</button>
+    <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:6px;" onclick="event.stopPropagation(); clearIntakeForm();">Clear</button>
   </div>
-  <div class="card-content">
-    <div id="azureDiagnosticsHint" class="azure-note">Sign in to query customer Azure subscriptions and Log Analytics workspaces directly from your browser session.</div>
-    <div id="azureSwitchDirectoryRow" class="azure-panel-field" style="display:none; margin-bottom:10px;">
-      <label for="azureTenantInput" id="azureSwitchDirectoryLabel" style="font-size:12px;">Switch directory (tenant ID or domain)</label>
-      <div style="display:flex; gap:6px;">
-        <input id="azureTenantInput" type="text" placeholder="e.g. contoso.onmicrosoft.com" style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--input-bg); color:var(--fg); font-size:13px;" />
-        <button id="azureSwitchDirectoryBtn" type="button" onclick="switchAzureDirectory()" style="white-space:nowrap;">Switch</button>
-      </div>
+  <div class="card-content collapsed">
+    <p class="intake-form-hint" style="margin:0 0 10px 0; font-size:12px; opacity:0.8;">
+      Paste in here the customer intake form responses. Formatting (bold, italics, lists, tables, links, pasted images) is preserved. Contents are saved locally in your browser (functional cookies must be allowed) and are appended to the <strong>Copy Email Quota</strong> output.
+    </p>
+    <div id="intakeFormToolbar" class="intake-form-toolbar" role="toolbar" aria-label="Formatting">
+      <button type="button" data-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+      <button type="button" data-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+      <button type="button" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+      <button type="button" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+      <span class="intake-toolbar-sep"></span>
+      <button type="button" data-cmd="formatBlock" data-arg="H3" title="Heading">H</button>
+      <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">&bull; List</button>
+      <button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
+      <button type="button" data-cmd="formatBlock" data-arg="BLOCKQUOTE" title="Quote">&ldquo; &rdquo;</button>
+      <button type="button" data-cmd="formatBlock" data-arg="PRE" title="Code block">{ }</button>
+      <span class="intake-toolbar-sep"></span>
+      <button type="button" data-cmd="createLink" title="Insert link">Link</button>
+      <button type="button" data-cmd="unlink" title="Remove link">Unlink</button>
+      <span class="intake-toolbar-sep"></span>
+      <button type="button" data-cmd="removeFormat" title="Clear formatting">T&times;</button>
     </div>
-    <div class="azure-panel-grid">
-      <div class="azure-panel-field">
-        <label for="azureSubscriptionSelect" id="azureSubscriptionLabel">Subscription</label>
-        <select id="azureSubscriptionSelect"></select>
-      </div>
-      <div class="azure-panel-field">
-        <label for="azureResourceSelect" id="azureResourceLabel">ACS Resource</label>
-        <select id="azureResourceSelect"></select>
-      </div>
-      <div class="azure-panel-field">
-        <label for="azureWorkspaceSelect" id="azureWorkspaceLabel">Workspace</label>
-        <select id="azureWorkspaceSelect"></select>
-      </div>
+    <div id="intakeRichEditor"
+         class="intake-rich-editor"
+         contenteditable="true"
+         spellcheck="true"
+         role="textbox"
+         aria-multiline="true"
+         aria-label="Customer intake information"
+         data-placeholder="Paste or type customer intake information here. Use the toolbar (or Ctrl+B / Ctrl+I / Ctrl+U) to format. Click 'Insert template' for the standard ACS intake questionnaire."></div>
+
+    <!--
+      Process Data: walks the editor's text content and matches each line
+      against the standard ACS intake questions to populate the extracted
+      fields below. Lets the user see exactly what the app pulled from
+      the rich text box before they hit Copy Email Quota.
+    -->
+    <div class="intake-process-row">
+      <button type="button" id="intakeProcessBtn" class="copy-btn" onclick="processIntakeForm()">Process Data</button>
+      <span id="intakeProcessStatus" class="intake-process-status" aria-live="polite"></span>
     </div>
-    <div class="azure-panel-actions">
-      <button id="azureRunInventoryBtn" type="button" class="primary" onclick="runAzureQueryTemplate('workspaceInventory')">Run workspace inventory</button>
-      <button id="azureRunDomainSearchBtn" type="button" onclick="runAzureQueryTemplate('domainSearch')">Run domain search</button>
-      <button id="azureRunAcsSearchBtn" type="button" onclick="runAzureQueryTemplate('acsSearch')">Run ACS search</button>
+
+    <div id="intakeExtractedWrap" class="intake-extracted-wrap" style="display:none;">
+      <h4 class="intake-extracted-title">Extracted fields</h4>
+      <p class="intake-extracted-hint">These are the values the app detected in the rich text box above. Edit any cell to correct it &mdash; edits are included in the <strong>Copy Email Quota</strong> output.</p>
+      <table class="intake-extracted-table">
+        <thead>
+          <tr><th style="width:42%;">Field</th><th>Detected value</th></tr>
+        </thead>
+        <tbody id="intakeExtractedBody"></tbody>
+      </table>
     </div>
-    <div id="azureDiagnosticsStatus" class="azure-status"></div>
-    <div id="azureDiagnosticsResults" class="azure-results-container"></div>
   </div>
 </div>
+
 <div id="results" class="cards"></div>
 
 <div class="footer" id="footerText">
@@ -12111,45 +12510,6 @@ const TRANSLATIONS = {
     dkim1StatusLabel: 'DKIM1 Status',
     dkim2StatusLabel: 'DKIM2 Status',
     dmarcStatusLabel: 'DMARC Status',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Azure Workspace Diagnostics',
-    azureDiagnosticsHint: 'Sign in to query customer Azure subscriptions and Log Analytics workspaces directly from your browser session. No customer query data is sent to the local server.',
-    azureSubscription: 'Subscription',
-    azureAcsResource: 'ACS Resource',
-    azureWorkspace: 'Workspace',
-    azureLoadSubscriptions: 'Load subscriptions',
-    azureDiscoverResources: 'Discover ACS resources',
-    azureDiscoverWorkspaces: 'Discover workspaces',
-    azureRunInventory: 'Run workspace inventory',
-    azureRunDomainSearch: 'Run domain search',
-    azureRunAcsSearch: 'Run ACS search',
-    azureSignInRequired: 'Sign in with Microsoft to query Azure subscriptions and Log Analytics from the browser.',
-    azureLoadingSubscriptions: 'Loading subscriptions...',
-    azureLoadingTenants: 'Discovering tenants...',
-    azureLoadingTenantSubscriptions: 'Loading subscriptions for tenant {tenant} ({current}/{total})...',
-    azureFilteringAcsSubscriptions: 'Checking {current}/{total} subscriptions for ACS resources...',
-    azureLoadingResources: 'Discovering ACS resources...',
-    azureLoadingWorkspaces: 'Discovering connected workspaces...',
-    azureRunningQuery: 'Running query: {name}',
-    azureNoSubscriptions: 'No Azure subscriptions were returned for this user.',
-    azureNoResources: 'No ACS resources were found in the selected subscription.',
-    azureSubscriptionNotEnabled: 'The selected subscription is {state}. Resource discovery requires an Enabled subscription.',
-    azureNoWorkspaces: 'No connected Log Analytics workspaces were found. Check diagnostic settings on the selected ACS resources.',
-    azureSelectSubscriptionFirst: 'Select a subscription first.',
-    azureSelectWorkspaceFirst: 'Select a workspace first.',
-    azureDomainRequired: 'Enter a domain before running the domain search query.',
-    azureWorkspaceInventory: 'Workspace inventory',
-    azureDomainSearch: 'Domain search',
-    azureAcsSearch: 'ACS search',
-    azureResultsSummary: 'Tenant: {tenant} \u2022 Subscription: {subscription} \u2022 Workspace: {workspace}',
-    azureQueryReturnedNoTables: 'The query completed but returned no tables.',
-    azureQueryFailed: 'Azure query failed: {reason}',
-    azureDiscoverSuccess: 'Discovery complete. Select a workspace and run a query.',
-    azureSignedInAs: 'Signed in as {user}',
-    azureConsentRequired: 'Additional Azure permissions are required. Approve the consent prompt to continue.',
-    azureQueryTextLabel: 'Executed query',
-    azureSwitchDirectory: 'Switch directory (tenant ID or domain)',
-    azureSwitchBtn: 'Switch',
     guidanceIconInformational: 'Informational',
     guidanceIconError: 'Error',
     guidanceIconAttention: 'Needs Attention',
@@ -14883,45 +15243,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: 'Correcto',
     guidanceLegendAttention: 'Atenci\u00F3n',
     guidanceLegendInformational: 'Informativo',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Diagn\u00F3sticos del \u00E1rea de trabajo de Azure',
-    azureDiagnosticsHint: 'Inicie sesi\u00F3n para consultar suscripciones de Azure y \u00E1reas de trabajo de Log Analytics directamente desde su sesi\u00F3n del navegador. No se env\u00EDan datos de consulta del cliente al servidor local.',
-    azureSubscription: 'Suscripci\u00F3n',
-    azureAcsResource: 'Recurso de ACS',
-    azureWorkspace: '\u00C1rea de trabajo',
-    azureLoadSubscriptions: 'Cargar suscripciones',
-    azureDiscoverResources: 'Detectar recursos de ACS',
-    azureDiscoverWorkspaces: 'Detectar \u00E1reas de trabajo',
-    azureRunInventory: 'Ejecutar inventario del \u00E1rea de trabajo',
-    azureRunDomainSearch: 'Ejecutar b\u00FAsqueda de dominio',
-    azureRunAcsSearch: 'Ejecutar b\u00FAsqueda de ACS',
-    azureSignInRequired: 'Inicie sesi\u00F3n con Microsoft para consultar suscripciones de Azure y Log Analytics desde el navegador.',
-    azureLoadingSubscriptions: 'Cargando suscripciones...',
-    azureLoadingTenants: 'Detectando inquilinos...',
-    azureLoadingTenantSubscriptions: 'Cargando suscripciones del inquilino {tenant} ({current}/{total})...',
-    azureFilteringAcsSubscriptions: 'Comprobando {current}/{total} suscripciones en busca de recursos de ACS...',
-    azureLoadingResources: 'Detectando recursos de ACS...',
-    azureLoadingWorkspaces: 'Detectando \u00E1reas de trabajo conectadas...',
-    azureRunningQuery: 'Ejecutando consulta: {name}',
-    azureNoSubscriptions: 'No se devolvieron suscripciones de Azure para este usuario.',
-    azureNoResources: 'No se encontraron recursos de ACS en la suscripci\u00F3n seleccionada.',
-    azureSubscriptionNotEnabled: 'La suscripci\u00F3n seleccionada est\u00E1 {state}. La detecci\u00F3n de recursos requiere una suscripci\u00F3n habilitada.',
-    azureNoWorkspaces: 'No se encontraron \u00E1reas de trabajo de Log Analytics conectadas. Compruebe la configuraci\u00F3n de diagn\u00F3stico en los recursos de ACS seleccionados.',
-    azureSelectSubscriptionFirst: 'Seleccione primero una suscripci\u00F3n.',
-    azureSelectWorkspaceFirst: 'Seleccione primero un \u00E1rea de trabajo.',
-    azureDomainRequired: 'Escriba un dominio antes de ejecutar la consulta de b\u00FAsqueda de dominio.',
-    azureWorkspaceInventory: 'Inventario del \u00E1rea de trabajo',
-    azureDomainSearch: 'B\u00FAsqueda de dominio',
-    azureAcsSearch: 'B\u00FAsqueda de ACS',
-    azureResultsSummary: 'Inquilino: {tenant} \u2022 Suscripci\u00F3n: {subscription} \u2022 \u00C1rea de trabajo: {workspace}',
-    azureQueryReturnedNoTables: 'La consulta se complet\u00F3 pero no devolvi\u00F3 tablas.',
-    azureQueryFailed: 'Error en la consulta de Azure: {reason}',
-    azureDiscoverSuccess: 'Detecci\u00F3n completada. Seleccione un \u00E1rea de trabajo y ejecute una consulta.',
-    azureSignedInAs: 'Sesi\u00F3n iniciada como {user}',
-    azureConsentRequired: 'Se requieren permisos adicionales de Azure. Apruebe la solicitud de consentimiento para continuar.',
-    azureQueryTextLabel: 'Consulta ejecutada',
-    azureSwitchDirectory: 'Cambiar directorio (id. de inquilino o dominio)',
-    azureSwitchBtn: 'Cambiar'
   },
   fr: {
     guidanceIconInformational: 'Informatif',
@@ -14930,45 +15251,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: 'R\u00E9ussite',
     guidanceLegendAttention: 'Attention',
     guidanceLegendInformational: 'Informatif',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Diagnostics de l\u2019espace de travail Azure',
-    azureDiagnosticsHint: 'Connectez-vous pour interroger les abonnements Azure et les espaces de travail Log Analytics directement depuis votre session de navigateur. Aucune donn\u00E9e de requ\u00EAte client n\u2019est envoy\u00E9e au serveur local.',
-    azureSubscription: 'Abonnement',
-    azureAcsResource: 'Ressource ACS',
-    azureWorkspace: 'Espace de travail',
-    azureLoadSubscriptions: 'Charger les abonnements',
-    azureDiscoverResources: 'D\u00E9couvrir les ressources ACS',
-    azureDiscoverWorkspaces: 'D\u00E9couvrir les espaces de travail',
-    azureRunInventory: 'Ex\u00E9cuter l\u2019inventaire de l\u2019espace de travail',
-    azureRunDomainSearch: 'Ex\u00E9cuter la recherche de domaine',
-    azureRunAcsSearch: 'Ex\u00E9cuter la recherche ACS',
-    azureSignInRequired: 'Connectez-vous avec Microsoft pour interroger les abonnements Azure et Log Analytics depuis le navigateur.',
-    azureLoadingSubscriptions: 'Chargement des abonnements...',
-    azureLoadingTenants: 'D\u00E9couverte des locataires...',
-    azureLoadingTenantSubscriptions: 'Chargement des abonnements du locataire {tenant} ({current}/{total})...',
-    azureFilteringAcsSubscriptions: 'V\u00E9rification de {current}/{total} abonnements pour les ressources ACS...',
-    azureLoadingResources: 'D\u00E9couverte des ressources ACS...',
-    azureLoadingWorkspaces: 'D\u00E9couverte des espaces de travail connect\u00E9s...',
-    azureRunningQuery: 'Ex\u00E9cution de la requ\u00EAte : {name}',
-    azureNoSubscriptions: 'Aucun abonnement Azure n\u2019a \u00E9t\u00E9 retourn\u00E9 pour cet utilisateur.',
-    azureNoResources: 'Aucune ressource ACS n\u2019a \u00E9t\u00E9 trouv\u00E9e dans l\u2019abonnement s\u00E9lectionn\u00E9.',
-    azureSubscriptionNotEnabled: 'L\u2019abonnement s\u00E9lectionn\u00E9 est {state}. La d\u00E9couverte de ressources n\u00E9cessite un abonnement activ\u00E9.',
-    azureNoWorkspaces: 'Aucun espace de travail Log Analytics connect\u00E9 n\u2019a \u00E9t\u00E9 trouv\u00E9. V\u00E9rifiez les param\u00E8tres de diagnostic sur les ressources ACS s\u00E9lectionn\u00E9es.',
-    azureSelectSubscriptionFirst: 'S\u00E9lectionnez d\u2019abord un abonnement.',
-    azureSelectWorkspaceFirst: 'S\u00E9lectionnez d\u2019abord un espace de travail.',
-    azureDomainRequired: 'Saisissez un domaine avant d\u2019ex\u00E9cuter la requ\u00EAte de recherche de domaine.',
-    azureWorkspaceInventory: 'Inventaire de l\u2019espace de travail',
-    azureDomainSearch: 'Recherche de domaine',
-    azureAcsSearch: 'Recherche ACS',
-    azureResultsSummary: 'Locataire : {tenant} \u2022 Abonnement : {subscription} \u2022 Espace de travail : {workspace}',
-    azureQueryReturnedNoTables: 'La requ\u00EAte s\u2019est termin\u00E9e mais n\u2019a retourn\u00E9 aucune table.',
-    azureQueryFailed: '\u00C9chec de la requ\u00EAte Azure : {reason}',
-    azureDiscoverSuccess: 'D\u00E9couverte termin\u00E9e. S\u00E9lectionnez un espace de travail et ex\u00E9cutez une requ\u00EAte.',
-    azureSignedInAs: 'Connect\u00E9 en tant que {user}',
-    azureConsentRequired: 'Des autorisations Azure suppl\u00E9mentaires sont requises. Approuvez l\u2019invite de consentement pour continuer.',
-    azureQueryTextLabel: 'Requ\u00EAte ex\u00E9cut\u00E9e',
-    azureSwitchDirectory: 'Changer d\u2019annuaire (ID de locataire ou domaine)',
-    azureSwitchBtn: 'Changer'
   },
   de: {
     guidanceIconInformational: 'Informativ',
@@ -14977,45 +15259,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: 'Erfolg',
     guidanceLegendAttention: 'Beachten',
     guidanceLegendInformational: 'Informativ',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Azure-Arbeitsbereichsdiagnose',
-    azureDiagnosticsHint: 'Melden Sie sich an, um Azure-Abonnements und Log Analytics-Arbeitsbereiche direkt von Ihrer Browsersitzung abzufragen. Es werden keine Kundenabfragedaten an den lokalen Server gesendet.',
-    azureSubscription: 'Abonnement',
-    azureAcsResource: 'ACS-Ressource',
-    azureWorkspace: 'Arbeitsbereich',
-    azureLoadSubscriptions: 'Abonnements laden',
-    azureDiscoverResources: 'ACS-Ressourcen ermitteln',
-    azureDiscoverWorkspaces: 'Arbeitsbereiche ermitteln',
-    azureRunInventory: 'Arbeitsbereichsinventar ausf\u00FChren',
-    azureRunDomainSearch: 'Domainsuche ausf\u00FChren',
-    azureRunAcsSearch: 'ACS-Suche ausf\u00FChren',
-    azureSignInRequired: 'Melden Sie sich mit Microsoft an, um Azure-Abonnements und Log Analytics vom Browser aus abzufragen.',
-    azureLoadingSubscriptions: 'Abonnements werden geladen...',
-    azureLoadingTenants: 'Mandanten werden ermittelt...',
-    azureLoadingTenantSubscriptions: 'Abonnements f\u00FCr Mandant {tenant} werden geladen ({current}/{total})...',
-    azureFilteringAcsSubscriptions: '{current}/{total} Abonnements werden auf ACS-Ressourcen gepr\u00FCft...',
-    azureLoadingResources: 'ACS-Ressourcen werden ermittelt...',
-    azureLoadingWorkspaces: 'Verbundene Arbeitsbereiche werden ermittelt...',
-    azureRunningQuery: 'Abfrage wird ausgef\u00FChrt: {name}',
-    azureNoSubscriptions: 'Es wurden keine Azure-Abonnements f\u00FCr diesen Benutzer zur\u00FCckgegeben.',
-    azureNoResources: 'Im ausgew\u00E4hlten Abonnement wurden keine ACS-Ressourcen gefunden.',
-    azureSubscriptionNotEnabled: 'Das ausgew\u00E4hlte Abonnement ist {state}. Die Ressourcenermittlung erfordert ein aktiviertes Abonnement.',
-    azureNoWorkspaces: 'Es wurden keine verbundenen Log Analytics-Arbeitsbereiche gefunden. Pr\u00FCfen Sie die Diagnoseeinstellungen der ausgew\u00E4hlten ACS-Ressourcen.',
-    azureSelectSubscriptionFirst: 'W\u00E4hlen Sie zuerst ein Abonnement aus.',
-    azureSelectWorkspaceFirst: 'W\u00E4hlen Sie zuerst einen Arbeitsbereich aus.',
-    azureDomainRequired: 'Geben Sie eine Domain ein, bevor Sie die Domainsuche ausf\u00FChren.',
-    azureWorkspaceInventory: 'Arbeitsbereichsinventar',
-    azureDomainSearch: 'Domainsuche',
-    azureAcsSearch: 'ACS-Suche',
-    azureResultsSummary: 'Mandant: {tenant} \u2022 Abonnement: {subscription} \u2022 Arbeitsbereich: {workspace}',
-    azureQueryReturnedNoTables: 'Die Abfrage wurde abgeschlossen, hat aber keine Tabellen zur\u00FCckgegeben.',
-    azureQueryFailed: 'Azure-Abfrage fehlgeschlagen: {reason}',
-    azureDiscoverSuccess: 'Ermittlung abgeschlossen. W\u00E4hlen Sie einen Arbeitsbereich und f\u00FChren Sie eine Abfrage aus.',
-    azureSignedInAs: 'Angemeldet als {user}',
-    azureConsentRequired: 'Zus\u00E4tzliche Azure-Berechtigungen sind erforderlich. Genehmigen Sie die Zustimmungsaufforderung, um fortzufahren.',
-    azureQueryTextLabel: 'Ausgef\u00FChrte Abfrage',
-    azureSwitchDirectory: 'Verzeichnis wechseln (Mandanten-ID oder Dom\u00E4ne)',
-    azureSwitchBtn: 'Wechseln'
   },
   'pt-BR': {
     guidanceIconInformational: 'Informativo',
@@ -15024,45 +15267,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: 'Sucesso',
     guidanceLegendAttention: 'Aten\u00E7\u00E3o',
     guidanceLegendInformational: 'Informativo',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Diagn\u00F3stico do workspace do Azure',
-    azureDiagnosticsHint: 'Entre para consultar assinaturas do Azure e workspaces do Log Analytics diretamente do navegador. Nenhum dado de consulta do cliente \u00E9 enviado ao servidor local.',
-    azureSubscription: 'Assinatura',
-    azureAcsResource: 'Recurso do ACS',
-    azureWorkspace: 'Workspace',
-    azureLoadSubscriptions: 'Carregar assinaturas',
-    azureDiscoverResources: 'Descobrir recursos do ACS',
-    azureDiscoverWorkspaces: 'Descobrir workspaces',
-    azureRunInventory: 'Executar invent\u00E1rio do workspace',
-    azureRunDomainSearch: 'Executar pesquisa de dom\u00EDnio',
-    azureRunAcsSearch: 'Executar pesquisa do ACS',
-    azureSignInRequired: 'Entre com a Microsoft para consultar assinaturas do Azure e Log Analytics pelo navegador.',
-    azureLoadingSubscriptions: 'Carregando assinaturas...',
-    azureLoadingTenants: 'Descobrindo locat\u00E1rios...',
-    azureLoadingTenantSubscriptions: 'Carregando assinaturas do locat\u00E1rio {tenant} ({current}/{total})...',
-    azureFilteringAcsSubscriptions: 'Verificando {current}/{total} assinaturas em busca de recursos do ACS...',
-    azureLoadingResources: 'Descobrindo recursos do ACS...',
-    azureLoadingWorkspaces: 'Descobrindo workspaces conectados...',
-    azureRunningQuery: 'Executando consulta: {name}',
-    azureNoSubscriptions: 'Nenhuma assinatura do Azure foi retornada para este usu\u00E1rio.',
-    azureNoResources: 'Nenhum recurso do ACS foi encontrado na assinatura selecionada.',
-    azureSubscriptionNotEnabled: 'A assinatura selecionada est\u00E1 {state}. A descoberta de recursos requer uma assinatura habilitada.',
-    azureNoWorkspaces: 'Nenhum workspace do Log Analytics conectado foi encontrado. Verifique as configura\u00E7\u00F5es de diagn\u00F3stico nos recursos do ACS selecionados.',
-    azureSelectSubscriptionFirst: 'Selecione uma assinatura primeiro.',
-    azureSelectWorkspaceFirst: 'Selecione um workspace primeiro.',
-    azureDomainRequired: 'Insira um dom\u00EDnio antes de executar a consulta de pesquisa de dom\u00EDnio.',
-    azureWorkspaceInventory: 'Invent\u00E1rio do workspace',
-    azureDomainSearch: 'Pesquisa de dom\u00EDnio',
-    azureAcsSearch: 'Pesquisa do ACS',
-    azureResultsSummary: 'Locat\u00E1rio: {tenant} \u2022 Assinatura: {subscription} \u2022 Workspace: {workspace}',
-    azureQueryReturnedNoTables: 'A consulta foi conclu\u00EDda, mas n\u00E3o retornou tabelas.',
-    azureQueryFailed: 'Falha na consulta do Azure: {reason}',
-    azureDiscoverSuccess: 'Descoberta conclu\u00EDda. Selecione um workspace e execute uma consulta.',
-    azureSignedInAs: 'Conectado como {user}',
-    azureConsentRequired: 'S\u00E3o necess\u00E1rias permiss\u00F5es adicionais do Azure. Aprove a solicita\u00E7\u00E3o de consentimento para continuar.',
-    azureQueryTextLabel: 'Consulta executada',
-    azureSwitchDirectory: 'Alternar diret\u00F3rio (ID do locat\u00E1rio ou dom\u00EDnio)',
-    azureSwitchBtn: 'Alternar'
   },
   ar: {
     guidanceIconInformational: '\u0645\u0639\u0644\u0648\u0645\u0627\u062A\u064A',
@@ -15071,45 +15275,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: '\u0646\u062C\u0627\u062D',
     guidanceLegendAttention: '\u0627\u0646\u062A\u0628\u0627\u0647',
     guidanceLegendInformational: '\u0645\u0639\u0644\u0648\u0645\u0627\u062A\u064A',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: '\u062A\u0634\u062E\u064A\u0635\u0627\u062A \u0645\u0633\u0627\u062D\u0629 \u0639\u0645\u0644 Azure',
-    azureDiagnosticsHint: '\u0633\u062C\u0651\u0644 \u0627\u0644\u062F\u062E\u0648\u0644 \u0644\u0644\u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u0639\u0646 \u0627\u0634\u062A\u0631\u0627\u0643\u0627\u062A Azure \u0648\u0645\u0633\u0627\u062D\u0627\u062A \u0639\u0645\u0644 Log Analytics \u0645\u0628\u0627\u0634\u0631\u0629 \u0645\u0646 \u062C\u0644\u0633\u0629 \u0627\u0644\u0645\u062A\u0635\u0641\u062D. \u0644\u0627 \u064A\u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u0623\u064A \u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u0639\u0645\u064A\u0644 \u0625\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0627\u0644\u0645\u062D\u0644\u064A.',
-    azureSubscription: '\u0627\u0644\u0627\u0634\u062A\u0631\u0627\u0643',
-    azureAcsResource: '\u0645\u0648\u0631\u062F ACS',
-    azureWorkspace: '\u0645\u0633\u0627\u062D\u0629 \u0627\u0644\u0639\u0645\u0644',
-    azureLoadSubscriptions: '\u062A\u062D\u0645\u064A\u0644 \u0627\u0644\u0627\u0634\u062A\u0631\u0627\u0643\u0627\u062A',
-    azureDiscoverResources: '\u0627\u0643\u062A\u0634\u0627\u0641 \u0645\u0648\u0627\u0631\u062F ACS',
-    azureDiscoverWorkspaces: '\u0627\u0643\u062A\u0634\u0627\u0641 \u0645\u0633\u0627\u062D\u0627\u062A \u0627\u0644\u0639\u0645\u0644',
-    azureRunInventory: '\u062A\u0634\u063A\u064A\u0644 \u062C\u0631\u062F \u0645\u0633\u0627\u062D\u0629 \u0627\u0644\u0639\u0645\u0644',
-    azureRunDomainSearch: '\u062A\u0634\u063A\u064A\u0644 \u0628\u062D\u062B \u0627\u0644\u0646\u0637\u0627\u0642',
-    azureRunAcsSearch: '\u062A\u0634\u063A\u064A\u0644 \u0628\u062D\u062B ACS',
-    azureSignInRequired: '\u0633\u062C\u0651\u0644 \u0627\u0644\u062F\u062E\u0648\u0644 \u0628\u0627\u0633\u062A\u062E\u062F\u0627\u0645 Microsoft \u0644\u0644\u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u0639\u0646 \u0627\u0634\u062A\u0631\u0627\u0643\u0627\u062A Azure \u0648Log Analytics \u0645\u0646 \u0627\u0644\u0645\u062A\u0635\u0641\u062D.',
-    azureLoadingSubscriptions: '\u062C\u0627\u0631\u064D \u062A\u062D\u0645\u064A\u0644 \u0627\u0644\u0627\u0634\u062A\u0631\u0627\u0643\u0627\u062A...',
-    azureLoadingTenants: '\u062C\u0627\u0631\u064D \u0627\u0643\u062A\u0634\u0627\u0641 \u0627\u0644\u0645\u0633\u062A\u0623\u062C\u0631\u064A\u0646...',
-    azureLoadingTenantSubscriptions: '\u062C\u0627\u0631\u064D \u062A\u062D\u0645\u064A\u0644 \u0627\u0634\u062A\u0631\u0627\u0643\u0627\u062A \u0627\u0644\u0645\u0633\u062A\u0623\u062C\u0631 {tenant} ({current}/{total})...',
-    azureFilteringAcsSubscriptions: '\u062C\u0627\u0631\u064D \u0641\u062D\u0635 {current}/{total} \u0627\u0634\u062A\u0631\u0627\u0643\u064B\u0627 \u0628\u062D\u062B\u064B\u0627 \u0639\u0646 \u0645\u0648\u0627\u0631\u062F ACS...',
-    azureLoadingResources: '\u062C\u0627\u0631\u064D \u0627\u0643\u062A\u0634\u0627\u0641 \u0645\u0648\u0627\u0631\u062F ACS...',
-    azureLoadingWorkspaces: '\u062C\u0627\u0631\u064D \u0627\u0643\u062A\u0634\u0627\u0641 \u0645\u0633\u0627\u062D\u0627\u062A \u0627\u0644\u0639\u0645\u0644 \u0627\u0644\u0645\u062A\u0635\u0644\u0629...',
-    azureRunningQuery: '\u062C\u0627\u0631\u064D \u062A\u0646\u0641\u064A\u0630 \u0627\u0644\u0627\u0633\u062A\u0639\u0644\u0627\u0645: {name}',
-    azureNoSubscriptions: '\u0644\u0645 \u064A\u062A\u0645 \u0625\u0631\u062C\u0627\u0639 \u0623\u064A \u0627\u0634\u062A\u0631\u0627\u0643\u0627\u062A Azure \u0644\u0647\u0630\u0627 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645.',
-    azureNoResources: '\u0644\u0645 \u064A\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 \u0645\u0648\u0627\u0631\u062F ACS \u0641\u064A \u0627\u0644\u0627\u0634\u062A\u0631\u0627\u0643 \u0627\u0644\u0645\u062D\u062F\u062F.',
-    azureSubscriptionNotEnabled: '\u0627\u0644\u0627\u0634\u062A\u0631\u0627\u0643 \u0627\u0644\u0645\u062D\u062F\u062F \u0641\u064A \u062D\u0627\u0644\u0629 {state}. \u064A\u062A\u0637\u0644\u0628 \u0627\u0643\u062A\u0634\u0627\u0641 \u0627\u0644\u0645\u0648\u0627\u0631\u062F \u0627\u0634\u062A\u0631\u0627\u0643\u064B\u0627 \u0645\u064F\u0645\u0643\u0651\u0646\u064B\u0627.',
-    azureNoWorkspaces: '\u0644\u0645 \u064A\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 \u0645\u0633\u0627\u062D\u0627\u062A \u0639\u0645\u0644 Log Analytics \u0645\u062A\u0635\u0644\u0629. \u062A\u062D\u0642\u0651\u0642 \u0645\u0646 \u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0644\u062A\u0634\u062E\u064A\u0635 \u0639\u0644\u0649 \u0645\u0648\u0627\u0631\u062F ACS \u0627\u0644\u0645\u062D\u062F\u062F\u0629.',
-    azureSelectSubscriptionFirst: '\u062D\u062F\u062F \u0627\u0634\u062A\u0631\u0627\u0643\u064B\u0627 \u0623\u0648\u0644\u0627\u064B.',
-    azureSelectWorkspaceFirst: '\u062D\u062F\u062F \u0645\u0633\u0627\u062D\u0629 \u0639\u0645\u0644 \u0623\u0648\u0644\u0627\u064B.',
-    azureDomainRequired: '\u0623\u062F\u062E\u0644 \u0646\u0637\u0627\u0642\u064B\u0627 \u0642\u0628\u0644 \u062A\u0634\u063A\u064A\u0644 \u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u0628\u062D\u062B \u0627\u0644\u0646\u0637\u0627\u0642.',
-    azureWorkspaceInventory: '\u062C\u0631\u062F \u0645\u0633\u0627\u062D\u0629 \u0627\u0644\u0639\u0645\u0644',
-    azureDomainSearch: '\u0628\u062D\u062B \u0627\u0644\u0646\u0637\u0627\u0642',
-    azureAcsSearch: '\u0628\u062D\u062B ACS',
-    azureResultsSummary: '\u0627\u0644\u0645\u0633\u062A\u0623\u062C\u0631: {tenant} \u2022 \u0627\u0644\u0627\u0634\u062A\u0631\u0627\u0643: {subscription} \u2022 \u0645\u0633\u0627\u062D\u0629 \u0627\u0644\u0639\u0645\u0644: {workspace}',
-    azureQueryReturnedNoTables: '\u0627\u0643\u062A\u0645\u0644 \u0627\u0644\u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u0648\u0644\u0643\u0646\u0647 \u0644\u0645 \u064A\u064F\u0631\u062C\u0639 \u0623\u064A \u062C\u062F\u0627\u0648\u0644.',
-    azureQueryFailed: '\u0641\u0634\u0644 \u0627\u0633\u062A\u0639\u0644\u0627\u0645 Azure: {reason}',
-    azureDiscoverSuccess: '\u0627\u0643\u062A\u0645\u0644 \u0627\u0644\u0627\u0643\u062A\u0634\u0627\u0641. \u062D\u062F\u062F \u0645\u0633\u0627\u062D\u0629 \u0639\u0645\u0644 \u0648\u0634\u063A\u0651\u0644 \u0627\u0633\u062A\u0639\u0644\u0627\u0645\u064B\u0627.',
-    azureSignedInAs: '\u0645\u0633\u062C\u0651\u0644 \u0627\u0644\u062F\u062E\u0648\u0644 \u0628\u0627\u0633\u0645 {user}',
-    azureConsentRequired: '\u0645\u0637\u0644\u0648\u0628 \u0623\u0630\u0648\u0646\u0627\u062A Azure \u0625\u0636\u0627\u0641\u064A\u0629. \u0648\u0627\u0641\u0642 \u0639\u0644\u0649 \u0637\u0644\u0628 \u0627\u0644\u0645\u0648\u0627\u0641\u0642\u0629 \u0644\u0644\u0645\u062A\u0627\u0628\u0639\u0629.',
-    azureQueryTextLabel: '\u0627\u0644\u0627\u0633\u062A\u0639\u0644\u0627\u0645 \u0627\u0644\u0645\u0646\u0641\u0630',
-    azureSwitchDirectory: '\u062A\u0628\u062F\u064A\u0644 \u0627\u0644\u062F\u0644\u064A\u0644 (\u0645\u0639\u0631\u0641 \u0627\u0644\u0645\u0633\u062A\u0623\u062C\u0631 \u0623\u0648 \u0627\u0644\u0646\u0637\u0627\u0642)',
-    azureSwitchBtn: '\u062A\u0628\u062F\u064A\u0644'
   },
   'zh-CN': {
     guidanceIconInformational: '\u53C2\u8003\u4FE1\u606F',
@@ -15118,45 +15283,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: '\u6210\u529F',
     guidanceLegendAttention: '\u6CE8\u610F',
     guidanceLegendInformational: '\u53C2\u8003\u4FE1\u606F',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Azure \u5DE5\u4F5C\u533A\u8BCA\u65AD',
-    azureDiagnosticsHint: '\u767B\u5F55\u4EE5\u76F4\u63A5\u4ECE\u6D4F\u89C8\u5668\u4F1A\u8BDD\u67E5\u8BE2\u5BA2\u6237 Azure \u8BA2\u9605\u548C Log Analytics \u5DE5\u4F5C\u533A\u3002\u4E0D\u4F1A\u5C06\u4EFB\u4F55\u5BA2\u6237\u67E5\u8BE2\u6570\u636E\u53D1\u9001\u5230\u672C\u5730\u670D\u52A1\u5668\u3002',
-    azureSubscription: '\u8BA2\u9605',
-    azureAcsResource: 'ACS \u8D44\u6E90',
-    azureWorkspace: '\u5DE5\u4F5C\u533A',
-    azureLoadSubscriptions: '\u52A0\u8F7D\u8BA2\u9605',
-    azureDiscoverResources: '\u53D1\u73B0 ACS \u8D44\u6E90',
-    azureDiscoverWorkspaces: '\u53D1\u73B0\u5DE5\u4F5C\u533A',
-    azureRunInventory: '\u8FD0\u884C\u5DE5\u4F5C\u533A\u6E05\u5355',
-    azureRunDomainSearch: '\u8FD0\u884C\u57DF\u641C\u7D22',
-    azureRunAcsSearch: '\u8FD0\u884C ACS \u641C\u7D22',
-    azureSignInRequired: '\u4F7F\u7528 Microsoft \u767B\u5F55\u4EE5\u4ECE\u6D4F\u89C8\u5668\u67E5\u8BE2 Azure \u8BA2\u9605\u548C Log Analytics\u3002',
-    azureLoadingSubscriptions: '\u6B63\u5728\u52A0\u8F7D\u8BA2\u9605...',
-    azureLoadingTenants: '\u6B63\u5728\u53D1\u73B0\u79DF\u6237...',
-    azureLoadingTenantSubscriptions: '\u6B63\u5728\u52A0\u8F7D\u79DF\u6237 {tenant} \u7684\u8BA2\u9605 ({current}/{total})...',
-    azureFilteringAcsSubscriptions: '\u6B63\u5728\u68C0\u67E5 {current}/{total} \u4E2A\u8BA2\u9605\u7684 ACS \u8D44\u6E90...',
-    azureLoadingResources: '\u6B63\u5728\u53D1\u73B0 ACS \u8D44\u6E90...',
-    azureLoadingWorkspaces: '\u6B63\u5728\u53D1\u73B0\u5DF2\u8FDE\u63A5\u7684\u5DE5\u4F5C\u533A...',
-    azureRunningQuery: '\u6B63\u5728\u8FD0\u884C\u67E5\u8BE2\uFF1A{name}',
-    azureNoSubscriptions: '\u672A\u8FD4\u56DE\u6B64\u7528\u6237\u7684\u4EFB\u4F55 Azure \u8BA2\u9605\u3002',
-    azureNoResources: '\u5728\u6240\u9009\u8BA2\u9605\u4E2D\u672A\u627E\u5230 ACS \u8D44\u6E90\u3002',
-    azureSubscriptionNotEnabled: '\u6240\u9009\u8BA2\u9605\u5904\u4E8E {state} \u72B6\u6001\u3002\u8D44\u6E90\u53D1\u73B0\u9700\u8981\u5DF2\u542F\u7528\u7684\u8BA2\u9605\u3002',
-    azureNoWorkspaces: '\u672A\u627E\u5230\u5DF2\u8FDE\u63A5\u7684 Log Analytics \u5DE5\u4F5C\u533A\u3002\u8BF7\u68C0\u67E5\u6240\u9009 ACS \u8D44\u6E90\u4E0A\u7684\u8BCA\u65AD\u8BBE\u7F6E\u3002',
-    azureSelectSubscriptionFirst: '\u8BF7\u5148\u9009\u62E9\u4E00\u4E2A\u8BA2\u9605\u3002',
-    azureSelectWorkspaceFirst: '\u8BF7\u5148\u9009\u62E9\u4E00\u4E2A\u5DE5\u4F5C\u533A\u3002',
-    azureDomainRequired: '\u5728\u8FD0\u884C\u57DF\u641C\u7D22\u67E5\u8BE2\u4E4B\u524D\uFF0C\u8BF7\u8F93\u5165\u57DF\u540D\u3002',
-    azureWorkspaceInventory: '\u5DE5\u4F5C\u533A\u6E05\u5355',
-    azureDomainSearch: '\u57DF\u641C\u7D22',
-    azureAcsSearch: 'ACS \u641C\u7D22',
-    azureResultsSummary: '\u79DF\u6237\uFF1A{tenant} \u2022 \u8BA2\u9605\uFF1A{subscription} \u2022 \u5DE5\u4F5C\u533A\uFF1A{workspace}',
-    azureQueryReturnedNoTables: '\u67E5\u8BE2\u5DF2\u5B8C\u6210\uFF0C\u4F46\u672A\u8FD4\u56DE\u4EFB\u4F55\u8868\u3002',
-    azureQueryFailed: 'Azure \u67E5\u8BE2\u5931\u8D25\uFF1A{reason}',
-    azureDiscoverSuccess: '\u53D1\u73B0\u5B8C\u6210\u3002\u8BF7\u9009\u62E9\u4E00\u4E2A\u5DE5\u4F5C\u533A\u5E76\u8FD0\u884C\u67E5\u8BE2\u3002',
-    azureSignedInAs: '\u5DF2\u4EE5 {user} \u8EAB\u4EFD\u767B\u5F55',
-    azureConsentRequired: '\u9700\u8981\u989D\u5916\u7684 Azure \u6743\u9650\u3002\u8BF7\u6279\u51C6\u540C\u610F\u63D0\u793A\u4EE5\u7EE7\u7EED\u3002',
-    azureQueryTextLabel: '\u5DF2\u6267\u884C\u7684\u67E5\u8BE2',
-    azureSwitchDirectory: '\u5207\u6362\u76EE\u5F55\uFF08\u79DF\u6237 ID \u6216\u57DF\uFF09',
-    azureSwitchBtn: '\u5207\u6362'
   },
   'hi-IN': {
     guidanceIconInformational: '\u0938\u0942\u091A\u0928\u093E\u0924\u094D\u092E\u0915',
@@ -15165,45 +15291,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: '\u0938\u092B\u0932',
     guidanceLegendAttention: '\u0927\u094D\u092F\u093E\u0928 \u0926\u0947\u0902',
     guidanceLegendInformational: '\u0938\u0942\u091A\u0928\u093E\u0924\u094D\u092E\u0915',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Azure \u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u0928\u093F\u0926\u093E\u0928',
-    azureDiagnosticsHint: '\u092C\u094D\u0930\u093E\u0909\u091C\u093C\u0930 \u0938\u0924\u094D\u0930 \u0938\u0947 \u0938\u0940\u0927\u0947 \u0917\u094D\u0930\u093E\u0939\u0915 Azure \u0938\u0926\u0938\u094D\u092F\u0924\u093E\u090F\u0901 \u0914\u0930 Log Analytics \u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u0915\u094D\u0935\u0947\u0930\u0940 \u0915\u0930\u0928\u0947 \u0915\u0947 \u0932\u093F\u090F \u0938\u093E\u0907\u0928 \u0907\u0928 \u0915\u0930\u0947\u0902\u0964 \u0938\u094D\u0925\u093E\u0928\u0940\u092F \u0938\u0930\u094D\u0935\u0930 \u0915\u094B \u0915\u094B\u0908 \u0917\u094D\u0930\u093E\u0939\u0915 \u0915\u094D\u0935\u0947\u0930\u0940 \u0921\u0947\u091F\u093E \u0928\u0939\u0940\u0902 \u092D\u0947\u091C\u093E \u091C\u093E\u0924\u093E \u0939\u0948\u0964',
-    azureSubscription: '\u0938\u0926\u0938\u094D\u092F\u0924\u093E',
-    azureAcsResource: 'ACS \u0938\u0902\u0938\u093E\u0927\u0928',
-    azureWorkspace: '\u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930',
-    azureLoadSubscriptions: '\u0938\u0926\u0938\u094D\u092F\u0924\u093E\u090F\u0901 \u0932\u094B\u0921 \u0915\u0930\u0947\u0902',
-    azureDiscoverResources: 'ACS \u0938\u0902\u0938\u093E\u0927\u0928 \u0916\u094B\u091C\u0947\u0902',
-    azureDiscoverWorkspaces: '\u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u0916\u094B\u091C\u0947\u0902',
-    azureRunInventory: '\u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u0938\u0942\u091A\u0940 \u091A\u0932\u093E\u090F\u0901',
-    azureRunDomainSearch: '\u0921\u094B\u092E\u0947\u0928 \u0916\u094B\u091C \u091A\u0932\u093E\u090F\u0901',
-    azureRunAcsSearch: 'ACS \u0916\u094B\u091C \u091A\u0932\u093E\u090F\u0901',
-    azureSignInRequired: '\u092C\u094D\u0930\u093E\u0909\u091C\u093C\u0930 \u0938\u0947 Azure \u0938\u0926\u0938\u094D\u092F\u0924\u093E\u090F\u0901 \u0914\u0930 Log Analytics \u0915\u094D\u0935\u0947\u0930\u0940 \u0915\u0930\u0928\u0947 \u0915\u0947 \u0932\u093F\u090F Microsoft \u0938\u0947 \u0938\u093E\u0907\u0928 \u0907\u0928 \u0915\u0930\u0947\u0902\u0964',
-    azureLoadingSubscriptions: '\u0938\u0926\u0938\u094D\u092F\u0924\u093E\u090F\u0901 \u0932\u094B\u0921 \u0939\u094B \u0930\u0939\u0940 \u0939\u0948\u0902...',
-    azureLoadingTenants: '\u091F\u0948\u0928\u0947\u0902\u091F \u0916\u094B\u091C\u0947 \u091C\u093E \u0930\u0939\u0947 \u0939\u0948\u0902...',
-    azureLoadingTenantSubscriptions: '\u091F\u0948\u0928\u0947\u0902\u091F {tenant} \u0915\u0940 \u0938\u0926\u0938\u094D\u092F\u0924\u093E\u090F\u0901 \u0932\u094B\u0921 \u0939\u094B \u0930\u0939\u0940 \u0939\u0948\u0902 ({current}/{total})...',
-    azureFilteringAcsSubscriptions: 'ACS \u0938\u0902\u0938\u093E\u0927\u0928\u094B\u0902 \u0915\u0947 \u0932\u093F\u090F {current}/{total} \u0938\u0926\u0938\u094D\u092F\u0924\u093E\u090F\u0901 \u091C\u093E\u0901\u091A\u0940 \u091C\u093E \u0930\u0939\u0940 \u0939\u0948\u0902...',
-    azureLoadingResources: 'ACS \u0938\u0902\u0938\u093E\u0927\u0928 \u0916\u094B\u091C\u0947 \u091C\u093E \u0930\u0939\u0947 \u0939\u0948\u0902...',
-    azureLoadingWorkspaces: '\u0915\u0928\u0947\u0915\u094D\u091F\u0947\u0921 \u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u0916\u094B\u091C\u0947 \u091C\u093E \u0930\u0939\u0947 \u0939\u0948\u0902...',
-    azureRunningQuery: '\u0915\u094D\u0935\u0947\u0930\u0940 \u091A\u0932 \u0930\u0939\u0940 \u0939\u0948: {name}',
-    azureNoSubscriptions: '\u0907\u0938 \u0909\u092A\u092F\u094B\u0917\u0915\u0930\u094D\u0924\u093E \u0915\u0947 \u0932\u093F\u090F \u0915\u094B\u0908 Azure \u0938\u0926\u0938\u094D\u092F\u0924\u093E \u0928\u0939\u0940\u0902 \u0932\u094C\u091F\u0940\u0964',
-    azureNoResources: '\u091A\u092F\u0928\u093F\u0924 \u0938\u0926\u0938\u094D\u092F\u0924\u093E \u092E\u0947\u0902 \u0915\u094B\u0908 ACS \u0938\u0902\u0938\u093E\u0927\u0928 \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u093E\u0964',
-    azureSubscriptionNotEnabled: '\u091A\u092F\u0928\u093F\u0924 \u0938\u0926\u0938\u094D\u092F\u0924\u093E {state} \u0939\u0948\u0964 \u0938\u0902\u0938\u093E\u0927\u0928 \u0916\u094B\u091C \u0915\u0947 \u0932\u093F\u090F \u090F\u0915 \u0938\u0915\u094D\u0937\u092E \u0938\u0926\u0938\u094D\u092F\u0924\u093E \u0906\u0935\u0936\u094D\u092F\u0915 \u0939\u0948\u0964',
-    azureNoWorkspaces: '\u0915\u094B\u0908 \u0915\u0928\u0947\u0915\u094D\u091F\u0947\u0921 Log Analytics \u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u093E\u0964 \u091A\u092F\u0928\u093F\u0924 ACS \u0938\u0902\u0938\u093E\u0927\u0928\u094B\u0902 \u092A\u0930 \u0928\u0948\u0926\u093E\u0928\u093F\u0915 \u0938\u0947\u091F\u093F\u0902\u0917\u094D\u0938 \u091C\u093E\u0901\u091A\u0947\u0902\u0964',
-    azureSelectSubscriptionFirst: '\u092A\u0939\u0932\u0947 \u090F\u0915 \u0938\u0926\u0938\u094D\u092F\u0924\u093E \u091A\u0941\u0928\u0947\u0902\u0964',
-    azureSelectWorkspaceFirst: '\u092A\u0939\u0932\u0947 \u090F\u0915 \u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u091A\u0941\u0928\u0947\u0902\u0964',
-    azureDomainRequired: '\u0921\u094B\u092E\u0947\u0928 \u0916\u094B\u091C \u0915\u094D\u0935\u0947\u0930\u0940 \u091A\u0932\u093E\u0928\u0947 \u0938\u0947 \u092A\u0939\u0932\u0947 \u0921\u094B\u092E\u0947\u0928 \u0926\u0930\u094D\u091C \u0915\u0930\u0947\u0902\u0964',
-    azureWorkspaceInventory: '\u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u0938\u0942\u091A\u0940',
-    azureDomainSearch: '\u0921\u094B\u092E\u0947\u0928 \u0916\u094B\u091C',
-    azureAcsSearch: 'ACS \u0916\u094B\u091C',
-    azureResultsSummary: '\u091F\u0948\u0928\u0947\u0902\u091F: {tenant} \u2022 \u0938\u0926\u0938\u094D\u092F\u0924\u093E: {subscription} \u2022 \u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930: {workspace}',
-    azureQueryReturnedNoTables: '\u0915\u094D\u0935\u0947\u0930\u0940 \u092A\u0942\u0930\u094D\u0923 \u0939\u0941\u0908 \u0932\u0947\u0915\u093F\u0928 \u0915\u094B\u0908 \u0924\u093E\u0932\u093F\u0915\u093E \u0928\u0939\u0940\u0902 \u0932\u094C\u091F\u0940\u0964',
-    azureQueryFailed: 'Azure \u0915\u094D\u0935\u0947\u0930\u0940 \u0935\u093F\u092B\u0932: {reason}',
-    azureDiscoverSuccess: '\u0916\u094B\u091C \u092A\u0942\u0930\u094D\u0923\u0964 \u090F\u0915 \u0915\u093E\u0930\u094D\u092F\u0915\u094D\u0937\u0947\u0924\u094D\u0930 \u091A\u0941\u0928\u0947\u0902 \u0914\u0930 \u0915\u094D\u0935\u0947\u0930\u0940 \u091A\u0932\u093E\u090F\u0901\u0964',
-    azureSignedInAs: '{user} \u0915\u0947 \u0930\u0942\u092A \u092E\u0947\u0902 \u0938\u093E\u0907\u0928 \u0907\u0928 \u0915\u093F\u092F\u093E',
-    azureConsentRequired: '\u0905\u0924\u093F\u0930\u093F\u0915\u094D\u0924 Azure \u0905\u0928\u0941\u092E\u0924\u093F\u092F\u093E\u0901 \u0906\u0935\u0936\u094D\u092F\u0915 \u0939\u0948\u0902\u0964 \u091C\u093E\u0930\u0940 \u0930\u0916\u0928\u0947 \u0915\u0947 \u0932\u093F\u090F \u0938\u0939\u092E\u0924\u093F \u092A\u094D\u0930\u0949\u092E\u094D\u092A\u094D\u091F \u0938\u094D\u0935\u0940\u0915\u093E\u0930 \u0915\u0930\u0947\u0902\u0964',
-    azureQueryTextLabel: '\u0928\u093F\u0937\u094D\u092A\u093E\u0926\u093F\u0924 \u0915\u094D\u0935\u0947\u0930\u0940',
-    azureSwitchDirectory: '\u0928\u093F\u0930\u094D\u0926\u0947\u0936\u093F\u0915\u093E \u092C\u0926\u0932\u0947\u0902 (\u091F\u0948\u0928\u0947\u0902\u091F ID \u092F\u093E \u0921\u094B\u092E\u0947\u0928)',
-    azureSwitchBtn: '\u092C\u0926\u0932\u0947\u0902'
   },
   'ja-JP': {
     guidanceIconInformational: '\u60C5\u5831',
@@ -15212,45 +15299,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: '\u6210\u529F',
     guidanceLegendAttention: '\u6CE8\u610F',
     guidanceLegendInformational: '\u60C5\u5831',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: 'Azure \u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u8A3A\u65AD',
-    azureDiagnosticsHint: '\u30D6\u30E9\u30A6\u30B6\u30FC \u30BB\u30C3\u30B7\u30E7\u30F3\u304B\u3089\u76F4\u63A5 Azure \u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u3068 Log Analytics \u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u3092\u7167\u4F1A\u3059\u308B\u306B\u306F\u3001\u30B5\u30A4\u30F3\u30A4\u30F3\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u9867\u5BA2\u306E\u30AF\u30A8\u30EA \u30C7\u30FC\u30BF\u306F\u30ED\u30FC\u30AB\u30EB \u30B5\u30FC\u30D0\u30FC\u306B\u9001\u4FE1\u3055\u308C\u307E\u305B\u3093\u3002',
-    azureSubscription: '\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3',
-    azureAcsResource: 'ACS \u30EA\u30BD\u30FC\u30B9',
-    azureWorkspace: '\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9',
-    azureLoadSubscriptions: '\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u3092\u8AAD\u307F\u8FBC\u3080',
-    azureDiscoverResources: 'ACS \u30EA\u30BD\u30FC\u30B9\u3092\u691C\u51FA',
-    azureDiscoverWorkspaces: '\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u3092\u691C\u51FA',
-    azureRunInventory: '\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9 \u30A4\u30F3\u30D9\u30F3\u30C8\u30EA\u3092\u5B9F\u884C',
-    azureRunDomainSearch: '\u30C9\u30E1\u30A4\u30F3\u691C\u7D22\u3092\u5B9F\u884C',
-    azureRunAcsSearch: 'ACS \u691C\u7D22\u3092\u5B9F\u884C',
-    azureSignInRequired: '\u30D6\u30E9\u30A6\u30B6\u30FC\u304B\u3089 Azure \u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u3068 Log Analytics \u3092\u7167\u4F1A\u3059\u308B\u306B\u306F\u3001Microsoft \u3067\u30B5\u30A4\u30F3\u30A4\u30F3\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
-    azureLoadingSubscriptions: '\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059...',
-    azureLoadingTenants: '\u30C6\u30CA\u30F3\u30C8\u3092\u691C\u51FA\u3057\u3066\u3044\u307E\u3059...',
-    azureLoadingTenantSubscriptions: '\u30C6\u30CA\u30F3\u30C8 {tenant} \u306E\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059 ({current}/{total})...',
-    azureFilteringAcsSubscriptions: 'ACS \u30EA\u30BD\u30FC\u30B9\u306E {current}/{total} \u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u3092\u78BA\u8A8D\u3057\u3066\u3044\u307E\u3059...',
-    azureLoadingResources: 'ACS \u30EA\u30BD\u30FC\u30B9\u3092\u691C\u51FA\u3057\u3066\u3044\u307E\u3059...',
-    azureLoadingWorkspaces: '\u63A5\u7D9A\u3055\u308C\u305F\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u3092\u691C\u51FA\u3057\u3066\u3044\u307E\u3059...',
-    azureRunningQuery: '\u30AF\u30A8\u30EA\u3092\u5B9F\u884C\u3057\u3066\u3044\u307E\u3059: {name}',
-    azureNoSubscriptions: '\u3053\u306E\u30E6\u30FC\u30B6\u30FC\u306E Azure \u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u306F\u8FD4\u3055\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002',
-    azureNoResources: '\u9078\u629E\u3057\u305F\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u306B ACS \u30EA\u30BD\u30FC\u30B9\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002',
-    azureSubscriptionNotEnabled: '\u9078\u629E\u3057\u305F\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u306F {state} \u3067\u3059\u3002\u30EA\u30BD\u30FC\u30B9\u306E\u691C\u51FA\u306B\u306F\u6709\u52B9\u306A\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u304C\u5FC5\u8981\u3067\u3059\u3002',
-    azureNoWorkspaces: '\u63A5\u7D9A\u3055\u308C\u305F Log Analytics \u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002\u9078\u629E\u3057\u305F ACS \u30EA\u30BD\u30FC\u30B9\u306E\u8A3A\u65AD\u8A2D\u5B9A\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
-    azureSelectSubscriptionFirst: '\u6700\u521D\u306B\u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
-    azureSelectWorkspaceFirst: '\u6700\u521D\u306B\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
-    azureDomainRequired: '\u30C9\u30E1\u30A4\u30F3\u691C\u7D22\u30AF\u30A8\u30EA\u3092\u5B9F\u884C\u3059\u308B\u524D\u306B\u30C9\u30E1\u30A4\u30F3\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
-    azureWorkspaceInventory: '\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9 \u30A4\u30F3\u30D9\u30F3\u30C8\u30EA',
-    azureDomainSearch: '\u30C9\u30E1\u30A4\u30F3\u691C\u7D22',
-    azureAcsSearch: 'ACS \u691C\u7D22',
-    azureResultsSummary: '\u30C6\u30CA\u30F3\u30C8: {tenant} \u2022 \u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3: {subscription} \u2022 \u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9: {workspace}',
-    azureQueryReturnedNoTables: '\u30AF\u30A8\u30EA\u306F\u5B8C\u4E86\u3057\u307E\u3057\u305F\u304C\u3001\u30C6\u30FC\u30D6\u30EB\u306F\u8FD4\u3055\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002',
-    azureQueryFailed: 'Azure \u30AF\u30A8\u30EA\u304C\u5931\u6557\u3057\u307E\u3057\u305F: {reason}',
-    azureDiscoverSuccess: '\u691C\u51FA\u304C\u5B8C\u4E86\u3057\u307E\u3057\u305F\u3002\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u3092\u9078\u629E\u3057\u3066\u30AF\u30A8\u30EA\u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
-    azureSignedInAs: '{user} \u3068\u3057\u3066\u30B5\u30A4\u30F3\u30A4\u30F3\u4E2D',
-    azureConsentRequired: '\u8FFD\u52A0\u306E Azure \u30A2\u30AF\u30BB\u30B9\u8A31\u53EF\u304C\u5FC5\u8981\u3067\u3059\u3002\u7D9A\u884C\u3059\u308B\u306B\u306F\u540C\u610F\u30D7\u30ED\u30F3\u30D7\u30C8\u3092\u627F\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002',
-    azureQueryTextLabel: '\u5B9F\u884C\u3055\u308C\u305F\u30AF\u30A8\u30EA',
-    azureSwitchDirectory: '\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u306E\u5207\u308A\u66FF\u3048 (\u30C6\u30CA\u30F3\u30C8 ID \u307E\u305F\u306F\u30C9\u30E1\u30A4\u30F3)',
-    azureSwitchBtn: '\u5207\u308A\u66FF\u3048'
   },
   'ru-RU': {
     guidanceIconInformational: '\u0418\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u044F',
@@ -15259,45 +15307,6 @@ const GUIDANCE_AND_AZURE_OVERRIDES = {
     guidanceIconSuccess: '\u0423\u0441\u043F\u0435\u0445',
     guidanceLegendAttention: '\u0412\u043D\u0438\u043C\u0430\u043D\u0438\u0435',
     guidanceLegendInformational: '\u0418\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u044F',
-    azureTag: 'AZURE',
-    azureDiagnosticsTitle: '\u0414\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0430 \u0440\u0430\u0431\u043E\u0447\u0435\u0439 \u043E\u0431\u043B\u0430\u0441\u0442\u0438 Azure',
-    azureDiagnosticsHint: '\u0412\u043E\u0439\u0434\u0438\u0442\u0435, \u0447\u0442\u043E\u0431\u044B \u0437\u0430\u043F\u0440\u0430\u0448\u0438\u0432\u0430\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0438 Azure \u0438 \u0440\u0430\u0431\u043E\u0447\u0438\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u0438 Log Analytics \u043F\u0440\u044F\u043C\u043E \u0438\u0437 \u0441\u0435\u0430\u043D\u0441\u0430 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430. \u0414\u0430\u043D\u043D\u044B\u0435 \u043A\u043B\u0438\u0435\u043D\u0442\u0441\u043A\u0438\u0445 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u043D\u0435 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0442\u0441\u044F \u043D\u0430 \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0435\u0440\u0432\u0435\u0440.',
-    azureSubscription: '\u041F\u043E\u0434\u043F\u0438\u0441\u043A\u0430',
-    azureAcsResource: '\u0420\u0435\u0441\u0443\u0440\u0441 ACS',
-    azureWorkspace: '\u0420\u0430\u0431\u043E\u0447\u0430\u044F \u043E\u0431\u043B\u0430\u0441\u0442\u044C',
-    azureLoadSubscriptions: '\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0438',
-    azureDiscoverResources: '\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0438\u0442\u044C \u0440\u0435\u0441\u0443\u0440\u0441\u044B ACS',
-    azureDiscoverWorkspaces: '\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0438\u0442\u044C \u0440\u0430\u0431\u043E\u0447\u0438\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u0438',
-    azureRunInventory: '\u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u0438\u043D\u0432\u0435\u043D\u0442\u0430\u0440\u0438\u0437\u0430\u0446\u0438\u044E \u0440\u0430\u0431\u043E\u0447\u0435\u0439 \u043E\u0431\u043B\u0430\u0441\u0442\u0438',
-    azureRunDomainSearch: '\u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u043F\u043E\u0438\u0441\u043A \u0434\u043E\u043C\u0435\u043D\u0430',
-    azureRunAcsSearch: '\u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u043F\u043E\u0438\u0441\u043A ACS',
-    azureSignInRequired: '\u0412\u043E\u0439\u0434\u0438\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 Microsoft, \u0447\u0442\u043E\u0431\u044B \u0437\u0430\u043F\u0440\u0430\u0448\u0438\u0432\u0430\u0442\u044C \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0438 Azure \u0438 Log Analytics \u0438\u0437 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430.',
-    azureLoadingSubscriptions: '\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430 \u043F\u043E\u0434\u043F\u0438\u0441\u043E\u043A...',
-    azureLoadingTenants: '\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u0438\u0435 \u0430\u0440\u0435\u043D\u0434\u0430\u0442\u043E\u0440\u043E\u0432...',
-    azureLoadingTenantSubscriptions: '\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430 \u043F\u043E\u0434\u043F\u0438\u0441\u043E\u043A \u0430\u0440\u0435\u043D\u0434\u0430\u0442\u043E\u0440\u0430 {tenant} ({current}/{total})...',
-    azureFilteringAcsSubscriptions: '\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 {current}/{total} \u043F\u043E\u0434\u043F\u0438\u0441\u043E\u043A \u043D\u0430 \u043D\u0430\u043B\u0438\u0447\u0438\u0435 \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 ACS...',
-    azureLoadingResources: '\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u0438\u0435 \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 ACS...',
-    azureLoadingWorkspaces: '\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u0438\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D\u043D\u044B\u0445 \u0440\u0430\u0431\u043E\u0447\u0438\u0445 \u043E\u0431\u043B\u0430\u0441\u0442\u0435\u0439...',
-    azureRunningQuery: '\u0412\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u0438\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u0430: {name}',
-    azureNoSubscriptions: '\u041F\u043E\u0434\u043F\u0438\u0441\u043A\u0438 Azure \u0434\u043B\u044F \u044D\u0442\u043E\u0433\u043E \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u044B.',
-    azureNoResources: '\u0420\u0435\u0441\u0443\u0440\u0441\u044B ACS \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u044B \u0432 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0439 \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0435.',
-    azureSubscriptionNotEnabled: '\u0412\u044B\u0431\u0440\u0430\u043D\u043D\u0430\u044F \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0430 \u043D\u0430\u0445\u043E\u0434\u0438\u0442\u0441\u044F \u0432 \u0441\u043E\u0441\u0442\u043E\u044F\u043D\u0438\u0438 {state}. \u0414\u043B\u044F \u043E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u0438\u044F \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044F \u0430\u043A\u0442\u0438\u0432\u043D\u0430\u044F \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0430.',
-    azureNoWorkspaces: '\u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D\u043D\u044B\u0435 \u0440\u0430\u0431\u043E\u0447\u0438\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u0438 Log Analytics \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u044B. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u0434\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0438 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0445 \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 ACS.',
-    azureSelectSubscriptionFirst: '\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043F\u043E\u0434\u043F\u0438\u0441\u043A\u0443.',
-    azureSelectWorkspaceFirst: '\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0440\u0430\u0431\u043E\u0447\u0443\u044E \u043E\u0431\u043B\u0430\u0441\u0442\u044C.',
-    azureDomainRequired: '\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u0434\u043E\u043C\u0435\u043D \u043F\u0435\u0440\u0435\u0434 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u0438\u0435\u043C \u0437\u0430\u043F\u0440\u043E\u0441\u0430 \u043F\u043E\u0438\u0441\u043A\u0430 \u0434\u043E\u043C\u0435\u043D\u0430.',
-    azureWorkspaceInventory: '\u0418\u043D\u0432\u0435\u043D\u0442\u0430\u0440\u0438\u0437\u0430\u0446\u0438\u044F \u0440\u0430\u0431\u043E\u0447\u0435\u0439 \u043E\u0431\u043B\u0430\u0441\u0442\u0438',
-    azureDomainSearch: '\u041F\u043E\u0438\u0441\u043A \u0434\u043E\u043C\u0435\u043D\u0430',
-    azureAcsSearch: '\u041F\u043E\u0438\u0441\u043A ACS',
-    azureResultsSummary: '\u0410\u0440\u0435\u043D\u0434\u0430\u0442\u043E\u0440: {tenant} \u2022 \u041F\u043E\u0434\u043F\u0438\u0441\u043A\u0430: {subscription} \u2022 \u0420\u0430\u0431\u043E\u0447\u0430\u044F \u043E\u0431\u043B\u0430\u0441\u0442\u044C: {workspace}',
-    azureQueryReturnedNoTables: '\u0417\u0430\u043F\u0440\u043E\u0441 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D, \u043D\u043E \u043D\u0435 \u0432\u0435\u0440\u043D\u0443\u043B \u0442\u0430\u0431\u043B\u0438\u0446.',
-    azureQueryFailed: '\u041E\u0448\u0438\u0431\u043A\u0430 \u0437\u0430\u043F\u0440\u043E\u0441\u0430 Azure: {reason}',
-    azureDiscoverSuccess: '\u041E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u0438\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043D\u043E. \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0440\u0430\u0431\u043E\u0447\u0443\u044E \u043E\u0431\u043B\u0430\u0441\u0442\u044C \u0438 \u0432\u044B\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u0437\u0430\u043F\u0440\u043E\u0441.',
-    azureSignedInAs: '\u0412\u0445\u043E\u0434 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D \u043A\u0430\u043A {user}',
-    azureConsentRequired: '\u0422\u0440\u0435\u0431\u0443\u044E\u0442\u0441\u044F \u0434\u043E\u043F\u043E\u043B\u043D\u0438\u0442\u0435\u043B\u044C\u043D\u044B\u0435 \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u044F Azure. \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u0435 \u0437\u0430\u043F\u0440\u043E\u0441 \u0441\u043E\u0433\u043B\u0430\u0441\u0438\u044F \u0434\u043B\u044F \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0435\u043D\u0438\u044F.',
-    azureQueryTextLabel: '\u0412\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043D\u044B\u0439 \u0437\u0430\u043F\u0440\u043E\u0441',
-    azureSwitchDirectory: '\u0421\u043C\u0435\u043D\u0438\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433 (\u0438\u0434\u0435\u043D\u0442\u0438\u0444\u0438\u043A\u0430\u0442\u043E\u0440 \u0430\u0440\u0435\u043D\u0434\u0430\u0442\u043E\u0440\u0430 \u0438\u043B\u0438 \u0434\u043E\u043C\u0435\u043D)',
-    azureSwitchBtn: '\u0421\u043C\u0435\u043D\u0438\u0442\u044C'
   }
 };
 
@@ -17310,38 +17319,6 @@ function applyLanguageToStaticUi() {
   const signOutBtn = document.getElementById('msSignOutBtn');
   if (signOutBtn) signOutBtn.innerHTML = t('signOut');
 
-  const azureTag = document.getElementById('azureDiagnosticsTag');
-  if (azureTag) azureTag.textContent = t('azureTag');
-
-  const azureTitle = document.getElementById('azureDiagnosticsTitle');
-  if (azureTitle) azureTitle.textContent = t('azureDiagnosticsTitle');
-
-  const azureHint = document.getElementById('azureDiagnosticsHint');
-  if (azureHint) azureHint.textContent = t('azureDiagnosticsHint');
-
-  const azureSubscriptionLabel = document.getElementById('azureSubscriptionLabel');
-  if (azureSubscriptionLabel) azureSubscriptionLabel.textContent = t('azureSubscription');
-
-  const azureSwitchDirectoryLabel = document.getElementById('azureSwitchDirectoryLabel');
-  if (azureSwitchDirectoryLabel) azureSwitchDirectoryLabel.textContent = t('azureSwitchDirectory');
-  const azureSwitchDirectoryBtn = document.getElementById('azureSwitchDirectoryBtn');
-  if (azureSwitchDirectoryBtn) azureSwitchDirectoryBtn.textContent = t('azureSwitchBtn');
-
-  const azureResourceLabel = document.getElementById('azureResourceLabel');
-  if (azureResourceLabel) azureResourceLabel.textContent = t('azureAcsResource');
-
-  const azureWorkspaceLabel = document.getElementById('azureWorkspaceLabel');
-  if (azureWorkspaceLabel) azureWorkspaceLabel.textContent = t('azureWorkspace');
-
-  const azureRunInventoryBtn = document.getElementById('azureRunInventoryBtn');
-  if (azureRunInventoryBtn) azureRunInventoryBtn.textContent = t('azureRunInventory');
-
-  const azureRunDomainSearchBtn = document.getElementById('azureRunDomainSearchBtn');
-  if (azureRunDomainSearchBtn) azureRunDomainSearchBtn.textContent = t('azureRunDomainSearch');
-
-  const azureRunAcsSearchBtn = document.getElementById('azureRunAcsSearchBtn');
-  if (azureRunAcsSearchBtn) azureRunAcsSearchBtn.textContent = t('azureRunAcsSearch');
-
   const footer = document.getElementById('footerText');
   if (footer) {
     let footerHtml = t('footer', { version: appVersion });
@@ -17354,7 +17331,6 @@ function applyLanguageToStaticUi() {
 
   populateLanguageSelect();
   loadHistory();
-  renderAzureDiagnosticsUi();
 
   // Re-render the live check-progress popover so its labels follow the
   // newly selected language even if a lookup is currently in flight.
@@ -21584,6 +21560,12 @@ function render(r) {
 
   const quotaCopyTextPlain = plainTable.join('\n');
   const quotaCopyTextHtml = `<table style="border-collapse:collapse;min-width:260px;">${htmlTableRows.map(r => r.replace('<th>', '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">').replace('<td>', '<td style="padding:4px 8px;border:1px solid #ddd;">')).join('')}</table>`;
+  // Store the base DNS/quota table so the copy handler can recombine it with
+  // the latest intake content at click time. The intake block is intentionally
+  // NOT baked in here: render() runs during the domain lookup (before the user
+  // clicks "Process Data"), so building the intake portion now would freeze an
+  // empty/stale snapshot. buildQuotaCopyPayload() rebuilds it on demand.
+  window.quotaCopyBase = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
   quotaCopyText = quotaCopyTextPlain;
   // Expose for inline copy handler with rich + plain variants
   window.quotaCopyText = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
@@ -21594,7 +21576,7 @@ function render(r) {
       <span class="chevron">&#x25BC;</span>
       <span class="tag tag-info">${escapeHtml(t('checklist'))}</span>
       <strong>${escapeHtml(t('emailQuota'))}</strong>
-      <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(window.quotaCopyText, this)">${escapeHtml(t('copyEmailQuota'))}</button>
+      <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(buildQuotaCopyPayload(), this)">${escapeHtml(t('copyEmailQuota'))}</button>
     </div>
     <div class="card-content">
       <div class="status-summary">${quotaItems.join('')}</div>
@@ -22563,18 +22545,794 @@ document.getElementById("domainInput").addEventListener("keyup", function (e) {
   }
 });
 
-document.getElementById('azureSubscriptionSelect').addEventListener('change', function () {
-  azureDiagnosticsState.resources = [];
-  azureDiagnosticsState.workspaces = [];
-  renderAzureDiagnosticsUi();
-  discoverAzureResources();
-});
+// ===== Customer Intake Form (rich-text editor) =====
+// The intake section is a single contenteditable region. We persist both
+// the HTML (for the rich Copy Email Quota output) and a plain-text
+// projection (used when the clipboard target only accepts text). Storage
+// is gated through the same consent-aware wrapper as the rest of the app.
+const INTAKE_STORAGE_KEY = 'acsIntakeRich';
+const INTAKE_TEMPLATE_HTML = [
+  '<p><strong>Customer Information</strong></p>',
+  '<ul>',
+  '<li>Company name: </li>',
+  '<li>Company website: </li>',
+  '<li>Provide a brief description of your business: </li>',
+  '</ul>',
+  '<p><strong>Email Service Information</strong></p>',
+  '<ul>',
+  '<li>Subscription ID: </li>',
+  '<li>Azure Communication Services Resource Name: </li>',
+  '<li>Is your custom domain already set up and currently used for sending messages: </li>',
+  '<li>Indicate the domain from which you are currently sending emails: </li>',
+  '</ul>',
+  '<p><strong>Usage Information</strong></p>',
+  '<ol>',
+  '<li>What type of emails do you send? (such as Transactional, Marketing, Promotional) </li>',
+  '<li>Specify the expected volume of emails you plan to send:',
+  '<ul>',
+  '<li>What is the maximum rate of messages per minute that you require? </li>',
+  '<li>What is the maximum rate of messages per hour that you require? </li>',
+  '<li>What is the maximum rate of messages per day that you require? </li>',
+  '</ul></li>',
+  '<li>What is the maximum attachment size (in MB) that you require? </li>',
+  '</ol>',
+  '<p><strong>Additional Information</strong></p>',
+  '<p>What is the source of the email addresses that you use for sending your messages?</p>',
+  '<p><em>Note: The source of the email addresses that you send your messages to plays a crucial role in the effectiveness and compliance of your email marketing campaigns. Providing details about the source of your email addresses helps us understand how you acquire and maintain your subscriber list.</em></p>',
+  '<p><br></p>',
+  '<p>How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?</p>',
+  '<p><em>Explain if you have an automated process in place that handles unsubscribes when recipients click on the \'unsubscribe\' link in your emails. Additionally, if you receive bounce/undeliverable notifications, can you include how you handle those and whether you have any mechanism to automatically remove email addresses that result in consistent bounces.</em></p>',
+  '<p><br></p>'
+].join('');
 
-document.getElementById('azureResourceSelect').addEventListener('change', function () {
-  azureDiagnosticsState.workspaces = [];
-  renderAzureDiagnosticsUi();
-  discoverAzureWorkspaces();
-});
+function getIntakeEditor() { return document.getElementById('intakeRichEditor'); }
+
+function loadIntakeForm() {
+  const editor = getIntakeEditor();
+  if (!editor) return;
+  let html = '';
+  try { html = consentAwareGetItem(INTAKE_STORAGE_KEY, 'functional') || ''; } catch (_) {}
+  if (html) editor.innerHTML = html;
+
+  if (!editor.__intakeBound) {
+    editor.addEventListener('input', saveIntakeForm);
+    editor.addEventListener('blur', saveIntakeForm);
+    // Strip styles from pasted content but keep structural markup so the
+    // copied payload doesn't inherit weird fonts/colors from the source.
+    editor.addEventListener('paste', handleIntakePaste);
+    bindIntakeToolbar();
+    editor.__intakeBound = true;
+  }
+}
+
+function saveIntakeForm() {
+  const editor = getIntakeEditor();
+  if (!editor) return;
+  try { consentAwareSetItem(INTAKE_STORAGE_KEY, editor.innerHTML, 'functional'); } catch (_) {}
+}
+
+function clearIntakeForm() {
+  const editor = getIntakeEditor();
+  if (editor) editor.innerHTML = '';
+  try { consentAwareSetItem(INTAKE_STORAGE_KEY, '', 'functional'); } catch (_) {}
+  intakeExtractedOverrides = {};
+  const wrap = document.getElementById('intakeExtractedWrap');
+  if (wrap) wrap.style.display = 'none';
+  const status = document.getElementById('intakeProcessStatus');
+  if (status) status.textContent = '';
+}
+
+function prefillIntakeForm() {
+  const editor = getIntakeEditor();
+  if (!editor) return;
+  const existing = (editor.innerHTML || '').trim();
+  if (existing && !window.confirm('Replace the current intake notes with the standard template?')) return;
+  editor.innerHTML = INTAKE_TEMPLATE_HTML;
+  saveIntakeForm();
+}
+
+function handleIntakePaste(e) {
+  // Prefer HTML so formatting/tables survive; fall back to plain text.
+  const cd = e.clipboardData || window.clipboardData;
+  if (!cd) return;
+  const html = cd.getData('text/html');
+  const text = cd.getData('text/plain');
+  if (html) {
+    e.preventDefault();
+    // Sanitize: drop <script>/<style> and inline event handlers / style
+    // attributes so the editor cannot inherit malicious or visually
+    // disruptive markup from the clipboard source.
+    const cleaned = sanitizeIntakeHtml(html);
+    document.execCommand('insertHTML', false, cleaned);
+    saveIntakeForm();
+  } else if (text) {
+    e.preventDefault();
+    document.execCommand('insertText', false, text);
+    saveIntakeForm();
+  }
+}
+
+function sanitizeIntakeHtml(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = String(html || '');
+  const walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_ELEMENT);
+  const toRemove = [];
+  let n;
+  while ((n = walker.nextNode())) {
+    const tag = n.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'META' || tag === 'LINK') {
+      toRemove.push(n);
+      continue;
+    }
+    // Drop style attribute and any on* event handlers.
+    if (n.hasAttribute('style')) n.removeAttribute('style');
+    for (const attr of Array.from(n.attributes)) {
+      if (/^on/i.test(attr.name)) n.removeAttribute(attr.name);
+    }
+  }
+  toRemove.forEach(el => el.parentNode && el.parentNode.removeChild(el));
+  return tpl.innerHTML;
+}
+
+function bindIntakeToolbar() {
+  const bar = document.getElementById('intakeFormToolbar');
+  if (!bar || bar.__intakeBound) return;
+  bar.__intakeBound = true;
+  bar.addEventListener('mousedown', (e) => {
+    // Keep editor selection while clicking toolbar buttons.
+    const btn = e.target.closest('button[data-cmd]');
+    if (btn) e.preventDefault();
+  });
+  bar.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-cmd]');
+    if (!btn) return;
+    const cmd = btn.getAttribute('data-cmd');
+    let arg = btn.getAttribute('data-arg') || null;
+    if (cmd === 'createLink') {
+      const url = window.prompt('Link URL:', 'https://');
+      if (!url) return;
+      arg = url;
+    }
+    document.execCommand(cmd, false, arg);
+    const editor = getIntakeEditor();
+    if (editor) editor.focus();
+    saveIntakeForm();
+  });
+}
+
+function getIntakeContent() {
+  // Returns { plain, html } for whatever the user has currently typed,
+  // or null when the editor is empty.
+  const editor = getIntakeEditor();
+  if (!editor) return null;
+  const html = (editor.innerHTML || '').trim();
+  const text = (editor.innerText || '').trim();
+  if (!text && !html) return null;
+  if (!text) return null;
+  return { plain: text, html: html };
+}
+
+// ----- Extraction -----------------------------------------------------
+// Standard ACS intake fields. Each entry lists the canonical label plus
+// alternate phrasings/keywords we'll look for in the rich-text editor.
+// Matching is case-insensitive and tolerant of trailing punctuation.
+const INTAKE_EXTRACT_FIELDS = [
+  { id: 'companyName',          label: 'Company name',                                 patterns: ['company name', 'customer name', 'organization name', 'organisation name'] },
+  { id: 'companyWebsite',       label: 'Company website',                              patterns: ['company website', 'website', 'company url', 'web site'] },
+  { id: 'businessDescription',  label: 'Brief description of your business',           patterns: ['provide a brief description of your business', 'brief description of your business', 'business description', 'description of your business', 'description of business', 'about the business', 'about your business'] },
+  { id: 'subscriptionId',       label: 'Subscription ID',                              patterns: ['subscription id', 'azure subscription id', 'subscription'] },
+  { id: 'acsResourceName',      label: 'Azure Communication Services Resource Name',   patterns: ['azure communication services resource name', 'acs resource name', 'communication services resource name', 'resource name'] },
+  { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'custom domain already set up', 'custom domain in use', 'domain already in use'] },
+  { id: 'currentSendingDomain', label: 'Current sending domain',                       patterns: ['indicate the domain from which you are currently sending emails', 'current sending domain', 'currently sending from', 'sending domain'] },
+  { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'type of emails do you send', 'type of emails', 'email type', 'types of emails'] },
+  { id: 'currentTier',          label: 'Current tier level',                           patterns: ['current tier level', 'current tier', 'existing tier', 'throttling tier for current subscription', 'throttling tier'] },
+  { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'email volume', 'volume of emails'] },
+  { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'rate per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
+  { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'rate per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
+  { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
+  { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
+  { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
+  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced', 'unsubscribe link'] }
+];
+
+// Track manual edits made in the extracted-fields table so re-running
+// "Process Data" doesn't blow them away unless the user explicitly clears
+// the field first.
+let intakeExtractedOverrides = {};
+
+// ACS Email throttling tiers. Each entry: { name, perMinute, perHour }.
+// "Expected tier level" is computed as the smallest tier whose per-minute
+// AND per-hour caps both meet or exceed the customer's requested rates.
+//
+// Tier names are stored base64-encoded (and decoded once at runtime) so
+// they are not trivially greppable in the bundled source. This is light
+// obfuscation, NOT a security control -- anyone who runs the page can
+// still read the decoded list in the browser. True one-way hashing would
+// prevent us from ever displaying the name, which defeats the feature.
+const INTAKE_TIERS = (function () {
+  const raw = [
+    { n: 'TWVyY3VyeQ==',                  perMinute:     30, perHour:      100 },
+    { n: 'VmVudXM=',                      perMinute:    100, perHour:     1000 },
+    { n: 'VmVudXNTdGFuZGFyZA==',          perMinute:    500, perHour:     2000 },
+    { n: 'VmVudXNQcm9mZXNzaW9uYWw=',      perMinute:   1000, perHour:     3000 },
+    { n: 'VmVudXNQcmVtaXVt',              perMinute:   2000, perHour:     4000 },
+    { n: 'RWFydGg=',                      perMinute:   5000, perHour:    20000 },
+    { n: 'RWFydGhTdGFuZGFyZA==',          perMinute:  10000, perHour:    40000 },
+    { n: 'RWFydGhQcm9mZXNzaW9uYWw=',      perMinute:  15000, perHour:    80000 },
+    { n: 'RWFydGhQcmVtaXVt',              perMinute:  20000, perHour:   100000 },
+    { n: 'RWFydGhTaWx2ZXI=',              perMinute: 100000, perHour:   500000 },
+    { n: 'RWFydGhHb2xk',                  perMinute: 200000, perHour:  1000000 },
+    { n: 'RWFydGhQbGF0aW51bQ==',          perMinute: 400000, perHour:  2000000 }
+  ];
+  const decode = (s) => {
+    try { return decodeURIComponent(escape(atob(s))); }
+    catch (_) { try { return atob(s); } catch (__) { return s; } }
+  };
+  return raw.map(t => ({ name: decode(t.n), perMinute: t.perMinute, perHour: t.perHour }));
+})();
+
+function parseIntakeNumeric(text) {
+  if (text === null || text === undefined) return null;
+  // Pull the first integer-like token out of the cell. Handles "1,000",
+  // "1000 msgs", "~100", etc. Returns null when no number is present.
+  const m = String(text).replace(/[\u00A0\s]/g, '').match(/(\d{1,3}(?:,\d{3})+|\d+)/);
+  if (!m) return null;
+  const n = parseInt(m[1].replace(/,/g, ''), 10);
+  return isNaN(n) ? null : n;
+}
+
+function inferExpectedTierIndex(perMinute, perHour) {
+  // Returns the index of the smallest tier that meets both rates, or -1
+  // when the customer's request exceeds every published tier.
+  const wantMin = parseIntakeNumeric(perMinute);
+  const wantHour = parseIntakeNumeric(perHour);
+  if (wantMin === null && wantHour === null) return -1;
+  for (let i = 0; i < INTAKE_TIERS.length; i++) {
+    const t = INTAKE_TIERS[i];
+    const okMin  = (wantMin  === null) || (t.perMinute >= wantMin);
+    const okHour = (wantHour === null) || (t.perHour   >= wantHour);
+    if (okMin && okHour) return i;
+  }
+  return -1;
+}
+
+function inferExpectedTier(perMinute, perHour) {
+  const idx = inferExpectedTierIndex(perMinute, perHour);
+  return idx >= 0 ? INTAKE_TIERS[idx].name : null;
+}
+
+function formatExpectedTierValue(existingValue, perMinute, perHour) {
+  // Prefix the inferred tier label onto whatever the user wrote in the
+  // expected-volume question. We never replace user-supplied text; we only
+  // enrich it so support reviewers see the target level next to the raw ask.
+  let tierIndex = inferExpectedTierIndex(perMinute, perHour);
+  // Tier index 0 is the default/base level, so quota-increase requests start
+  // at the next level up.
+  if (tierIndex === 0) tierIndex = 1;
+  const tier = tierIndex >= 0 && INTAKE_TIERS[tierIndex] ? INTAKE_TIERS[tierIndex].name : null;
+  const existing = (existingValue || '').trim();
+  if (!tier) return existing;
+  if (!existing) return tier;
+  // Avoid double-prefixing if the tier name is already in the text.
+  if (existing.toLowerCase().indexOf(tier.toLowerCase()) !== -1) return existing;
+  return tier + ' \u2014 ' + existing;
+}
+
+function normalizeIntakePlainText(plain) {
+  // Collapse non-breaking spaces and trim each line. Keep blank lines so
+  // we can detect multi-line answers under a question heading. Before
+  // splitting, insert soft line breaks before well-known form labels and
+  // section headers; this lets the extractor handle both nicely formatted
+  // multi-line forms and single-paragraph paste artifacts where fields run
+  // together ("Company name: X Company website: Y ...").
+  let text = String(plain || '').replace(/\u00A0/g, ' ');
+  const markers = [
+    'Customer Information',
+    'Company name:',
+    'Company website:',
+    'Please provide a brief description of your business:',
+    'Provide a brief description of your business:',
+    'Email Service Information',
+    'Subscription ID:',
+    'Azure Communication Services Resource Name:',
+    'Is your custom domain already set up and currently used for sending messages:',
+    'Indicate the domain from which you are currently sending emails:',
+    'Usage Information',
+    'What type of emails do you send?',
+    'Please specify the expected volume of emails you plan to send:',
+    'Specify the expected volume of emails you plan to send:',
+    'What is the maximum rate of messages per minute that you require?',
+    'What is the maximum rate of messages per hour that you require?',
+    'What is the maximum rate of messages per day that you require?',
+    'What is the maximum attachment size in MB?',
+    'Additional Information',
+    'What is the source of the email addresses that you use for sending your messages?',
+    'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?'
+  ];
+  for (const marker of markers) {
+    const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Insert a soft line break before the marker. Absorb an optional leading
+    // list number ("1. " / "2) ") into the same line so "2. Specify ..." is
+    // not split into a bare "2." line followed by the question text (which
+    // previously got glued onto the prior answer as e.g. "Transactional 2.").
+    text = text.replace(
+      new RegExp('\\s+(\\d+[\\.)]\\s+)?(' + escaped + ')', 'gi'),
+      function (m, num, mk) { return '\n' + (num || '') + mk; }
+    );
+  }
+  return text
+    .replace(/\u00A0/g, ' ')
+    .split(/\r?\n/)
+    .map(s => s.replace(/\s+$/, ''));
+}
+
+function isIntakeSectionHeader(line) {
+  // These section dividers are part of the customer form, not answers. Treat
+  // them as hard boundaries so a previous answer never absorbs the next
+  // section title (for example, "appmail.example.com Usage Information").
+  const s = String(line || '').trim().toLowerCase().replace(/[\u00A0\s]+/g, ' ');
+  return s === 'customer information'
+    || s === 'email service information'
+    || s === 'usage information'
+    || s === 'additional information';
+}
+
+// Sub-questions / clarifying prompts that aren't extracted as their own field
+// but DO mark the end of the previous answer. Without these, a narrative answer
+// would keep absorbing the follow-up prompt and its response.
+const INTAKE_QUESTION_BOUNDARIES = [
+  'explain if you have an automated process',
+  'additionally, if you receive bounce'
+];
+function isIntakeQuestionBoundary(line) {
+  const s = String(line || '').trim().toLowerCase().replace(/[\u00A0\s]+/g, ' ');
+  for (const b of INTAKE_QUESTION_BOUNDARIES) {
+    if (s.indexOf(b) !== -1) return true;
+  }
+  return false;
+}
+
+function isLikelyNonAnswerTail(text) {
+  // Some patterns intentionally match only the stable part of a question.
+  // For example, matching "maximum rate of messages per minute" leaves
+  // "that you require?" as the tail. That is not an answer; force the parser
+  // to collect the next line instead.
+  const s = String(text || '').trim().toLowerCase();
+  return !s
+    || s === '?'
+    || s === ':'
+    || s === 'or'
+    || s === 'and'
+    || s === 'that you require?'
+    || s === 'that you require'
+    || s === 'you require?'
+    || s === 'you require'
+    || /^or resulted\b/.test(s)
+    || /^resulted in bounce backs\b/.test(s)
+    || /^from your mailing list\??$/.test(s);
+}
+
+function cleanIntakeAnswerText(text) {
+  return String(text || '')
+    // Remove bullets or numbered-list prefixes, but never remove a real
+    // numeric answer like "10 messages per minute" or "30 MB".
+    .replace(/^[\s\-\*\u2022\u2023\u25E6]+/, '')
+    .replace(/^\d+[\.)]\s+/, '')
+    .replace(/^(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*/i, '')
+    .trim();
+}
+
+function matchIntakePattern(line, patterns) {
+  // Returns { rest } when `line` contains one of the patterns near its
+  // start, otherwise null. We accept patterns located in the first ~30
+  // chars (to allow short prefixes like "Provide a " or "1. ") or any
+  // long pattern (>= 20 chars) anywhere in the line, since long phrase
+  // matches are unambiguous. The returned `rest` is the line's tail with
+  // the matched phrase, any leading parenthetical clarifier, trailing
+  // "?"/":"/"-" punctuation, and a leading "Re:"/"Answer:" prefix stripped.
+  const norm = String(line || '')
+    // Strip bullets, but preserve numeric-leading answers such as
+    // "10 messages per minute". Only remove numbered-list prefixes when
+    // they include punctuation ("1. " / "2) ").
+    .replace(/^[\s\-\*\u2022\u2023\u25E6]+/, '')
+    .replace(/^\d+[\.)]\s+/, '')
+    .trim();
+  const lower = norm.toLowerCase();
+  for (const p of patterns) {
+    const pl = p.toLowerCase();
+    const idx = lower.indexOf(pl);
+    if (idx < 0) continue;
+    // Lines such as "10 messages per minute" are answers, not questions.
+    // Do not let generic patterns ("messages per minute") classify them
+    // as question lines and steal only the trailing punctuation.
+    if (idx > 0 && /^\d[\d,\.]*\s+/.test(norm)) continue;
+    if (idx === 0 || idx <= 30 || pl.length >= 20) {
+      let rest = norm.slice(idx + pl.length).trim();
+      // Strip a leading "(...)" clarifier such as "(such as Transactional...)".
+      rest = rest.replace(/^\([^)]*\)\s*/, '');
+      // Strip leading separator punctuation: : - ? \u2013 \u2014.
+      rest = rest.replace(/^[:?\-\u2013\u2014]+\s*/, '');
+      // Strip another parenthetical that may sit after the colon.
+      rest = rest.replace(/^\([^)]*\)\s*/, '');
+      // Strip a leading "Re:" / "Answer:" prefix on inline answers.
+      rest = rest.replace(/^(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*/i, '');
+      // Strip a trailing question clause that precedes the inline answer, e.g.
+      // "...per minute that you require? 3 aprox" -> "3 aprox".
+      rest = rest.replace(/^that\s+you\s+require\s*\??\s*/i, '');
+      rest = rest.replace(/^you\s+require\s*\??\s*/i, '');
+      if (isLikelyNonAnswerTail(rest)) rest = '';
+      return { rest: rest };
+    }
+  }
+  return null;
+}
+
+function extractIntakeFields(plain) {
+  const lines = normalizeIntakePlainText(plain).map(l => l || '');
+  const found = {};
+  const reAnswer = /^\s*(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*(.+)$/i;
+  const isQuestionLine = (line) => {
+    if (isIntakeSectionHeader(line)) return true;
+    if (isIntakeQuestionBoundary(line)) return true;
+    for (const f of INTAKE_EXTRACT_FIELDS) {
+      if (matchIntakePattern(line, f.patterns)) return true;
+    }
+    return false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+
+    // Build candidates: the current line on its own, and the current line
+    // joined with the next non-blank line (handles word-wrapped questions
+    // such as "How do you currently manage and remove email addresses
+    // that have unsubscribed or\nresulted in bounce backs...").
+    const candidates = [{ text: line, span: 1 }];
+    if (i + 1 < lines.length && lines[i + 1].trim()) {
+      candidates.push({ text: line + ' ' + lines[i + 1].trim(), span: 2 });
+    }
+
+    for (const field of INTAKE_EXTRACT_FIELDS) {
+      if (found[field.id]) continue;
+      let match = null;
+      let span = 1;
+      for (const c of candidates) {
+        const m = matchIntakePattern(c.text, field.patterns);
+        if (m) { match = m; span = c.span; break; }
+      }
+      if (!match) continue;
+
+      let value = (match.rest || '').trim();
+
+      // Look ahead for an explicit "Re:" / "Answer:" line within the next
+      // ~12 non-blank lines (stopping at the next known question). When
+      // present that overrides any inline rest, because intake docs often
+      // repeat the question text on multiple lines before the response.
+      let reValue = '';
+      for (let j = i + span; j < Math.min(lines.length, i + span + 14); j++) {
+        const nl = lines[j];
+        if (!nl.trim()) continue;
+        if (isQuestionLine(nl)) break;
+        const am = nl.match(reAnswer);
+        if (am) {
+          reValue = am[2].trim();
+          for (let k = j + 1; k < lines.length; k++) {
+            const nl2 = lines[k];
+            if (!nl2.trim()) break;
+            if (isQuestionLine(nl2)) break;
+            if (reAnswer.test(nl2)) break;
+            reValue += ' ' + nl2.trim();
+          }
+          break;
+        }
+      }
+      if (reValue) value = reValue;
+
+      // If still empty, gather following non-blank lines until a blank
+      // line or another known question.
+      if (!value) {
+        const collected = [];
+        let started = false;
+        for (let j = i + span; j < lines.length; j++) {
+          const next = lines[j];
+          if (!next.trim()) {
+            // Allow blank lines between a question and its answer, and also
+            // within longer narrative answers. Stop only after we've already
+            // collected something and the next non-blank line is a question or
+            // section header; otherwise keep scanning.
+            let k = j + 1;
+            while (k < lines.length && !lines[k].trim()) k++;
+            if (started && (k >= lines.length || isQuestionLine(lines[k]))) break;
+            continue;
+          }
+          if (isQuestionLine(next)) break;
+          // Before we've collected anything, skip wrapped question-continuation
+          // lines (the tail of a multi-line question, which typically ends with
+          // "?"). This prevents an answer from being set to leftover question
+          // text such as "resulted in bounce backs from your mailing list?".
+          if (!started && /\?\s*$/.test(next)) continue;
+          let t = cleanIntakeAnswerText(next);
+          if (!t || /^note\s*:/i.test(t)) break;
+          collected.push(t);
+          started = true;
+        }
+        value = collected.join(' ').trim();
+      }
+
+      if (value) found[field.id] = value;
+    }
+  }
+  return found;
+}
+
+function processIntakeForm() {
+  const status = document.getElementById('intakeProcessStatus');
+  const wrap = document.getElementById('intakeExtractedWrap');
+  const body = document.getElementById('intakeExtractedBody');
+  if (!body || !wrap) return;
+
+  const intake = getIntakeContent();
+  if (!intake || !intake.plain) {
+    wrap.style.display = 'none';
+    if (status) status.textContent = 'Editor is empty &mdash; nothing to process.';
+    return;
+  }
+
+  const detected = extractIntakeFields(intake.plain);
+  // Enrich "Expected tier level" with the inferred ACS throttling tier
+  // name when we have per-minute / per-hour rate values. The user's
+  // original text (e.g. "100 / min, 1000 / hr") is preserved as a suffix.
+  const inferredVolumeBase = detected.expectedVolume || '';
+  const enrichedVolume = formatExpectedTierValue(inferredVolumeBase, detected.ratePerMinute, detected.ratePerHour);
+  if (enrichedVolume) detected.expectedVolume = enrichedVolume;
+
+  // Merge with prior manual overrides so the user's edits survive a re-run.
+  const merged = {};
+  let detectedCount = 0;
+  for (const f of INTAKE_EXTRACT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(intakeExtractedOverrides, f.id)) {
+      merged[f.id] = intakeExtractedOverrides[f.id];
+    } else if (Object.prototype.hasOwnProperty.call(detected, f.id)) {
+      merged[f.id] = detected[f.id];
+      detectedCount++;
+    } else {
+      merged[f.id] = '';
+    }
+  }
+
+  renderExtractedIntakeTable(merged);
+  wrap.style.display = '';
+  if (status) {
+    status.textContent = detectedCount > 0
+      ? 'Detected ' + detectedCount + ' of ' + INTAKE_EXTRACT_FIELDS.length + ' fields. Edit any cell to correct.'
+      : 'No fields detected. You can fill them in manually below.';
+  }
+
+  // If the intake form names a "Current sending domain" that differs from the
+  // domain the checker is currently set to, automatically re-run the domain
+  // checker against the sending domain so the results reflect the customer's
+  // actual mail domain rather than whatever was previously typed/loaded.
+  maybeRunCheckerForIntakeDomain(merged.currentSendingDomain, status);
+}
+
+// Compare the intake "Current sending domain" against the domain currently
+// loaded in the checker. When they differ (and the sending domain is valid),
+// load it into the search box and trigger a fresh lookup.
+function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
+  const sendingDomain = normalizeDomain(rawSendingDomain || '');
+  if (!sendingDomain || !isValidDomain(sendingDomain)) return;
+
+  const input = document.getElementById('domainInput');
+  const currentDomain = normalizeDomain(input ? input.value : '');
+  if (sendingDomain === currentDomain) return;
+
+  if (input) input.value = sendingDomain;
+  if (typeof toggleClearBtn === 'function') toggleClearBtn();
+  if (status) {
+    status.textContent = (status.textContent ? status.textContent + ' ' : '')
+      + 'Running checker against ' + sendingDomain + '\u2026';
+  }
+  // Pass the sending domain explicitly so the lookup is not affected by any
+  // race with the input value update above.
+  lookup({ domainOverride: sendingDomain, animateTopIntro: true });
+}
+
+function renderExtractedIntakeTable(values) {
+  const body = document.getElementById('intakeExtractedBody');
+  if (!body) return;
+  const rows = [];
+  for (const f of INTAKE_EXTRACT_FIELDS) {
+    const val = values[f.id] || '';
+    const emptyCls = val ? '' : ' class="intake-extracted-empty"';
+    rows.push(
+      '<tr' + emptyCls + ' data-field-id="' + escapeHtml(f.id) + '">' +
+      '<th>' + escapeHtml(f.label) + '</th>' +
+      '<td contenteditable="true" data-empty-text="(not detected)">' +
+      (val ? escapeHtml(val) : '(not detected)') +
+      '</td></tr>'
+    );
+  }
+  body.innerHTML = rows.join('');
+  // Wire up edit tracking.
+  Array.from(body.querySelectorAll('td[contenteditable="true"]')).forEach(td => {
+    // Clear placeholder text on focus when the cell has the empty marker.
+    td.addEventListener('focus', () => {
+      const tr = td.parentElement;
+      if (tr && tr.classList.contains('intake-extracted-empty')) {
+        td.textContent = '';
+        tr.classList.remove('intake-extracted-empty');
+      }
+    });
+    td.addEventListener('blur', () => {
+      const tr = td.parentElement;
+      const fieldId = tr ? tr.getAttribute('data-field-id') : null;
+      const text = (td.innerText || '').trim();
+      if (fieldId) {
+        if (text) {
+          intakeExtractedOverrides[fieldId] = text;
+        } else {
+          delete intakeExtractedOverrides[fieldId];
+          td.textContent = '(not detected)';
+          tr.classList.add('intake-extracted-empty');
+        }
+      }
+    });
+  });
+}
+
+function getExtractedIntakeValues() {
+  // Returns the currently displayed extracted fields, in canonical order,
+  // skipping rows the user/extractor left empty.
+  const body = document.getElementById('intakeExtractedBody');
+  if (!body) return [];
+  const out = [];
+  for (const f of INTAKE_EXTRACT_FIELDS) {
+    const tr = body.querySelector('tr[data-field-id="' + f.id + '"]');
+    if (!tr || tr.classList.contains('intake-extracted-empty')) continue;
+    const td = tr.querySelector('td[contenteditable="true"]');
+    const val = td ? (td.innerText || '').trim() : '';
+    if (val) out.push({ id: f.id, label: f.label, value: val });
+  }
+  return out;
+}
+
+// Returns a plain { fieldId: value } lookup of the currently displayed
+// extracted fields, used by the structured request-template builder below.
+function getExtractedIntakeMap() {
+  const map = {};
+  for (const f of getExtractedIntakeValues()) {
+    map[f.id] = f.value;
+  }
+  return map;
+}
+
+// Canonical ACS "Email quota increase" intake template. Each row mirrors the
+// numbered questionnaire reviewers expect, mapping the long "Required
+// Information" prompt to the extractor field whose value fills the "Details to
+// Provide" column. Rows with `id: null` are pure section/sub-headers; rows
+// with a `sub: true` flag are indented sub-questions under a parent number.
+const INTAKE_REQUEST_TEMPLATE = [
+  { id: 'companyName',          label: 'Company Name' },
+  { id: 'companyWebsite',       label: 'Company Website' },
+  { id: 'businessDescription',  label: 'Brief Description of Your Business' },
+  { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a pre-requisite before the quota increase and AMD domain is only for testing purpose, not allowed for quota increase and the failure rate should be less than 1%.' },
+  { id: 'currentSendingDomain', label: 'What is the domain you are currently sending emails from? Please make sure it has successfully sent emails.' },
+  { id: 'acsResourceName',      label: 'ACS Resource Name' },
+  { id: 'subscriptionId',       label: 'Subscription ID' },
+  { id: 'emailType',            label: 'What type of emails do you send? (e.g., Transactional, Marketing, Promotional)' },
+  { id: null,                   label: 'Please specify the expected volume of emails you plan to send (exact in number).' },
+  { id: 'expectedVolume',       label: 'Expected tier level', sub: true },
+  { id: 'ratePerMinute',        label: 'What is the maximum rate of messages per minute that you require?', sub: true },
+  { id: 'ratePerHour',          label: 'What is the maximum rate of messages per hour that you require?', sub: true },
+  { id: 'ratePerDay',           label: 'What is the maximum rate of messages per day that you require?', sub: true },
+  { id: 'attachmentSizeMb',     label: 'What is the maximum attachment size (in MB) that you require?' },
+  { id: 'addressSource',        label: 'What is the source of the email addresses that you use for sending your messages? (e.g., The source of the email addresses that you use for sending your messages plays a crucial role in the effectiveness and compliance of your email marketing campaigns. Providing details about the source of your email addresses will help us understand how you acquire and maintain your subscriber list).' },
+  { id: 'bounceHandling',       label: 'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounces from your mailing list? (e.g., Explain whether you have an automated process in place that handles unsubscribes when recipients click on the \'unsubscribe\' link in your emails. Additionally, if you receive bounce notifications, can you mention how you handle those and whether you have any mechanism to automatically remove email addresses that result in consistent bounces).' }
+];
+
+// Builds the numbered "Required Information / Details to Provide" request
+// template as both plain text and HTML, filling the Details column from the
+// extracted intake fields. Returns null when no intake fields are available.
+function buildIntakeRequestTemplate() {
+  const values = getExtractedIntakeMap();
+  if (!values || Object.keys(values).length === 0) return null;
+
+  const plainRows = [];
+  const htmlRows = [];
+  let sno = 0;
+  for (const row of INTAKE_REQUEST_TEMPLATE) {
+    const detail = (row.id && values[row.id]) ? values[row.id] : '';
+    // Sub-questions (rate per minute/hour/day) sit under the prior number and
+    // get a blank S.No cell; everything else advances the running number.
+    const numberLabel = row.sub ? '' : String(++sno);
+    plainRows.push((numberLabel ? numberLabel + '. ' : '   ') + row.label + (detail ? ' => ' + detail : ' =>'));
+    const indentStyle = row.sub ? 'padding-left:24px;' : '';
+    htmlRows.push(
+      '<tr>' +
+      '<td style="padding:4px 8px;border:1px solid #ddd;text-align:center;vertical-align:top;">' + escapeHtml(numberLabel) + '</td>' +
+      '<td style="padding:4px 8px;border:1px solid #ddd;vertical-align:top;' + indentStyle + '">' + escapeHtml(row.label) + '</td>' +
+      '<td style="padding:4px 8px;border:1px solid #ddd;vertical-align:top;white-space:pre-wrap;">' + escapeHtml(detail) + '</td>' +
+      '</tr>'
+    );
+  }
+
+  const plain = ['S.No | Required Information | Details to Provide', '---'].concat(plainRows).join('\n');
+  const html =
+    '<table style="border-collapse:collapse;min-width:480px;margin-top:4px;">' +
+    '<thead><tr>' +
+    '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">S.No</th>' +
+    '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">Required Information</th>' +
+    '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">Details to Provide</th>' +
+    '</tr></thead><tbody>' + htmlRows.join('') + '</tbody></table>';
+
+  return { plain: plain, html: html };
+}
+
+// Builds the full Copy Email Quota payload at click time: the base DNS/quota
+// table (captured during render) plus the latest Customer Intake Information
+// block. This is computed on demand so clicking "Process Data" after a lookup
+// is reflected in the copied output without re-running the domain check.
+function buildQuotaCopyPayload() {
+  const base = window.quotaCopyBase || { plain: '', html: '' };
+  let intakePlain = '';
+  let intakeHtml = '';
+  try {
+    const extracted = (typeof getExtractedIntakeValues === 'function') ? getExtractedIntakeValues() : [];
+    const requestTemplate = (typeof buildIntakeRequestTemplate === 'function') ? buildIntakeRequestTemplate() : null;
+    const hasExtracted = extracted && extracted.length > 0;
+    if (hasExtracted) {
+      const plainParts = ['', '---', 'Customer Intake Information', '---'];
+      const htmlParts = ['<br><strong>Customer Intake Information</strong>'];
+      if (requestTemplate) {
+        // Structured "Required Information / Details to Provide" request table,
+        // matching the ACS email quota increase intake questionnaire.
+        plainParts.push(requestTemplate.plain);
+        htmlParts.push(requestTemplate.html);
+      } else {
+        plainParts.push('Extracted fields:');
+        for (const f of extracted) {
+          plainParts.push('- ' + f.label + ': ' + f.value);
+        }
+        const rows = extracted.map(f =>
+          '<tr>' +
+          '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">' + escapeHtml(f.label) + '</th>' +
+          '<td style="padding:4px 8px;border:1px solid #ddd;white-space:pre-wrap;">' + escapeHtml(f.value) + '</td>' +
+          '</tr>'
+        ).join('');
+        htmlParts.push('<table style="border-collapse:collapse;min-width:260px;margin-top:4px;">' + rows + '</table>');
+      }
+      // Intentionally NOT including the raw editor notes (intake.plain /
+      // intake.html) here: the copied output should contain only the
+      // structured extracted-fields table, not the free-form intake text.
+      intakePlain = '\n' + plainParts.join('\n');
+      intakeHtml = htmlParts.join('');
+    }
+  } catch (_) {}
+  const payload = {
+    plain: (base.plain || '') + intakePlain,
+    html: (base.html || '') + intakeHtml
+  };
+  // Keep the legacy global in sync for any other consumers.
+  window.quotaCopyText = payload;
+  return payload;
+}
+
+// Show the intake form only when the signed-in user has been identified
+// as a Microsoft employee. Called from updateAuthUI in
+// 20e-HtmlAzureIntegration.ps1.
+function updateIntakeFormVisibility(isSignedIn) {
+  const card = document.getElementById('intakeFormCard');
+  if (!card) return;
+  // Only show the Customer Intake form to users signed in with a Microsoft
+  // account. Hide it (and don't load saved content) otherwise.
+  if (isSignedIn) {
+    card.style.display = '';
+    loadIntakeForm();
+  } else {
+    card.style.display = 'none';
+  }
+}
 
 // Theme + query-domain initialization
 function initializePage() {
@@ -22621,6 +23379,13 @@ function initializePage() {
   if (shouldShowCookieConsent() || openCookieSettingsRequested) {
     applyCookieConsentLanguage();
     showCookieConsentBanner();
+  }
+
+  // Customer intake form starts hidden; it is revealed by updateAuthUI
+  // only when the signed-in user is a Microsoft employee.
+  // TEMP: load it eagerly so it works without sign-in during testing.
+  if (typeof loadIntakeForm === 'function') {
+    loadIntakeForm();
   }
 
   scheduleInitialLookup(bootstrapDomain);
@@ -22698,18 +23463,7 @@ let msalInstance = null;
 let msAuthAccount = null;
 let isMsEmployee = false;
 let msalInitError = null;
-const ARM_SCOPES = ['https://management.azure.com/user_impersonation'];
-const LOG_ANALYTICS_SCOPES = ['https://api.loganalytics.io/Data.Read'];
 const GRAPH_SCOPES = ['User.Read'];
-let azureDiagnosticsState = {
-  subscriptions: [],
-  resources: [],
-  workspaces: [],
-  lastQueryText: '',
-  lastQueryName: '',
-  lastResult: null,
-  isBusy: false
-};
 
 '@
 # ===== JavaScript Azure / MSAL Integration =====
@@ -22834,11 +23588,11 @@ async function msSignIn() {
     if (btn) { btn.disabled = true; btn.textContent = t('authSigningIn'); }
 
     // Use redirect flow for best compatibility with browser / popup blockers.
-    // Request Graph scopes for the token, plus pre-consent ARM and Log Analytics
-    // via extraScopesToConsent so acquireTokenSilent works later without popups.
+    // Only the Microsoft Graph User.Read scope is requested so we can read the
+    // signed-in user's basic profile for the intake-form gating and anonymous
+    // sign-in metrics. No Azure management or Log Analytics scopes are requested.
     await msalInstance.loginRedirect({
       scopes: GRAPH_SCOPES,
-      extraScopesToConsent: [...ARM_SCOPES, ...LOG_ANALYTICS_SCOPES],
       prompt: 'select_account'
     });
   } catch (e) {
@@ -22880,13 +23634,6 @@ async function msSignOut() {
 
     msAuthAccount = null;
     isMsEmployee = false;
-    azureDiagnosticsState.subscriptions = [];
-    azureDiagnosticsState.resources = [];
-    azureDiagnosticsState.workspaces = [];
-    azureDiagnosticsState.lastResult = null;
-    azureDiagnosticsState.lastQueryText = '';
-    azureDiagnosticsState.lastQueryName = '';
-    setAzureDiagnosticsResultsHtml('');
     updateAuthUI(null);
   } catch (e) {
     console.error('Sign-out error:', e);
@@ -23000,693 +23747,12 @@ function updateAuthUI(authData) {
     isMsEmployee = false;
   }
 
-  renderAzureDiagnosticsUi();
-
-  if (authData && msAuthAccount) {
-    loadAzureSubscriptions();
+  // Intake form is shown to any user signed in with a Microsoft account.
+  if (typeof updateIntakeFormVisibility === 'function') {
+    updateIntakeFormVisibility(!!(authData && msAuthAccount));
   }
 }
 
-function setAzureDiagnosticsStatus(message, isError = false) {
-  const el = document.getElementById('azureDiagnosticsStatus');
-  if (!el) return;
-  el.textContent = message || '';
-  el.className = isError ? 'azure-status error' : 'azure-status';
-}
-
-function setAzureDiagnosticsResultsHtml(html) {
-  const el = document.getElementById('azureDiagnosticsResults');
-  if (!el) return;
-  el.innerHTML = html || '';
-}
-
-function getSelectedAzureSubscriptionId() {
-  const el = document.getElementById('azureSubscriptionSelect');
-  return el ? String(el.value || '') : '';
-}
-
-function getSelectedAzureResourceId() {
-  const el = document.getElementById('azureResourceSelect');
-  return el ? String(el.value || '') : '';
-}
-
-function getSelectedAzureWorkspaceId() {
-  const el = document.getElementById('azureWorkspaceSelect');
-  return el ? String(el.value || '') : '';
-}
-
-function renderAzureSelectOptions(selectId, items, getValue, getLabel, emptyText) {
-  const el = document.getElementById(selectId);
-  if (!el) return;
-  const currentValue = el.value;
-  const options = (items || []).map(item => {
-    const value = String(getValue(item) || '');
-    const label = String(getLabel(item) || value);
-    return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
-  });
-  if (options.length === 0) {
-    el.innerHTML = `<option value="">${escapeHtml(emptyText)}</option>`;
-    return;
-  }
-  el.innerHTML = options.join('');
-  if (currentValue && items.some(item => String(getValue(item) || '') === currentValue)) {
-    el.value = currentValue;
-  }
-}
-
-function getAzureAuthDisplayName() {
-  return (lastAuthData && (lastAuthData.displayName || lastAuthData.userPrincipalName))
-    ? String(lastAuthData.displayName || lastAuthData.userPrincipalName)
-    : '';
-}
-
-function renderAzureDiagnosticsUi() {
-  const card = document.getElementById('azureDiagnosticsCard');
-  if (!card) return;
-
-  const signedIn = !!(msAuthAccount && msalInstance);
-  const shouldShow = !!(getMsalConfig() && signedIn);
-  card.style.display = shouldShow ? '' : 'none';
-  // The card carries the .engage-section class so it participates in the
-  // staggered fade-in animation on initial page load. When the card is
-  // hidden at that time (no signed-in user yet), animateTopSections()
-  // filters it out and never applies the `engage-in` class. The CSS rule
-  // `body.section-fade-enabled .engage-section { opacity: 0; transform:
-  // translateY(20px); }` then keeps the card invisible even after we
-  // flip display back on at sign-in. Add `engage-in` here so the card
-  // becomes fully visible the moment it is revealed post-auth.
-  if (shouldShow) {
-    card.classList.add('engage-in');
-  } else {
-    card.classList.remove('engage-in');
-  }
-
-  const switchRow = document.getElementById('azureSwitchDirectoryRow');
-  if (switchRow) switchRow.style.display = signedIn ? '' : 'none';
-
-  renderAzureSelectOptions(
-    'azureSubscriptionSelect',
-    azureDiagnosticsState.subscriptions,
-    item => item.subscriptionId,
-    item => `${item.displayName || item.subscriptionId}${item.tenantId ? ` (${item.tenantId})` : ''}`,
-    t('azureNoSubscriptions')
-  );
-
-  renderAzureSelectOptions(
-    'azureResourceSelect',
-    azureDiagnosticsState.resources,
-    item => item.id,
-    item => `${item.name} [${item.type}]`,
-    t('azureNoResources')
-  );
-
-  renderAzureSelectOptions(
-    'azureWorkspaceSelect',
-    azureDiagnosticsState.workspaces,
-    item => item.id,
-    item => `${item.name}${item.customerId ? ` (${item.customerId})` : ''}`,
-    t('azureNoWorkspaces')
-  );
-
-  const hint = document.getElementById('azureDiagnosticsHint');
-  if (hint) {
-    hint.textContent = signedIn
-      ? t('azureSignedInAs', { user: getAzureAuthDisplayName() || t('authMicrosoftLabel') })
-      : t('azureDiagnosticsHint');
-  }
-
-  ['azureRunInventoryBtn','azureRunDomainSearchBtn','azureRunAcsSearchBtn']
-    .forEach(id => {
-      const btn = document.getElementById(id);
-      if (btn) btn.disabled = !signedIn || azureDiagnosticsState.isBusy;
-    });
-
-  if (!signedIn) {
-    setAzureDiagnosticsStatus(t('azureSignInRequired'), false);
-  }
-}
-
-function escapeKqlString(text) {
-  return String(text || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/'/g, "\\'")
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
-}
-
-function getMsAuthLoginHint() {
-  if (msAuthAccount) {
-    return msAuthAccount.username || (msAuthAccount.idTokenClaims && msAuthAccount.idTokenClaims.preferred_username) || '';
-  }
-  if (lastAuthData && lastAuthData.userPrincipalName) {
-    return lastAuthData.userPrincipalName;
-  }
-  return '';
-}
-
-async function acquireAzureAccessToken(scopes, tenantId, silentOnly) {
-  const scopeLabel = (scopes || []).map(s => String(s).split('/').pop()).join(',');
-  const tenantLabel = tenantId ? tenantId.substring(0, 8) + '...' : 'default';
-  console.log(`[AzureDiag] acquireToken: scope=${scopeLabel}, tenant=${tenantLabel}, silentOnly=${!!silentOnly}`);
-
-  if (!msalInstance || !msAuthAccount) {
-    console.warn('[AzureDiag] acquireToken: FAILED \u2014 msalInstance or msAuthAccount is null');
-    throw new Error(t('azureSignInRequired'));
-  }
-
-  const loginHint = getMsAuthLoginHint();
-  const homeTenantId = msAuthAccount.tenantId || '';
-  const isCrossTenant = tenantId && tenantId !== homeTenantId;
-
-  const request = {
-    scopes,
-    account: msAuthAccount
-  };
-  if (tenantId) {
-    request.authority = `https://login.microsoftonline.com/${tenantId}`;
-  }
-  // For cross-tenant requests, always force a fresh token from the target
-  // tenant's authority.  MSAL v2 cache keys do not always differentiate by
-  // tenant for the same resource, so without forceRefresh the cached home-
-  // tenant token is returned and ARM sees subscriptions as "Disabled".
-  if (isCrossTenant) {
-    request.forceRefresh = true;
-    console.log(`[AzureDiag] acquireToken: cross-tenant detected (home=${homeTenantId.substring(0, 8)}...), forcing refresh`);
-  }
-
-  try {
-    const silent = await msalInstance.acquireTokenSilent(request);
-    const tokenTenant = silent.tenantId || silent.account?.tenantId || 'n/a';
-    const tokenTenantLabel = tokenTenant !== 'n/a' ? tokenTenant.substring(0, 8) + '...' : 'n/a';
-    console.log(`[AzureDiag] acquireToken: silent OK for tenant=${tenantLabel}, tokenTenant=${tokenTenantLabel}, tokenLength=${silent.accessToken ? silent.accessToken.length : 0}, fromCache=${!!silent.fromCache}`);
-    return silent.accessToken;
-  } catch (e) {
-    const errorCode = String(e?.errorCode || e?.name || 'unknown');
-    console.warn(`[AzureDiag] acquireToken: silent FAILED for tenant=${tenantLabel}, errorCode=${errorCode}`);
-    const requiresInteraction = e instanceof msal.InteractionRequiredAuthError ||
-      ['interaction_required', 'consent_required', 'login_required'].includes(String(e?.errorCode || '').toLowerCase());
-    if (!requiresInteraction) throw e;
-
-    // Try once more with forceRefresh before falling back to redirect
-    try {
-      console.log(`[AzureDiag] acquireToken: retrying with forceRefresh for tenant=${tenantLabel}`);
-      const retry = await msalInstance.acquireTokenSilent({ ...request, forceRefresh: true });
-      console.log(`[AzureDiag] acquireToken: forceRefresh OK for tenant=${tenantLabel}`);
-      return retry.accessToken;
-    } catch (_retryErr) {
-      const retryCode = String(_retryErr?.errorCode || _retryErr?.name || 'unknown');
-      console.warn(`[AzureDiag] acquireToken: forceRefresh FAILED for tenant=${tenantLabel}, errorCode=${retryCode}`);
-      // In silentOnly mode, do not redirect; just throw so callers can skip this tenant.
-      if (silentOnly) throw _retryErr;
-
-      // Silent retry also failed; use redirect to get consent.
-      // This avoids opening a popup that shows a mini copy of the website.
-      console.log('[AzureDiag] acquireToken: falling back to redirect for consent');
-      setAzureDiagnosticsStatus(t('azureConsentRequired'));
-      const redirectRequest = {
-        scopes,
-        account: msAuthAccount
-      };
-      if (tenantId) {
-        redirectRequest.authority = `https://login.microsoftonline.com/${tenantId}`;
-      }
-      if (loginHint) {
-        redirectRequest.loginHint = loginHint;
-      }
-      await msalInstance.acquireTokenRedirect(redirectRequest);
-      // Page will redirect; code below this line will not execute.
-      // After redirect, handleRedirectPromise in initMsAuth will resume the session.
-      return '';
-    }
-  }
-}
-
-async function armFetchJson(url, options = {}, tenantId) {
-  const token = await acquireAzureAccessToken(ARM_SCOPES, tenantId);
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...(options.headers || {}),
-      Authorization: 'Bearer ' + token,
-      Accept: 'application/json'
-    }
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`ARM ${response.status}: ${text || response.statusText}`);
-  }
-  return response.json();
-}
-
-async function armFetchJsonSilent(url, options = {}, tenantId) {
-  const urlPath = url.replace('https://management.azure.com', '');
-  console.log(`[AzureDiag] armFetchSilent: ${urlPath.substring(0, 120)}${urlPath.length > 120 ? '...' : ''}`);
-  const token = await acquireAzureAccessToken(ARM_SCOPES, tenantId, true);
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...(options.headers || {}),
-      Authorization: 'Bearer ' + token,
-      Accept: 'application/json'
-    }
-  });
-  console.log(`[AzureDiag] armFetchSilent: HTTP ${response.status} for ${urlPath.substring(0, 80)}`);
-  if (!response.ok) {
-    const text = await response.text();
-    console.warn(`[AzureDiag] armFetchSilent: FAILED HTTP ${response.status} \u2014 ${(text || '').substring(0, 200)}`);
-    throw new Error(`ARM ${response.status}: ${text || response.statusText}`);
-  }
-  return response.json();
-}
-
-async function armFetchAll(url, tenantId) {
-  const items = [];
-  let next = url;
-  const maxPages = 50;
-  let page = 0;
-  while (next && page < maxPages) {
-    page++;
-    const data = await armFetchJson(next, {}, tenantId);
-    if (Array.isArray(data.value)) items.push(...data.value);
-    // ARM uses '@odata.nextLink' (or sometimes 'nextLink') for pagination
-    next = data['@odata.nextLink'] || data.nextLink || null;
-  }
-  return items;
-}
-
-async function armFetchAllSilent(url, tenantId) {
-  const items = [];
-  let next = url;
-  const maxPages = 50;
-  let page = 0;
-  while (next && page < maxPages) {
-    page++;
-    const data = await armFetchJsonSilent(next, {}, tenantId);
-    const pageCount = Array.isArray(data.value) ? data.value.length : 0;
-    if (Array.isArray(data.value)) items.push(...data.value);
-    const hasNext = !!(data['@odata.nextLink'] || data.nextLink);
-    console.log(`[AzureDiag] armFetchAllSilent: page=${page}, itemsOnPage=${pageCount}, totalSoFar=${items.length}, hasNextPage=${hasNext}`);
-    next = data['@odata.nextLink'] || data.nextLink || null;
-  }
-  console.log(`[AzureDiag] armFetchAllSilent: DONE pages=${page}, totalItems=${items.length}`);
-  return items;
-}
-
-async function switchAzureDirectory() {
-  const input = document.getElementById('azureTenantInput');
-  const tenantValue = (input ? input.value : '').trim();
-  if (!tenantValue) {
-    setAzureDiagnosticsStatus('Enter a tenant ID or domain name (e.g. contoso.onmicrosoft.com).', true);
-    return;
-  }
-  if (!msalInstance) {
-    setAzureDiagnosticsStatus(t('azureSignInRequired'), true);
-    return;
-  }
-  console.log(`[AzureDiag] switchAzureDirectory: re-authenticating against tenant "${tenantValue}"`);
-  try {
-    await msalInstance.loginRedirect({
-      scopes: GRAPH_SCOPES,
-      extraScopesToConsent: [...ARM_SCOPES, ...LOG_ANALYTICS_SCOPES],
-      authority: `https://login.microsoftonline.com/${encodeURIComponent(tenantValue)}`,
-      prompt: 'login'
-    });
-  } catch (e) {
-    console.error('[AzureDiag] switchAzureDirectory failed:', e);
-    setAzureDiagnosticsStatus(t('authSignInFailed', { reason: e?.message || t('authUnknownError') }), true);
-  }
-}
-
-async function loadAzureSubscriptions() {
-  console.log('[AzureDiag] ===== loadAzureSubscriptions START =====');
-  console.log('[AzureDiag] msalInstance exists:', !!msalInstance);
-  console.log('[AzureDiag] msAuthAccount exists:', !!msAuthAccount);
-  if (msAuthAccount) {
-    console.log('[AzureDiag] account homeAccountId length:', (msAuthAccount.homeAccountId || '').length);
-    console.log('[AzureDiag] account environment:', msAuthAccount.environment || 'n/a');
-    console.log('[AzureDiag] account tenantId:', msAuthAccount.tenantId ? msAuthAccount.tenantId.substring(0, 8) + '...' : 'n/a');
-  }
-  try {
-    azureDiagnosticsState.isBusy = true;
-    renderAzureDiagnosticsUi();
-    setAzureDiagnosticsStatus(t('azureLoadingSubscriptions'));
-
-    // Step 1: Enumerate all tenants the user has access to.
-    // The home-tenant token can list tenants even if it cannot get tokens for them.
-    console.log('[AzureDiag] Step 1: Enumerating tenants via GET /tenants...');
-    let tenants = [];
-    try {
-      tenants = await armFetchAll('https://management.azure.com/tenants?api-version=2020-01-01');
-      console.log(`[AzureDiag] Step 1 result: ${tenants.length} tenant(s) returned`);
-    } catch (tenantErr) {
-      const errCode = String(tenantErr?.errorCode || tenantErr?.name || tenantErr?.message || 'unknown').substring(0, 100);
-      console.warn(`[AzureDiag] Step 1 FAILED: ${errCode} \u2014 falling back to default tenant`);
-      tenants = [];
-    }
-    const tenantIds = tenants.length > 0
-      ? tenants.map(tn => String(tn.tenantId || '')).filter(Boolean)
-      : [null]; // null = use default (home) tenant
-    console.log(`[AzureDiag] Step 1 final: ${tenantIds.length} tenant ID(s) to query: [${tenantIds.map(t => t ? t.substring(0, 8) + '...' : 'default').join(', ')}]`);
-
-    // Step 2: For each tenant, silently acquire an ARM token and list subscriptions.
-    // Cross-tenant token acquisition will fail for tenants where the app has no
-    // consent (AADSTS65001) or where conditional access blocks it (AADSTS53003).
-    // Those failures are expected and silently skipped.
-    console.log('[AzureDiag] Step 2: Loading subscriptions per tenant...');
-    const allSubscriptions = [];
-    const seenSubscriptionIds = new Set();
-    for (let i = 0; i < tenantIds.length; i++) {
-      const tid = tenantIds[i];
-      const tenantLabel = tid ? tid.substring(0, 8) + '...' : 'default';
-      console.log(`[AzureDiag] Step 2.${i + 1}: Loading subscriptions for tenant=${tenantLabel}`);
-      setAzureDiagnosticsStatus(t('azureLoadingTenantSubscriptions', {
-        tenant: tenantLabel.length > 12 ? tenantLabel.substring(0, 12) + '...' : tenantLabel,
-        current: String(i + 1),
-        total: String(tenantIds.length)
-      }));
-      try {
-        const subs = await armFetchAllSilent('https://management.azure.com/subscriptions?api-version=2020-01-01', tid);
-        console.log(`[AzureDiag] Step 2.${i + 1}: ARM returned ${(subs || []).length} raw subscription(s) for tenant=${tenantLabel}`);
-        let added = 0;
-        let skippedDupe = 0;
-        for (const item of (subs || [])) {
-          if (seenSubscriptionIds.has(item.subscriptionId)) { skippedDupe++; continue; }
-          seenSubscriptionIds.add(item.subscriptionId);
-          allSubscriptions.push({
-            subscriptionId: item.subscriptionId,
-            displayName: item.displayName || item.subscriptionId,
-            tenantId: item.tenantId || tid || ''
-          });
-          added++;
-        }
-        console.log(`[AzureDiag] Step 2.${i + 1}: added=${added}, skippedDupe=${skippedDupe}`);
-      } catch (subErr) {
-        const errCode = String(subErr?.errorCode || subErr?.name || 'unknown');
-        const errMsg = String(subErr?.message || '').substring(0, 150);
-        console.warn(`[AzureDiag] Step 2.${i + 1}: FAILED for tenant=${tenantLabel}, errorCode=${errCode}, message=${errMsg}`);
-      }
-    }
-    console.log(`[AzureDiag] Step 2 complete: ${allSubscriptions.length} total subscription(s) across all tenants`);
-
-    azureDiagnosticsState.subscriptions = allSubscriptions;
-    azureDiagnosticsState.resources = [];
-    azureDiagnosticsState.workspaces = [];
-    renderAzureDiagnosticsUi();
-    setAzureDiagnosticsStatus(
-      allSubscriptions.length > 0
-        ? `${allSubscriptions.length} ${t('azureSubscription').toLowerCase()}(s) loaded.`
-        : t('azureNoSubscriptions')
-    );
-
-    if (allSubscriptions.length > 0) {
-      const subSelect = document.getElementById('azureSubscriptionSelect');
-      if (subSelect && subSelect.options.length > 0) subSelect.selectedIndex = 0;
-      // Release busy before chaining so that discoverAzureResources can set it again cleanly
-      azureDiagnosticsState.isBusy = false;
-      renderAzureDiagnosticsUi();
-      try {
-        await discoverAzureResources();
-      } catch (chainErr) {
-        console.error('Azure resource discovery chain failed:', chainErr);
-        setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: chainErr?.message || t('authUnknownError') }), true);
-      }
-      return;
-    }
-    console.log('[AzureDiag] ===== loadAzureSubscriptions END (no subscriptions) =====');
-  } catch (e) {
-    const errCode = String(e?.errorCode || e?.name || 'unknown');
-    const errMsg = String(e?.message || '').substring(0, 200);
-    console.error(`[AzureDiag] loadAzureSubscriptions OUTER ERROR: errorCode=${errCode}, message=${errMsg}`);
-    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
-  } finally {
-    azureDiagnosticsState.isBusy = false;
-    renderAzureDiagnosticsUi();
-  }
-}
-
-function getSelectedSubscriptionTenantId() {
-  const subId = getSelectedAzureSubscriptionId();
-  if (!subId) return null;
-  const sub = azureDiagnosticsState.subscriptions.find(s => s.subscriptionId === subId);
-  return (sub && sub.tenantId) ? sub.tenantId : null;
-}
-
-async function discoverAzureResources() {
-  const subscriptionId = getSelectedAzureSubscriptionId();
-  if (!subscriptionId) {
-    setAzureDiagnosticsStatus(t('azureSelectSubscriptionFirst'), true);
-    return;
-  }
-  const tenantId = getSelectedSubscriptionTenantId();
-
-  try {
-    azureDiagnosticsState.isBusy = true;
-    renderAzureDiagnosticsUi();
-    setAzureDiagnosticsStatus(t('azureLoadingResources'));
-
-    const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`, tenantId);
-    azureDiagnosticsState.resources = (resources || [])
-      .filter(item => /^microsoft\.communication\//i.test(String(item.type || '')))
-      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
-
-    azureDiagnosticsState.workspaces = [];
-    renderAzureDiagnosticsUi();
-    setAzureDiagnosticsStatus(
-      azureDiagnosticsState.resources.length > 0
-        ? `${azureDiagnosticsState.resources.length} ACS resource(s) discovered.`
-        : t('azureNoResources')
-    );
-
-    if (azureDiagnosticsState.resources.length > 0) {
-      const resSelect = document.getElementById('azureResourceSelect');
-      if (resSelect && resSelect.options.length > 0) resSelect.selectedIndex = 0;
-      // Release busy before chaining so that discoverAzureWorkspaces can set it again cleanly
-      azureDiagnosticsState.isBusy = false;
-      renderAzureDiagnosticsUi();
-      try {
-        await discoverAzureWorkspaces();
-      } catch (chainErr) {
-        console.error('Azure workspace discovery chain failed:', chainErr);
-        setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: chainErr?.message || t('authUnknownError') }), true);
-      }
-      return;
-    }
-  } catch (e) {
-    console.error('Azure resource discovery failed:', e);
-    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
-  } finally {
-    azureDiagnosticsState.isBusy = false;
-    renderAzureDiagnosticsUi();
-  }
-}
-
-async function getWorkspaceMetadata(workspaceResourceId) {
-  // Ensure the resource ID starts with '/' for a valid ARM URL
-  const normalizedId = workspaceResourceId.startsWith('/') ? workspaceResourceId : '/' + workspaceResourceId;
-  const tenantId = getSelectedSubscriptionTenantId();
-  const data = await armFetchJson(`https://management.azure.com${normalizedId}?api-version=2022-10-01`, {}, tenantId);
-  return {
-    id: data.id,
-    name: data.name,
-    location: data.location,
-    customerId: data.properties && data.properties.customerId ? data.properties.customerId : '',
-    resourceGroup: data.id ? (data.id.split('/')[4] || '') : ''
-  };
-}
-
-async function discoverAzureWorkspaces() {
-  const subscriptionId = getSelectedAzureSubscriptionId();
-  if (!subscriptionId) {
-    setAzureDiagnosticsStatus(t('azureSelectSubscriptionFirst'), true);
-    return;
-  }
-  const tenantId = getSelectedSubscriptionTenantId();
-
-  const selectedResourceId = getSelectedAzureResourceId();
-  const resourcesToCheck = selectedResourceId
-    ? azureDiagnosticsState.resources.filter(item => item.id === selectedResourceId)
-    : azureDiagnosticsState.resources;
-
-  try {
-    azureDiagnosticsState.isBusy = true;
-    renderAzureDiagnosticsUi();
-    setAzureDiagnosticsStatus(t('azureLoadingWorkspaces'));
-
-    const workspaceMap = new Map();
-
-    for (const resource of resourcesToCheck) {
-      try {
-        const diagnostics = await armFetchJson(`https://management.azure.com${resource.id}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview`, {}, tenantId);
-        for (const setting of (diagnostics.value || [])) {
-          // The workspaceId lives under setting.properties, not at the top level
-          const wsId = (setting.properties && setting.properties.workspaceId) || setting.workspaceId || '';
-          if (wsId) {
-            workspaceMap.set(wsId.toLowerCase(), wsId);
-          }
-        }
-      } catch (diagErr) {
-        console.warn('Diagnostic settings read failed for', resource.id, diagErr);
-      }
-    }
-
-    if (workspaceMap.size === 0) {
-      const resources = await armFetchAll(`https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resources?api-version=2021-04-01`, tenantId);
-      for (const resource of resources) {
-        if (String(resource.type || '').toLowerCase() === 'microsoft.operationalinsights/workspaces') {
-          workspaceMap.set(String(resource.id).toLowerCase(), resource.id);
-        }
-      }
-    }
-
-    const workspaces = [];
-    for (const workspaceId of workspaceMap.values()) {
-      try {
-        workspaces.push(await getWorkspaceMetadata(workspaceId));
-      } catch (e) {
-        console.warn('Workspace metadata load failed for', workspaceId, e);
-      }
-    }
-
-    azureDiagnosticsState.workspaces = workspaces.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
-    renderAzureDiagnosticsUi();
-
-    if (azureDiagnosticsState.workspaces.length > 0) {
-      const wsSelect = document.getElementById('azureWorkspaceSelect');
-      if (wsSelect && wsSelect.options.length > 0) wsSelect.selectedIndex = 0;
-    }
-
-    setAzureDiagnosticsStatus(
-      azureDiagnosticsState.workspaces.length > 0
-        ? t('azureDiscoverSuccess')
-        : t('azureNoWorkspaces')
-    );
-  } catch (e) {
-    console.error('Azure workspace discovery failed:', e);
-    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
-  } finally {
-    azureDiagnosticsState.isBusy = false;
-    renderAzureDiagnosticsUi();
-  }
-}
-
-function buildAzureQueryTemplate(templateName) {
-  const domain = String((document.getElementById('domainInput')?.value || '').trim());
-  switch (templateName) {
-    case 'workspaceInventory':
-      return {
-        name: t('azureWorkspaceInventory'),
-        query: 'union withsource=SourceTable * | summarize Rows=count() by SourceTable | top 25 by Rows desc'
-      };
-    case 'domainSearch':
-      if (!domain) throw new Error(t('azureDomainRequired'));
-      return {
-        name: t('azureDomainSearch'),
-        query: `search in (*) "${escapeKqlString(domain)}" | take 100`
-      };
-    case 'acsSearch':
-      return {
-        name: t('azureAcsSearch'),
-        query: 'search in (*) "Microsoft.Communication" | take 100'
-      };
-    default:
-      throw new Error('Unknown Azure query template: ' + templateName);
-  }
-}
-
-function renderLogAnalyticsResult(result) {
-  if (!result || !Array.isArray(result.tables) || result.tables.length === 0) {
-    return `<div>${escapeHtml(t('azureQueryReturnedNoTables'))}</div>`;
-  }
-
-  const workspace = azureDiagnosticsState.workspaces.find(item => item.id === getSelectedAzureWorkspaceId());
-  const subscription = azureDiagnosticsState.subscriptions.find(item => item.subscriptionId === getSelectedAzureSubscriptionId());
-  const meta = `<div class="azure-result-meta">${escapeHtml(t('azureResultsSummary', {
-    tenant: lastAuthData?.tenantId || 'n/a',
-    subscription: subscription?.displayName || subscription?.subscriptionId || 'n/a',
-    workspace: workspace?.name || workspace?.customerId || 'n/a'
-  }))}</div>`;
-  const queryText = azureDiagnosticsState.lastQueryText
-    ? `<div class="azure-result-meta"><strong>${escapeHtml(t('azureQueryTextLabel'))}:</strong> <code class="guidance-code">${escapeHtml(azureDiagnosticsState.lastQueryText)}</code></div>`
-    : '';
-
-  const tablesHtml = result.tables.map(table => {
-    const columns = Array.isArray(table.columns) ? table.columns : [];
-    const rows = Array.isArray(table.rows) ? table.rows.slice(0, 100) : [];
-    const totalRows = Array.isArray(table.rows) ? table.rows.length : 0;
-    const truncatedNote = totalRows > 100 ? ` (showing 100 of ${totalRows})` : '';
-    return `
-      <div>
-        <div class="azure-result-meta"><strong>${escapeHtml(table.name || 'Table')}</strong> \u2014 ${rows.length} row(s)${truncatedNote}</div>
-        <div class="azure-result-table-wrap">
-          <table class="azure-result-table">
-            <thead><tr>${columns.map(col => `<th>${escapeHtml(col.name || '')}</th>`).join('')}</tr></thead>
-            <tbody>
-              ${rows.map(row => `<tr>${columns.map((col, index) => {
-                const val = row[index] === null || row[index] === undefined ? '' : String(row[index]);
-                return `<td title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
-              }).join('')}</tr>`).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>`;
-  }).join('');
-
-  return meta + queryText + tablesHtml;
-}
-
-async function runAzureQueryTemplate(templateName) {
-  const workspaceId = getSelectedAzureWorkspaceId();
-  if (!workspaceId) {
-    setAzureDiagnosticsStatus(t('azureSelectWorkspaceFirst'), true);
-    return;
-  }
-
-  const workspace = azureDiagnosticsState.workspaces.find(item => item.id === workspaceId);
-  if (!workspace || !workspace.customerId) {
-    setAzureDiagnosticsStatus(t('azureSelectWorkspaceFirst'), true);
-    return;
-  }
-
-  try {
-    azureDiagnosticsState.isBusy = true;
-    renderAzureDiagnosticsUi();
-
-    const template = buildAzureQueryTemplate(templateName);
-    azureDiagnosticsState.lastQueryText = template.query;
-    azureDiagnosticsState.lastQueryName = template.name;
-    setAzureDiagnosticsStatus(t('azureRunningQuery', { name: template.name }));
-
-    const token = await acquireAzureAccessToken(LOG_ANALYTICS_SCOPES);
-    const response = await fetch(`https://api.loganalytics.io/v1/workspaces/${encodeURIComponent(workspace.customerId)}/query`, {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + token,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query: template.query,
-        timespan: 'P1D'
-      })
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`${response.status}: ${text || response.statusText}`);
-    }
-
-    const result = await response.json();
-    azureDiagnosticsState.lastResult = result;
-    setAzureDiagnosticsResultsHtml(renderLogAnalyticsResult(result));
-    setAzureDiagnosticsStatus(`${template.name} completed.`);
-  } catch (e) {
-    console.error('Azure Log Analytics query failed:', e);
-    setAzureDiagnosticsStatus(t('azureQueryFailed', { reason: e?.message || t('authUnknownError') }), true);
-  } finally {
-    azureDiagnosticsState.isBusy = false;
-    renderAzureDiagnosticsUi();
-  }
-}
 </script>
 
 </body>
@@ -24411,7 +24477,8 @@ $functionNames = @(
   'Get-HashedDomain',
   'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Test-WhoisDomainNameSafe','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Invoke-WhoisProcess','Initialize-WhoisFieldRegexes','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex','Get-WhoisParsedRegistrationData','Get-FirstNonEmptyPropertyValue',
+  'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
+  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit',

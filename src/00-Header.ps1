@@ -195,6 +195,16 @@ if ([string]::IsNullOrWhiteSpace($AnonymousMetricsFile)) {
 $AnonymousMetricsFile = [System.IO.Path]::GetFullPath($AnonymousMetricsFile)
 $env:ACS_ANON_METRICS_FILE = $AnonymousMetricsFile
 
+# Public Suffix List (PSL) cache file. Used by Get-RegistrableDomain to derive the
+# registrable domain for WHOIS/RDAP lookups across thousands of multi-label zones.
+# The file is refreshed at build time (Download-UiAssets.ps1) and lazily refreshed
+# at runtime when missing/stale. Worker runspaces read $env:ACS_PSL_FILE directly,
+# so we always round-trip through the env var. Honors an existing override.
+if ([string]::IsNullOrWhiteSpace($env:ACS_PSL_FILE)) {
+  $env:ACS_PSL_FILE = Join-Path -Path $PSScriptRoot -ChildPath 'public_suffix_list.dat'
+}
+try { $env:ACS_PSL_FILE = [System.IO.Path]::GetFullPath($env:ACS_PSL_FILE) } catch { }
+
 # DoH endpoint: CLI parameter wins, otherwise honor ACS_DNS_DOH_ENDPOINT. Worker
 # runspaces read the env var directly inside Resolve-DohName, so we always
 # round-trip through the env var even when the CLI param wins.

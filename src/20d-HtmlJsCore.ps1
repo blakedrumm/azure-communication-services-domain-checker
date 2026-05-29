@@ -3029,6 +3029,12 @@ function render(r) {
 
   const quotaCopyTextPlain = plainTable.join('\n');
   const quotaCopyTextHtml = `<table style="border-collapse:collapse;min-width:260px;">${htmlTableRows.map(r => r.replace('<th>', '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">').replace('<td>', '<td style="padding:4px 8px;border:1px solid #ddd;">')).join('')}</table>`;
+  // Store the base DNS/quota table so the copy handler can recombine it with
+  // the latest intake content at click time. The intake block is intentionally
+  // NOT baked in here: render() runs during the domain lookup (before the user
+  // clicks "Process Data"), so building the intake portion now would freeze an
+  // empty/stale snapshot. buildQuotaCopyPayload() rebuilds it on demand.
+  window.quotaCopyBase = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
   quotaCopyText = quotaCopyTextPlain;
   // Expose for inline copy handler with rich + plain variants
   window.quotaCopyText = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
@@ -3039,7 +3045,7 @@ function render(r) {
       <span class="chevron">&#x25BC;</span>
       <span class="tag tag-info">${escapeHtml(t('checklist'))}</span>
       <strong>${escapeHtml(t('emailQuota'))}</strong>
-      <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(window.quotaCopyText, this)">${escapeHtml(t('copyEmailQuota'))}</button>
+      <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(buildQuotaCopyPayload(), this)">${escapeHtml(t('copyEmailQuota'))}</button>
     </div>
     <div class="card-content">
       <div class="status-summary">${quotaItems.join('')}</div>
@@ -4008,18 +4014,794 @@ document.getElementById("domainInput").addEventListener("keyup", function (e) {
   }
 });
 
-document.getElementById('azureSubscriptionSelect').addEventListener('change', function () {
-  azureDiagnosticsState.resources = [];
-  azureDiagnosticsState.workspaces = [];
-  renderAzureDiagnosticsUi();
-  discoverAzureResources();
-});
+// ===== Customer Intake Form (rich-text editor) =====
+// The intake section is a single contenteditable region. We persist both
+// the HTML (for the rich Copy Email Quota output) and a plain-text
+// projection (used when the clipboard target only accepts text). Storage
+// is gated through the same consent-aware wrapper as the rest of the app.
+const INTAKE_STORAGE_KEY = 'acsIntakeRich';
+const INTAKE_TEMPLATE_HTML = [
+  '<p><strong>Customer Information</strong></p>',
+  '<ul>',
+  '<li>Company name: </li>',
+  '<li>Company website: </li>',
+  '<li>Provide a brief description of your business: </li>',
+  '</ul>',
+  '<p><strong>Email Service Information</strong></p>',
+  '<ul>',
+  '<li>Subscription ID: </li>',
+  '<li>Azure Communication Services Resource Name: </li>',
+  '<li>Is your custom domain already set up and currently used for sending messages: </li>',
+  '<li>Indicate the domain from which you are currently sending emails: </li>',
+  '</ul>',
+  '<p><strong>Usage Information</strong></p>',
+  '<ol>',
+  '<li>What type of emails do you send? (such as Transactional, Marketing, Promotional) </li>',
+  '<li>Specify the expected volume of emails you plan to send:',
+  '<ul>',
+  '<li>What is the maximum rate of messages per minute that you require? </li>',
+  '<li>What is the maximum rate of messages per hour that you require? </li>',
+  '<li>What is the maximum rate of messages per day that you require? </li>',
+  '</ul></li>',
+  '<li>What is the maximum attachment size (in MB) that you require? </li>',
+  '</ol>',
+  '<p><strong>Additional Information</strong></p>',
+  '<p>What is the source of the email addresses that you use for sending your messages?</p>',
+  '<p><em>Note: The source of the email addresses that you send your messages to plays a crucial role in the effectiveness and compliance of your email marketing campaigns. Providing details about the source of your email addresses helps us understand how you acquire and maintain your subscriber list.</em></p>',
+  '<p><br></p>',
+  '<p>How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?</p>',
+  '<p><em>Explain if you have an automated process in place that handles unsubscribes when recipients click on the \'unsubscribe\' link in your emails. Additionally, if you receive bounce/undeliverable notifications, can you include how you handle those and whether you have any mechanism to automatically remove email addresses that result in consistent bounces.</em></p>',
+  '<p><br></p>'
+].join('');
 
-document.getElementById('azureResourceSelect').addEventListener('change', function () {
-  azureDiagnosticsState.workspaces = [];
-  renderAzureDiagnosticsUi();
-  discoverAzureWorkspaces();
-});
+function getIntakeEditor() { return document.getElementById('intakeRichEditor'); }
+
+function loadIntakeForm() {
+  const editor = getIntakeEditor();
+  if (!editor) return;
+  let html = '';
+  try { html = consentAwareGetItem(INTAKE_STORAGE_KEY, 'functional') || ''; } catch (_) {}
+  if (html) editor.innerHTML = html;
+
+  if (!editor.__intakeBound) {
+    editor.addEventListener('input', saveIntakeForm);
+    editor.addEventListener('blur', saveIntakeForm);
+    // Strip styles from pasted content but keep structural markup so the
+    // copied payload doesn't inherit weird fonts/colors from the source.
+    editor.addEventListener('paste', handleIntakePaste);
+    bindIntakeToolbar();
+    editor.__intakeBound = true;
+  }
+}
+
+function saveIntakeForm() {
+  const editor = getIntakeEditor();
+  if (!editor) return;
+  try { consentAwareSetItem(INTAKE_STORAGE_KEY, editor.innerHTML, 'functional'); } catch (_) {}
+}
+
+function clearIntakeForm() {
+  const editor = getIntakeEditor();
+  if (editor) editor.innerHTML = '';
+  try { consentAwareSetItem(INTAKE_STORAGE_KEY, '', 'functional'); } catch (_) {}
+  intakeExtractedOverrides = {};
+  const wrap = document.getElementById('intakeExtractedWrap');
+  if (wrap) wrap.style.display = 'none';
+  const status = document.getElementById('intakeProcessStatus');
+  if (status) status.textContent = '';
+}
+
+function prefillIntakeForm() {
+  const editor = getIntakeEditor();
+  if (!editor) return;
+  const existing = (editor.innerHTML || '').trim();
+  if (existing && !window.confirm('Replace the current intake notes with the standard template?')) return;
+  editor.innerHTML = INTAKE_TEMPLATE_HTML;
+  saveIntakeForm();
+}
+
+function handleIntakePaste(e) {
+  // Prefer HTML so formatting/tables survive; fall back to plain text.
+  const cd = e.clipboardData || window.clipboardData;
+  if (!cd) return;
+  const html = cd.getData('text/html');
+  const text = cd.getData('text/plain');
+  if (html) {
+    e.preventDefault();
+    // Sanitize: drop <script>/<style> and inline event handlers / style
+    // attributes so the editor cannot inherit malicious or visually
+    // disruptive markup from the clipboard source.
+    const cleaned = sanitizeIntakeHtml(html);
+    document.execCommand('insertHTML', false, cleaned);
+    saveIntakeForm();
+  } else if (text) {
+    e.preventDefault();
+    document.execCommand('insertText', false, text);
+    saveIntakeForm();
+  }
+}
+
+function sanitizeIntakeHtml(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = String(html || '');
+  const walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_ELEMENT);
+  const toRemove = [];
+  let n;
+  while ((n = walker.nextNode())) {
+    const tag = n.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'META' || tag === 'LINK') {
+      toRemove.push(n);
+      continue;
+    }
+    // Drop style attribute and any on* event handlers.
+    if (n.hasAttribute('style')) n.removeAttribute('style');
+    for (const attr of Array.from(n.attributes)) {
+      if (/^on/i.test(attr.name)) n.removeAttribute(attr.name);
+    }
+  }
+  toRemove.forEach(el => el.parentNode && el.parentNode.removeChild(el));
+  return tpl.innerHTML;
+}
+
+function bindIntakeToolbar() {
+  const bar = document.getElementById('intakeFormToolbar');
+  if (!bar || bar.__intakeBound) return;
+  bar.__intakeBound = true;
+  bar.addEventListener('mousedown', (e) => {
+    // Keep editor selection while clicking toolbar buttons.
+    const btn = e.target.closest('button[data-cmd]');
+    if (btn) e.preventDefault();
+  });
+  bar.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-cmd]');
+    if (!btn) return;
+    const cmd = btn.getAttribute('data-cmd');
+    let arg = btn.getAttribute('data-arg') || null;
+    if (cmd === 'createLink') {
+      const url = window.prompt('Link URL:', 'https://');
+      if (!url) return;
+      arg = url;
+    }
+    document.execCommand(cmd, false, arg);
+    const editor = getIntakeEditor();
+    if (editor) editor.focus();
+    saveIntakeForm();
+  });
+}
+
+function getIntakeContent() {
+  // Returns { plain, html } for whatever the user has currently typed,
+  // or null when the editor is empty.
+  const editor = getIntakeEditor();
+  if (!editor) return null;
+  const html = (editor.innerHTML || '').trim();
+  const text = (editor.innerText || '').trim();
+  if (!text && !html) return null;
+  if (!text) return null;
+  return { plain: text, html: html };
+}
+
+// ----- Extraction -----------------------------------------------------
+// Standard ACS intake fields. Each entry lists the canonical label plus
+// alternate phrasings/keywords we'll look for in the rich-text editor.
+// Matching is case-insensitive and tolerant of trailing punctuation.
+const INTAKE_EXTRACT_FIELDS = [
+  { id: 'companyName',          label: 'Company name',                                 patterns: ['company name', 'customer name', 'organization name', 'organisation name'] },
+  { id: 'companyWebsite',       label: 'Company website',                              patterns: ['company website', 'website', 'company url', 'web site'] },
+  { id: 'businessDescription',  label: 'Brief description of your business',           patterns: ['provide a brief description of your business', 'brief description of your business', 'business description', 'description of your business', 'description of business', 'about the business', 'about your business'] },
+  { id: 'subscriptionId',       label: 'Subscription ID',                              patterns: ['subscription id', 'azure subscription id', 'subscription'] },
+  { id: 'acsResourceName',      label: 'Azure Communication Services Resource Name',   patterns: ['azure communication services resource name', 'acs resource name', 'communication services resource name', 'resource name'] },
+  { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'custom domain already set up', 'custom domain in use', 'domain already in use'] },
+  { id: 'currentSendingDomain', label: 'Current sending domain',                       patterns: ['indicate the domain from which you are currently sending emails', 'current sending domain', 'currently sending from', 'sending domain'] },
+  { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'type of emails do you send', 'type of emails', 'email type', 'types of emails'] },
+  { id: 'currentTier',          label: 'Current tier level',                           patterns: ['current tier level', 'current tier', 'existing tier', 'throttling tier for current subscription', 'throttling tier'] },
+  { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'email volume', 'volume of emails'] },
+  { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'rate per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
+  { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'rate per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
+  { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
+  { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
+  { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
+  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced', 'unsubscribe link'] }
+];
+
+// Track manual edits made in the extracted-fields table so re-running
+// "Process Data" doesn't blow them away unless the user explicitly clears
+// the field first.
+let intakeExtractedOverrides = {};
+
+// ACS Email throttling tiers. Each entry: { name, perMinute, perHour }.
+// "Expected tier level" is computed as the smallest tier whose per-minute
+// AND per-hour caps both meet or exceed the customer's requested rates.
+//
+// Tier names are stored base64-encoded (and decoded once at runtime) so
+// they are not trivially greppable in the bundled source. This is light
+// obfuscation, NOT a security control -- anyone who runs the page can
+// still read the decoded list in the browser. True one-way hashing would
+// prevent us from ever displaying the name, which defeats the feature.
+const INTAKE_TIERS = (function () {
+  const raw = [
+    { n: 'TWVyY3VyeQ==',                  perMinute:     30, perHour:      100 },
+    { n: 'VmVudXM=',                      perMinute:    100, perHour:     1000 },
+    { n: 'VmVudXNTdGFuZGFyZA==',          perMinute:    500, perHour:     2000 },
+    { n: 'VmVudXNQcm9mZXNzaW9uYWw=',      perMinute:   1000, perHour:     3000 },
+    { n: 'VmVudXNQcmVtaXVt',              perMinute:   2000, perHour:     4000 },
+    { n: 'RWFydGg=',                      perMinute:   5000, perHour:    20000 },
+    { n: 'RWFydGhTdGFuZGFyZA==',          perMinute:  10000, perHour:    40000 },
+    { n: 'RWFydGhQcm9mZXNzaW9uYWw=',      perMinute:  15000, perHour:    80000 },
+    { n: 'RWFydGhQcmVtaXVt',              perMinute:  20000, perHour:   100000 },
+    { n: 'RWFydGhTaWx2ZXI=',              perMinute: 100000, perHour:   500000 },
+    { n: 'RWFydGhHb2xk',                  perMinute: 200000, perHour:  1000000 },
+    { n: 'RWFydGhQbGF0aW51bQ==',          perMinute: 400000, perHour:  2000000 }
+  ];
+  const decode = (s) => {
+    try { return decodeURIComponent(escape(atob(s))); }
+    catch (_) { try { return atob(s); } catch (__) { return s; } }
+  };
+  return raw.map(t => ({ name: decode(t.n), perMinute: t.perMinute, perHour: t.perHour }));
+})();
+
+function parseIntakeNumeric(text) {
+  if (text === null || text === undefined) return null;
+  // Pull the first integer-like token out of the cell. Handles "1,000",
+  // "1000 msgs", "~100", etc. Returns null when no number is present.
+  const m = String(text).replace(/[\u00A0\s]/g, '').match(/(\d{1,3}(?:,\d{3})+|\d+)/);
+  if (!m) return null;
+  const n = parseInt(m[1].replace(/,/g, ''), 10);
+  return isNaN(n) ? null : n;
+}
+
+function inferExpectedTierIndex(perMinute, perHour) {
+  // Returns the index of the smallest tier that meets both rates, or -1
+  // when the customer's request exceeds every published tier.
+  const wantMin = parseIntakeNumeric(perMinute);
+  const wantHour = parseIntakeNumeric(perHour);
+  if (wantMin === null && wantHour === null) return -1;
+  for (let i = 0; i < INTAKE_TIERS.length; i++) {
+    const t = INTAKE_TIERS[i];
+    const okMin  = (wantMin  === null) || (t.perMinute >= wantMin);
+    const okHour = (wantHour === null) || (t.perHour   >= wantHour);
+    if (okMin && okHour) return i;
+  }
+  return -1;
+}
+
+function inferExpectedTier(perMinute, perHour) {
+  const idx = inferExpectedTierIndex(perMinute, perHour);
+  return idx >= 0 ? INTAKE_TIERS[idx].name : null;
+}
+
+function formatExpectedTierValue(existingValue, perMinute, perHour) {
+  // Prefix the inferred tier label onto whatever the user wrote in the
+  // expected-volume question. We never replace user-supplied text; we only
+  // enrich it so support reviewers see the target level next to the raw ask.
+  let tierIndex = inferExpectedTierIndex(perMinute, perHour);
+  // Tier index 0 is the default/base level, so quota-increase requests start
+  // at the next level up.
+  if (tierIndex === 0) tierIndex = 1;
+  const tier = tierIndex >= 0 && INTAKE_TIERS[tierIndex] ? INTAKE_TIERS[tierIndex].name : null;
+  const existing = (existingValue || '').trim();
+  if (!tier) return existing;
+  if (!existing) return tier;
+  // Avoid double-prefixing if the tier name is already in the text.
+  if (existing.toLowerCase().indexOf(tier.toLowerCase()) !== -1) return existing;
+  return tier + ' \u2014 ' + existing;
+}
+
+function normalizeIntakePlainText(plain) {
+  // Collapse non-breaking spaces and trim each line. Keep blank lines so
+  // we can detect multi-line answers under a question heading. Before
+  // splitting, insert soft line breaks before well-known form labels and
+  // section headers; this lets the extractor handle both nicely formatted
+  // multi-line forms and single-paragraph paste artifacts where fields run
+  // together ("Company name: X Company website: Y ...").
+  let text = String(plain || '').replace(/\u00A0/g, ' ');
+  const markers = [
+    'Customer Information',
+    'Company name:',
+    'Company website:',
+    'Please provide a brief description of your business:',
+    'Provide a brief description of your business:',
+    'Email Service Information',
+    'Subscription ID:',
+    'Azure Communication Services Resource Name:',
+    'Is your custom domain already set up and currently used for sending messages:',
+    'Indicate the domain from which you are currently sending emails:',
+    'Usage Information',
+    'What type of emails do you send?',
+    'Please specify the expected volume of emails you plan to send:',
+    'Specify the expected volume of emails you plan to send:',
+    'What is the maximum rate of messages per minute that you require?',
+    'What is the maximum rate of messages per hour that you require?',
+    'What is the maximum rate of messages per day that you require?',
+    'What is the maximum attachment size in MB?',
+    'Additional Information',
+    'What is the source of the email addresses that you use for sending your messages?',
+    'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?'
+  ];
+  for (const marker of markers) {
+    const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Insert a soft line break before the marker. Absorb an optional leading
+    // list number ("1. " / "2) ") into the same line so "2. Specify ..." is
+    // not split into a bare "2." line followed by the question text (which
+    // previously got glued onto the prior answer as e.g. "Transactional 2.").
+    text = text.replace(
+      new RegExp('\\s+(\\d+[\\.)]\\s+)?(' + escaped + ')', 'gi'),
+      function (m, num, mk) { return '\n' + (num || '') + mk; }
+    );
+  }
+  return text
+    .replace(/\u00A0/g, ' ')
+    .split(/\r?\n/)
+    .map(s => s.replace(/\s+$/, ''));
+}
+
+function isIntakeSectionHeader(line) {
+  // These section dividers are part of the customer form, not answers. Treat
+  // them as hard boundaries so a previous answer never absorbs the next
+  // section title (for example, "appmail.example.com Usage Information").
+  const s = String(line || '').trim().toLowerCase().replace(/[\u00A0\s]+/g, ' ');
+  return s === 'customer information'
+    || s === 'email service information'
+    || s === 'usage information'
+    || s === 'additional information';
+}
+
+// Sub-questions / clarifying prompts that aren't extracted as their own field
+// but DO mark the end of the previous answer. Without these, a narrative answer
+// would keep absorbing the follow-up prompt and its response.
+const INTAKE_QUESTION_BOUNDARIES = [
+  'explain if you have an automated process',
+  'additionally, if you receive bounce'
+];
+function isIntakeQuestionBoundary(line) {
+  const s = String(line || '').trim().toLowerCase().replace(/[\u00A0\s]+/g, ' ');
+  for (const b of INTAKE_QUESTION_BOUNDARIES) {
+    if (s.indexOf(b) !== -1) return true;
+  }
+  return false;
+}
+
+function isLikelyNonAnswerTail(text) {
+  // Some patterns intentionally match only the stable part of a question.
+  // For example, matching "maximum rate of messages per minute" leaves
+  // "that you require?" as the tail. That is not an answer; force the parser
+  // to collect the next line instead.
+  const s = String(text || '').trim().toLowerCase();
+  return !s
+    || s === '?'
+    || s === ':'
+    || s === 'or'
+    || s === 'and'
+    || s === 'that you require?'
+    || s === 'that you require'
+    || s === 'you require?'
+    || s === 'you require'
+    || /^or resulted\b/.test(s)
+    || /^resulted in bounce backs\b/.test(s)
+    || /^from your mailing list\??$/.test(s);
+}
+
+function cleanIntakeAnswerText(text) {
+  return String(text || '')
+    // Remove bullets or numbered-list prefixes, but never remove a real
+    // numeric answer like "10 messages per minute" or "30 MB".
+    .replace(/^[\s\-\*\u2022\u2023\u25E6]+/, '')
+    .replace(/^\d+[\.)]\s+/, '')
+    .replace(/^(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*/i, '')
+    .trim();
+}
+
+function matchIntakePattern(line, patterns) {
+  // Returns { rest } when `line` contains one of the patterns near its
+  // start, otherwise null. We accept patterns located in the first ~30
+  // chars (to allow short prefixes like "Provide a " or "1. ") or any
+  // long pattern (>= 20 chars) anywhere in the line, since long phrase
+  // matches are unambiguous. The returned `rest` is the line's tail with
+  // the matched phrase, any leading parenthetical clarifier, trailing
+  // "?"/":"/"-" punctuation, and a leading "Re:"/"Answer:" prefix stripped.
+  const norm = String(line || '')
+    // Strip bullets, but preserve numeric-leading answers such as
+    // "10 messages per minute". Only remove numbered-list prefixes when
+    // they include punctuation ("1. " / "2) ").
+    .replace(/^[\s\-\*\u2022\u2023\u25E6]+/, '')
+    .replace(/^\d+[\.)]\s+/, '')
+    .trim();
+  const lower = norm.toLowerCase();
+  for (const p of patterns) {
+    const pl = p.toLowerCase();
+    const idx = lower.indexOf(pl);
+    if (idx < 0) continue;
+    // Lines such as "10 messages per minute" are answers, not questions.
+    // Do not let generic patterns ("messages per minute") classify them
+    // as question lines and steal only the trailing punctuation.
+    if (idx > 0 && /^\d[\d,\.]*\s+/.test(norm)) continue;
+    if (idx === 0 || idx <= 30 || pl.length >= 20) {
+      let rest = norm.slice(idx + pl.length).trim();
+      // Strip a leading "(...)" clarifier such as "(such as Transactional...)".
+      rest = rest.replace(/^\([^)]*\)\s*/, '');
+      // Strip leading separator punctuation: : - ? \u2013 \u2014.
+      rest = rest.replace(/^[:?\-\u2013\u2014]+\s*/, '');
+      // Strip another parenthetical that may sit after the colon.
+      rest = rest.replace(/^\([^)]*\)\s*/, '');
+      // Strip a leading "Re:" / "Answer:" prefix on inline answers.
+      rest = rest.replace(/^(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*/i, '');
+      // Strip a trailing question clause that precedes the inline answer, e.g.
+      // "...per minute that you require? 3 aprox" -> "3 aprox".
+      rest = rest.replace(/^that\s+you\s+require\s*\??\s*/i, '');
+      rest = rest.replace(/^you\s+require\s*\??\s*/i, '');
+      if (isLikelyNonAnswerTail(rest)) rest = '';
+      return { rest: rest };
+    }
+  }
+  return null;
+}
+
+function extractIntakeFields(plain) {
+  const lines = normalizeIntakePlainText(plain).map(l => l || '');
+  const found = {};
+  const reAnswer = /^\s*(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*(.+)$/i;
+  const isQuestionLine = (line) => {
+    if (isIntakeSectionHeader(line)) return true;
+    if (isIntakeQuestionBoundary(line)) return true;
+    for (const f of INTAKE_EXTRACT_FIELDS) {
+      if (matchIntakePattern(line, f.patterns)) return true;
+    }
+    return false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+
+    // Build candidates: the current line on its own, and the current line
+    // joined with the next non-blank line (handles word-wrapped questions
+    // such as "How do you currently manage and remove email addresses
+    // that have unsubscribed or\nresulted in bounce backs...").
+    const candidates = [{ text: line, span: 1 }];
+    if (i + 1 < lines.length && lines[i + 1].trim()) {
+      candidates.push({ text: line + ' ' + lines[i + 1].trim(), span: 2 });
+    }
+
+    for (const field of INTAKE_EXTRACT_FIELDS) {
+      if (found[field.id]) continue;
+      let match = null;
+      let span = 1;
+      for (const c of candidates) {
+        const m = matchIntakePattern(c.text, field.patterns);
+        if (m) { match = m; span = c.span; break; }
+      }
+      if (!match) continue;
+
+      let value = (match.rest || '').trim();
+
+      // Look ahead for an explicit "Re:" / "Answer:" line within the next
+      // ~12 non-blank lines (stopping at the next known question). When
+      // present that overrides any inline rest, because intake docs often
+      // repeat the question text on multiple lines before the response.
+      let reValue = '';
+      for (let j = i + span; j < Math.min(lines.length, i + span + 14); j++) {
+        const nl = lines[j];
+        if (!nl.trim()) continue;
+        if (isQuestionLine(nl)) break;
+        const am = nl.match(reAnswer);
+        if (am) {
+          reValue = am[2].trim();
+          for (let k = j + 1; k < lines.length; k++) {
+            const nl2 = lines[k];
+            if (!nl2.trim()) break;
+            if (isQuestionLine(nl2)) break;
+            if (reAnswer.test(nl2)) break;
+            reValue += ' ' + nl2.trim();
+          }
+          break;
+        }
+      }
+      if (reValue) value = reValue;
+
+      // If still empty, gather following non-blank lines until a blank
+      // line or another known question.
+      if (!value) {
+        const collected = [];
+        let started = false;
+        for (let j = i + span; j < lines.length; j++) {
+          const next = lines[j];
+          if (!next.trim()) {
+            // Allow blank lines between a question and its answer, and also
+            // within longer narrative answers. Stop only after we've already
+            // collected something and the next non-blank line is a question or
+            // section header; otherwise keep scanning.
+            let k = j + 1;
+            while (k < lines.length && !lines[k].trim()) k++;
+            if (started && (k >= lines.length || isQuestionLine(lines[k]))) break;
+            continue;
+          }
+          if (isQuestionLine(next)) break;
+          // Before we've collected anything, skip wrapped question-continuation
+          // lines (the tail of a multi-line question, which typically ends with
+          // "?"). This prevents an answer from being set to leftover question
+          // text such as "resulted in bounce backs from your mailing list?".
+          if (!started && /\?\s*$/.test(next)) continue;
+          let t = cleanIntakeAnswerText(next);
+          if (!t || /^note\s*:/i.test(t)) break;
+          collected.push(t);
+          started = true;
+        }
+        value = collected.join(' ').trim();
+      }
+
+      if (value) found[field.id] = value;
+    }
+  }
+  return found;
+}
+
+function processIntakeForm() {
+  const status = document.getElementById('intakeProcessStatus');
+  const wrap = document.getElementById('intakeExtractedWrap');
+  const body = document.getElementById('intakeExtractedBody');
+  if (!body || !wrap) return;
+
+  const intake = getIntakeContent();
+  if (!intake || !intake.plain) {
+    wrap.style.display = 'none';
+    if (status) status.textContent = 'Editor is empty &mdash; nothing to process.';
+    return;
+  }
+
+  const detected = extractIntakeFields(intake.plain);
+  // Enrich "Expected tier level" with the inferred ACS throttling tier
+  // name when we have per-minute / per-hour rate values. The user's
+  // original text (e.g. "100 / min, 1000 / hr") is preserved as a suffix.
+  const inferredVolumeBase = detected.expectedVolume || '';
+  const enrichedVolume = formatExpectedTierValue(inferredVolumeBase, detected.ratePerMinute, detected.ratePerHour);
+  if (enrichedVolume) detected.expectedVolume = enrichedVolume;
+
+  // Merge with prior manual overrides so the user's edits survive a re-run.
+  const merged = {};
+  let detectedCount = 0;
+  for (const f of INTAKE_EXTRACT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(intakeExtractedOverrides, f.id)) {
+      merged[f.id] = intakeExtractedOverrides[f.id];
+    } else if (Object.prototype.hasOwnProperty.call(detected, f.id)) {
+      merged[f.id] = detected[f.id];
+      detectedCount++;
+    } else {
+      merged[f.id] = '';
+    }
+  }
+
+  renderExtractedIntakeTable(merged);
+  wrap.style.display = '';
+  if (status) {
+    status.textContent = detectedCount > 0
+      ? 'Detected ' + detectedCount + ' of ' + INTAKE_EXTRACT_FIELDS.length + ' fields. Edit any cell to correct.'
+      : 'No fields detected. You can fill them in manually below.';
+  }
+
+  // If the intake form names a "Current sending domain" that differs from the
+  // domain the checker is currently set to, automatically re-run the domain
+  // checker against the sending domain so the results reflect the customer's
+  // actual mail domain rather than whatever was previously typed/loaded.
+  maybeRunCheckerForIntakeDomain(merged.currentSendingDomain, status);
+}
+
+// Compare the intake "Current sending domain" against the domain currently
+// loaded in the checker. When they differ (and the sending domain is valid),
+// load it into the search box and trigger a fresh lookup.
+function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
+  const sendingDomain = normalizeDomain(rawSendingDomain || '');
+  if (!sendingDomain || !isValidDomain(sendingDomain)) return;
+
+  const input = document.getElementById('domainInput');
+  const currentDomain = normalizeDomain(input ? input.value : '');
+  if (sendingDomain === currentDomain) return;
+
+  if (input) input.value = sendingDomain;
+  if (typeof toggleClearBtn === 'function') toggleClearBtn();
+  if (status) {
+    status.textContent = (status.textContent ? status.textContent + ' ' : '')
+      + 'Running checker against ' + sendingDomain + '\u2026';
+  }
+  // Pass the sending domain explicitly so the lookup is not affected by any
+  // race with the input value update above.
+  lookup({ domainOverride: sendingDomain, animateTopIntro: true });
+}
+
+function renderExtractedIntakeTable(values) {
+  const body = document.getElementById('intakeExtractedBody');
+  if (!body) return;
+  const rows = [];
+  for (const f of INTAKE_EXTRACT_FIELDS) {
+    const val = values[f.id] || '';
+    const emptyCls = val ? '' : ' class="intake-extracted-empty"';
+    rows.push(
+      '<tr' + emptyCls + ' data-field-id="' + escapeHtml(f.id) + '">' +
+      '<th>' + escapeHtml(f.label) + '</th>' +
+      '<td contenteditable="true" data-empty-text="(not detected)">' +
+      (val ? escapeHtml(val) : '(not detected)') +
+      '</td></tr>'
+    );
+  }
+  body.innerHTML = rows.join('');
+  // Wire up edit tracking.
+  Array.from(body.querySelectorAll('td[contenteditable="true"]')).forEach(td => {
+    // Clear placeholder text on focus when the cell has the empty marker.
+    td.addEventListener('focus', () => {
+      const tr = td.parentElement;
+      if (tr && tr.classList.contains('intake-extracted-empty')) {
+        td.textContent = '';
+        tr.classList.remove('intake-extracted-empty');
+      }
+    });
+    td.addEventListener('blur', () => {
+      const tr = td.parentElement;
+      const fieldId = tr ? tr.getAttribute('data-field-id') : null;
+      const text = (td.innerText || '').trim();
+      if (fieldId) {
+        if (text) {
+          intakeExtractedOverrides[fieldId] = text;
+        } else {
+          delete intakeExtractedOverrides[fieldId];
+          td.textContent = '(not detected)';
+          tr.classList.add('intake-extracted-empty');
+        }
+      }
+    });
+  });
+}
+
+function getExtractedIntakeValues() {
+  // Returns the currently displayed extracted fields, in canonical order,
+  // skipping rows the user/extractor left empty.
+  const body = document.getElementById('intakeExtractedBody');
+  if (!body) return [];
+  const out = [];
+  for (const f of INTAKE_EXTRACT_FIELDS) {
+    const tr = body.querySelector('tr[data-field-id="' + f.id + '"]');
+    if (!tr || tr.classList.contains('intake-extracted-empty')) continue;
+    const td = tr.querySelector('td[contenteditable="true"]');
+    const val = td ? (td.innerText || '').trim() : '';
+    if (val) out.push({ id: f.id, label: f.label, value: val });
+  }
+  return out;
+}
+
+// Returns a plain { fieldId: value } lookup of the currently displayed
+// extracted fields, used by the structured request-template builder below.
+function getExtractedIntakeMap() {
+  const map = {};
+  for (const f of getExtractedIntakeValues()) {
+    map[f.id] = f.value;
+  }
+  return map;
+}
+
+// Canonical ACS "Email quota increase" intake template. Each row mirrors the
+// numbered questionnaire reviewers expect, mapping the long "Required
+// Information" prompt to the extractor field whose value fills the "Details to
+// Provide" column. Rows with `id: null` are pure section/sub-headers; rows
+// with a `sub: true` flag are indented sub-questions under a parent number.
+const INTAKE_REQUEST_TEMPLATE = [
+  { id: 'companyName',          label: 'Company Name' },
+  { id: 'companyWebsite',       label: 'Company Website' },
+  { id: 'businessDescription',  label: 'Brief Description of Your Business' },
+  { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a pre-requisite before the quota increase and AMD domain is only for testing purpose, not allowed for quota increase and the failure rate should be less than 1%.' },
+  { id: 'currentSendingDomain', label: 'What is the domain you are currently sending emails from? Please make sure it has successfully sent emails.' },
+  { id: 'acsResourceName',      label: 'ACS Resource Name' },
+  { id: 'subscriptionId',       label: 'Subscription ID' },
+  { id: 'emailType',            label: 'What type of emails do you send? (e.g., Transactional, Marketing, Promotional)' },
+  { id: null,                   label: 'Please specify the expected volume of emails you plan to send (exact in number).' },
+  { id: 'expectedVolume',       label: 'Expected tier level', sub: true },
+  { id: 'ratePerMinute',        label: 'What is the maximum rate of messages per minute that you require?', sub: true },
+  { id: 'ratePerHour',          label: 'What is the maximum rate of messages per hour that you require?', sub: true },
+  { id: 'ratePerDay',           label: 'What is the maximum rate of messages per day that you require?', sub: true },
+  { id: 'attachmentSizeMb',     label: 'What is the maximum attachment size (in MB) that you require?' },
+  { id: 'addressSource',        label: 'What is the source of the email addresses that you use for sending your messages? (e.g., The source of the email addresses that you use for sending your messages plays a crucial role in the effectiveness and compliance of your email marketing campaigns. Providing details about the source of your email addresses will help us understand how you acquire and maintain your subscriber list).' },
+  { id: 'bounceHandling',       label: 'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounces from your mailing list? (e.g., Explain whether you have an automated process in place that handles unsubscribes when recipients click on the \'unsubscribe\' link in your emails. Additionally, if you receive bounce notifications, can you mention how you handle those and whether you have any mechanism to automatically remove email addresses that result in consistent bounces).' }
+];
+
+// Builds the numbered "Required Information / Details to Provide" request
+// template as both plain text and HTML, filling the Details column from the
+// extracted intake fields. Returns null when no intake fields are available.
+function buildIntakeRequestTemplate() {
+  const values = getExtractedIntakeMap();
+  if (!values || Object.keys(values).length === 0) return null;
+
+  const plainRows = [];
+  const htmlRows = [];
+  let sno = 0;
+  for (const row of INTAKE_REQUEST_TEMPLATE) {
+    const detail = (row.id && values[row.id]) ? values[row.id] : '';
+    // Sub-questions (rate per minute/hour/day) sit under the prior number and
+    // get a blank S.No cell; everything else advances the running number.
+    const numberLabel = row.sub ? '' : String(++sno);
+    plainRows.push((numberLabel ? numberLabel + '. ' : '   ') + row.label + (detail ? ' => ' + detail : ' =>'));
+    const indentStyle = row.sub ? 'padding-left:24px;' : '';
+    htmlRows.push(
+      '<tr>' +
+      '<td style="padding:4px 8px;border:1px solid #ddd;text-align:center;vertical-align:top;">' + escapeHtml(numberLabel) + '</td>' +
+      '<td style="padding:4px 8px;border:1px solid #ddd;vertical-align:top;' + indentStyle + '">' + escapeHtml(row.label) + '</td>' +
+      '<td style="padding:4px 8px;border:1px solid #ddd;vertical-align:top;white-space:pre-wrap;">' + escapeHtml(detail) + '</td>' +
+      '</tr>'
+    );
+  }
+
+  const plain = ['S.No | Required Information | Details to Provide', '---'].concat(plainRows).join('\n');
+  const html =
+    '<table style="border-collapse:collapse;min-width:480px;margin-top:4px;">' +
+    '<thead><tr>' +
+    '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">S.No</th>' +
+    '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">Required Information</th>' +
+    '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">Details to Provide</th>' +
+    '</tr></thead><tbody>' + htmlRows.join('') + '</tbody></table>';
+
+  return { plain: plain, html: html };
+}
+
+// Builds the full Copy Email Quota payload at click time: the base DNS/quota
+// table (captured during render) plus the latest Customer Intake Information
+// block. This is computed on demand so clicking "Process Data" after a lookup
+// is reflected in the copied output without re-running the domain check.
+function buildQuotaCopyPayload() {
+  const base = window.quotaCopyBase || { plain: '', html: '' };
+  let intakePlain = '';
+  let intakeHtml = '';
+  try {
+    const extracted = (typeof getExtractedIntakeValues === 'function') ? getExtractedIntakeValues() : [];
+    const requestTemplate = (typeof buildIntakeRequestTemplate === 'function') ? buildIntakeRequestTemplate() : null;
+    const hasExtracted = extracted && extracted.length > 0;
+    if (hasExtracted) {
+      const plainParts = ['', '---', 'Customer Intake Information', '---'];
+      const htmlParts = ['<br><strong>Customer Intake Information</strong>'];
+      if (requestTemplate) {
+        // Structured "Required Information / Details to Provide" request table,
+        // matching the ACS email quota increase intake questionnaire.
+        plainParts.push(requestTemplate.plain);
+        htmlParts.push(requestTemplate.html);
+      } else {
+        plainParts.push('Extracted fields:');
+        for (const f of extracted) {
+          plainParts.push('- ' + f.label + ': ' + f.value);
+        }
+        const rows = extracted.map(f =>
+          '<tr>' +
+          '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">' + escapeHtml(f.label) + '</th>' +
+          '<td style="padding:4px 8px;border:1px solid #ddd;white-space:pre-wrap;">' + escapeHtml(f.value) + '</td>' +
+          '</tr>'
+        ).join('');
+        htmlParts.push('<table style="border-collapse:collapse;min-width:260px;margin-top:4px;">' + rows + '</table>');
+      }
+      // Intentionally NOT including the raw editor notes (intake.plain /
+      // intake.html) here: the copied output should contain only the
+      // structured extracted-fields table, not the free-form intake text.
+      intakePlain = '\n' + plainParts.join('\n');
+      intakeHtml = htmlParts.join('');
+    }
+  } catch (_) {}
+  const payload = {
+    plain: (base.plain || '') + intakePlain,
+    html: (base.html || '') + intakeHtml
+  };
+  // Keep the legacy global in sync for any other consumers.
+  window.quotaCopyText = payload;
+  return payload;
+}
+
+// Show the intake form only when the signed-in user has been identified
+// as a Microsoft employee. Called from updateAuthUI in
+// 20e-HtmlAzureIntegration.ps1.
+function updateIntakeFormVisibility(isSignedIn) {
+  const card = document.getElementById('intakeFormCard');
+  if (!card) return;
+  // Only show the Customer Intake form to users signed in with a Microsoft
+  // account. Hide it (and don't load saved content) otherwise.
+  if (isSignedIn) {
+    card.style.display = '';
+    loadIntakeForm();
+  } else {
+    card.style.display = 'none';
+  }
+}
 
 // Theme + query-domain initialization
 function initializePage() {
@@ -4066,6 +4848,13 @@ function initializePage() {
   if (shouldShowCookieConsent() || openCookieSettingsRequested) {
     applyCookieConsentLanguage();
     showCookieConsentBanner();
+  }
+
+  // Customer intake form starts hidden; it is revealed by updateAuthUI
+  // only when the signed-in user is a Microsoft employee.
+  // TEMP: load it eagerly so it works without sign-in during testing.
+  if (typeof loadIntakeForm === 'function') {
+    loadIntakeForm();
   }
 
   scheduleInitialLookup(bootstrapDomain);
@@ -4143,17 +4932,6 @@ let msalInstance = null;
 let msAuthAccount = null;
 let isMsEmployee = false;
 let msalInitError = null;
-const ARM_SCOPES = ['https://management.azure.com/user_impersonation'];
-const LOG_ANALYTICS_SCOPES = ['https://api.loganalytics.io/Data.Read'];
 const GRAPH_SCOPES = ['User.Read'];
-let azureDiagnosticsState = {
-  subscriptions: [],
-  resources: [],
-  workspaces: [],
-  lastQueryText: '',
-  lastQueryName: '',
-  lastResult: null,
-  isBusy: false
-};
 
 '@

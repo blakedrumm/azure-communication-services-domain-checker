@@ -212,44 +212,82 @@ async function ensureMsalLoaded() {
 </div>
 <div id="checkProgressPopover" class="check-progress-popover hide-on-screenshot" role="status" aria-live="polite" hidden></div>
 <div id="status" class="engage-section"></div>
-<div id="azureDiagnosticsCard" class="card hide-on-screenshot engage-section" style="display:none; margin-bottom: 12px;">
-  <div class="card-header" onclick="toggleCard(this)">
+
+<!--
+  Intake Information form (hidden from screenshots).
+  Values entered here are persisted to localStorage (only when the user has
+  granted functional-cookie consent) and are appended to the "Copy Email
+  Quota" output so support staff can paste a full request package in one
+  go. Field set matches the standard ACS email-quota-increase intake form.
+-->
+<!--
+  Visibility is gated to users signed in with a Microsoft account (see
+  updateIntakeFormVisibility in 20d-HtmlJsCore.ps1, called from
+  updateAuthUI). Hidden by default so anonymous users never see it; the
+  auth flow reveals it once a Microsoft account is signed in.
+-->
+<div id="intakeFormCard" class="card intake-form-card" style="margin-bottom: 12px; display: none;">
+  <div class="card-header collapsed-header" onclick="toggleCard(this)">
     <span class="chevron">&#x25BC;</span>
-    <span class="tag tag-info" id="azureDiagnosticsTag">AZURE</span>
-    <strong id="azureDiagnosticsTitle">Azure Workspace Diagnostics</strong>
+    <span class="tag tag-info">Form</span>
+    <strong id="intakeFormTitle">Customer Intake Information (optional)</strong>
+    <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); prefillIntakeForm();">Insert template</button>
+    <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:6px;" onclick="event.stopPropagation(); clearIntakeForm();">Clear</button>
   </div>
-  <div class="card-content">
-    <div id="azureDiagnosticsHint" class="azure-note">Sign in to query customer Azure subscriptions and Log Analytics workspaces directly from your browser session.</div>
-    <div id="azureSwitchDirectoryRow" class="azure-panel-field" style="display:none; margin-bottom:10px;">
-      <label for="azureTenantInput" id="azureSwitchDirectoryLabel" style="font-size:12px;">Switch directory (tenant ID or domain)</label>
-      <div style="display:flex; gap:6px;">
-        <input id="azureTenantInput" type="text" placeholder="e.g. contoso.onmicrosoft.com" style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--input-bg); color:var(--fg); font-size:13px;" />
-        <button id="azureSwitchDirectoryBtn" type="button" onclick="switchAzureDirectory()" style="white-space:nowrap;">Switch</button>
-      </div>
+  <div class="card-content collapsed">
+    <p class="intake-form-hint" style="margin:0 0 10px 0; font-size:12px; opacity:0.8;">
+      Paste in here the customer intake form responses. Formatting (bold, italics, lists, tables, links, pasted images) is preserved. Contents are saved locally in your browser (functional cookies must be allowed) and are appended to the <strong>Copy Email Quota</strong> output.
+    </p>
+    <div id="intakeFormToolbar" class="intake-form-toolbar" role="toolbar" aria-label="Formatting">
+      <button type="button" data-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+      <button type="button" data-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+      <button type="button" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+      <button type="button" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+      <span class="intake-toolbar-sep"></span>
+      <button type="button" data-cmd="formatBlock" data-arg="H3" title="Heading">H</button>
+      <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">&bull; List</button>
+      <button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
+      <button type="button" data-cmd="formatBlock" data-arg="BLOCKQUOTE" title="Quote">&ldquo; &rdquo;</button>
+      <button type="button" data-cmd="formatBlock" data-arg="PRE" title="Code block">{ }</button>
+      <span class="intake-toolbar-sep"></span>
+      <button type="button" data-cmd="createLink" title="Insert link">Link</button>
+      <button type="button" data-cmd="unlink" title="Remove link">Unlink</button>
+      <span class="intake-toolbar-sep"></span>
+      <button type="button" data-cmd="removeFormat" title="Clear formatting">T&times;</button>
     </div>
-    <div class="azure-panel-grid">
-      <div class="azure-panel-field">
-        <label for="azureSubscriptionSelect" id="azureSubscriptionLabel">Subscription</label>
-        <select id="azureSubscriptionSelect"></select>
-      </div>
-      <div class="azure-panel-field">
-        <label for="azureResourceSelect" id="azureResourceLabel">ACS Resource</label>
-        <select id="azureResourceSelect"></select>
-      </div>
-      <div class="azure-panel-field">
-        <label for="azureWorkspaceSelect" id="azureWorkspaceLabel">Workspace</label>
-        <select id="azureWorkspaceSelect"></select>
-      </div>
+    <div id="intakeRichEditor"
+         class="intake-rich-editor"
+         contenteditable="true"
+         spellcheck="true"
+         role="textbox"
+         aria-multiline="true"
+         aria-label="Customer intake information"
+         data-placeholder="Paste or type customer intake information here. Use the toolbar (or Ctrl+B / Ctrl+I / Ctrl+U) to format. Click 'Insert template' for the standard ACS intake questionnaire."></div>
+
+    <!--
+      Process Data: walks the editor's text content and matches each line
+      against the standard ACS intake questions to populate the extracted
+      fields below. Lets the user see exactly what the app pulled from
+      the rich text box before they hit Copy Email Quota.
+    -->
+    <div class="intake-process-row">
+      <button type="button" id="intakeProcessBtn" class="copy-btn" onclick="processIntakeForm()">Process Data</button>
+      <span id="intakeProcessStatus" class="intake-process-status" aria-live="polite"></span>
     </div>
-    <div class="azure-panel-actions">
-      <button id="azureRunInventoryBtn" type="button" class="primary" onclick="runAzureQueryTemplate('workspaceInventory')">Run workspace inventory</button>
-      <button id="azureRunDomainSearchBtn" type="button" onclick="runAzureQueryTemplate('domainSearch')">Run domain search</button>
-      <button id="azureRunAcsSearchBtn" type="button" onclick="runAzureQueryTemplate('acsSearch')">Run ACS search</button>
+
+    <div id="intakeExtractedWrap" class="intake-extracted-wrap" style="display:none;">
+      <h4 class="intake-extracted-title">Extracted fields</h4>
+      <p class="intake-extracted-hint">These are the values the app detected in the rich text box above. Edit any cell to correct it &mdash; edits are included in the <strong>Copy Email Quota</strong> output.</p>
+      <table class="intake-extracted-table">
+        <thead>
+          <tr><th style="width:42%;">Field</th><th>Detected value</th></tr>
+        </thead>
+        <tbody id="intakeExtractedBody"></tbody>
+      </table>
     </div>
-    <div id="azureDiagnosticsStatus" class="azure-status"></div>
-    <div id="azureDiagnosticsResults" class="azure-results-container"></div>
   </div>
 </div>
+
 <div id="results" class="cards"></div>
 
 <div class="footer" id="footerText">

@@ -383,6 +383,22 @@ Customize the application behavior using these environment variables:
 | `ACS_DNS_RESOLVER` | `Auto` | DNS resolver mode: `Auto`, `System`, or `DoH` |
 | `ACS_DNS_DOH_ENDPOINT` | _(auto)_ | Custom DNS-over-HTTPS endpoint URL |
 
+### 🌐 Public Suffix List (registrable-domain resolution)
+The registrable-domain resolver (used to pick the correct WHOIS/RDAP target for multi-label
+zones such as `co.uk`, `com.au`, or `co.th`) uses a cached copy of the official
+[Public Suffix List](https://publicsuffix.org/). The list is downloaded to
+`public_suffix_list.dat` at build time by `Download-UiAssets.ps1` and is lazily refreshed at
+runtime when the file is missing or older than the TTL. If no list is available (offline build
+or download disabled), the resolver falls back to a small embedded set of common multi-label
+suffixes.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_PSL_FILE` | `public_suffix_list.dat` next to the script | Path to the cached Public Suffix List file |
+| `ACS_PSL_URL` | `https://publicsuffix.org/list/public_suffix_list.dat` | Source URL for runtime/build refresh |
+| `ACS_PSL_MAX_AGE_DAYS` | `30` | Refresh the cached list when it is older than this many days |
+| `ACS_PSL_DISABLE_DOWNLOAD` | `0` | Set to `1` to never download at runtime (offline / locked-down hosts) |
+
 ### 📊 Metrics & Analytics
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -392,7 +408,7 @@ Customize the application behavior using these environment variables:
 
 When browser-based anonymous metrics are enabled, the SPA now asks the user for cookie consent before storing optional preferences or sending analytics consent that allows the temporary `acs_session` analytics cookie. The consent banner is localized across all supported UI languages, and the `/terms` and `/privacy` pages now include links that reopen cookie management directly in the SPA.
 
-To avoid browser tracking-prevention warnings from third-party SVG downloads, the SPA can also serve Lucide and flag SVG files from same-origin `/assets/*` paths. Use `Download-UiAssets.ps1` to fetch those files into the repository `assets/vendor/...` folders.
+To avoid browser tracking-prevention warnings from third-party SVG downloads, the SPA can also serve Lucide and flag SVG files from same-origin `/assets/*` paths. Use `Download-UiAssets.ps1` to fetch those files into the repository `assets/vendor/...` folders. The same script also refreshes the cached `public_suffix_list.dat` used for registrable-domain resolution.
 
 ```powershell
 pwsh -NoProfile -File .\Download-UiAssets.ps1
@@ -559,7 +575,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.1.6`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.3.0`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -582,8 +598,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.1.6
-git push origin v2.1.6
+git tag v2.3.0
+git push origin v2.3.0
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -594,7 +610,7 @@ git push origin v2.1.6
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.1.6`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.3.0`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -611,11 +627,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.1.6
+docker pull limitlessworlds/acs-domain-checker:2.3.0
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.1.6
-docker pull limitlessworlds/acs-domain-checker:windows-2.1.6
+docker pull limitlessworlds/acs-domain-checker:linux-2.3.0
+docker pull limitlessworlds/acs-domain-checker:windows-2.3.0
 ```
 
 ### 🛠️ Manual Build Script
@@ -630,7 +646,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.1.6
+./acs-domain-checker-dockerhub.ps1 -Version 2.3.0
 ```
 
 **📋 Requirements for manual script:**

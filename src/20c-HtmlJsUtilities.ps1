@@ -527,38 +527,6 @@ function applyLanguageToStaticUi() {
   const signOutBtn = document.getElementById('msSignOutBtn');
   if (signOutBtn) signOutBtn.innerHTML = t('signOut');
 
-  const azureTag = document.getElementById('azureDiagnosticsTag');
-  if (azureTag) azureTag.textContent = t('azureTag');
-
-  const azureTitle = document.getElementById('azureDiagnosticsTitle');
-  if (azureTitle) azureTitle.textContent = t('azureDiagnosticsTitle');
-
-  const azureHint = document.getElementById('azureDiagnosticsHint');
-  if (azureHint) azureHint.textContent = t('azureDiagnosticsHint');
-
-  const azureSubscriptionLabel = document.getElementById('azureSubscriptionLabel');
-  if (azureSubscriptionLabel) azureSubscriptionLabel.textContent = t('azureSubscription');
-
-  const azureSwitchDirectoryLabel = document.getElementById('azureSwitchDirectoryLabel');
-  if (azureSwitchDirectoryLabel) azureSwitchDirectoryLabel.textContent = t('azureSwitchDirectory');
-  const azureSwitchDirectoryBtn = document.getElementById('azureSwitchDirectoryBtn');
-  if (azureSwitchDirectoryBtn) azureSwitchDirectoryBtn.textContent = t('azureSwitchBtn');
-
-  const azureResourceLabel = document.getElementById('azureResourceLabel');
-  if (azureResourceLabel) azureResourceLabel.textContent = t('azureAcsResource');
-
-  const azureWorkspaceLabel = document.getElementById('azureWorkspaceLabel');
-  if (azureWorkspaceLabel) azureWorkspaceLabel.textContent = t('azureWorkspace');
-
-  const azureRunInventoryBtn = document.getElementById('azureRunInventoryBtn');
-  if (azureRunInventoryBtn) azureRunInventoryBtn.textContent = t('azureRunInventory');
-
-  const azureRunDomainSearchBtn = document.getElementById('azureRunDomainSearchBtn');
-  if (azureRunDomainSearchBtn) azureRunDomainSearchBtn.textContent = t('azureRunDomainSearch');
-
-  const azureRunAcsSearchBtn = document.getElementById('azureRunAcsSearchBtn');
-  if (azureRunAcsSearchBtn) azureRunAcsSearchBtn.textContent = t('azureRunAcsSearch');
-
   const footer = document.getElementById('footerText');
   if (footer) {
     let footerHtml = t('footer', { version: appVersion });
@@ -571,7 +539,6 @@ function applyLanguageToStaticUi() {
 
   populateLanguageSelect();
   loadHistory();
-  renderAzureDiagnosticsUi();
 
   // Re-render the live check-progress popover so its labels follow the
   // newly selected language even if a lookup is currently in flight.
