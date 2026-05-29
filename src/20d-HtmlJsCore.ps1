@@ -4691,6 +4691,7 @@ const INTAKE_REQUEST_TEMPLATE = [
   { id: 'subscriptionId',       label: 'Subscription ID' },
   { id: 'emailType',            label: 'What type of emails do you send? (e.g., Transactional, Marketing, Promotional)' },
   { id: null,                   label: 'Please specify the expected volume of emails you plan to send (exact in number).' },
+  { id: 'currentTier',          label: 'Current tier level', sub: true },
   { id: 'expectedVolume',       label: 'Expected tier level', sub: true },
   { id: 'ratePerMinute',        label: 'What is the maximum rate of messages per minute that you require?', sub: true },
   { id: 'ratePerHour',          label: 'What is the maximum rate of messages per hour that you require?', sub: true },
