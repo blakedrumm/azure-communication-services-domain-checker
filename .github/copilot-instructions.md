@@ -65,7 +65,7 @@ Files are numbered `NN-Name.ps1` to control concatenation order. The build sorts
 
 | File | Lines | Contents |
 |---|---|---|
-| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.3.0`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
+| `03-MetricsHashKey.ps1` | ~117 | `$script:AppVersion` (currently `2.3.1`), metrics hash key persistence, `Get-HashedDomain`, `Handle-MetricsRequest` |
 | `09-AnonymousMetrics.ps1` | ~361 | Optional anonymous usage metrics — persistence, aggregation counters, file I/O |
 | `10-SessionCookies.ps1` | ~288 | Anonymous session tracking, session cookie management, `Update-AnonymousMetrics`. The `Secure` attribute on `acs_session` only honors the `X-Forwarded-Proto` header when the immediate TCP peer is in `ACS_TRUSTED_PROXIES` (mirrors `Get-ClientIp`); otherwise it falls back to `Request.Url.Scheme` so an untrusted client cannot trick the server into stamping `Secure` on a plaintext cookie. |
 

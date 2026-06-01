@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.3.0'
+$script:AppVersion = '2.3.1'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -22719,17 +22719,17 @@ function getIntakeContent() {
 const INTAKE_EXTRACT_FIELDS = [
   { id: 'companyName',          label: 'Company name',                                 patterns: ['company name', 'customer name', 'organization name', 'organisation name'] },
   { id: 'companyWebsite',       label: 'Company website',                              patterns: ['company website', 'website', 'company url', 'web site'] },
-  { id: 'businessDescription',  label: 'Brief description of your business',           patterns: ['provide a brief description of your business', 'brief description of your business', 'business description', 'description of your business', 'description of business', 'about the business', 'about your business'] },
+  { id: 'businessDescription',  label: 'Brief description of your business',           patterns: ['provide a brief description of your business', 'brief description of your business', 'business description', 'description of your business', 'description of business', 'brief description', 'about the business', 'about your business'] },
   { id: 'subscriptionId',       label: 'Subscription ID',                              patterns: ['subscription id', 'azure subscription id', 'subscription'] },
   { id: 'acsResourceName',      label: 'Azure Communication Services Resource Name',   patterns: ['azure communication services resource name', 'acs resource name', 'communication services resource name', 'resource name'] },
-  { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'custom domain already set up', 'custom domain in use', 'domain already in use'] },
+  { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'custom domain already set up', 'custom domain set up', 'custom domain in use', 'domain already in use', 'custom domain'] },
   { id: 'currentSendingDomain', label: 'Current sending domain',                       patterns: ['indicate the domain from which you are currently sending emails', 'current sending domain', 'currently sending from', 'sending domain'] },
   { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'type of emails do you send', 'type of emails', 'email type', 'types of emails'] },
   { id: 'currentTier',          label: 'Current tier level',                           patterns: ['current tier level', 'current tier', 'existing tier', 'throttling tier for current subscription', 'throttling tier'] },
-  { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'email volume', 'volume of emails'] },
-  { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'rate per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
-  { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'rate per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
-  { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
+  { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'estimated monthly volume', 'monthly volume', 'email volume', 'volume of emails'] },
+  { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'maximum per minute', 'max per minute', 'rate per minute', 'per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
+  { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'maximum per hour', 'max per hour', 'rate per hour', 'per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
+  { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'maximum per day', 'max per day', 'rate per day', 'per day', 'msgs per day', 'msg/day', 'messages/day'] },
   { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
   { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
   { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced', 'unsubscribe link'] }
@@ -22832,22 +22832,33 @@ function normalizeIntakePlainText(plain) {
     'Company website:',
     'Please provide a brief description of your business:',
     'Provide a brief description of your business:',
+    'Brief description:',
     'Email Service Information',
     'Subscription ID:',
     'Azure Communication Services Resource Name:',
     'Is your custom domain already set up and currently used for sending messages:',
+    'Custom domain set up:',
     'Indicate the domain from which you are currently sending emails:',
+    'Sending domain:',
     'Usage Information',
     'What type of emails do you send?',
+    'Type of emails:',
     'Please specify the expected volume of emails you plan to send:',
     'Specify the expected volume of emails you plan to send:',
+    'Expected volume',
     'What is the maximum rate of messages per minute that you require?',
     'What is the maximum rate of messages per hour that you require?',
     'What is the maximum rate of messages per day that you require?',
+    'Maximum per minute:',
+    'Maximum per hour:',
+    'Maximum per day:',
+    'Estimated monthly volume:',
     'What is the maximum attachment size in MB?',
     'Additional Information',
     'What is the source of the email addresses that you use for sending your messages?',
-    'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?'
+    'Source of email addresses:',
+    'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?',
+    'Unsubscribe and bounce handling:'
   ];
   for (const marker of markers) {
     const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
