@@ -4188,7 +4188,7 @@ function getIntakeContent() {
 const INTAKE_EXTRACT_FIELDS = [
   { id: 'companyName',          label: 'Company name',                                 patterns: ['company name', 'customer name', 'organization name', 'organisation name'] },
   { id: 'companyWebsite',       label: 'Company website',                              patterns: ['company website', 'website', 'company url', 'web site'] },
-  { id: 'businessDescription',  label: 'Brief description of your business',           patterns: ['provide a brief description of your business', 'brief description of your business', 'business description', 'description of your business', 'description of business', 'brief description', 'about the business', 'about your business'] },
+  { id: 'businessDescription',  label: 'Brief description of your business',           rich: true, patterns: ['provide a brief description of your business', 'brief description of your business', 'business description', 'description of your business', 'description of business', 'brief description', 'about the business', 'about your business'] },
   { id: 'subscriptionId',       label: 'Subscription ID',                              patterns: ['subscription id', 'azure subscription id', 'subscription'] },
   { id: 'acsResourceName',      label: 'Azure Communication Services Resource Name',   patterns: ['azure communication services resource name', 'acs resource name', 'communication services resource name', 'resource name'] },
   { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'custom domain already set up', 'custom domain set up', 'custom domain in use', 'domain already in use', 'custom domain'] },
@@ -4196,12 +4196,12 @@ const INTAKE_EXTRACT_FIELDS = [
   { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'type of emails do you send', 'type of emails', 'email type', 'types of emails'] },
   { id: 'currentTier',          label: 'Current tier level',                           patterns: ['current tier level', 'current tier', 'existing tier', 'throttling tier for current subscription', 'throttling tier'] },
   { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'estimated monthly volume', 'monthly volume', 'email volume', 'volume of emails'] },
-  { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'maximum per minute', 'max per minute', 'rate per minute', 'per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
-  { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'maximum per hour', 'max per hour', 'rate per hour', 'per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
-  { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'maximum per day', 'max per day', 'rate per day', 'per day', 'msgs per day', 'msg/day', 'messages/day'] },
+  { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'maximum per minute', 'max per minute', 'rate per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
+  { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'maximum per hour', 'max per hour', 'rate per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
+  { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'maximum per day', 'max per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
   { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
   { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
-  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced', 'unsubscribe link'] }
+  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced', 'unsubscribe link'] }
 ];
 
 // Track manual edits made in the extracted-fields table so re-running
@@ -4295,51 +4295,96 @@ function normalizeIntakePlainText(plain) {
   // multi-line forms and single-paragraph paste artifacts where fields run
   // together ("Company name: X Company website: Y ...").
   let text = String(plain || '').replace(/\u00A0/g, ' ');
+  // Split markers fall into two families:
+  //   1. Canonical ACS intake questions (long, unambiguous).
+  //   2. Short "label:" variants people use when they retype the form by hand
+  //      (often copied straight from this app's own "Extracted fields" table).
+  // Every short label that mirrors a displayed field label is included so the
+  // app can round-trip its own output, and so hand-typed forms still split.
   const markers = [
     'Customer Information',
     'Company name:',
     'Company website:',
     'Please provide a brief description of your business:',
     'Provide a brief description of your business:',
+    'Brief description of your business:',
     'Brief description:',
     'Email Service Information',
     'Subscription ID:',
     'Azure Communication Services Resource Name:',
     'Is your custom domain already set up and currently used for sending messages:',
+    'Custom domain already set up and in use:',
+    'Custom domain already set up:',
     'Custom domain set up:',
     'Indicate the domain from which you are currently sending emails:',
+    'Current sending domain:',
     'Sending domain:',
     'Usage Information',
     'What type of emails do you send?',
+    'Type of emails sent:',
     'Type of emails:',
     'Please specify the expected volume of emails you plan to send:',
     'Specify the expected volume of emails you plan to send:',
-    'Expected volume',
+    'Expected tier level:',
+    'Expected volume:',
+    'Current tier level:',
     'What is the maximum rate of messages per minute that you require?',
     'What is the maximum rate of messages per hour that you require?',
     'What is the maximum rate of messages per day that you require?',
+    'Max rate per minute:',
+    'Max rate per hour:',
+    'Max rate per day:',
     'Maximum per minute:',
     'Maximum per hour:',
     'Maximum per day:',
     'Estimated monthly volume:',
     'What is the maximum attachment size in MB?',
+    'Max attachment size (MB):',
+    'Max attachment size:',
     'Additional Information',
     'What is the source of the email addresses that you use for sending your messages?',
     'Source of email addresses:',
     'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?',
+    'Unsubscribe / bounce handling:',
     'Unsubscribe and bounce handling:'
   ];
-  for (const marker of markers) {
-    const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Process the LONGEST, most specific markers first and replace each match
+  // with an opaque sentinel token. This prevents a SHORTER marker from
+  // re-splitting a region a longer marker already claimed -- e.g. the short
+  // "Sending domain:" label must never carve "Current" off the longer
+  // "Current sending domain:" label, and "Expected volume:" must never split
+  // the middle of "Specify the expected volume of emails you plan to send:".
+  // Sentinels are made of NUL bytes + an index, which can never appear in
+  // pasted form text and can never match another marker.
+  const ordered = markers
+    .map((m, i) => ({ marker: m, i: i }))
+    .sort(function (a, b) {
+      // Longest first; stable on original order for equal lengths.
+      if (b.marker.length !== a.marker.length) return b.marker.length - a.marker.length;
+      return a.i - b.i;
+    });
+  const sentinels = [];
+  for (const entry of ordered) {
+    const escaped = entry.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // Insert a soft line break before the marker. Absorb an optional leading
     // list number ("1. " / "2) ") into the same line so "2. Specify ..." is
     // not split into a bare "2." line followed by the question text (which
     // previously got glued onto the prior answer as e.g. "Transactional 2.").
     text = text.replace(
       new RegExp('\\s+(\\d+[\\.)]\\s+)?(' + escaped + ')', 'gi'),
-      function (m, num, mk) { return '\n' + (num || '') + mk; }
+      function (m, num, mk) {
+        const token = '\u0000' + sentinels.length + '\u0000';
+        sentinels.push(mk);
+        return '\n' + (num || '') + token;
+      }
     );
   }
+  // Restore each sentinel back to the exact marker text (original casing) that
+  // produced it now that all splitting is finished.
+  text = text.replace(/\u0000(\d+)\u0000/g, function (m, idx) {
+    const original = sentinels[parseInt(idx, 10)];
+    return (original === undefined || original === null) ? '' : original;
+  });
   return text
     .replace(/\u00A0/g, ' ')
     .split(/\r?\n/)
@@ -4596,12 +4641,43 @@ function processIntakeForm() {
   maybeRunCheckerForIntakeDomain(merged.currentSendingDomain, status);
 }
 
+// Some intake forms list MORE THAN ONE "Current sending domain" in a single
+// answer (for example "mail1.example.com, mail2.example.com" or
+// "example.com and example.net"). The checker can only run against one domain,
+// so we deliberately pick the FIRST valid domain we can find and ignore the
+// rest. Returns '' when no token in the value normalizes to a valid domain.
+function getFirstIntakeSendingDomain(rawSendingDomain) {
+  const raw = (rawSendingDomain === null || rawSendingDomain === undefined)
+    ? '' : String(rawSendingDomain);
+  if (!raw.trim()) return '';
+
+  // First, fast-path the common single-value case: if the whole answer
+  // already normalizes to one valid domain, use it as-is.
+  const whole = normalizeDomain(raw);
+  if (whole && isValidDomain(whole)) return whole;
+
+  // Otherwise split the answer into candidate tokens on the separators people
+  // actually use between multiple domains: commas, semicolons, pipes, slashes,
+  // whitespace/newlines, and the words "and"/"or". Each token is then run
+  // through the same normalizer (which also strips http(s):// and mailto/@)
+  // and validator the single-domain path uses. We return the first hit.
+  const tokens = raw.split(/(?:\s+|[,;|]+|\/+|\b(?:and|or)\b)+/i);
+  for (const token of tokens) {
+    if (!token) continue;
+    const candidate = normalizeDomain(token);
+    if (candidate && isValidDomain(candidate)) return candidate;
+  }
+  return '';
+}
+
 // Compare the intake "Current sending domain" against the domain currently
 // loaded in the checker. When they differ (and the sending domain is valid),
-// load it into the search box and trigger a fresh lookup.
+// load it into the search box and trigger a fresh lookup. When the intake
+// answer lists multiple domains we only ever run the checker on the FIRST
+// valid one (see getFirstIntakeSendingDomain).
 function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
-  const sendingDomain = normalizeDomain(rawSendingDomain || '');
-  if (!sendingDomain || !isValidDomain(sendingDomain)) return;
+  const sendingDomain = getFirstIntakeSendingDomain(rawSendingDomain);
+  if (!sendingDomain) return;
 
   const input = document.getElementById('domainInput');
   const currentDomain = normalizeDomain(input ? input.value : '');
@@ -4621,14 +4697,23 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
 function renderExtractedIntakeTable(values) {
   const body = document.getElementById('intakeExtractedBody');
   if (!body) return;
+  // Quick lookup of each field's definition so the blur handler can tell
+  // whether a cell is a rich-text field (keeps multi-line formatting) or a
+  // plain field (single line, formatting stripped, ends trimmed).
+  const fieldById = {};
+  for (const f of INTAKE_EXTRACT_FIELDS) fieldById[f.id] = f;
   const rows = [];
   for (const f of INTAKE_EXTRACT_FIELDS) {
     const val = values[f.id] || '';
     const emptyCls = val ? '' : ' class="intake-extracted-empty"';
+    // Only the two narrative fields (business description, unsubscribe/bounce
+    // handling) keep rich-text behavior. Every other cell is marked as a plain
+    // single-line field so the blur handler can flatten and trim it.
+    const plainAttr = f.rich ? '' : ' data-plain-field="true"';
     rows.push(
       '<tr' + emptyCls + ' data-field-id="' + escapeHtml(f.id) + '">' +
       '<th>' + escapeHtml(f.label) + '</th>' +
-      '<td contenteditable="true" data-empty-text="(not detected)">' +
+      '<td contenteditable="true" data-empty-text="(not detected)"' + plainAttr + '>' +
       (val ? escapeHtml(val) : '(not detected)') +
       '</td></tr>'
     );
@@ -4636,6 +4721,7 @@ function renderExtractedIntakeTable(values) {
   body.innerHTML = rows.join('');
   // Wire up edit tracking.
   Array.from(body.querySelectorAll('td[contenteditable="true"]')).forEach(td => {
+    const isPlainField = td.getAttribute('data-plain-field') === 'true';
     // Clear placeholder text on focus when the cell has the empty marker.
     td.addEventListener('focus', () => {
       const tr = td.parentElement;
@@ -4644,10 +4730,37 @@ function renderExtractedIntakeTable(values) {
         tr.classList.remove('intake-extracted-empty');
       }
     });
+    // For plain (non-rich) fields, intercept paste so rich clipboard content
+    // is inserted as plain text only. Rich fields keep the default behavior.
+    if (isPlainField) {
+      td.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const clip = (e.clipboardData || window.clipboardData);
+        const pasted = clip ? clip.getData('text/plain') : '';
+        // Collapse any newlines so a multi-line paste stays single-line.
+        const flat = String(pasted || '').replace(/[\r\n]+/g, ' ');
+        if (typeof document.execCommand === 'function') {
+          document.execCommand('insertText', false, flat);
+        } else {
+          td.textContent = (td.innerText || '') + flat;
+        }
+      });
+    }
     td.addEventListener('blur', () => {
       const tr = td.parentElement;
       const fieldId = tr ? tr.getAttribute('data-field-id') : null;
-      const text = (td.innerText || '').trim();
+      // Plain fields are flattened to a single line and have leading/trailing
+      // whitespace removed. Rich fields keep their internal formatting but are
+      // still trimmed of surrounding whitespace.
+      let text;
+      if (isPlainField) {
+        text = (td.innerText || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+        // Re-render the cell as flat text so any pasted markup/line breaks are
+        // visually removed too, not just stripped from the stored value.
+        if (text) td.textContent = text;
+      } else {
+        text = (td.innerText || '').replace(/^\s+|\s+$/g, '');
+      }
       if (fieldId) {
         if (text) {
           intakeExtractedOverrides[fieldId] = text;
@@ -4655,6 +4768,12 @@ function renderExtractedIntakeTable(values) {
           delete intakeExtractedOverrides[fieldId];
           td.textContent = '(not detected)';
           tr.classList.add('intake-extracted-empty');
+        }
+        // When the user edits the "Current sending domain" cell, re-run the
+        // checker against it immediately (using the first valid domain when
+        // several are listed) rather than waiting for the next "Process Data".
+        if (fieldId === 'currentSendingDomain' && text) {
+          maybeRunCheckerForIntakeDomain(text, document.getElementById('intakeProcessStatus'));
         }
       }
     });
