@@ -168,6 +168,8 @@ function Get-DnsBaseStatus {
     spfRequiredIncludeMatchType = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.matchType } else { $null })
     spfRequiredIncludeDetail = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.detail } else { $null })
     spfRequiredIncludeError = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.error } else { $null })
+    spfRequiredIncludeProvider = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.provider } else { $null })
+    spfRequiredIncludeMacroTarget = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.macroTarget } else { $null })
     acsPresent = $acsPresent
     acsValue   = $acsTxt
 

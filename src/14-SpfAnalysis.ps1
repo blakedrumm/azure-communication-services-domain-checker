@@ -533,6 +533,69 @@ function Test-SpfChainCoversOutlookRanges {
   }
 }
 
+# Known hosted / dynamic-SPF (macro-delegated) provider suffixes. These
+# services publish a per-message macro include (e.g. Valimail's
+# "%{i}._ip.%{h}._ehlo.%{d}._spf.vali.email") that only resolves to a real
+# answer with the actual sending IP / HELO / MAIL FROM, so the Outlook include
+# can never be confirmed by static (browser/CLI) analysis. We recognize the
+# common providers by suffix to produce friendlier messaging, but the
+# indeterminate verdict is provider-agnostic (see Find-SpfMacroDelegatedTarget).
+function Get-SpfMacroDelegationProvider {
+  param([string]$Target)
+
+  if ([string]::IsNullOrWhiteSpace($Target)) { return $null }
+  $t = ([string]$Target).Trim().TrimEnd('.').ToLowerInvariant()
+
+  $map = [ordered]@{
+    'vali.email'        = 'Valimail'
+    'valimail.com'      = 'Valimail'
+    'ondmarc.com'       = 'OnDMARC'
+    'sendmarc.com'      = 'Sendmarc'
+    'easydmarc.com'     = 'EasyDMARC'
+    'dmarcian.com'      = 'dmarcian'
+    'fcrdns.net'        = 'Red Sift'
+  }
+  foreach ($suffix in $map.Keys) {
+    if ($t -eq $suffix -or $t.EndsWith('.' + $suffix)) { return $map[$suffix] }
+  }
+  return $null
+}
+
+# Find the first macro-based include/redirect target in the SPF record or its
+# expanded analysis tree. A non-null result means the record delegates SPF
+# evaluation to a service that builds a different DNS answer per message, so the
+# Outlook requirement cannot be statically confirmed or denied. We check the raw
+# record tokens first (covers the top-level macro include even when the analysis
+# tree stored it only as an error node) and then the expanded include/redirect
+# nodes (covers nested macro includes).
+function Find-SpfMacroDelegatedTarget {
+  param(
+    [object]$Analysis,
+    [string]$SpfRecord
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($SpfRecord)) {
+    foreach ($token in @(Get-SpfTokens -SpfRecord $SpfRecord)) {
+      $normalized = ([string]$token).Trim() -replace '^[\+\-~\?]', ''
+      if ($normalized -match '^(?i)include:(.+)$' -or $normalized -match '^(?i)redirect=(.+)$') {
+        $target = ([string]$Matches[1]).Trim()
+        if (Test-SpfMacroText -Text $target) { return $target }
+      }
+    }
+  }
+
+  if ($Analysis) {
+    foreach ($include in @($Analysis.includes)) {
+      if (Test-SpfMacroText -Text ([string]$include.domain)) { return [string]$include.domain }
+    }
+    if ($Analysis.redirect -and (Test-SpfMacroText -Text ([string]$Analysis.redirect.domain))) {
+      return [string]$Analysis.redirect.domain
+    }
+  }
+
+  return $null
+}
+
 # Determine whether the ACS-required "include:spf.protection.outlook.com" is present
 # in the domain's SPF record (directly or through nested includes/redirects).
 # Returns an object with isPresent, matchType, detail, and error.
@@ -617,6 +680,30 @@ function Get-SpfOutlookRequirementStatus {
   }
 
   $analysisScope = if ($SpfAnalysis -and $SpfAnalysis.analysisScope) { [string]$SpfAnalysis.analysisScope } else { 'full-static' }
+
+  # Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...).
+  # Reached only when flattening coverage above did NOT confirm the Outlook
+  # ranges. When the only path to authorization is a macro include/redirect
+  # target, the service builds a different DNS answer per message using the live
+  # sending IP, HELO, and MAIL FROM, so spf.protection.outlook.com can be
+  # neither confirmed nor denied by static analysis. Report an explicit
+  # "indeterminate" verdict (isPresent = $null) so the UI can soften the strict
+  # FAIL to a WARN and tell the operator to verify Exchange Online is enabled in
+  # the provider's console, instead of implying the SPF record is broken for ACS.
+  $macroTarget = Find-SpfMacroDelegatedTarget -Analysis $SpfAnalysis -SpfRecord $SpfRecord
+  if ($macroTarget) {
+    $provider = Get-SpfMacroDelegationProvider -Target $macroTarget
+    $providerLabel = if ($provider) { $provider } else { 'a hosted/dynamic SPF service' }
+    return [pscustomobject]@{
+      isPresent = $null
+      matchType = 'macro-delegated'
+      provider = $provider
+      macroTarget = $macroTarget
+      detail = $null
+      error = "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Microsoft 365 / Exchange Online authorization is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that spf.protection.outlook.com (Exchange Online) is enabled for this domain."
+    }
+  }
+
   $error = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
     "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
   } else {

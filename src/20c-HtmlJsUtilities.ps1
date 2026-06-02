@@ -992,6 +992,19 @@ function localizeWhoisStatus(status) {
 
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
+  // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...)
+  // resolves Exchange Online authorization dynamically per message, so the
+  // Outlook include can be neither confirmed nor denied by static analysis.
+  // Surface an indeterminate explanation (with the provider name when known)
+  // instead of a missing/present verdict.
+  const matchTypeRaw = String((result && result.spfRequiredIncludeMatchType) || '').trim().toLowerCase();
+  if (matchTypeRaw === 'macro-delegated' || result.spfHasRequiredInclude === null) {
+    const provider = String((result && result.spfRequiredIncludeProvider) || '').trim();
+    if (provider) {
+      return t('spfOutlookRequirementMacroDelegatedProvider', { provider });
+    }
+    return t('spfOutlookRequirementMacroDelegated');
+  }
   if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
   if (result.spfHasRequiredInclude === true) {
     // Base verdict ("Required Outlook SPF include detected for ACS.") is the
@@ -1136,6 +1149,20 @@ function getDnsTxtRecoveryState(r) {
   const spfHasRequiredInclude = recoveredFromDetailedRecords && spfValue
     ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
     : (r ? r.spfHasRequiredInclude : null);
+  // Macro-delegated SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...) cannot be
+  // statically confirmed for the Outlook include. The server reports this via
+  // matchType === 'macro-delegated' with spfHasRequiredInclude === null. When we
+  // recovered SPF from the detailed records payload (no server verdict), detect
+  // the macro include locally so the UI can still soften the verdict rather than
+  // showing a misleading hard FAIL.
+  const spfRequiredIncludeMatchType = recoveredFromDetailedRecords && spfValue
+    ? (/include:[^\s]*%\{[^\s]*outlook\.com/i.test(String(spfValue || '')) || (/%\{/.test(String(spfValue || '')) && /include:|redirect=/i.test(String(spfValue || '')) && !spfHasRequiredInclude) ? 'macro-delegated' : (r ? r.spfRequiredIncludeMatchType : null))
+    : (r ? r.spfRequiredIncludeMatchType : null);
+  // Treat a macro-delegated verdict as indeterminate (null) rather than false so
+  // downstream pass/fail gates render WARN instead of FAIL.
+  const spfHasRequiredIncludeEffective = (String(spfRequiredIncludeMatchType || '').toLowerCase() === 'macro-delegated')
+    ? null
+    : spfHasRequiredInclude;
 
   return {
     recoveredFromDetailedRecords,
@@ -1148,7 +1175,10 @@ function getDnsTxtRecoveryState(r) {
     ipUsedParent: recoveredAddressesFromDetailedRecords ? false : !!(r && r.ipUsedParent),
     spfValue,
     spfPresent: !!spfValue,
-    spfHasRequiredInclude,
+    spfHasRequiredInclude: spfHasRequiredIncludeEffective,
+    spfRequiredIncludeMatchType,
+    spfRequiredIncludeProvider: r ? r.spfRequiredIncludeProvider : null,
+    spfRequiredIncludeMacroTarget: r ? r.spfRequiredIncludeMacroTarget : null,
     acsValue,
     acsPresent: !!acsValue
   };
@@ -1193,7 +1223,19 @@ function buildGuidance(r) {
       }
     }
     if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
-      guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
+      // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
+      // informational note explaining the indeterminate verdict (and how to
+      // verify it in the provider console) instead of a hard "missing" warning.
+      const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
+      if (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null) {
+        const provider = String(txtRecovery.spfRequiredIncludeProvider || '').trim();
+        const text = provider
+          ? t('spfOutlookRequirementMacroDelegatedProvider', { provider })
+          : t('spfOutlookRequirementMacroDelegated');
+        guidance.push({ type: 'info', text });
+      } else {
+        guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
+      }
     }
     if (!txtRecovery.acsPresent) {
       if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
@@ -1382,7 +1424,20 @@ function buildTestSummaryHtml(r) {
     add("ACS TXT", "fail");
     add("TXT Records", "unavailable", true);
   } else {
-    add("SPF (queried domain TXT)", (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) ? "pass" : "fail", true);
+    // SPF: a macro-delegated / hosted SPF service (Valimail, OnDMARC, ...) cannot
+    // be statically confirmed for the Outlook include, so report it as WARN
+    // (indeterminate) rather than FAIL. A literal/flattened include is PASS;
+    // a present record without the include is a real FAIL.
+    const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
+    let spfState;
+    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) {
+      spfState = "pass";
+    } else if (txtRecovery.spfPresent && (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null)) {
+      spfState = "warn";
+    } else {
+      spfState = "fail";
+    }
+    add("SPF (queried domain TXT)", spfState, true);
     add("ACS TXT", txtRecovery.acsPresent ? "pass" : "fail");
     const hasTxt = Array.isArray(txtRecovery.txtRecords) && txtRecovery.txtRecords.length > 0;
     add("TXT Records", hasTxt ? "pass" : "fail", true);

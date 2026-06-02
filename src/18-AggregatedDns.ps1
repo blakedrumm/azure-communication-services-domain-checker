@@ -213,6 +213,8 @@ function Get-AcsDnsStatus {
         spfRequiredIncludeMatchType = $base.spfRequiredIncludeMatchType
         spfRequiredIncludeDetail = $base.spfRequiredIncludeDetail
         spfRequiredIncludeError = $base.spfRequiredIncludeError
+        spfRequiredIncludeProvider = $base.spfRequiredIncludeProvider
+        spfRequiredIncludeMacroTarget = $base.spfRequiredIncludeMacroTarget
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
         acsPresent = $effectiveAcsPresent

@@ -2098,7 +2098,87 @@ ul.guidance li {
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
     z-index: 40;
     font-size: 12px;
+    transition: left 0.2s ease, width 0.2s ease, padding 0.2s ease;
   }
+  /* Collapsed: tuck the rail flush against the left edge as a slim vertical tab.
+     The list/header are hidden and only the .section-rail-expand affordance is
+     shown (a thin rotated "Jump to Section" label + arrow). */
+  .section-rail.section-rail-visible.section-rail-collapsed {
+    left: 0;
+    width: auto;
+    padding: 0;
+    overflow: visible;
+    border-left: none;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    box-shadow: 2px 4px 14px rgba(0, 0, 0, 0.16);
+  }
+}
+/* Header row holding the title + collapse control. */
+.section-rail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.section-rail-collapsed .section-rail-header,
+.section-rail-collapsed .section-rail-list {
+  display: none;
+}
+/* Collapse control (chevron) shown in the expanded header. */
+.section-rail-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--button-bg-secondary);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  transition: background 0.15s ease;
+}
+.section-rail-toggle:hover {
+  background: var(--button-bg);
+  color: #fff;
+}
+/* Expand affordance — only visible while collapsed. Renders a slim vertical tab
+   with the rotated "Jump to Section" label and an arrow pointing right. */
+.section-rail-expand {
+  display: none;
+}
+.section-rail-collapsed .section-rail-expand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 6px;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-top-right-radius: 10px;
+  border-bottom-right-radius: 10px;
+  background: var(--card-bg);
+  color: var(--fg);
+  cursor: pointer;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.section-rail-collapsed .section-rail-expand:hover {
+  background: var(--button-bg);
+  color: #fff;
+}
+.section-rail-expand-icon {
+  font-size: 11px;
+  opacity: 0.8;
 }
 .section-rail-title {
   font-size: 11px;
@@ -2106,7 +2186,6 @@ ul.guidance li {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   opacity: 0.6;
-  margin-bottom: 8px;
   padding-left: 8px;
 }
 .section-rail-list {

@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.4.1'
+$script:AppVersion = '2.5.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -6412,6 +6412,69 @@ function Test-SpfChainCoversOutlookRanges {
   }
 }
 
+# Known hosted / dynamic-SPF (macro-delegated) provider suffixes. These
+# services publish a per-message macro include (e.g. Valimail's
+# "%{i}._ip.%{h}._ehlo.%{d}._spf.vali.email") that only resolves to a real
+# answer with the actual sending IP / HELO / MAIL FROM, so the Outlook include
+# can never be confirmed by static (browser/CLI) analysis. We recognize the
+# common providers by suffix to produce friendlier messaging, but the
+# indeterminate verdict is provider-agnostic (see Find-SpfMacroDelegatedTarget).
+function Get-SpfMacroDelegationProvider {
+  param([string]$Target)
+
+  if ([string]::IsNullOrWhiteSpace($Target)) { return $null }
+  $t = ([string]$Target).Trim().TrimEnd('.').ToLowerInvariant()
+
+  $map = [ordered]@{
+    'vali.email'        = 'Valimail'
+    'valimail.com'      = 'Valimail'
+    'ondmarc.com'       = 'OnDMARC'
+    'sendmarc.com'      = 'Sendmarc'
+    'easydmarc.com'     = 'EasyDMARC'
+    'dmarcian.com'      = 'dmarcian'
+    'fcrdns.net'        = 'Red Sift'
+  }
+  foreach ($suffix in $map.Keys) {
+    if ($t -eq $suffix -or $t.EndsWith('.' + $suffix)) { return $map[$suffix] }
+  }
+  return $null
+}
+
+# Find the first macro-based include/redirect target in the SPF record or its
+# expanded analysis tree. A non-null result means the record delegates SPF
+# evaluation to a service that builds a different DNS answer per message, so the
+# Outlook requirement cannot be statically confirmed or denied. We check the raw
+# record tokens first (covers the top-level macro include even when the analysis
+# tree stored it only as an error node) and then the expanded include/redirect
+# nodes (covers nested macro includes).
+function Find-SpfMacroDelegatedTarget {
+  param(
+    [object]$Analysis,
+    [string]$SpfRecord
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($SpfRecord)) {
+    foreach ($token in @(Get-SpfTokens -SpfRecord $SpfRecord)) {
+      $normalized = ([string]$token).Trim() -replace '^[\+\-~\?]', ''
+      if ($normalized -match '^(?i)include:(.+)$' -or $normalized -match '^(?i)redirect=(.+)$') {
+        $target = ([string]$Matches[1]).Trim()
+        if (Test-SpfMacroText -Text $target) { return $target }
+      }
+    }
+  }
+
+  if ($Analysis) {
+    foreach ($include in @($Analysis.includes)) {
+      if (Test-SpfMacroText -Text ([string]$include.domain)) { return [string]$include.domain }
+    }
+    if ($Analysis.redirect -and (Test-SpfMacroText -Text ([string]$Analysis.redirect.domain))) {
+      return [string]$Analysis.redirect.domain
+    }
+  }
+
+  return $null
+}
+
 # Determine whether the ACS-required "include:spf.protection.outlook.com" is present
 # in the domain's SPF record (directly or through nested includes/redirects).
 # Returns an object with isPresent, matchType, detail, and error.
@@ -6496,6 +6559,30 @@ function Get-SpfOutlookRequirementStatus {
   }
 
   $analysisScope = if ($SpfAnalysis -and $SpfAnalysis.analysisScope) { [string]$SpfAnalysis.analysisScope } else { 'full-static' }
+
+  # Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...).
+  # Reached only when flattening coverage above did NOT confirm the Outlook
+  # ranges. When the only path to authorization is a macro include/redirect
+  # target, the service builds a different DNS answer per message using the live
+  # sending IP, HELO, and MAIL FROM, so spf.protection.outlook.com can be
+  # neither confirmed nor denied by static analysis. Report an explicit
+  # "indeterminate" verdict (isPresent = $null) so the UI can soften the strict
+  # FAIL to a WARN and tell the operator to verify Exchange Online is enabled in
+  # the provider's console, instead of implying the SPF record is broken for ACS.
+  $macroTarget = Find-SpfMacroDelegatedTarget -Analysis $SpfAnalysis -SpfRecord $SpfRecord
+  if ($macroTarget) {
+    $provider = Get-SpfMacroDelegationProvider -Target $macroTarget
+    $providerLabel = if ($provider) { $provider } else { 'a hosted/dynamic SPF service' }
+    return [pscustomobject]@{
+      isPresent = $null
+      matchType = 'macro-delegated'
+      provider = $provider
+      macroTarget = $macroTarget
+      detail = $null
+      error = "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Microsoft 365 / Exchange Online authorization is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that spf.protection.outlook.com (Exchange Online) is enabled for this domain."
+    }
+  }
+
   $error = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
     "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
   } else {
@@ -7552,6 +7639,8 @@ function Get-DnsBaseStatus {
     spfRequiredIncludeMatchType = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.matchType } else { $null })
     spfRequiredIncludeDetail = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.detail } else { $null })
     spfRequiredIncludeError = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.error } else { $null })
+    spfRequiredIncludeProvider = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.provider } else { $null })
+    spfRequiredIncludeMacroTarget = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.macroTarget } else { $null })
     acsPresent = $acsPresent
     acsValue   = $acsTxt
 
@@ -9195,6 +9284,8 @@ function Get-AcsDnsStatus {
         spfRequiredIncludeMatchType = $base.spfRequiredIncludeMatchType
         spfRequiredIncludeDetail = $base.spfRequiredIncludeDetail
         spfRequiredIncludeError = $base.spfRequiredIncludeError
+        spfRequiredIncludeProvider = $base.spfRequiredIncludeProvider
+        spfRequiredIncludeMacroTarget = $base.spfRequiredIncludeMacroTarget
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
         acsPresent = $effectiveAcsPresent
@@ -11387,7 +11478,87 @@ ul.guidance li {
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
     z-index: 40;
     font-size: 12px;
+    transition: left 0.2s ease, width 0.2s ease, padding 0.2s ease;
   }
+  /* Collapsed: tuck the rail flush against the left edge as a slim vertical tab.
+     The list/header are hidden and only the .section-rail-expand affordance is
+     shown (a thin rotated "Jump to Section" label + arrow). */
+  .section-rail.section-rail-visible.section-rail-collapsed {
+    left: 0;
+    width: auto;
+    padding: 0;
+    overflow: visible;
+    border-left: none;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    box-shadow: 2px 4px 14px rgba(0, 0, 0, 0.16);
+  }
+}
+/* Header row holding the title + collapse control. */
+.section-rail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.section-rail-collapsed .section-rail-header,
+.section-rail-collapsed .section-rail-list {
+  display: none;
+}
+/* Collapse control (chevron) shown in the expanded header. */
+.section-rail-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--button-bg-secondary);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  transition: background 0.15s ease;
+}
+.section-rail-toggle:hover {
+  background: var(--button-bg);
+  color: #fff;
+}
+/* Expand affordance — only visible while collapsed. Renders a slim vertical tab
+   with the rotated "Jump to Section" label and an arrow pointing right. */
+.section-rail-expand {
+  display: none;
+}
+.section-rail-collapsed .section-rail-expand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 6px;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-top-right-radius: 10px;
+  border-bottom-right-radius: 10px;
+  background: var(--card-bg);
+  color: var(--fg);
+  cursor: pointer;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.section-rail-collapsed .section-rail-expand:hover {
+  background: var(--button-bg);
+  color: #fff;
+}
+.section-rail-expand-icon {
+  font-size: 11px;
+  opacity: 0.8;
 }
 .section-rail-title {
   font-size: 11px;
@@ -11395,7 +11566,6 @@ ul.guidance li {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   opacity: 0.6;
-  margin-bottom: 8px;
   padding-left: 8px;
 }
 .section-rail-list {
@@ -12416,6 +12586,8 @@ const TRANSLATIONS = {
     view: 'View',
     jumpToSection: 'Jump to Section',
     jumpToTag: 'NAVIGATE',
+    jumpToSectionCollapse: 'Collapse Jump to Section',
+    jumpToSectionExpand: 'Expand Jump to Section',
     type: 'Type',
     addresses: 'Addresses',
     ipv4: 'IPv4',
@@ -12763,6 +12935,8 @@ const TRANSLATIONS = {
     view: 'Ver',
     jumpToSection: 'Ir a la secci\u00F3n',
     jumpToTag: 'NAVEGAR',
+    jumpToSectionCollapse: 'Contraer Ir a la secci\u00F3n',
+    jumpToSectionExpand: 'Expandir Ir a la secci\u00F3n',
     type: 'Tipo',
     addresses: 'Direcciones',
     ipv4: 'IPv4',
@@ -12949,6 +13123,8 @@ const TRANSLATIONS = {
     view: 'Voir',
     jumpToSection: 'Aller \u00E0 la section',
     jumpToTag: 'NAVIGUER',
+    jumpToSectionCollapse: 'R\u00E9duire Aller \u00E0 la section',
+    jumpToSectionExpand: 'D\u00E9velopper Aller \u00E0 la section',
     type: 'Type',
     addresses: 'Adresses',
     ipv4: 'IPv4',
@@ -13077,6 +13253,8 @@ const TRANSLATIONS = {
     view: 'Anzeigen',
     jumpToSection: 'Zum Abschnitt springen',
     jumpToTag: 'NAVIGATION',
+    jumpToSectionCollapse: 'Abschnittsnavigation einklappen',
+    jumpToSectionExpand: 'Abschnittsnavigation ausklappen',
     type: 'Typ',
     addresses: 'Adressen',
     ipv4: 'IPv4',
@@ -13205,6 +13383,8 @@ const TRANSLATIONS = {
     view: 'Ver',
     jumpToSection: 'Ir para a se\u00E7\u00E3o',
     jumpToTag: 'NAVEGAR',
+    jumpToSectionCollapse: 'Recolher Ir para a se\u00E7\u00E3o',
+    jumpToSectionExpand: 'Expandir Ir para a se\u00E7\u00E3o',
     type: 'Tipo',
     addresses: 'Endere\u00E7os',
     ipv4: 'IPv4',
@@ -14242,6 +14422,8 @@ const UI_TRANSLATION_OVERRIDES = {
     spfOutlookRequirementPresent: 'Required Outlook SPF include detected for ACS.',
     spfOutlookRequirementMissing: 'Required Outlook SPF include was not detected for ACS.',
     spfOutlookRequirementFlattenedSuffix: '(Flattened DNS record being utilized)',
+    spfOutlookRequirementMacroDelegated: 'This SPF record delegates evaluation to a hosted/dynamic SPF service using a macro-based include, so the Outlook (Exchange Online) authorization is resolved per message and cannot be confirmed by static analysis. Verify in your SPF provider console that Exchange Online (spf.protection.outlook.com) is enabled for this domain.',
+    spfOutlookRequirementMacroDelegatedProvider: 'This SPF record delegates evaluation to {provider} using a macro-based include, so the Outlook (Exchange Online) authorization is resolved per message and cannot be confirmed by static analysis. Verify in the {provider} console that Exchange Online (spf.protection.outlook.com) is enabled for this domain.',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -14256,6 +14438,8 @@ const UI_TRANSLATION_OVERRIDES = {
     spfOutlookRequirementPresent: 'Se detect\u00F3 el include SPF de Outlook requerido para ACS.',
     spfOutlookRequirementMissing: 'No se detect\u00F3 el include SPF de Outlook requerido para ACS.',
     spfOutlookRequirementFlattenedSuffix: '(Se utiliza un registro DNS aplanado)',
+    spfOutlookRequirementMacroDelegated: 'Este registro SPF delega la evaluaci\u00F3n a un servicio SPF alojado/din\u00E1mico mediante un include basado en macros, por lo que la autorizaci\u00F3n de Outlook (Exchange Online) se resuelve por mensaje y no puede confirmarse mediante an\u00E1lisis est\u00E1tico. Verifique en la consola de su proveedor SPF que Exchange Online (spf.protection.outlook.com) est\u00E9 habilitado para este dominio.',
+    spfOutlookRequirementMacroDelegatedProvider: 'Este registro SPF delega la evaluaci\u00F3n a {provider} mediante un include basado en macros, por lo que la autorizaci\u00F3n de Outlook (Exchange Online) se resuelve por mensaje y no puede confirmarse mediante an\u00E1lisis est\u00E1tico. Verifique en la consola de {provider} que Exchange Online (spf.protection.outlook.com) est\u00E9 habilitado para este dominio.',
     unitYearOne: 'a\u00F1o',
     unitYearMany: 'a\u00F1os',
     unitMonthOne: 'mes',
@@ -14288,6 +14472,8 @@ const UI_TRANSLATION_OVERRIDES = {
     spfOutlookRequirementPresent: 'L\u2019inclusion SPF Outlook requise pour ACS a \u00E9t\u00E9 d\u00E9tect\u00E9e.',
     spfOutlookRequirementMissing: 'L\u2019inclusion SPF Outlook requise pour ACS n\u2019a pas \u00E9t\u00E9 d\u00E9tect\u00E9e.',
     spfOutlookRequirementFlattenedSuffix: '(Enregistrement DNS aplati utilis\u00E9)',
+    spfOutlookRequirementMacroDelegated: 'Cet enregistrement SPF d\u00E9l\u00E8gue l\u2019\u00E9valuation \u00E0 un service SPF h\u00E9berg\u00E9/dynamique via un include bas\u00E9 sur des macros\u00A0; l\u2019autorisation Outlook (Exchange Online) est donc r\u00E9solue par message et ne peut pas \u00EAtre confirm\u00E9e par une analyse statique. V\u00E9rifiez dans la console de votre fournisseur SPF que Exchange Online (spf.protection.outlook.com) est activ\u00E9 pour ce domaine.',
+    spfOutlookRequirementMacroDelegatedProvider: 'Cet enregistrement SPF d\u00E9l\u00E8gue l\u2019\u00E9valuation \u00E0 {provider} via un include bas\u00E9 sur des macros\u00A0; l\u2019autorisation Outlook (Exchange Online) est donc r\u00E9solue par message et ne peut pas \u00EAtre confirm\u00E9e par une analyse statique. V\u00E9rifiez dans la console {provider} que Exchange Online (spf.protection.outlook.com) est activ\u00E9 pour ce domaine.',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -14302,6 +14488,8 @@ const UI_TRANSLATION_OVERRIDES = {
     spfOutlookRequirementPresent: 'Der f\u00FCr ACS erforderliche Outlook-SPF-Include wurde erkannt.',
     spfOutlookRequirementMissing: 'Der f\u00FCr ACS erforderliche Outlook-SPF-Include wurde nicht erkannt.',
     spfOutlookRequirementFlattenedSuffix: '(Abgeflachter DNS-Eintrag wird verwendet)',
+    spfOutlookRequirementMacroDelegated: 'Dieser SPF-Eintrag delegiert die Auswertung \u00FCber ein makrobasiertes Include an einen gehosteten/dynamischen SPF-Dienst. Die Outlook-Autorisierung (Exchange Online) wird daher pro Nachricht aufgel\u00F6st und kann durch statische Analyse nicht best\u00E4tigt werden. Pr\u00FCfen Sie in der Konsole Ihres SPF-Anbieters, ob Exchange Online (spf.protection.outlook.com) f\u00FCr diese Dom\u00E4ne aktiviert ist.',
+    spfOutlookRequirementMacroDelegatedProvider: 'Dieser SPF-Eintrag delegiert die Auswertung \u00FCber ein makrobasiertes Include an {provider}. Die Outlook-Autorisierung (Exchange Online) wird daher pro Nachricht aufgel\u00F6st und kann durch statische Analyse nicht best\u00E4tigt werden. Pr\u00FCfen Sie in der {provider}-Konsole, ob Exchange Online (spf.protection.outlook.com) f\u00FCr diese Dom\u00E4ne aktiviert ist.',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -14316,6 +14504,8 @@ const UI_TRANSLATION_OVERRIDES = {
     spfOutlookRequirementPresent: 'O include SPF do Outlook exigido para ACS foi detectado.',
     spfOutlookRequirementMissing: 'O include SPF do Outlook exigido para ACS n\u00E3o foi detectado.',
     spfOutlookRequirementFlattenedSuffix: '(Registro DNS achatado em uso)',
+    spfOutlookRequirementMacroDelegated: 'Este registro SPF delega a avalia\u00E7\u00E3o a um servi\u00E7o SPF hospedado/din\u00E2mico por meio de um include baseado em macros, portanto a autoriza\u00E7\u00E3o do Outlook (Exchange Online) \u00E9 resolvida por mensagem e n\u00E3o pode ser confirmada por an\u00E1lise est\u00E1tica. Verifique no console do seu provedor SPF se o Exchange Online (spf.protection.outlook.com) est\u00E1 habilitado para este dom\u00EDnio.',
+    spfOutlookRequirementMacroDelegatedProvider: 'Este registro SPF delega a avalia\u00E7\u00E3o a {provider} por meio de um include baseado em macros, portanto a autoriza\u00E7\u00E3o do Outlook (Exchange Online) \u00E9 resolvida por mensagem e n\u00E3o pode ser confirmada por an\u00E1lise est\u00E1tica. Verifique no console do {provider} se o Exchange Online (spf.protection.outlook.com) est\u00E1 habilitado para este dom\u00EDnio.',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2'
   },
@@ -14330,6 +14520,8 @@ const UI_TRANSLATION_OVERRIDES = {
     spfOutlookRequirementPresent: '\u062A\u0645 \u0627\u0643\u062A\u0634\u0627\u0641 \u062A\u0636\u0645\u064A\u0646 Outlook SPF \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0644\u0640 ACS.',
     spfOutlookRequirementMissing: '\u0644\u0645 \u064A\u062A\u0645 \u0627\u0643\u062A\u0634\u0627\u0641 \u062A\u0636\u0645\u064A\u0646 Outlook SPF \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0644\u0640 ACS.',
     spfOutlookRequirementFlattenedSuffix: '(\u064A\u062A\u0645 \u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0633\u062C\u0644 DNS \u0645\u0633\u0637\u062D)',
+    spfOutlookRequirementMacroDelegated: 'This SPF record delegates evaluation to a hosted/dynamic SPF service using a macro-based include, so the Outlook (Exchange Online) authorization is resolved per message and cannot be confirmed by static analysis. Verify in your SPF provider console that Exchange Online (spf.protection.outlook.com) is enabled for this domain.',
+    spfOutlookRequirementMacroDelegatedProvider: 'This SPF record delegates evaluation to {provider} using a macro-based include, so the Outlook (Exchange Online) authorization is resolved per message and cannot be confirmed by static analysis. Verify in the {provider} console that Exchange Online (spf.protection.outlook.com) is enabled for this domain.',
     unitYearOne: '\u0633\u0646\u0629',
     unitYearMany: '\u0633\u0646\u0648\u0627\u062A',
     unitMonthOne: '\u0634\u0647\u0631',
@@ -14893,6 +15085,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     copyEmailQuota: '\u0646\u0633\u062E \u062D\u0635\u0629 \u0627\u0644\u0628\u0631\u064A\u062F \u0627\u0644\u0625\u0644\u0643\u062A\u0631\u0648\u0646\u064A',
     jumpToSection: '\u0627\u0644\u0627\u0646\u062A\u0642\u0627\u0644 \u0625\u0644\u0649 \u0627\u0644\u0642\u0633\u0645',
     jumpToTag: '\u062A\u0646\u0642\u0644',
+    jumpToSectionCollapse: '\u0637\u064A \u0627\u0644\u0627\u0646\u062A\u0642\u0627\u0644 \u0625\u0644\u0649 \u0627\u0644\u0642\u0633\u0645',
+    jumpToSectionExpand: '\u062A\u0648\u0633\u064A\u0639 \u0627\u0644\u0627\u0646\u062A\u0642\u0627\u0644 \u0625\u0644\u0649 \u0627\u0644\u0642\u0633\u0645',
     creationDate: '\u062A\u0627\u0631\u064A\u062E \u0627\u0644\u0625\u0646\u0634\u0627\u0621',
     daysUntilExpiry: '\u0639\u062F\u062F \u0627\u0644\u0623\u064A\u0627\u0645 \u062D\u062A\u0649 \u0627\u0644\u0627\u0646\u062A\u0647\u0627\u0621',
     detectedProvider: '\u0645\u0648\u0641\u0631 \u062A\u0645 \u0627\u0643\u062A\u0634\u0627\u0641\u0647',
@@ -15033,6 +15227,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     copyEmailQuota: '\u590D\u5236\u7535\u5B50\u90AE\u4EF6\u914D\u989D',
     jumpToSection: '\u8DF3\u8F6C\u5230\u90E8\u5206',
     jumpToTag: '\u5BFC\u822A',
+    jumpToSectionCollapse: '\u6536\u8D77\u8DF3\u8F6C\u5230\u90E8\u5206',
+    jumpToSectionExpand: '\u5C55\u5F00\u8DF3\u8F6C\u5230\u90E8\u5206',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2',
     dkimRecordBasics: 'DKIM \u57FA\u7840\u77E5\u8BC6',
@@ -15139,6 +15335,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     copyEmailQuota: '\u0908\u092E\u0947\u0932 \u0915\u094B\u091F\u093E \u0915\u0949\u092A\u0940 \u0915\u0930\u0947\u0902',
     jumpToSection: '\u0905\u0928\u0941\u092D\u093E\u0917 \u092A\u0930 \u091C\u093E\u090F\u0902',
     jumpToTag: '\u0928\u0947\u0935\u093F\u0917\u0947\u091F',
+    jumpToSectionCollapse: '\u0905\u0928\u0941\u092D\u093E\u0917 \u092A\u0930 \u091C\u093E\u090F\u0902 \u0938\u092E\u0947\u091F\u0947\u0902',
+    jumpToSectionExpand: '\u0905\u0928\u0941\u092D\u093E\u0917 \u092A\u0930 \u091C\u093E\u090F\u0902 \u0935\u093F\u0938\u094D\u0924\u093E\u0930 \u0915\u0930\u0947\u0902',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2',
     dkimRecordBasics: 'DKIM \u0915\u0940 \u092E\u0942\u0932 \u092C\u093E\u0924\u0947\u0902',
@@ -15244,6 +15442,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     copyEmailQuota: '\u30E1\u30FC\u30EB \u30AF\u30A9\u30FC\u30BF\u3092\u30B3\u30D4\u30FC',
     jumpToSection: '\u30BB\u30AF\u30B7\u30E7\u30F3\u3078\u79FB\u52D5',
     jumpToTag: '\u30CA\u30D3\u30B2\u30FC\u30B7\u30E7\u30F3',
+    jumpToSectionCollapse: '\u30BB\u30AF\u30B7\u30E7\u30F3\u3078\u79FB\u52D5\u3092\u6298\u308A\u305F\u305F\u3080',
+    jumpToSectionExpand: '\u30BB\u30AF\u30B7\u30E7\u30F3\u3078\u79FB\u52D5\u3092\u5C55\u958B',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2',
     dkimRecordBasics: 'DKIM \u306E\u57FA\u790E',
@@ -15349,6 +15549,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     copyEmailQuota: '\u041A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u0432\u043E\u0442\u0443 \u044D\u043B\u0435\u043A\u0442\u0440\u043E\u043D\u043D\u043E\u0439 \u043F\u043E\u0447\u0442\u044B',
     jumpToSection: '\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u043A \u0440\u0430\u0437\u0434\u0435\u043B\u0443',
     jumpToTag: '\u041D\u0410\u0412\u0418\u0413\u0410\u0426\u0418\u042F',
+    jumpToSectionCollapse: '\u0421\u0432\u0435\u0440\u043D\u0443\u0442\u044C \u00AB\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u043A \u0440\u0430\u0437\u0434\u0435\u043B\u0443\u00BB',
+    jumpToSectionExpand: '\u0420\u0430\u0437\u0432\u0435\u0440\u043D\u0443\u0442\u044C \u00AB\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u043A \u0440\u0430\u0437\u0434\u0435\u043B\u0443\u00BB',
     dkim1Title: 'DKIM1',
     dkim2Title: 'DKIM2',
     dkimRecordBasics: '\u041E\u0441\u043D\u043E\u0432\u044B DKIM',
@@ -18135,6 +18337,19 @@ function localizeWhoisStatus(status) {
 
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
+  // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...)
+  // resolves Exchange Online authorization dynamically per message, so the
+  // Outlook include can be neither confirmed nor denied by static analysis.
+  // Surface an indeterminate explanation (with the provider name when known)
+  // instead of a missing/present verdict.
+  const matchTypeRaw = String((result && result.spfRequiredIncludeMatchType) || '').trim().toLowerCase();
+  if (matchTypeRaw === 'macro-delegated' || result.spfHasRequiredInclude === null) {
+    const provider = String((result && result.spfRequiredIncludeProvider) || '').trim();
+    if (provider) {
+      return t('spfOutlookRequirementMacroDelegatedProvider', { provider });
+    }
+    return t('spfOutlookRequirementMacroDelegated');
+  }
   if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
   if (result.spfHasRequiredInclude === true) {
     // Base verdict ("Required Outlook SPF include detected for ACS.") is the
@@ -18279,6 +18494,20 @@ function getDnsTxtRecoveryState(r) {
   const spfHasRequiredInclude = recoveredFromDetailedRecords && spfValue
     ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
     : (r ? r.spfHasRequiredInclude : null);
+  // Macro-delegated SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...) cannot be
+  // statically confirmed for the Outlook include. The server reports this via
+  // matchType === 'macro-delegated' with spfHasRequiredInclude === null. When we
+  // recovered SPF from the detailed records payload (no server verdict), detect
+  // the macro include locally so the UI can still soften the verdict rather than
+  // showing a misleading hard FAIL.
+  const spfRequiredIncludeMatchType = recoveredFromDetailedRecords && spfValue
+    ? (/include:[^\s]*%\{[^\s]*outlook\.com/i.test(String(spfValue || '')) || (/%\{/.test(String(spfValue || '')) && /include:|redirect=/i.test(String(spfValue || '')) && !spfHasRequiredInclude) ? 'macro-delegated' : (r ? r.spfRequiredIncludeMatchType : null))
+    : (r ? r.spfRequiredIncludeMatchType : null);
+  // Treat a macro-delegated verdict as indeterminate (null) rather than false so
+  // downstream pass/fail gates render WARN instead of FAIL.
+  const spfHasRequiredIncludeEffective = (String(spfRequiredIncludeMatchType || '').toLowerCase() === 'macro-delegated')
+    ? null
+    : spfHasRequiredInclude;
 
   return {
     recoveredFromDetailedRecords,
@@ -18291,7 +18520,10 @@ function getDnsTxtRecoveryState(r) {
     ipUsedParent: recoveredAddressesFromDetailedRecords ? false : !!(r && r.ipUsedParent),
     spfValue,
     spfPresent: !!spfValue,
-    spfHasRequiredInclude,
+    spfHasRequiredInclude: spfHasRequiredIncludeEffective,
+    spfRequiredIncludeMatchType,
+    spfRequiredIncludeProvider: r ? r.spfRequiredIncludeProvider : null,
+    spfRequiredIncludeMacroTarget: r ? r.spfRequiredIncludeMacroTarget : null,
     acsValue,
     acsPresent: !!acsValue
   };
@@ -18336,7 +18568,19 @@ function buildGuidance(r) {
       }
     }
     if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
-      guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
+      // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
+      // informational note explaining the indeterminate verdict (and how to
+      // verify it in the provider console) instead of a hard "missing" warning.
+      const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
+      if (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null) {
+        const provider = String(txtRecovery.spfRequiredIncludeProvider || '').trim();
+        const text = provider
+          ? t('spfOutlookRequirementMacroDelegatedProvider', { provider })
+          : t('spfOutlookRequirementMacroDelegated');
+        guidance.push({ type: 'info', text });
+      } else {
+        guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
+      }
     }
     if (!txtRecovery.acsPresent) {
       if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
@@ -18525,7 +18769,20 @@ function buildTestSummaryHtml(r) {
     add("ACS TXT", "fail");
     add("TXT Records", "unavailable", true);
   } else {
-    add("SPF (queried domain TXT)", (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) ? "pass" : "fail", true);
+    // SPF: a macro-delegated / hosted SPF service (Valimail, OnDMARC, ...) cannot
+    // be statically confirmed for the Outlook include, so report it as WARN
+    // (indeterminate) rather than FAIL. A literal/flattened include is PASS;
+    // a present record without the include is a real FAIL.
+    const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
+    let spfState;
+    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) {
+      spfState = "pass";
+    } else if (txtRecovery.spfPresent && (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null)) {
+      spfState = "warn";
+    } else {
+      spfState = "fail";
+    }
+    add("SPF (queried domain TXT)", spfState, true);
     add("ACS TXT", txtRecovery.acsPresent ? "pass" : "fail");
     const hasTxt = Array.isArray(txtRecovery.txtRecords) && txtRecovery.txtRecords.length > 0;
     add("TXT Records", hasTxt ? "pass" : "fail", true);
@@ -19326,6 +19583,10 @@ let sectionRailVisibility = {};
 // and a guard so the scroll/resize scrollspy listener is only bound once.
 let sectionRailKeys = [];
 let sectionRailScrollHandlerBound = false;
+// Persisted (functional preference) collapsed state for the floating rail. When
+// collapsed the rail tucks flush to the left edge as a slim vertical tab that
+// only shows the "Jump to Section" label + an expand arrow.
+const SECTION_RAIL_COLLAPSED_KEY = 'acsSectionRailCollapsed';
 
 // Populate the floating left-hand section rail from the shared section entries
 // and wire up an IntersectionObserver scrollspy that highlights whichever
@@ -19360,9 +19621,24 @@ function buildSectionRail(markup) {
     .join('');
 
   rail.innerHTML = `
-    <div class="section-rail-title">${escapeHtml(t('jumpToSection'))}</div>
-    <ul class="section-rail-list">${items}</ul>`;
+    <div class="section-rail-header">
+      <span class="section-rail-title">${escapeHtml(t('jumpToSection'))}</span>
+      <button type="button" class="section-rail-toggle" onclick="toggleSectionRailCollapsed()"
+        aria-label="${escapeHtml(t('jumpToSectionCollapse'))}" title="${escapeHtml(t('jumpToSectionCollapse'))}">
+        <span class="section-rail-toggle-icon" aria-hidden="true">&#x276E;</span>
+      </button>
+    </div>
+    <ul class="section-rail-list">${items}</ul>
+    <button type="button" class="section-rail-expand" onclick="toggleSectionRailCollapsed()"
+      aria-label="${escapeHtml(t('jumpToSectionExpand'))}" title="${escapeHtml(t('jumpToSectionExpand'))}">
+      <span class="section-rail-expand-label">${escapeHtml(t('jumpToSection'))}</span>
+      <span class="section-rail-expand-icon" aria-hidden="true">&#x276F;</span>
+    </button>`;
   rail.classList.add('section-rail-visible');
+
+  // Restore the persisted collapsed/expanded state so it survives re-renders and
+  // page reloads (functional preference; gated behind cookie consent).
+  applySectionRailCollapsedState(rail);
 
   // Remember the on-page order of keys so the scrollspy can force the first/last
   // section active at the very top/bottom of the page (where the biased active
@@ -19404,6 +19680,41 @@ function buildSectionRail(markup) {
 
   // Establish an initial highlight without waiting for a scroll event.
   updateActiveSectionRailLink();
+}
+
+// Apply the persisted collapsed/expanded state to the rail element. When
+// collapsed the rail gains .section-rail-collapsed, which CSS uses to tuck it
+// flush against the left edge as a slim "Jump to Section" tab. Reads are gated
+// behind functional cookie consent; without consent the rail defaults to
+// expanded.
+function applySectionRailCollapsedState(rail) {
+  const target = rail || document.getElementById('sectionRail');
+  if (!target) return;
+  const collapsed = consentAwareGetItem(SECTION_RAIL_COLLAPSED_KEY, 'functional') === '1';
+  target.classList.toggle('section-rail-collapsed', collapsed);
+  syncSectionRailToggleLabels(target, collapsed);
+}
+
+// Flip the rail between expanded and collapsed, persisting the new state so it
+// is remembered across renders and reloads (functional preference).
+function toggleSectionRailCollapsed() {
+  const rail = document.getElementById('sectionRail');
+  if (!rail) return;
+  const collapsed = !rail.classList.contains('section-rail-collapsed');
+  rail.classList.toggle('section-rail-collapsed', collapsed);
+  consentAwareSetItem(SECTION_RAIL_COLLAPSED_KEY, collapsed ? '1' : '0', 'functional');
+  syncSectionRailToggleLabels(rail, collapsed);
+}
+
+// Keep the collapse/expand control accessible labels in sync with the current
+// state so screen-reader users get the correct "collapse"/"expand" action text.
+function syncSectionRailToggleLabels(rail, collapsed) {
+  const collapseBtn = rail.querySelector('.section-rail-toggle');
+  if (collapseBtn) {
+    const label = collapsed ? t('jumpToSectionExpand') : t('jumpToSectionCollapse');
+    collapseBtn.setAttribute('aria-label', label);
+    collapseBtn.setAttribute('title', label);
+  }
 }
 
 // Highlight the rail link for the section currently at the TOP of the viewport.
@@ -21681,6 +21992,14 @@ function render(r) {
   const effectiveSpfPresent = !!txtRecovery.spfPresent;
   const effectiveSpfValue = txtRecovery.spfValue || null;
   const effectiveSpfHasRequiredInclude = txtRecovery.spfHasRequiredInclude;
+  // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, ...) resolves the
+  // Outlook include dynamically per message, so it can be neither confirmed nor
+  // denied statically. The server signals this via matchType 'macro-delegated'
+  // (with spfHasRequiredInclude === null). Treat it as an indeterminate WARN
+  // rather than a hard FAIL so the SPF card does not look misleadingly broken.
+  const effectiveSpfRequiredIncludeMatchType = txtRecovery.spfRequiredIncludeMatchType || (r && r.spfRequiredIncludeMatchType) || null;
+  const effectiveSpfIsMacroDelegated = (String(effectiveSpfRequiredIncludeMatchType || '').trim().toLowerCase() === 'macro-delegated')
+    || (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null);
   const effectiveAcsPresent = !!txtRecovery.acsPresent;
   const effectiveAcsValue = txtRecovery.acsValue || null;
   const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
@@ -22057,11 +22376,12 @@ function render(r) {
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> FAIL${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
   } else {
     const spfPassesRequirement = !!(effectiveSpfPresent && effectiveSpfHasRequiredInclude === true);
+    const spfIsIndeterminate = !spfPassesRequirement && effectiveSpfPresent && effectiveSpfIsMacroDelegated;
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n"))
+      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : t('noSpfRecordDetected');
-    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : 'fail', spfDetail, null, 'spf'));
-    const spfState = spfPassesRequirement ? 'PASS' : 'FAIL';
+    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : (spfIsIndeterminate ? 'warn' : 'fail'), spfDetail, null, 'spf'));
+    const spfState = spfPassesRequirement ? 'PASS' : (spfIsIndeterminate ? 'WARN' : 'FAIL');
     quotaLines.push(`**${t('spfQueried')}:** ${spfState}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfState)}${spfDetail ? ' - ' + escapeHtml(spfDetail).replace(/\r?\n/g, '<br>') : ''}`);
   }
@@ -22626,7 +22946,7 @@ function render(r) {
   const spfCardBaseValue = loaded.base
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -22671,7 +22991,7 @@ function render(r) {
       // Mirror the ACS Outlook requirement verdict inside the panel. This
       // is the same string the card body would normally show under the raw
       // record. Empty when no verdict is available (e.g., no SPF at all).
-      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType });
+      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider });
       const spfRequirementNote = spfRequirementText
         ? `<div class="spf-explained-requirement">${escapeHtml(spfRequirementText)}</div>`
         : '';
@@ -22692,8 +23012,8 @@ function render(r) {
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : "FAIL")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : "FAIL"))),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : "tag-fail"))),
     "spf",
     true,
     spfExplainedTitleSuffix,
@@ -25239,7 +25559,7 @@ $functionNames = @(
   'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly',
-  'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
+  'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',

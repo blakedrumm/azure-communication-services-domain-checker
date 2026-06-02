@@ -444,6 +444,10 @@ let sectionRailVisibility = {};
 // and a guard so the scroll/resize scrollspy listener is only bound once.
 let sectionRailKeys = [];
 let sectionRailScrollHandlerBound = false;
+// Persisted (functional preference) collapsed state for the floating rail. When
+// collapsed the rail tucks flush to the left edge as a slim vertical tab that
+// only shows the "Jump to Section" label + an expand arrow.
+const SECTION_RAIL_COLLAPSED_KEY = 'acsSectionRailCollapsed';
 
 // Populate the floating left-hand section rail from the shared section entries
 // and wire up an IntersectionObserver scrollspy that highlights whichever
@@ -478,9 +482,24 @@ function buildSectionRail(markup) {
     .join('');
 
   rail.innerHTML = `
-    <div class="section-rail-title">${escapeHtml(t('jumpToSection'))}</div>
-    <ul class="section-rail-list">${items}</ul>`;
+    <div class="section-rail-header">
+      <span class="section-rail-title">${escapeHtml(t('jumpToSection'))}</span>
+      <button type="button" class="section-rail-toggle" onclick="toggleSectionRailCollapsed()"
+        aria-label="${escapeHtml(t('jumpToSectionCollapse'))}" title="${escapeHtml(t('jumpToSectionCollapse'))}">
+        <span class="section-rail-toggle-icon" aria-hidden="true">&#x276E;</span>
+      </button>
+    </div>
+    <ul class="section-rail-list">${items}</ul>
+    <button type="button" class="section-rail-expand" onclick="toggleSectionRailCollapsed()"
+      aria-label="${escapeHtml(t('jumpToSectionExpand'))}" title="${escapeHtml(t('jumpToSectionExpand'))}">
+      <span class="section-rail-expand-label">${escapeHtml(t('jumpToSection'))}</span>
+      <span class="section-rail-expand-icon" aria-hidden="true">&#x276F;</span>
+    </button>`;
   rail.classList.add('section-rail-visible');
+
+  // Restore the persisted collapsed/expanded state so it survives re-renders and
+  // page reloads (functional preference; gated behind cookie consent).
+  applySectionRailCollapsedState(rail);
 
   // Remember the on-page order of keys so the scrollspy can force the first/last
   // section active at the very top/bottom of the page (where the biased active
@@ -522,6 +541,41 @@ function buildSectionRail(markup) {
 
   // Establish an initial highlight without waiting for a scroll event.
   updateActiveSectionRailLink();
+}
+
+// Apply the persisted collapsed/expanded state to the rail element. When
+// collapsed the rail gains .section-rail-collapsed, which CSS uses to tuck it
+// flush against the left edge as a slim "Jump to Section" tab. Reads are gated
+// behind functional cookie consent; without consent the rail defaults to
+// expanded.
+function applySectionRailCollapsedState(rail) {
+  const target = rail || document.getElementById('sectionRail');
+  if (!target) return;
+  const collapsed = consentAwareGetItem(SECTION_RAIL_COLLAPSED_KEY, 'functional') === '1';
+  target.classList.toggle('section-rail-collapsed', collapsed);
+  syncSectionRailToggleLabels(target, collapsed);
+}
+
+// Flip the rail between expanded and collapsed, persisting the new state so it
+// is remembered across renders and reloads (functional preference).
+function toggleSectionRailCollapsed() {
+  const rail = document.getElementById('sectionRail');
+  if (!rail) return;
+  const collapsed = !rail.classList.contains('section-rail-collapsed');
+  rail.classList.toggle('section-rail-collapsed', collapsed);
+  consentAwareSetItem(SECTION_RAIL_COLLAPSED_KEY, collapsed ? '1' : '0', 'functional');
+  syncSectionRailToggleLabels(rail, collapsed);
+}
+
+// Keep the collapse/expand control accessible labels in sync with the current
+// state so screen-reader users get the correct "collapse"/"expand" action text.
+function syncSectionRailToggleLabels(rail, collapsed) {
+  const collapseBtn = rail.querySelector('.section-rail-toggle');
+  if (collapseBtn) {
+    const label = collapsed ? t('jumpToSectionExpand') : t('jumpToSectionCollapse');
+    collapseBtn.setAttribute('aria-label', label);
+    collapseBtn.setAttribute('title', label);
+  }
 }
 
 // Highlight the rail link for the section currently at the TOP of the viewport.
@@ -2799,6 +2853,14 @@ function render(r) {
   const effectiveSpfPresent = !!txtRecovery.spfPresent;
   const effectiveSpfValue = txtRecovery.spfValue || null;
   const effectiveSpfHasRequiredInclude = txtRecovery.spfHasRequiredInclude;
+  // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, ...) resolves the
+  // Outlook include dynamically per message, so it can be neither confirmed nor
+  // denied statically. The server signals this via matchType 'macro-delegated'
+  // (with spfHasRequiredInclude === null). Treat it as an indeterminate WARN
+  // rather than a hard FAIL so the SPF card does not look misleadingly broken.
+  const effectiveSpfRequiredIncludeMatchType = txtRecovery.spfRequiredIncludeMatchType || (r && r.spfRequiredIncludeMatchType) || null;
+  const effectiveSpfIsMacroDelegated = (String(effectiveSpfRequiredIncludeMatchType || '').trim().toLowerCase() === 'macro-delegated')
+    || (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null);
   const effectiveAcsPresent = !!txtRecovery.acsPresent;
   const effectiveAcsValue = txtRecovery.acsValue || null;
   const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
@@ -3175,11 +3237,12 @@ function render(r) {
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> FAIL${r.dnsError ? ' - ' + escapeHtml(r.dnsError) : ' - ' + escapeHtml(t('txtLookupFailedOrTimedOut'))}`);
   } else {
     const spfPassesRequirement = !!(effectiveSpfPresent && effectiveSpfHasRequiredInclude === true);
+    const spfIsIndeterminate = !spfPassesRequirement && effectiveSpfPresent && effectiveSpfIsMacroDelegated;
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n"))
+      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : t('noSpfRecordDetected');
-    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : 'fail', spfDetail, null, 'spf'));
-    const spfState = spfPassesRequirement ? 'PASS' : 'FAIL';
+    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : (spfIsIndeterminate ? 'warn' : 'fail'), spfDetail, null, 'spf'));
+    const spfState = spfPassesRequirement ? 'PASS' : (spfIsIndeterminate ? 'WARN' : 'FAIL');
     quotaLines.push(`**${t('spfQueried')}:** ${spfState}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfState)}${spfDetail ? ' - ' + escapeHtml(spfDetail).replace(/\r?\n/g, '<br>') : ''}`);
   }
@@ -3744,7 +3807,7 @@ function render(r) {
   const spfCardBaseValue = loaded.base
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -3789,7 +3852,7 @@ function render(r) {
       // Mirror the ACS Outlook requirement verdict inside the panel. This
       // is the same string the card body would normally show under the raw
       // record. Empty when no verdict is available (e.g., no SPF at all).
-      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: r && r.spfRequiredIncludeMatchType });
+      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider });
       const spfRequirementNote = spfRequirementText
         ? `<div class="spf-explained-requirement">${escapeHtml(spfRequirementText)}</div>`
         : '';
@@ -3810,8 +3873,8 @@ function render(r) {
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : "FAIL")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : "tag-fail")),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : "FAIL"))),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : "tag-fail"))),
     "spf",
     true,
     spfExplainedTitleSuffix,
