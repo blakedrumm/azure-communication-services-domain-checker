@@ -58,6 +58,7 @@
 - ⚡ **Fast and lightweight** - minimal resource footprint
 - 🎨 **Modern, responsive UI** - dark/light theme toggle, search history chips, shareable links, screenshot export, and JSON download
   - Direct `?domain=` URLs auto-run the lookup on initial page load for shareable troubleshooting links
+  - A **Jump to Section** navigation card at the top of the results lists every returned card (Domain Registration, Domain, DNS records, MX, SPF, SPF Expansion, ACS Domain Verification TXT, etc.) and smooth-scrolls to the selected one
   - Intro sections start hidden so the top-bar/search-box sequence fades in cleanly without an initial flash before the animation begins
   - Top-bar controls and header sections use staged fade-in animations on page load, while lookup refreshes animate only the lower result sections
 - 🧾 **Detailed DNS records table** - DomainDossier-style dataset with reverse-lookup supplements, DNSSEC record details, and expanded TTL formatting (`seconds (5d 2h 33s)` style when applicable)

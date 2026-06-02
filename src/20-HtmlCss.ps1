@@ -1986,6 +1986,175 @@ ul.guidance li {
   animation: flashHighlight 2.4s ease-out;
 }
 
+/* "Jump to Section" navigation card: an aligned grid of buttons that scroll to
+   each returned result card. Each button carries a colored status dot (and a
+   short status badge when one is available) so failing/warning sections stand
+   out at a glance instead of being lost in a flat list of pills. Kept visually
+   distinct from result cards with a subtle accent border. */
+.section-nav-card {
+  border-color: var(--button-bg);
+}
+/* On wide viewports (>=1500px) the floating section rail is shown instead, so
+   the inline "Jump to Section" card would be redundant — hide it there and let
+   the rail handle navigation. Narrower screens keep the inline card. */
+@media (min-width: 1500px) {
+  .section-nav-card {
+    display: none;
+  }
+}
+.section-nav-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+.section-nav-btn {
+  appearance: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--button-border-secondary);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 8px 12px;
+  border-radius: 8px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.section-nav-btn:hover {
+  border-color: var(--button-bg);
+  background: var(--button-bg);
+  color: var(--button-fg);
+}
+.section-nav-btn:active {
+  transform: translateY(1px);
+}
+.section-nav-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Status dot mirrors the card badge color so problem sections are obvious. */
+.section-nav-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9aa0ab;
+}
+.section-nav-dot.tag-pass { background: #137333; }
+.section-nav-dot.tag-warn { background: #d99e00; }
+.section-nav-dot.tag-fail { background: #c5221f; }
+.section-nav-dot.tag-info { background: #214a9b; }
+/* Compact status word (PASS/FAIL/WARN/...) shown at the trailing edge. */
+.section-nav-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #e1ecff;
+  color: #214a9b;
+}
+.section-nav-badge.tag-pass { background: #e1f7e6; color: #137333; }
+.section-nav-badge.tag-warn { background: #f9d976; color: #5c3c00; }
+.section-nav-badge.tag-fail { background: #fde2e2; color: #c5221f; }
+.section-nav-badge.tag-info { background: #e1ecff; color: #214a9b; }
+/* Keep the badge readable against the hover (filled) button background. */
+.section-nav-btn:hover .section-nav-badge {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+/* Floating section rail (scrollspy). Fixed to the left edge so it follows the
+   page while scrolling and highlights the section currently in view. Hidden by
+   default; buildSectionRail() adds .section-rail-visible once it has entries.
+   On narrower viewports there isn't room beside the centered content, so the
+   rail is hidden and users rely on the inline "Jump to Section" card. */
+.section-rail {
+  display: none;
+}
+/* The rail is only shown on wide viewports (>=1500px) where there's room beside
+   the centered content. Below that it stays hidden (display:none above) and the
+   inline "Jump to Section" card handles navigation — otherwise the rail would
+   render as a stray static block at the top of the page on small screens. */
+@media (min-width: 1500px) {
+  .section-rail.section-rail-visible {
+    display: block;
+    position: fixed;
+    top: 90px;
+    left: 24px;
+    width: 230px;
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--card-bg);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+    z-index: 40;
+    font-size: 12px;
+  }
+}
+.section-rail-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+  margin-bottom: 8px;
+  padding-left: 8px;
+}
+.section-rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.section-rail-list li {
+  margin: 0;
+}
+.section-rail-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--fg);
+  text-decoration: none;
+  line-height: 1.25;
+  border-left: 2px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.section-rail-link:hover {
+  background: var(--button-bg-secondary);
+}
+.section-rail-link-active {
+  background: var(--button-bg-secondary);
+  border-left-color: var(--button-bg);
+  font-weight: 600;
+}
+.section-rail-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Status dot mirrors the card badge color so problem sections stand out. */
+.section-rail-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9aa0ab;
+}
+.section-rail-dot.tag-pass { background: #137333; }
+.section-rail-dot.tag-warn { background: #d99e00; }
+.section-rail-dot.tag-fail { background: #c5221f; }
+.section-rail-dot.tag-info { background: #214a9b; }
+
 @media (prefers-reduced-motion: no-preference) {
   body.section-fade-enabled .engage-top-item {
     opacity: 0;

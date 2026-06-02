@@ -288,6 +288,15 @@ async function ensureMsalLoaded() {
   </div>
 </div>
 
+<!--
+  Floating section rail (scrollspy). Populated by buildSectionRail() in
+  20d-HtmlJsCore.ps1 after each lookup. Fixed to the left edge of the viewport
+  on wide screens so it follows the page as the user scrolls, highlighting the
+  section currently in view. Hidden from screenshots and on narrow viewports
+  (the inline "Jump to Section" card covers those cases).
+-->
+<nav id="sectionRail" class="section-rail hide-on-screenshot" aria-label="Section navigation"></nav>
+
 <div id="results" class="cards"></div>
 
 <div class="footer" id="footerText">

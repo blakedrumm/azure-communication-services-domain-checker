@@ -355,6 +355,242 @@ function hideTopBarItem(element) {
     });
 }
 
+// Parse the assembled results markup into an ordered list of section entries.
+// Each card opens with `<div class="card" id="card-KEY">` followed by a header
+// that contains an optional status badge `<span class="tag TAGCLASS">BADGE</span>`
+// and a `<strong>TITLE</strong>`. We capture all three so navigation UI can show
+// a colored status dot (matching the card's badge) plus the badge text. Parsing
+// the final markup (instead of a hand-curated list) keeps every navigation aid
+// perfectly in sync with the cards that actually rendered, in on-page order.
+// The section-nav card itself is skipped so it never lists itself.
+function parseSectionNavEntries(markup) {
+  const entries = [];
+  if (!markup) return entries;
+  const seen = {};
+  // Capture: (1) card key, (2) the header HTML up to and including the title's
+  // </strong>. We then sub-parse the header chunk for the badge + title so the
+  // optional tag span doesn't have to be modeled inline in one brittle regex.
+  const re = /<div class="card"[^>]*\bid="card-([^"]+)"[^>]*>([\s\S]*?<strong[^>]*>[\s\S]*?<\/strong>)/g;
+  let m;
+  while ((m = re.exec(markup)) !== null) {
+    const key = m[1];
+    if (key === 'section-nav' || seen[key]) continue;
+    const headerChunk = m[2];
+
+    // Title: strip nested markup (icons, emphasis spans) so the label is clean.
+    const titleMatch = /<strong[^>]*>([\s\S]*?)<\/strong>/.exec(headerChunk);
+    const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : '';
+    if (!title) continue;
+
+    // Status badge: the first `tag` span in the header (e.g. tag-pass / tag-fail
+    // / tag-warn / tag-info). Used to color the nav dot and show the short
+    // status word. Some cards (e.g. Domain) may not carry a badge.
+    let tagClass = '';
+    let badgeText = '';
+    const tagMatch = /<span class="tag ([^"]*)"[^>]*>([\s\S]*?)<\/span>/.exec(headerChunk);
+    if (tagMatch) {
+      tagClass = tagMatch[1].replace(/\s+/g, ' ').trim();
+      badgeText = tagMatch[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    }
+
+    seen[key] = true;
+    entries.push({ key, title, tagClass, badgeText });
+  }
+  return entries;
+}
+
+// Build the inline "Jump to section" navigation card (rendered at the top of
+// the results). Uses the shared section entries so it matches the cards that
+// actually rendered, each button showing a colored status dot plus, for real
+// pass/warn/fail statuses, the short status word.
+function buildSectionNavHtml(markup) {
+  const entries = parseSectionNavEntries(markup);
+  if (entries.length === 0) return '';
+
+  const buttons = entries
+    .map(e => {
+      const dot = `<span class="section-nav-dot ${escapeHtml(e.tagClass)}" aria-hidden="true"></span>`;
+      // Only surface the badge word for real pass/warn/fail statuses. Info-style
+      // tags (READINESS TIPS, DOCS, TOOLS, NAVIGATE, LOOKED UP, ...) are section
+      // labels rather than statuses, so showing them as badges just adds noise —
+      // the colored dot is enough for those.
+      const isStatusBadge = /\btag-(pass|warn|fail)\b/.test(e.tagClass);
+      const badge = (isStatusBadge && e.badgeText)
+        ? `<span class="section-nav-badge ${escapeHtml(e.tagClass)}">${escapeHtml(e.badgeText)}</span>`
+        : '';
+      return `<button type="button" class="section-nav-btn" onclick="scrollToSection('${e.key}')" title="${escapeHtml(e.title)}">` +
+        `${dot}<span class="section-nav-label">${escapeHtml(e.title)}</span>${badge}</button>`;
+    })
+    .join('');
+
+  return `
+  <div class="card section-nav-card hide-on-screenshot" id="card-section-nav">
+    <div class="card-header" onclick="toggleCard(this)">
+      <span class="chevron">&#x25BC;</span>
+      <span class="tag tag-info">${escapeHtml(t('jumpToTag'))}</span>
+      <strong>${escapeHtml(t('jumpToSection'))}</strong>
+    </div>
+    <div class="card-content">
+      <div class="section-nav-grid">${buttons}</div>
+    </div>
+  </div>`;
+}
+
+// Tracks the IntersectionObserver powering the floating rail scrollspy so it can
+// be disconnected and rebuilt on each new render.
+let sectionRailObserver = null;
+let sectionRailVisibility = {};
+// Ordered list of section keys (top-to-bottom) for page-extreme highlighting,
+// and a guard so the scroll/resize scrollspy listener is only bound once.
+let sectionRailKeys = [];
+let sectionRailScrollHandlerBound = false;
+
+// Populate the floating left-hand section rail from the shared section entries
+// and wire up an IntersectionObserver scrollspy that highlights whichever
+// section is currently in view. The rail lives outside #results (see
+// 20a-HtmlScriptSetup.ps1) so it can be position:fixed and persist while the
+// results scroll beneath it. Hidden automatically when there are no sections.
+function buildSectionRail(markup) {
+  const rail = document.getElementById('sectionRail');
+  if (!rail) return;
+
+  // Tear down any previous observer before rebuilding for the new results.
+  if (sectionRailObserver) {
+    sectionRailObserver.disconnect();
+    sectionRailObserver = null;
+  }
+  sectionRailVisibility = {};
+
+  const entries = parseSectionNavEntries(markup);
+  if (entries.length === 0) {
+    rail.innerHTML = '';
+    rail.classList.remove('section-rail-visible');
+    return;
+  }
+
+  const items = entries
+    .map(e => {
+      const dot = `<span class="section-rail-dot ${escapeHtml(e.tagClass)}" aria-hidden="true"></span>`;
+      return `<li><a href="#card-${escapeHtml(e.key)}" class="section-rail-link" data-key="${escapeHtml(e.key)}" ` +
+        `onclick="event.preventDefault(); scrollToSection('${e.key}');" title="${escapeHtml(e.title)}">` +
+        `${dot}<span class="section-rail-label">${escapeHtml(e.title)}</span></a></li>`;
+    })
+    .join('');
+
+  rail.innerHTML = `
+    <div class="section-rail-title">${escapeHtml(t('jumpToSection'))}</div>
+    <ul class="section-rail-list">${items}</ul>`;
+  rail.classList.add('section-rail-visible');
+
+  // Remember the on-page order of keys so the scrollspy can force the first/last
+  // section active at the very top/bottom of the page (where the biased active
+  // band below can't otherwise reach the edge cards).
+  sectionRailKeys = entries.map(e => e.key);
+
+  // Scrollspy: observe each card and mark the rail link for whichever card is
+  // most prominently in view as active. We track per-card intersection ratios
+  // and pick the highest so the highlight follows the dominant on-screen card.
+  const observer = new IntersectionObserver((observed) => {
+    observed.forEach(entry => {
+      const id = entry.target.id; // e.g. "card-spf"
+      const key = id.replace(/^card-/, '');
+      sectionRailVisibility[key] = entry.isIntersecting ? entry.intersectionRatio : 0;
+    });
+    updateActiveSectionRailLink();
+  }, {
+    // Bias the active band toward the upper-middle of the viewport so the
+    // highlight lands on the section the user is actually reading.
+    rootMargin: '-20% 0px -55% 0px',
+    threshold: [0, 0.25, 0.5, 0.75, 1]
+  });
+
+  entries.forEach(e => {
+    const card = document.getElementById(`card-${e.key}`);
+    if (card) observer.observe(card);
+  });
+  sectionRailObserver = observer;
+
+  // The IntersectionObserver alone can't highlight the last section when the
+  // page is scrolled fully to the bottom (no content below to push the final
+  // cards into the biased active band) or the first section at the very top.
+  // A lightweight scroll/resize listener fills those gaps. Registered once.
+  if (!sectionRailScrollHandlerBound) {
+    window.addEventListener('scroll', updateActiveSectionRailLink, { passive: true });
+    window.addEventListener('resize', updateActiveSectionRailLink, { passive: true });
+    sectionRailScrollHandlerBound = true;
+  }
+
+  // Establish an initial highlight without waiting for a scroll event.
+  updateActiveSectionRailLink();
+}
+
+// Highlight the rail link for the section currently at the TOP of the viewport.
+// We deliberately use a top-anchored algorithm instead of "largest visible
+// area": the active section is the last card whose top edge has scrolled to (or
+// above) a thin activation line near the top of the viewport. This matches what
+// scrollToSection() does (it aligns a card's top just below the viewport top),
+// so clicking e.g. "TXT" highlights TXT rather than a taller neighbour like
+// DKIM1 that happens to occupy more pixels below it.
+function updateActiveSectionRailLink() {
+  const rail = document.getElementById('sectionRail');
+  if (!rail) return;
+
+  // Activation line: a small distance below the very top of the viewport. It is
+  // kept just below scrollToSection()'s 16px top offset so that immediately
+  // after a click the targeted card's top (which lands at ~16px) is already at
+  // or above the line and therefore selected.
+  const ACTIVATION_LINE = 24;
+
+  let bestKey = null;
+  // Walk sections in on-page order and keep the last one whose top is at or
+  // above the activation line. That is the section occupying the top of the
+  // screen right now.
+  for (let i = 0; i < sectionRailKeys.length; i++) {
+    const key = sectionRailKeys[i];
+    const card = document.getElementById(`card-${key}`);
+    if (!card) continue;
+    const top = card.getBoundingClientRect().top;
+    if (top <= ACTIVATION_LINE) {
+      bestKey = key;
+    } else {
+      // Cards are rendered top-to-bottom, so once a card starts below the line
+      // every later card is also below it.
+      break;
+    }
+  }
+
+  // Page-extreme overrides. Use a small tolerance so "close enough" to the edge
+  // still counts (smooth-scroll easing and sub-pixel rounding rarely land exact).
+  const doc = document.documentElement;
+  const scrollTop = window.pageYOffset || doc.scrollTop || 0;
+  const maxScroll = (doc.scrollHeight || 0) - window.innerHeight;
+  const atBottom = maxScroll > 0 && scrollTop >= maxScroll - 4;
+  const atTop = scrollTop <= 4;
+
+  if (atBottom && sectionRailKeys.length) {
+    // At the very bottom the last card's top may never reach the activation
+    // line (not enough content below to scroll it up), so force the last one.
+    bestKey = sectionRailKeys[sectionRailKeys.length - 1];
+  } else if (atTop && sectionRailKeys.length) {
+    bestKey = sectionRailKeys[0];
+  } else if (!bestKey && sectionRailKeys.length) {
+    // Above the first card's activation point: default to the first section.
+    bestKey = sectionRailKeys[0];
+  }
+
+  const links = rail.querySelectorAll('.section-rail-link');
+  links.forEach(link => {
+    const isActive = !!bestKey && link.getAttribute('data-key') === bestKey;
+    link.classList.toggle('section-rail-link-active', isActive);
+    if (isActive) {
+      // Keep the active link visible if the rail itself overflows/scrolls.
+      if (typeof link.scrollIntoView === 'function') {
+        link.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  });
+}
+
 function scrollToSection(key) {
   if (!key) return;
   const el = document.getElementById(`card-${key}`);
@@ -365,7 +601,15 @@ function scrollToSection(key) {
         toggleCard(header);
     }
 
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Align to the TOP of the card (not center): tall cards such as the DNS
+    // records table are taller than the viewport, so centering them would push
+    // the card header and first rows off-screen. We scroll the card's top edge
+    // to just below the top of the viewport, with a small offset for breathing
+    // room. Computed manually (rather than scrollIntoView block:'start') so the
+    // offset is consistent across browsers.
+    const offset = 16;
+    const top = el.getBoundingClientRect().top + (window.pageYOffset || document.documentElement.scrollTop || 0) - offset;
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
 
     // Reset animation if already playing
     el.classList.remove('flash-active');
@@ -3908,7 +4152,7 @@ function render(r) {
     return '<li style="display:flex; align-items:flex-start; gap:8px; margin-bottom:8px;">' + iconHtml + '<span style="padding-top:2px;">' + formatGuidanceText(text, r.domain || '') + '</span></li>';
   }).join("");
   cards.push(`
-    <div class="card">
+    <div class="card" id="card-guidance">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="chevron">&#x25BC;</span>
         <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
@@ -3927,7 +4171,7 @@ function render(r) {
   `);
 
   cards.push(`
-    <div class="card">
+    <div class="card" id="card-helpfulLinks">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="chevron">&#x25BC;</span>
         <span class="tag tag-info">${escapeHtml(t('docs'))}</span>
@@ -3956,7 +4200,7 @@ function render(r) {
   // that lands directly on a domain-scoped lookup view.
   const mxToolbox = `https://mxtoolbox.com/SuperTool.aspx?action=domain%3A${domainForLinks}&run=toolpage`;
   cards.push(`
-    <div class="card">
+    <div class="card" id="card-tools">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="chevron">&#x25BC;</span>
         <span class="tag tag-info">${escapeHtml(t('tools'))}</span>
@@ -3972,7 +4216,40 @@ function render(r) {
     </div>
   `);
 
-  renderResultsMarkup(cards.join(""));
+  // Prepend a "Jump to section" navigation card so users can quickly scroll to
+  // any returned result card. It is derived from the assembled card markup so it
+  // always matches the cards that actually rendered, in their on-page order.
+  const cardsMarkup = cards.join("");
+  const sectionNavHtml = buildSectionNavHtml(cardsMarkup);
+  renderResultsMarkup(sectionNavHtml + cardsMarkup);
+
+  // Build the floating left-hand section rail + scrollspy. Deferred so it runs
+  // after renderResultsMarkup has committed the cards to the DOM (which may be
+  // delayed by the section-reveal animation), otherwise the IntersectionObserver
+  // would have no card elements to watch.
+  scheduleSectionRailBuild(cardsMarkup);
+}
+
+// Rebuild the floating section rail once the results DOM is in place. We poll a
+// couple of animation frames for the first card to exist so the rail works
+// whether renderResultsMarkup committed synchronously or after a reveal delay.
+let _sectionRailBuildTimer = null;
+function scheduleSectionRailBuild(markup) {
+  if (_sectionRailBuildTimer) {
+    clearTimeout(_sectionRailBuildTimer);
+    _sectionRailBuildTimer = null;
+  }
+  let attempts = 0;
+  const tryBuild = () => {
+    attempts++;
+    const ready = document.querySelector('#results .card[id^="card-"]');
+    if (ready || attempts > 60) {
+      buildSectionRail(markup);
+      return;
+    }
+    _sectionRailBuildTimer = window.setTimeout(tryBuild, 50);
+  };
+  tryBuild();
 }
 
 let _loadingDotsTimer = null;
