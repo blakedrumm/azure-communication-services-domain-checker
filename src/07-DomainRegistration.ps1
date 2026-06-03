@@ -459,15 +459,31 @@ function Get-DomainRegistrationStatus {
       # SECURITY (M5): Sanitize provider error messages to avoid leaking API URLs,
       # provider names, or configuration details to anonymous clients. Map to
       # generic failure strings instead.
+      #
+      # Several independent providers are attempted (RDAP, GoDaddy, Sysinternals/
+      # Linux/TCP WHOIS, WhoisXML). Collect the distinct failure reasons so the
+      # message doesn't repeat "WHOIS unavailable." once per WHOIS provider or
+      # "External API not configured." once per API provider, which previously
+      # produced noisy strings like "... WHOIS unavailable. WHOIS unavailable.
+      # External API not configured. External API not configured."
+      $reasons = [System.Collections.Generic.List[string]]::new()
+
+      if ($rdapError) { [void]$reasons.Add('RDAP unavailable.') }
+
+      # Any of the local WHOIS providers failing collapses to a single reason.
+      if ($sysWhoisError -or $linuxWhoisError -or $tcpWhoisError) { [void]$reasons.Add('WHOIS unavailable.') }
+
+      # External APIs (GoDaddy + WhoisXML) collapse to one reason: if either was
+      # configured and failed report "unavailable"; otherwise, if neither is
+      # configured, report "not configured".
+      $apiAttemptedAndFailed = ($goDaddyError -or $whoisXmlError)
+      $goDaddyConfigured = -not ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret))
+      $whoisXmlConfigured = -not [string]::IsNullOrWhiteSpace($apiKey)
+      if ($apiAttemptedAndFailed) { [void]$reasons.Add('External API unavailable.') }
+      elseif (-not $goDaddyConfigured -and -not $whoisXmlConfigured) { [void]$reasons.Add('External API not configured.') }
+
       $err = 'Domain registration lookup failed.'
-      if ($rdapError) { $err += " RDAP unavailable." }
-      if ($goDaddyError) { $err += " External API unavailable." }
-      elseif ([string]::IsNullOrWhiteSpace($gdKey) -or [string]::IsNullOrWhiteSpace($gdSecret)) { $err += ' External API not configured.' }
-      if ($sysWhoisError) { $err += " WHOIS unavailable." }
-      if ($linuxWhoisError) { $err += " WHOIS unavailable." }
-      if ($tcpWhoisError) { $err += " WHOIS unavailable." }
-      if ($whoisXmlError) { $err += " External API unavailable." }
-      elseif ([string]::IsNullOrWhiteSpace($apiKey)) { $err += ' External API not configured.' }
+      if ($reasons.Count -gt 0) { $err += ' ' + ($reasons -join ' ') }
 
       $parentDomains = @(Get-ParentDomains -Domain $d)
       foreach ($parentDomain in $parentDomains) {
