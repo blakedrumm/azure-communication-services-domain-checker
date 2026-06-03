@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.5.0'
+$script:AppVersion = '2.5.2'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -12531,10 +12531,12 @@ const TRANSLATIONS = {
     themeDark: 'Dark mode \uD83C\uDF19',
     themeLight: 'Light mode \u2600\uFE0F',
     copyLink: 'Copy link \uD83D\uDD17',
+    pageLinkLabel: 'Report link',
     copyScreenshot: 'Copy page screenshot \uD83D\uDCF8',
     downloadJson: 'Download JSON \uD83D\uDCE5',
     reportIssue: 'Report issue \uD83D\uDC1B',
     signInMicrosoft: 'Sign in with Microsoft \uD83D\uDD12',
+    localhostSignInWarning: 'Would you like to proceed? This is likely to fail as you are using Localhost as the web URL currently.',
     signOut: 'Sign out',
     termsOfService: 'Terms of Service',
     privacyStatement: 'Privacy',
@@ -12819,11 +12821,12 @@ const TRANSLATIONS = {
     nothingToCopyFor: 'Nothing to copy for {field}.',
     copiedFieldToClipboard: 'Copied {field} to clipboard.',
     failedCopyFieldToClipboard: 'Failed to copy {field} to clipboard.',
-    screenshotClipboardUnsupported: 'Screenshot clipboard support is not available in this browser.',
+    screenshotClipboardUnsupported: 'Screenshot capture is not available in this browser.',
     screenshotContainerNotFound: 'Container not found for screenshot.',
     screenshotCaptureFailed: 'Failed to capture screenshot.',
     screenshotCopiedToClipboard: 'Screenshot copied to clipboard.',
     failedCopyScreenshot: 'Failed to copy screenshot to clipboard.',
+    screenshotDownloadedFallback: 'Could not copy to clipboard \u2014 screenshot downloaded as a PNG file instead.',
     screenshotRenderFailed: 'Screenshot capture failed.',
     issueReportingNotConfigured: 'Issue reporting is not configured.',
     issueReportConfirm: 'This will open the issue tracker and include {detail}. Continue?',
@@ -12879,10 +12882,12 @@ const TRANSLATIONS = {
     themeDark: 'Modo oscuro \uD83C\uDF19',
     themeLight: 'Modo claro \u2600\uFE0F',
     copyLink: 'Copiar v\u00EDnculo \uD83D\uDD17',
+    pageLinkLabel: 'Enlace del informe',
     copyScreenshot: 'Copiar captura \uD83D\uDCF8',
     downloadJson: 'Descargar JSON \uD83D\uDCE5',
     reportIssue: 'Reportar problema \uD83D\uDC1B',
     signInMicrosoft: 'Iniciar sesi\u00F3n con Microsoft \uD83D\uDD12',
+    localhostSignInWarning: '\u00BFDesea continuar? Es probable que falle porque actualmente est\u00E1 usando Localhost como la URL web.',
     signOut: 'Cerrar sesi\u00F3n',
     termsOfService: 'T\u00E9rminos de servicio',
     privacyStatement: 'Privacidad',
@@ -13067,10 +13072,12 @@ const TRANSLATIONS = {
     themeDark: 'Mode sombre \uD83C\uDF19',
     themeLight: 'Mode clair \u2600\uFE0F',
     copyLink: 'Copier le lien \uD83D\uDD17',
+    pageLinkLabel: 'Lien du rapport',
     copyScreenshot: 'Copier la capture \uD83D\uDCF8',
     downloadJson: 'T\u00E9l\u00E9charger le JSON \uD83D\uDCE5',
     reportIssue: 'Signaler un probl\u00E8me \uD83D\uDC1B',
     signInMicrosoft: 'Se connecter avec Microsoft \uD83D\uDD12',
+    localhostSignInWarning: 'Voulez-vous continuer\u00A0? Cela risque d\u2019\u00E9chouer car vous utilisez actuellement Localhost comme URL Web.',
     signOut: 'Se d\u00E9connecter',
     termsOfService: 'Conditions d\'utilisation',
     privacyStatement: 'Confidentialit\u00E9',
@@ -13165,7 +13172,7 @@ const TRANSLATIONS = {
     nothingToCopyFor: 'Rien \u00E0 copier pour {field}.',
     copiedFieldToClipboard: '{field} copi\u00E9 dans le presse-papiers.',
     failedCopyFieldToClipboard: '\u00C9chec de la copie de {field} dans le presse-papiers.',
-    screenshotClipboardUnsupported: 'La prise en charge de la copie de capture d\u2019\u00E9cran n\u2019est pas disponible dans ce navigateur.',
+    screenshotClipboardUnsupported: 'La capture d\u2019\u00E9cran n\u2019est pas disponible dans ce navigateur.',
     screenshotContainerNotFound: 'Conteneur introuvable pour la capture d\u2019\u00E9cran.',
     screenshotCaptureFailed: '\u00C9chec de la capture d\u2019\u00E9cran.',
     screenshotCopiedToClipboard: 'Capture d\u2019\u00E9cran copi\u00E9e dans le presse-papiers.',
@@ -13197,10 +13204,12 @@ const TRANSLATIONS = {
     themeDark: 'Dunkler Modus \uD83C\uDF19',
     themeLight: 'Heller Modus \u2600\uFE0F',
     copyLink: 'Link kopieren \uD83D\uDD17',
+    pageLinkLabel: 'Berichtslink',
     copyScreenshot: 'Seitenbild kopieren \uD83D\uDCF8',
     downloadJson: 'JSON herunterladen \uD83D\uDCE5',
     reportIssue: 'Problem melden \uD83D\uDC1B',
     signInMicrosoft: 'Mit Microsoft anmelden \uD83D\uDD12',
+    localhostSignInWarning: 'M\u00F6chten Sie fortfahren? Dies wird wahrscheinlich fehlschlagen, da Sie derzeit Localhost als Web-URL verwenden.',
     signOut: 'Abmelden',
     termsOfService: 'Nutzungsbedingungen',
     privacyStatement: 'Datenschutz',
@@ -13295,7 +13304,7 @@ const TRANSLATIONS = {
     nothingToCopyFor: 'F\u00FCr {field} gibt es nichts zu kopieren.',
     copiedFieldToClipboard: '{field} wurde in die Zwischenablage kopiert.',
     failedCopyFieldToClipboard: '{field} konnte nicht in die Zwischenablage kopiert werden.',
-    screenshotClipboardUnsupported: 'Die Zwischenablageunterst\u00FCtzung f\u00FCr Screenshots ist in diesem Browser nicht verf\u00FCgbar.',
+    screenshotClipboardUnsupported: 'Die Screenshot-Aufnahme ist in diesem Browser nicht verf\u00FCgbar.',
     screenshotContainerNotFound: 'Container f\u00FCr Screenshot nicht gefunden.',
     screenshotCaptureFailed: 'Screenshot konnte nicht erstellt werden.',
     screenshotCopiedToClipboard: 'Screenshot in die Zwischenablage kopiert.',
@@ -13327,10 +13336,12 @@ const TRANSLATIONS = {
     themeDark: 'Modo escuro \uD83C\uDF19',
     themeLight: 'Modo claro \u2600\uFE0F',
     copyLink: 'Copiar link \uD83D\uDD17',
+    pageLinkLabel: 'Link do relat\u00F3rio',
     copyScreenshot: 'Copiar captura da p\u00E1gina \uD83D\uDCF8',
     downloadJson: 'Baixar JSON \uD83D\uDCE5',
     reportIssue: 'Relatar problema \uD83D\uDC1B',
     signInMicrosoft: 'Entrar com Microsoft \uD83D\uDD12',
+    localhostSignInWarning: 'Deseja continuar? Isso provavelmente falhar\u00E1, pois voc\u00EA est\u00E1 usando o Localhost como URL da Web no momento.',
     signOut: 'Sair',
     termsOfService: 'Termos de servi\u00E7o',
     privacyStatement: 'Privacidade',
@@ -13425,7 +13436,7 @@ const TRANSLATIONS = {
     nothingToCopyFor: 'N\u00E3o h\u00E1 nada para copiar em {field}.',
     copiedFieldToClipboard: '{field} copiado para a \u00E1rea de transfer\u00EAncia.',
     failedCopyFieldToClipboard: 'Falha ao copiar {field} para a \u00E1rea de transfer\u00EAncia.',
-    screenshotClipboardUnsupported: 'O suporte para copiar capturas de tela para a \u00E1rea de transfer\u00EAncia n\u00E3o est\u00E1 dispon\u00EDvel neste navegador.',
+    screenshotClipboardUnsupported: 'A captura de tela n\u00E3o est\u00E1 dispon\u00EDvel neste navegador.',
     screenshotContainerNotFound: 'Cont\u00EAiner n\u00E3o encontrado para a captura de tela.',
     screenshotCaptureFailed: 'Falha ao capturar a imagem da tela.',
     screenshotCopiedToClipboard: 'Captura de tela copiada para a \u00E1rea de transfer\u00EAncia.',
@@ -13457,10 +13468,12 @@ const TRANSLATIONS = {
     themeDark: '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u062F\u0627\u0643\u0646 \uD83C\uDF19',
     themeLight: '\u0627\u0644\u0648\u0636\u0639 \u0627\u0644\u0641\u0627\u062A\u062D \u2600\uFE0F',
     copyLink: '\u0646\u0633\u062E \u0627\u0644\u0631\u0627\u0628\u0637 \uD83D\uDD17',
+    pageLinkLabel: '\u0631\u0627\u0628\u0637 \u0627\u0644\u062A\u0642\u0631\u064A\u0631',
     copyScreenshot: '\u0646\u0633\u062E \u0644\u0642\u0637\u0629 \u0627\u0644\u0635\u0641\u062D\u0629 \uD83D\uDCF8',
     downloadJson: '\u062A\u0646\u0632\u064A\u0644 JSON \uD83D\uDCE5',
     reportIssue: '\u0627\u0644\u0625\u0628\u0644\u0627\u063A \u0639\u0646 \u0645\u0634\u0643\u0644\u0629 \uD83D\uDC1B',
     signInMicrosoft: '\u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062F\u062E\u0648\u0644 \u0628\u0627\u0633\u062A\u062E\u062F\u0627\u0645 Microsoft \uD83D\uDD12',
+    localhostSignInWarning: '\u0647\u0644 \u062A\u0631\u064A\u062F \u0627\u0644\u0645\u062A\u0627\u0628\u0639\u0629\u061F \u0645\u0646 \u0627\u0644\u0645\u062D\u062A\u0645\u0644 \u0623\u0646 \u064A\u0641\u0634\u0644 \u0630\u0644\u0643 \u0644\u0623\u0646\u0643 \u062A\u0633\u062A\u062E\u062F\u0645 Localhost \u0643\u0639\u0646\u0648\u0627\u0646 URL \u0644\u0644\u0648\u064A\u0628 \u062D\u0627\u0644\u064A\u064B\u0627.',
     signOut: '\u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062E\u0631\u0648\u062C',
     termsOfService: '\u0634\u0631\u0648\u0637 \u0627\u0644\u062E\u062F\u0645\u0629',
     privacyStatement: '\u0627\u0644\u062E\u0635\u0648\u0635\u064A\u0629',
@@ -13477,7 +13490,7 @@ const TRANSLATIONS = {
     nothingToCopyFor: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0645\u0627 \u064A\u0645\u0643\u0646 \u0646\u0633\u062E\u0647 \u0644\u0644\u062D\u0642\u0644 {field}.',
     copiedFieldToClipboard: '\u062A\u0645 \u0646\u0633\u062E {field} \u0625\u0644\u0649 \u0627\u0644\u062D\u0627\u0641\u0638\u0629.',
     failedCopyFieldToClipboard: '\u062A\u0639\u0630\u0631 \u0646\u0633\u062E {field} \u0625\u0644\u0649 \u0627\u0644\u062D\u0627\u0641\u0638\u0629.',
-    screenshotClipboardUnsupported: '\u0646\u0633\u062E \u0644\u0642\u0637\u0627\u062A \u0627\u0644\u0634\u0627\u0634\u0629 \u0625\u0644\u0649 \u0627\u0644\u062D\u0627\u0641\u0638\u0629 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0647\u0630\u0627 \u0627\u0644\u0645\u062A\u0635\u0641\u062D.',
+    screenshotClipboardUnsupported: '\u0627\u0644\u062A\u0642\u0627\u0637 \u0644\u0642\u0637\u0627\u062A \u0627\u0644\u0634\u0627\u0634\u0629 \u063A\u064A\u0631 \u0645\u062F\u0639\u0648\u0645 \u0641\u064A \u0647\u0630\u0627 \u0627\u0644\u0645\u062A\u0635\u0641\u062D.',
     screenshotContainerNotFound: '\u0644\u0645 \u064A\u062A\u0645 \u0627\u0644\u0639\u062B\u0648\u0631 \u0639\u0644\u0649 \u0627\u0644\u062D\u0627\u0648\u064A\u0629 \u0627\u0644\u062E\u0627\u0635\u0629 \u0628\u0644\u0642\u0637\u0629 \u0627\u0644\u0634\u0627\u0634\u0629.',
     screenshotCaptureFailed: '\u062A\u0639\u0630\u0631 \u0627\u0644\u062A\u0642\u0627\u0637 \u0644\u0642\u0637\u0629 \u0627\u0644\u0634\u0627\u0634\u0629.',
     screenshotCopiedToClipboard: '\u062A\u0645 \u0646\u0633\u062E \u0644\u0642\u0637\u0629 \u0627\u0644\u0634\u0627\u0634\u0629 \u0625\u0644\u0649 \u0627\u0644\u062D\u0627\u0641\u0638\u0629.',
@@ -13509,10 +13522,12 @@ const TRANSLATIONS = {
     themeDark: '\u6DF1\u8272\u6A21\u5F0F \uD83C\uDF19',
     themeLight: '\u6D45\u8272\u6A21\u5F0F \u2600\uFE0F',
     copyLink: '\u590D\u5236\u94FE\u63A5 \uD83D\uDD17',
+    pageLinkLabel: '\u62A5\u544A\u94FE\u63A5',
     copyScreenshot: '\u590D\u5236\u9875\u9762\u622A\u56FE \uD83D\uDCF8',
     downloadJson: '\u4E0B\u8F7D JSON \uD83D\uDCE5',
     reportIssue: '\u62A5\u544A\u95EE\u9898 \uD83D\uDC1B',
     signInMicrosoft: '\u4F7F\u7528 Microsoft \u767B\u5F55 \uD83D\uDD12',
+    localhostSignInWarning: '\u662F\u5426\u8981\u7EE7\u7EED\uFF1F\u7531\u4E8E\u60A8\u5F53\u524D\u4F7F\u7528 Localhost \u4F5C\u4E3A Web URL\uFF0C\u6B64\u64CD\u4F5C\u5F88\u53EF\u80FD\u5931\u8D25\u3002',
     signOut: '\u9000\u51FA\u767B\u5F55',
     termsOfService: '\u670D\u52A1\u6761\u6B3E',
     privacyStatement: '\u9690\u79C1\u58F0\u660E',
@@ -13529,7 +13544,7 @@ const TRANSLATIONS = {
     nothingToCopyFor: '\u6CA1\u6709\u53EF\u590D\u5236\u7684 {field}\u3002',
     copiedFieldToClipboard: '\u5DF2\u5C06 {field} \u590D\u5236\u5230\u526A\u8D34\u677F\u3002',
     failedCopyFieldToClipboard: '\u65E0\u6CD5\u5C06 {field} \u590D\u5236\u5230\u526A\u8D34\u677F\u3002',
-    screenshotClipboardUnsupported: '\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u5C06\u622A\u56FE\u590D\u5236\u5230\u526A\u8D34\u677F\u3002',
+    screenshotClipboardUnsupported: '\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u5C4F\u5E55\u622A\u56FE\u3002',
     screenshotContainerNotFound: '\u672A\u627E\u5230\u622A\u56FE\u5BB9\u5668\u3002',
     screenshotCaptureFailed: '\u622A\u56FE\u5931\u8D25\u3002',
     screenshotCopiedToClipboard: '\u622A\u56FE\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F\u3002',
@@ -13919,10 +13934,12 @@ const TRANSLATION_EXTENSIONS = {
     themeDark: '\u0921\u093E\u0930\u094D\u0915 \u092E\u094B\u0921 \uD83C\uDF19',
     themeLight: '\u0932\u093E\u0907\u091F \u092E\u094B\u0921 \u2600\uFE0F',
     copyLink: '\u0932\u093F\u0902\u0915 \u0915\u0949\u092A\u0940 \u0915\u0930\u0947\u0902 \uD83D\uDD17',
+    pageLinkLabel: '\u0930\u093F\u092A\u094B\u0930\u094D\u091F \u0932\u093F\u0902\u0915',
     copyScreenshot: '\u092A\u0947\u091C \u0938\u094D\u0915\u094D\u0930\u0940\u0928\u0936\u0949\u091F \u0915\u0949\u092A\u0940 \u0915\u0930\u0947\u0902 \uD83D\uDCF8',
     downloadJson: 'JSON \u0921\u093E\u0909\u0928\u0932\u094B\u0921 \u0915\u0930\u0947\u0902 \uD83D\uDCE5',
     reportIssue: '\u0938\u092E\u0938\u094D\u092F\u093E \u0930\u093F\u092A\u094B\u0930\u094D\u091F \u0915\u0930\u0947\u0902 \uD83D\uDC1B',
     signInMicrosoft: 'Microsoft \u0938\u0947 \u0938\u093E\u0907\u0928 \u0907\u0928 \u0915\u0930\u0947\u0902 \uD83D\uDD12',
+    localhostSignInWarning: '\u0915\u094D\u092F\u093E \u0906\u092A \u0906\u0917\u0947 \u092C\u0922\u093C\u0928\u093E \u091A\u093E\u0939\u0924\u0947 \u0939\u0948\u0902? \u092F\u0939 \u0938\u0902\u092D\u0935\u0924\u0903 \u0935\u093F\u092B\u0932 \u0939\u094B\u0917\u093E \u0915\u094D\u092F\u094B\u0902\u0915\u093F \u0906\u092A \u0935\u0930\u094D\u0924\u092E\u093E\u0928 \u092E\u0947\u0902 \u0935\u0947\u092C URL \u0915\u0947 \u0930\u0942\u092A \u092E\u0947\u0902 Localhost \u0915\u093E \u0909\u092A\u092F\u094B\u0917 \u0915\u0930 \u0930\u0939\u0947 \u0939\u0948\u0902\u0964',
     signOut: '\u0938\u093E\u0907\u0928 \u0906\u0909\u091F',
     termsOfService: '\u0938\u0947\u0935\u093E \u0915\u0940 \u0936\u0930\u094D\u0924\u0947\u0902',
     privacyStatement: '\u0917\u094B\u092A\u0928\u0940\u092F\u0924\u093E',
@@ -13940,7 +13957,7 @@ const TRANSLATION_EXTENSIONS = {
     nothingToCopyFor: '{field} \u0915\u0947 \u0932\u093F\u090F \u0915\u0949\u092A\u0940 \u0915\u0930\u0928\u0947 \u0939\u0947\u0924\u0941 \u0915\u0941\u091B \u0928\u0939\u0940\u0902 \u0939\u0948\u0964',
     copiedFieldToClipboard: '{field} \u0915\u094D\u0932\u093F\u092A\u092C\u094B\u0930\u094D\u0921 \u092E\u0947\u0902 \u0915\u0949\u092A\u0940 \u0915\u093F\u092F\u093E \u0917\u092F\u093E\u0964',
     failedCopyFieldToClipboard: '{field} \u0915\u094D\u0932\u093F\u092A\u092C\u094B\u0930\u094D\u0921 \u092E\u0947\u0902 \u0915\u0949\u092A\u0940 \u0928\u0939\u0940\u0902 \u0915\u093F\u092F\u093E \u091C\u093E \u0938\u0915\u093E\u0964',
-    screenshotClipboardUnsupported: '\u0907\u0938 \u092C\u094D\u0930\u093E\u0909\u091C\u093C\u0930 \u092E\u0947\u0902 \u0938\u094D\u0915\u094D\u0930\u0940\u0928\u0936\u0949\u091F \u0915\u094D\u0932\u093F\u092A\u092C\u094B\u0930\u094D\u0921 \u0938\u092E\u0930\u094D\u0925\u0928 \u0909\u092A\u0932\u092C\u094D\u0927 \u0928\u0939\u0940\u0902 \u0939\u0948\u0964',
+    screenshotClipboardUnsupported: '\u0907\u0938 \u092C\u094D\u0930\u093E\u0909\u091C\u093C\u0930 \u092E\u0947\u0902 \u0938\u094D\u0915\u094D\u0930\u0940\u0928\u0936\u0949\u091F \u0915\u0948\u092A\u094D\u091A\u0930 \u0909\u092A\u0932\u092C\u094D\u0927 \u0928\u0939\u0940\u0902 \u0939\u0948\u0964',
     screenshotContainerNotFound: '\u0938\u094D\u0915\u094D\u0930\u0940\u0928\u0936\u0949\u091F \u0915\u0947 \u0932\u093F\u090F \u0915\u0902\u091F\u0947\u0928\u0930 \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u093E\u0964',
     screenshotCaptureFailed: '\u0938\u094D\u0915\u094D\u0930\u0940\u0928\u0936\u0949\u091F \u0915\u0948\u092A\u094D\u091A\u0930 \u0928\u0939\u0940\u0902 \u0939\u094B \u0938\u0915\u093E\u0964',
     screenshotCopiedToClipboard: '\u0938\u094D\u0915\u094D\u0930\u0940\u0928\u0936\u0949\u091F \u0915\u094D\u0932\u093F\u092A\u092C\u094B\u0930\u094D\u0921 \u092E\u0947\u0902 \u0915\u0949\u092A\u0940 \u0939\u094B \u0917\u092F\u093E\u0964',
@@ -14044,10 +14061,12 @@ const TRANSLATION_EXTENSIONS = {
     themeDark: '\u30C0\u30FC\u30AF \u30E2\u30FC\u30C9 \uD83C\uDF19',
     themeLight: '\u30E9\u30A4\u30C8 \u30E2\u30FC\u30C9 \u2600\uFE0F',
     copyLink: '\u30EA\u30F3\u30AF\u3092\u30B3\u30D4\u30FC \uD83D\uDD17',
+    pageLinkLabel: '\u30EC\u30DD\u30FC\u30C8\u30EA\u30F3\u30AF',
     copyScreenshot: '\u30DA\u30FC\u30B8\u306E\u30B9\u30AF\u30EA\u30FC\u30F3\u30B7\u30E7\u30C3\u30C8\u3092\u30B3\u30D4\u30FC \uD83D\uDCF8',
     downloadJson: 'JSON \u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9 \uD83D\uDCE5',
     reportIssue: '\u554F\u984C\u3092\u5831\u544A \uD83D\uDC1B',
     signInMicrosoft: 'Microsoft \u3067\u30B5\u30A4\u30F3\u30A4\u30F3 \uD83D\uDD12',
+    localhostSignInWarning: '\u7D9A\u884C\u3057\u307E\u3059\u304B\uFF1F\u73FE\u5728 Web URL \u3068\u3057\u3066 Localhost \u3092\u4F7F\u7528\u3057\u3066\u3044\u308B\u305F\u3081\u3001\u5931\u6557\u3059\u308B\u53EF\u80FD\u6027\u304C\u9AD8\u3044\u3067\u3059\u3002',
     signOut: '\u30B5\u30A4\u30F3\u30A2\u30A6\u30C8',
     termsOfService: '\u5229\u7528\u898F\u7D04',
     privacyStatement: '\u30D7\u30E9\u30A4\u30D0\u30B7\u30FC',
@@ -14065,7 +14084,7 @@ const TRANSLATION_EXTENSIONS = {
     nothingToCopyFor: '{field} \u306B\u30B3\u30D4\u30FC\u3059\u308B\u5185\u5BB9\u304C\u3042\u308A\u307E\u305B\u3093\u3002',
     copiedFieldToClipboard: '{field} \u3092\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u306B\u30B3\u30D4\u30FC\u3057\u307E\u3057\u305F\u3002',
     failedCopyFieldToClipboard: '{field} \u3092\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u306B\u30B3\u30D4\u30FC\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002',
-    screenshotClipboardUnsupported: '\u3053\u306E\u30D6\u30E9\u30A6\u30B6\u30FC\u3067\u306F\u30B9\u30AF\u30EA\u30FC\u30F3\u30B7\u30E7\u30C3\u30C8\u306E\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u6A5F\u80FD\u3092\u5229\u7528\u3067\u304D\u307E\u305B\u3093\u3002',
+    screenshotClipboardUnsupported: '\u3053\u306E\u30D6\u30E9\u30A6\u30B6\u30FC\u3067\u306F\u30B9\u30AF\u30EA\u30FC\u30F3\u30B7\u30E7\u30C3\u30C8\u306E\u53D6\u5F97\u3092\u5229\u7528\u3067\u304D\u307E\u305B\u3093\u3002',
     screenshotContainerNotFound: '\u30B9\u30AF\u30EA\u30FC\u30F3\u30B7\u30E7\u30C3\u30C8\u7528\u306E\u30B3\u30F3\u30C6\u30CA\u30FC\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002',
     screenshotCaptureFailed: '\u30B9\u30AF\u30EA\u30FC\u30F3\u30B7\u30E7\u30C3\u30C8\u306E\u53D6\u5F97\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002',
     screenshotCopiedToClipboard: '\u30B9\u30AF\u30EA\u30FC\u30F3\u30B7\u30E7\u30C3\u30C8\u3092\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u306B\u30B3\u30D4\u30FC\u3057\u307E\u3057\u305F\u3002',
@@ -14169,10 +14188,12 @@ const TRANSLATION_EXTENSIONS = {
     themeDark: '\u0422\u0451\u043C\u043D\u044B\u0439 \u0440\u0435\u0436\u0438\u043C \uD83C\uDF19',
     themeLight: '\u0421\u0432\u0435\u0442\u043B\u044B\u0439 \u0440\u0435\u0436\u0438\u043C \u2600\uFE0F',
     copyLink: '\u041A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0441\u044B\u043B\u043A\u0443 \uD83D\uDD17',
+    pageLinkLabel: '\u0421\u0441\u044B\u043B\u043A\u0430 \u043D\u0430 \u043E\u0442\u0447\u0451\u0442',
     copyScreenshot: '\u041A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u043D\u0438\u043C\u043E\u043A \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B \uD83D\uDCF8',
     downloadJson: '\u0421\u043A\u0430\u0447\u0430\u0442\u044C JSON \uD83D\uDCE5',
     reportIssue: '\u0421\u043E\u043E\u0431\u0449\u0438\u0442\u044C \u043E \u043F\u0440\u043E\u0431\u043B\u0435\u043C\u0435 \uD83D\uDC1B',
     signInMicrosoft: '\u0412\u043E\u0439\u0442\u0438 \u0447\u0435\u0440\u0435\u0437 Microsoft \uD83D\uDD12',
+    localhostSignInWarning: '\u041F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C? \u0421\u043A\u043E\u0440\u0435\u0435 \u0432\u0441\u0435\u0433\u043E, \u044D\u0442\u043E \u043D\u0435 \u0443\u0434\u0430\u0441\u0442\u0441\u044F, \u0442\u0430\u043A \u043A\u0430\u043A \u0432\u044B \u0441\u0435\u0439\u0447\u0430\u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442\u0435 Localhost \u0432 \u043A\u0430\u0447\u0435\u0441\u0442\u0432\u0435 \u0432\u0435\u0431-URL.',
     signOut: '\u0412\u044B\u0439\u0442\u0438',
     termsOfService: '\u0423\u0441\u043B\u043E\u0432\u0438\u044F \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u044F',
     privacyStatement: '\u041A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u044C',
@@ -14195,7 +14216,7 @@ const TRANSLATION_EXTENSIONS = {
     nothingToCopyFor: '\u041D\u0435\u0442 \u0434\u0430\u043D\u043D\u044B\u0445 \u0434\u043B\u044F \u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F \u0434\u043B\u044F {field}.',
     copiedFieldToClipboard: '{field} \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E \u0432 \u0431\u0443\u0444\u0435\u0440 \u043E\u0431\u043C\u0435\u043D\u0430.',
     failedCopyFieldToClipboard: '\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C {field} \u0432 \u0431\u0443\u0444\u0435\u0440 \u043E\u0431\u043C\u0435\u043D\u0430.',
-    screenshotClipboardUnsupported: '\u041F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0430 \u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F \u0441\u043D\u0438\u043C\u043A\u043E\u0432 \u044D\u043A\u0440\u0430\u043D\u0430 \u0432 \u0431\u0443\u0444\u0435\u0440 \u043E\u0431\u043C\u0435\u043D\u0430 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u0430 \u0432 \u044D\u0442\u043E\u043C \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435.',
+    screenshotClipboardUnsupported: '\u0421\u043E\u0437\u0434\u0430\u043D\u0438\u0435 \u0441\u043D\u0438\u043C\u043A\u043E\u0432 \u044D\u043A\u0440\u0430\u043D\u0430 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u043D\u043E \u0432 \u044D\u0442\u043E\u043C \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435.',
     screenshotContainerNotFound: '\u041A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0434\u043B\u044F \u0441\u043D\u0438\u043C\u043A\u0430 \u044D\u043A\u0440\u0430\u043D\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D.',
     screenshotCaptureFailed: '\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0437\u0434\u0430\u0442\u044C \u0441\u043D\u0438\u043C\u043E\u043A \u044D\u043A\u0440\u0430\u043D\u0430.',
     screenshotCopiedToClipboard: '\u0421\u043D\u0438\u043C\u043E\u043A \u044D\u043A\u0440\u0430\u043D\u0430 \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D \u0432 \u0431\u0443\u0444\u0435\u0440 \u043E\u0431\u043C\u0435\u043D\u0430.',
@@ -14807,7 +14828,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     linkCopiedToClipboard: 'V\u00EDnculo copiado al portapapeles.',
     nothingToCopyFor: 'No hay nada para copiar para {field}.',
     screenshotCaptureFailed: 'No se pudo capturar la captura de pantalla.',
-    screenshotClipboardUnsupported: 'La compatibilidad para copiar capturas al portapapeles no est\u00E1 disponible en este navegador.',
+    screenshotClipboardUnsupported: 'La captura de pantalla no est\u00E1 disponible en este navegador.',
     screenshotContainerNotFound: 'No se encontr\u00F3 el contenedor para la captura.',
     screenshotCopiedToClipboard: 'Captura de pantalla copiada al portapapeles.',
     screenshotRenderFailed: 'Error al capturar la captura de pantalla.',
@@ -19056,7 +19077,9 @@ function copyField(btn, key) {
 }
 
 function screenshotPage() {
-  if (!window.html2canvas || !navigator.clipboard || typeof ClipboardItem === "undefined") {
+  // Only html2canvas is strictly required: if the Clipboard API is unavailable
+  // (older browser or non-secure origin) we fall back to downloading the PNG.
+  if (!window.html2canvas) {
     setStatus(t('screenshotClipboardUnsupported'));
     return;
   }
@@ -19072,11 +19095,26 @@ function screenshotPage() {
     return;
   }
 
+  // The whole UI is rendered at `zoom: 1.1` (see `html { zoom }` in the CSS).
+  // html2canvas 1.4.1 does not understand the CSS `zoom` property: it measures
+  // element boxes *with* the zoom applied but paints glyphs at their un-zoomed
+  // font metrics, which shifts every character and badly garbles dense
+  // monospace content (e.g. base64 DKIM keys). Neutralize zoom in the cloned
+  // document so the capture lays out correctly, and raise `scale` to keep the
+  // output crisp at the same effective resolution the user sees on screen.
+  const pageZoom = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+  const captureScale = (window.devicePixelRatio || 1) * pageZoom;
+
   html2canvas(container, {
     backgroundColor: getComputedStyle(document.body).backgroundColor,
+    scale: captureScale,
     onclone: (clonedDoc) => {
       // Hide marked buttons in the cloned DOM only (prevents visible flashing)
       clonedDoc.body.classList.add("screenshot-mode");
+      // Reset the unsupported `zoom` on the clone so html2canvas renders text
+      // at 1:1 and characters no longer overlap. The lost size is restored via
+      // the `scale` option above so the screenshot keeps its on-screen size.
+      clonedDoc.documentElement.style.zoom = "1";
     }
   }).then(canvas => {
     canvas.toBlob(blob => {
@@ -19084,6 +19122,34 @@ function screenshotPage() {
         setStatus(t('screenshotCaptureFailed'));
         return;
       }
+      // Some Clipboard API rejections (lost document focus during the multi-
+      // second render, or a non-secure http:// origin) cannot be recovered.
+      // Re-focus the window first, then fall back to downloading the PNG so the
+      // user always ends up with their screenshot instead of a dead end.
+      const downloadFallback = () => {
+        try {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          const domainPart = (lastResult && lastResult.domain) ? lastResult.domain : "screenshot";
+          a.download = "acs-check-" + domainPart + ".png";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setStatus(t('screenshotDownloadedFallback'));
+        } catch (e) {
+          setStatus(t('failedCopyScreenshot'));
+        }
+      };
+
+      try { window.focus(); } catch (e) { /* best effort */ }
+
+      if (!navigator.clipboard || typeof navigator.clipboard.write !== "function" || typeof ClipboardItem === "undefined") {
+        downloadFallback();
+        return;
+      }
+
       const item = new ClipboardItem({ "image/png": blob });
       navigator.clipboard.write([item])
         .then(() => {
@@ -19096,7 +19162,7 @@ function screenshotPage() {
             }
           }, 2500);
         })
-        .catch(() => setStatus(t('failedCopyScreenshot')));
+        .catch(() => downloadFallback());
     });
   }).catch(() => {
     setStatus(t('screenshotRenderFailed'));
@@ -22461,6 +22527,26 @@ function render(r) {
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
   plainTable.push(`| ${t('reputationDnsbl')} | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
+  // Build the page/report link the same way the top-of-page "Copy link" button
+  // does (copyShareLink in 20c): start from the current location, set the
+  // queried domain (when valid) and the active language so the recipient lands
+  // on the exact same view this report was generated for.
+  const reportLinkUrl = (() => {
+    try {
+      const url = new URL(window.location.href);
+      const domainForLink = normalizeDomain(domainForCopy || '');
+      if (domainForLink && isValidDomain(domainForLink)) {
+        url.searchParams.set('domain', domainForLink);
+      } else {
+        url.searchParams.delete('domain');
+      }
+      url.searchParams.set(LANG_PARAM, currentLanguage);
+      return url.toString();
+    } catch (e) {
+      return window.location.href;
+    }
+  })();
+  plainTable.push(`| ${t('pageLinkLabel')} | ${reportLinkUrl} |`);
   addRow(t('domainNameLabel'), domainForCopy || t('unknown'));
   addRow(t('domainStatusLabel'), domainStatusText);
   addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
@@ -22472,6 +22558,9 @@ function render(r) {
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
   // Manual push for Reputation to include parsed HTML link (multiRblHtml)
   htmlTableRows.push(`<tr><th>${escapeHtml(t('reputationDnsbl'))}</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
+  // Page/report link row below Reputation: render a clickable anchor in the
+  // rich-text variant so pasting into Outlook/Teams/Word produces a usable link.
+  htmlTableRows.push(`<tr><th>${escapeHtml(t('pageLinkLabel'))}</th><td><a href="${escapeHtml(reportLinkUrl)}">${escapeHtml(reportLinkUrl)}</a></td></tr>`);
 
   const quotaCopyTextPlain = plainTable.join('\n');
   const quotaCopyTextHtml = `<table style="border-collapse:collapse;min-width:260px;">${htmlTableRows.map(r => r.replace('<th>', '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">').replace('<td>', '<td style="padding:4px 8px;border:1px solid #ddd;">')).join('')}</table>`;
@@ -23680,7 +23769,7 @@ const INTAKE_EXTRACT_FIELDS = [
   { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'maximum per day', 'max per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
   { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
   { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
-  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced', 'unsubscribe link'] }
+  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced'] }
 ];
 
 // Track manual edits made in the extracted-fields table so re-running
@@ -24050,6 +24139,28 @@ function extractIntakeFields(plain) {
             if (started && (k >= lines.length || isQuestionLine(lines[k]))) break;
             continue;
           }
+          // A clarifying sub-prompt (e.g. "Explain if you have an automated
+          // process..." / "Additionally, if you receive bounce...") is still
+          // part of the PRINTED question, not the answer. The real answer is
+          // the paragraph that follows the clarifier block. Skip over the
+          // entire clarifier paragraph and resume collecting from the first
+          // non-blank line after it -- unless that line is itself another known
+          // question/section header, in which case there is no answer to grab.
+          if (isIntakeQuestionBoundary(next)) {
+            let p = j;
+            while (p + 1 < lines.length && lines[p + 1].trim()) p++;
+            let q = p + 1;
+            while (q < lines.length && !lines[q].trim()) q++;
+            if (q < lines.length && !isQuestionLine(lines[q])) {
+              // Discard any wrapped question-continuation text collected so far
+              // and restart the scan at the answer paragraph.
+              collected.length = 0;
+              started = false;
+              j = q - 1;
+              continue;
+            }
+            break;
+          }
           if (isQuestionLine(next)) break;
           // Before we've collected anything, skip wrapped question-continuation
           // lines (the tail of a multi-line question, which typically ends with
@@ -24165,8 +24276,9 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
   if (input) input.value = sendingDomain;
   if (typeof toggleClearBtn === 'function') toggleClearBtn();
   if (status) {
-    status.textContent = (status.textContent ? status.textContent + ' ' : '')
-      + 'Running checker against ' + sendingDomain + '\u2026';
+    // Replace the status text (don't append) so repeated edits to the sending
+    // domain don't pile up multiple "Running checker against ..." fragments.
+    status.textContent = 'Running checker against ' + sendingDomain + '\u2026';
   }
   // Pass the sending domain explicitly so the lookup is not affected by any
   // race with the input value update above.
@@ -24291,13 +24403,13 @@ function getExtractedIntakeMap() {
 // Provide" column. Rows with `id: null` are pure section/sub-headers; rows
 // with a `sub: true` flag are indented sub-questions under a parent number.
 const INTAKE_REQUEST_TEMPLATE = [
+  { id: 'subscriptionId',       label: 'Subscription ID' },
   { id: 'companyName',          label: 'Company Name' },
   { id: 'companyWebsite',       label: 'Company Website' },
   { id: 'businessDescription',  label: 'Brief Description of Your Business' },
   { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a pre-requisite before the quota increase and AMD domain is only for testing purpose, not allowed for quota increase and the failure rate should be less than 1%.' },
   { id: 'currentSendingDomain', label: 'What is the domain you are currently sending emails from? Please make sure it has successfully sent emails.' },
   { id: 'acsResourceName',      label: 'ACS Resource Name' },
-  { id: 'subscriptionId',       label: 'Subscription ID' },
   { id: 'emailType',            label: 'What type of emails do you send? (e.g., Transactional, Marketing, Promotional)' },
   { id: null,                   label: 'Please specify the expected volume of emails you plan to send (exact in number).' },
   { id: 'currentTier',          label: 'Current tier level', sub: true },
@@ -24397,6 +24509,23 @@ function buildQuotaCopyPayload() {
   return payload;
 }
 
+// Returns true when the app is being served from a local development host
+// (localhost / loopback). Used to unconditionally reveal developer-only UI
+// (such as the Customer Intake form) so features can be tested on a dev
+// machine without signing in with a Microsoft account.
+function isLocalDevHost() {
+  try {
+    const host = (window.location.hostname || '').toLowerCase();
+    return host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host === '[::1]'
+      || host.endsWith('.localhost');
+  } catch (e) {
+    return false;
+  }
+}
+
 // Show the intake form only when the signed-in user has been identified
 // as a Microsoft employee. Called from updateAuthUI in
 // 20e-HtmlAzureIntegration.ps1.
@@ -24404,8 +24533,10 @@ function updateIntakeFormVisibility(isSignedIn) {
   const card = document.getElementById('intakeFormCard');
   if (!card) return;
   // Only show the Customer Intake form to users signed in with a Microsoft
-  // account. Hide it (and don't load saved content) otherwise.
-  if (isSignedIn) {
+  // account. Hide it (and don't load saved content) otherwise. On a local
+  // development host we always show it so features can be tested without
+  // signing in; the production sign-in gating is unchanged.
+  if (isSignedIn || isLocalDevHost()) {
     card.style.display = '';
     loadIntakeForm();
   } else {
@@ -24461,10 +24592,11 @@ function initializePage() {
   }
 
   // Customer intake form starts hidden; it is revealed by updateAuthUI
-  // only when the signed-in user is a Microsoft employee.
-  // TEMP: load it eagerly so it works without sign-in during testing.
-  if (typeof loadIntakeForm === 'function') {
-    loadIntakeForm();
+  // only when the signed-in user is a Microsoft employee. On a local
+  // development host, reveal it immediately so features can be tested
+  // without signing in.
+  if (typeof updateIntakeFormVisibility === 'function') {
+    updateIntakeFormVisibility(false);
   }
 
   scheduleInitialLookup(bootstrapDomain);
@@ -24660,6 +24792,15 @@ async function msSignIn() {
       setStatus(t('authSetClientIdAndRestart'));
     }
     return;
+  }
+
+  // When running against a local development host, Microsoft Entra sign-in
+  // usually fails because Localhost is rarely a registered redirect URI for
+  // the app registration. Warn the developer and let them choose to proceed.
+  if (typeof isLocalDevHost === 'function' && isLocalDevHost()) {
+    if (!window.confirm(t('localhostSignInWarning'))) {
+      return;
+    }
   }
 
   try {
@@ -25553,19 +25694,19 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 $functionNames = @(
   'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
-  'Get-HashedDomain',
-  'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions',
+  'Get-HashedDomain','Handle-MetricsRequest','Acquire-MetricsFileMutex',
+  'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions','ConvertTo-Iso8601Utc',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData',
+  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
-  'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-DomainRegistrationStatus',
+  'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-FirstNonEmptyPropertyValue','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
-  'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
+  'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Test-WhoisDomainNameSafe','Initialize-WhoisFieldRegexes','Get-WhoisParsedRegistrationData','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Invoke-WhoisProcess','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
   'Get-AcsDnsStatus'
 )
 

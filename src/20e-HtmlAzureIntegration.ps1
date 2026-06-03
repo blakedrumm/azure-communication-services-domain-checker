@@ -115,6 +115,15 @@ async function msSignIn() {
     return;
   }
 
+  // When running against a local development host, Microsoft Entra sign-in
+  // usually fails because Localhost is rarely a registered redirect URI for
+  // the app registration. Warn the developer and let them choose to proceed.
+  if (typeof isLocalDevHost === 'function' && isLocalDevHost()) {
+    if (!window.confirm(t('localhostSignInWarning'))) {
+      return;
+    }
+  }
+
   try {
     const btn = document.getElementById('msSignInBtn');
     if (btn) { btn.disabled = true; btn.textContent = t('authSigningIn'); }

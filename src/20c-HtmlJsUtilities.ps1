@@ -1711,7 +1711,9 @@ function copyField(btn, key) {
 }
 
 function screenshotPage() {
-  if (!window.html2canvas || !navigator.clipboard || typeof ClipboardItem === "undefined") {
+  // Only html2canvas is strictly required: if the Clipboard API is unavailable
+  // (older browser or non-secure origin) we fall back to downloading the PNG.
+  if (!window.html2canvas) {
     setStatus(t('screenshotClipboardUnsupported'));
     return;
   }
@@ -1727,11 +1729,26 @@ function screenshotPage() {
     return;
   }
 
+  // The whole UI is rendered at `zoom: 1.1` (see `html { zoom }` in the CSS).
+  // html2canvas 1.4.1 does not understand the CSS `zoom` property: it measures
+  // element boxes *with* the zoom applied but paints glyphs at their un-zoomed
+  // font metrics, which shifts every character and badly garbles dense
+  // monospace content (e.g. base64 DKIM keys). Neutralize zoom in the cloned
+  // document so the capture lays out correctly, and raise `scale` to keep the
+  // output crisp at the same effective resolution the user sees on screen.
+  const pageZoom = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+  const captureScale = (window.devicePixelRatio || 1) * pageZoom;
+
   html2canvas(container, {
     backgroundColor: getComputedStyle(document.body).backgroundColor,
+    scale: captureScale,
     onclone: (clonedDoc) => {
       // Hide marked buttons in the cloned DOM only (prevents visible flashing)
       clonedDoc.body.classList.add("screenshot-mode");
+      // Reset the unsupported `zoom` on the clone so html2canvas renders text
+      // at 1:1 and characters no longer overlap. The lost size is restored via
+      // the `scale` option above so the screenshot keeps its on-screen size.
+      clonedDoc.documentElement.style.zoom = "1";
     }
   }).then(canvas => {
     canvas.toBlob(blob => {
@@ -1739,6 +1756,34 @@ function screenshotPage() {
         setStatus(t('screenshotCaptureFailed'));
         return;
       }
+      // Some Clipboard API rejections (lost document focus during the multi-
+      // second render, or a non-secure http:// origin) cannot be recovered.
+      // Re-focus the window first, then fall back to downloading the PNG so the
+      // user always ends up with their screenshot instead of a dead end.
+      const downloadFallback = () => {
+        try {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          const domainPart = (lastResult && lastResult.domain) ? lastResult.domain : "screenshot";
+          a.download = "acs-check-" + domainPart + ".png";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setStatus(t('screenshotDownloadedFallback'));
+        } catch (e) {
+          setStatus(t('failedCopyScreenshot'));
+        }
+      };
+
+      try { window.focus(); } catch (e) { /* best effort */ }
+
+      if (!navigator.clipboard || typeof navigator.clipboard.write !== "function" || typeof ClipboardItem === "undefined") {
+        downloadFallback();
+        return;
+      }
+
       const item = new ClipboardItem({ "image/png": blob });
       navigator.clipboard.write([item])
         .then(() => {
@@ -1751,7 +1796,7 @@ function screenshotPage() {
             }
           }, 2500);
         })
-        .catch(() => setStatus(t('failedCopyScreenshot')));
+        .catch(() => downloadFallback());
     });
   }).catch(() => {
     setStatus(t('screenshotRenderFailed'));

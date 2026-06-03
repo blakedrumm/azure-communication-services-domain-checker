@@ -3322,6 +3322,26 @@ function render(r) {
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
   plainTable.push(`| ${t('reputationDnsbl')} | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
+  // Build the page/report link the same way the top-of-page "Copy link" button
+  // does (copyShareLink in 20c): start from the current location, set the
+  // queried domain (when valid) and the active language so the recipient lands
+  // on the exact same view this report was generated for.
+  const reportLinkUrl = (() => {
+    try {
+      const url = new URL(window.location.href);
+      const domainForLink = normalizeDomain(domainForCopy || '');
+      if (domainForLink && isValidDomain(domainForLink)) {
+        url.searchParams.set('domain', domainForLink);
+      } else {
+        url.searchParams.delete('domain');
+      }
+      url.searchParams.set(LANG_PARAM, currentLanguage);
+      return url.toString();
+    } catch (e) {
+      return window.location.href;
+    }
+  })();
+  plainTable.push(`| ${t('pageLinkLabel')} | ${reportLinkUrl} |`);
   addRow(t('domainNameLabel'), domainForCopy || t('unknown'));
   addRow(t('domainStatusLabel'), domainStatusText);
   addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
@@ -3333,6 +3353,9 @@ function render(r) {
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
   // Manual push for Reputation to include parsed HTML link (multiRblHtml)
   htmlTableRows.push(`<tr><th>${escapeHtml(t('reputationDnsbl'))}</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
+  // Page/report link row below Reputation: render a clickable anchor in the
+  // rich-text variant so pasting into Outlook/Teams/Word produces a usable link.
+  htmlTableRows.push(`<tr><th>${escapeHtml(t('pageLinkLabel'))}</th><td><a href="${escapeHtml(reportLinkUrl)}">${escapeHtml(reportLinkUrl)}</a></td></tr>`);
 
   const quotaCopyTextPlain = plainTable.join('\n');
   const quotaCopyTextHtml = `<table style="border-collapse:collapse;min-width:260px;">${htmlTableRows.map(r => r.replace('<th>', '<th style="text-align:left;padding:4px 8px;border:1px solid #ddd;">').replace('<td>', '<td style="padding:4px 8px;border:1px solid #ddd;">')).join('')}</table>`;
@@ -4541,7 +4564,7 @@ const INTAKE_EXTRACT_FIELDS = [
   { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'maximum per day', 'max per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
   { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
   { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
-  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced', 'unsubscribe link'] }
+  { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced'] }
 ];
 
 // Track manual edits made in the extracted-fields table so re-running
@@ -4911,6 +4934,28 @@ function extractIntakeFields(plain) {
             if (started && (k >= lines.length || isQuestionLine(lines[k]))) break;
             continue;
           }
+          // A clarifying sub-prompt (e.g. "Explain if you have an automated
+          // process..." / "Additionally, if you receive bounce...") is still
+          // part of the PRINTED question, not the answer. The real answer is
+          // the paragraph that follows the clarifier block. Skip over the
+          // entire clarifier paragraph and resume collecting from the first
+          // non-blank line after it -- unless that line is itself another known
+          // question/section header, in which case there is no answer to grab.
+          if (isIntakeQuestionBoundary(next)) {
+            let p = j;
+            while (p + 1 < lines.length && lines[p + 1].trim()) p++;
+            let q = p + 1;
+            while (q < lines.length && !lines[q].trim()) q++;
+            if (q < lines.length && !isQuestionLine(lines[q])) {
+              // Discard any wrapped question-continuation text collected so far
+              // and restart the scan at the answer paragraph.
+              collected.length = 0;
+              started = false;
+              j = q - 1;
+              continue;
+            }
+            break;
+          }
           if (isQuestionLine(next)) break;
           // Before we've collected anything, skip wrapped question-continuation
           // lines (the tail of a multi-line question, which typically ends with
@@ -5026,8 +5071,9 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
   if (input) input.value = sendingDomain;
   if (typeof toggleClearBtn === 'function') toggleClearBtn();
   if (status) {
-    status.textContent = (status.textContent ? status.textContent + ' ' : '')
-      + 'Running checker against ' + sendingDomain + '\u2026';
+    // Replace the status text (don't append) so repeated edits to the sending
+    // domain don't pile up multiple "Running checker against ..." fragments.
+    status.textContent = 'Running checker against ' + sendingDomain + '\u2026';
   }
   // Pass the sending domain explicitly so the lookup is not affected by any
   // race with the input value update above.
@@ -5152,13 +5198,13 @@ function getExtractedIntakeMap() {
 // Provide" column. Rows with `id: null` are pure section/sub-headers; rows
 // with a `sub: true` flag are indented sub-questions under a parent number.
 const INTAKE_REQUEST_TEMPLATE = [
+  { id: 'subscriptionId',       label: 'Subscription ID' },
   { id: 'companyName',          label: 'Company Name' },
   { id: 'companyWebsite',       label: 'Company Website' },
   { id: 'businessDescription',  label: 'Brief Description of Your Business' },
   { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a pre-requisite before the quota increase and AMD domain is only for testing purpose, not allowed for quota increase and the failure rate should be less than 1%.' },
   { id: 'currentSendingDomain', label: 'What is the domain you are currently sending emails from? Please make sure it has successfully sent emails.' },
   { id: 'acsResourceName',      label: 'ACS Resource Name' },
-  { id: 'subscriptionId',       label: 'Subscription ID' },
   { id: 'emailType',            label: 'What type of emails do you send? (e.g., Transactional, Marketing, Promotional)' },
   { id: null,                   label: 'Please specify the expected volume of emails you plan to send (exact in number).' },
   { id: 'currentTier',          label: 'Current tier level', sub: true },
@@ -5258,6 +5304,23 @@ function buildQuotaCopyPayload() {
   return payload;
 }
 
+// Returns true when the app is being served from a local development host
+// (localhost / loopback). Used to unconditionally reveal developer-only UI
+// (such as the Customer Intake form) so features can be tested on a dev
+// machine without signing in with a Microsoft account.
+function isLocalDevHost() {
+  try {
+    const host = (window.location.hostname || '').toLowerCase();
+    return host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host === '[::1]'
+      || host.endsWith('.localhost');
+  } catch (e) {
+    return false;
+  }
+}
+
 // Show the intake form only when the signed-in user has been identified
 // as a Microsoft employee. Called from updateAuthUI in
 // 20e-HtmlAzureIntegration.ps1.
@@ -5265,8 +5328,10 @@ function updateIntakeFormVisibility(isSignedIn) {
   const card = document.getElementById('intakeFormCard');
   if (!card) return;
   // Only show the Customer Intake form to users signed in with a Microsoft
-  // account. Hide it (and don't load saved content) otherwise.
-  if (isSignedIn) {
+  // account. Hide it (and don't load saved content) otherwise. On a local
+  // development host we always show it so features can be tested without
+  // signing in; the production sign-in gating is unchanged.
+  if (isSignedIn || isLocalDevHost()) {
     card.style.display = '';
     loadIntakeForm();
   } else {
@@ -5322,10 +5387,11 @@ function initializePage() {
   }
 
   // Customer intake form starts hidden; it is revealed by updateAuthUI
-  // only when the signed-in user is a Microsoft employee.
-  // TEMP: load it eagerly so it works without sign-in during testing.
-  if (typeof loadIntakeForm === 'function') {
-    loadIntakeForm();
+  // only when the signed-in user is a Microsoft employee. On a local
+  // development host, reveal it immediately so features can be tested
+  // without signing in.
+  if (typeof updateIntakeFormVisibility === 'function') {
+    updateIntakeFormVisibility(false);
   }
 
   scheduleInitialLookup(bootstrapDomain);
