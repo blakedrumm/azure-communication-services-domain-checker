@@ -57,7 +57,14 @@ function Get-SecurityHeaderMap {
   }
 
   $headers['X-Content-Type-Options'] = 'nosniff'
-  $headers['X-Frame-Options']        = 'DENY'
+  # SAMEORIGIN (not DENY) is required for MSAL silent SSO: ssoSilent() loads a
+  # hidden iframe to login.microsoftonline.com, and Entra then redirects that
+  # iframe BACK to our own redirectUri (this same origin). With DENY /
+  # frame-ancestors 'none' the browser blocks our own page from rendering in
+  # that same-origin iframe, so MSAL can never read the redirect result and the
+  # silent flow fails. SAMEORIGIN still blocks all cross-origin clickjacking
+  # (no third-party site may frame us); it only permits self-framing.
+  $headers['X-Frame-Options']        = 'SAMEORIGIN'
   $headers['Referrer-Policy']        = 'no-referrer'
 
   $nonceToken = if ([string]::IsNullOrWhiteSpace($Nonce)) { $null } else { "'nonce-$Nonce'" }
@@ -69,10 +76,14 @@ function Get-SecurityHeaderMap {
   # iframe flows work: ssoSilent() and acquireTokenSilent() renew tokens by
   # loading the Entra authorize endpoint in a hidden iframe. Without this the
   # browser blocks the iframe under the default-src 'self' fallback and MSAL
-  # fails with redirect_bridge_timeout. This is distinct from frame-ancestors
-  # 'none' / X-Frame-Options DENY below, which govern who may frame *us* (kept
-  # restrictive); frame-src governs what *we* are allowed to frame.
-  $headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-src 'self' https://login.microsoftonline.com; frame-ancestors 'none'"
+  # fails with redirect_bridge_timeout.
+  #
+  # frame-ancestors must be 'self' (not 'none') for the same reason as the
+  # X-Frame-Options SAMEORIGIN note above: Entra redirects MSAL's hidden iframe
+  # back to our own origin, so our page must be allowed to frame itself. 'self'
+  # still forbids any cross-origin site from framing us (clickjacking stays
+  # blocked); it only permits same-origin self-framing that MSAL depends on.
+  $headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-src 'self' https://login.microsoftonline.com; frame-ancestors 'self'"
 
   return $headers
 }

@@ -5407,6 +5407,21 @@ const INITIAL_LOOKUP_RETRY_DELAY_MS = 50;
 function startPageInitialization() {
   if (pageInitializationHasStarted) return;
   pageInitializationHasStarted = true;
+  // When the page is loaded inside an iframe it is almost always MSAL's hidden
+  // token-renewal frame (ssoSilent / acquireTokenSilent redirect the iframe
+  // back to our own origin). That frame only needs MSAL's redirect handler to
+  // run so the parent window can read the result; booting the entire SPA there
+  // wastes work and triggers a benign but noisy "Autofocus processing was
+  // blocked" console message because the hidden frame never has focus. Detect
+  // the framed case and run a minimal MSAL-only init instead of the full UI.
+  let inIframe = false;
+  try { inIframe = (window.self !== window.top); } catch (e) { inIframe = true; }
+  if (inIframe) {
+    if (typeof initMsAuth === 'function') {
+      initMsAuth();
+    }
+    return;
+  }
   initializePage();
 }
 

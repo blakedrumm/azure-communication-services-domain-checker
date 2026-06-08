@@ -710,7 +710,7 @@ The Privacy Statement explains the tool's data handling practices, including the
 
 Security is a top priority for the ACS Domain Checker:
 
-- 🛡️ **Content Security Policy (CSP)** is enforced with nonces for inline scripts/styles. `frame-src` allows `https://login.microsoftonline.com` so MSAL silent SSO (`ssoSilent`/iframe token renewal) works; `frame-ancestors 'none'` and `X-Frame-Options: DENY` still prevent this app from being framed by others.
+- 🛡️ **Content Security Policy (CSP)** is enforced with nonces for inline scripts/styles. `frame-src` allows `https://login.microsoftonline.com` so MSAL silent SSO (`ssoSilent`/iframe token renewal) works; framing is restricted to same-origin (`X-Frame-Options: SAMEORIGIN`, `frame-ancestors 'self'`) so MSAL's hidden iframe can redirect back to this app while all cross-origin framing/clickjacking stays blocked.
 - 🔐 **Anonymous metrics** do not store Personally Identifiable Information (PII) - domains are HMAC-hashed
 - ⚠️ **API key best practices:** Avoid using API keys in URLs for production environments to enhance security
 - 🔒 **HTTPS recommended:** Always use HTTPS in production deployments
