@@ -65,7 +65,14 @@ function Get-SecurityHeaderMap {
   $styleSrcParts  = @("'self'", $nonceToken) | Where-Object { $_ }
   $scriptSrc = 'script-src ' + ($scriptSrcParts -join ' ')
   $styleSrc  = 'style-src '  + ($styleSrcParts  -join ' ')
-  $headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-ancestors 'none'"
+  # frame-src must allow https://login.microsoftonline.com so MSAL's hidden
+  # iframe flows work: ssoSilent() and acquireTokenSilent() renew tokens by
+  # loading the Entra authorize endpoint in a hidden iframe. Without this the
+  # browser blocks the iframe under the default-src 'self' fallback and MSAL
+  # fails with redirect_bridge_timeout. This is distinct from frame-ancestors
+  # 'none' / X-Frame-Options DENY below, which govern who may frame *us* (kept
+  # restrictive); frame-src governs what *we* are allowed to frame.
+  $headers['Content-Security-Policy'] = "default-src 'self'; $scriptSrc; script-src-attr 'unsafe-inline'; $styleSrc; style-src-attr 'unsafe-inline'; img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://management.azure.com https://api.loganalytics.io; frame-src 'self' https://login.microsoftonline.com; frame-ancestors 'none'"
 
   return $headers
 }
