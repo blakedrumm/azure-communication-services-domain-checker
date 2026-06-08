@@ -6,6 +6,7 @@ $htmlPage += @'
 <!-- MSAL.js v2 for Microsoft Entra ID authentication (Authorization Code + PKCE) -->
 <script nonce="__CSP_NONCE__">
 const entraTenant = '__ENTRA_TENANT_ID__';
+const entraAutoSignIn = '__ENTRA_AUTO_SIGN_IN__';
 const acsApiKey = '__ACS_API_KEY__';
 const acsIssueUrl = '__ACS_ISSUE_URL__';
 const appVersion = '__APP_VERSION__';

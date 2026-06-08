@@ -54,6 +54,14 @@ $entraTenantId = $env:ACS_ENTRA_TENANT_ID
 if ([string]::IsNullOrWhiteSpace($entraTenantId)) { $entraTenantId = '' }
 $htmlPage = $htmlPage.Replace('__ENTRA_TENANT_ID__', (ConvertTo-JsStringLiteralBody $entraTenantId))
 
+# Controls whether the SPA quietly attempts MSAL ssoSilent() on page load when
+# no account is already cached in sessionStorage. Enabled by default so
+# Entra-joined / hybrid-joined Windows users can benefit from browser SSO, but
+# operators can set ACS_ENTRA_AUTO_SIGN_IN=0 to keep sign-in strictly manual.
+$entraAutoSignIn = $env:ACS_ENTRA_AUTO_SIGN_IN
+if ([string]::IsNullOrWhiteSpace($entraAutoSignIn)) { $entraAutoSignIn = '1' }
+$htmlPage = $htmlPage.Replace('__ENTRA_AUTO_SIGN_IN__', (ConvertTo-JsStringLiteralBody $entraAutoSignIn))
+
 $apiKey = $env:ACS_API_KEY
 if ([string]::IsNullOrWhiteSpace($apiKey)) { $apiKey = '' }
 $htmlPage = $htmlPage.Replace('__ACS_API_KEY__', (ConvertTo-JsStringLiteralBody $apiKey))

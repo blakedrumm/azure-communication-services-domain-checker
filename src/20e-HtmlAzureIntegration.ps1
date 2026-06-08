@@ -25,6 +25,53 @@ function getMsalConfig() {
   };
 }
 
+function isMsAutoSignInEnabled() {
+  const value = String(entraAutoSignIn || '1').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off', 'disabled'].includes(value);
+}
+
+function getSafeMsalErrorInfo(error) {
+  const clean = value => {
+    const text = String(value || '').trim();
+    return /^[A-Za-z0-9_.:-]+$/.test(text) ? text : '';
+  };
+
+  return {
+    errorCode: clean(error?.errorCode || error?.code || error?.name) || 'unknown_error',
+    subError: clean(error?.subError),
+    correlationId: clean(error?.correlationId)
+  };
+}
+
+async function tryMsAutoSignIn() {
+  if (!msalInstance || !isMsAutoSignInEnabled()) return false;
+
+  try {
+    // This does not force Windows Integrated Authentication. It gives Entra ID
+    // one quiet chance to use an existing browser / device SSO session
+    // (including WAM/PRT/WIA-backed sessions where available). Any condition
+    // that needs user interaction is swallowed so the manual sign-in button
+    // remains the fallback UX.
+    const ssoResult = await msalInstance.ssoSilent({
+      scopes: GRAPH_SCOPES,
+      prompt: 'none'
+    });
+
+    if (ssoResult && ssoResult.account && ssoResult.accessToken) {
+      msAuthAccount = ssoResult.account;
+      try { msalInstance.setActiveAccount(ssoResult.account); } catch {}
+      await verifyMsAccount(ssoResult.accessToken);
+      return true;
+    }
+
+    console.info('[ACS Auth] Automatic Microsoft Entra SSO did not return an account or access token; showing manual sign-in.');
+  } catch (e) {
+    console.info('[ACS Auth] Automatic Microsoft Entra SSO unavailable; showing manual sign-in.', getSafeMsalErrorInfo(e));
+  }
+
+  return false;
+}
+
 async function initMsAuth() {
   const config = getMsalConfig();
   if (!config) {
@@ -95,8 +142,12 @@ async function initMsAuth() {
         updateAuthUI(null);
       }
     } else {
-      // No existing account; ensure buttons are in a clean state
-      updateAuthUI(null);
+      // No account in the MSAL cache. Try a quiet Entra browser/device SSO
+      // sign-in before falling back to the explicit Sign in button.
+      const signedIn = await tryMsAutoSignIn();
+      if (!signedIn) {
+        updateAuthUI(null);
+      }
     }
   } catch (e) {
     console.error('MSAL initialization error:', e);

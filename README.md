@@ -420,6 +420,9 @@ pwsh -NoProfile -File .\Download-UiAssets.ps1
 |----------|---------|-------------|
 | `ACS_ENTRA_CLIENT_ID` | _(none)_ | Microsoft Entra ID (Azure AD) app client ID |
 | `ACS_ENTRA_TENANT_ID` | _(none)_ | Entra ID tenant ID or domain (e.g., `contoso.onmicrosoft.com`) |
+| `ACS_ENTRA_AUTO_SIGN_IN` | `1` | When `ACS_ENTRA_CLIENT_ID` is configured, quietly attempts MSAL browser/device SSO on page load before showing the manual sign-in fallback. Set to `0`, `false`, `no`, `off`, or `disabled` to require explicit sign-in. |
+
+When automatic Entra sign-in is enabled, the SPA only calls MSAL `ssoSilent()` with `prompt: 'none'`; it never receives Windows credentials and does not force Windows Integrated Authentication. Entra ID decides whether an existing browser, device, PRT, WAM, or WIA-backed session can satisfy the request. MFA, consent, Conditional Access, missing sessions, or multiple-account ambiguity still fall back to the **Sign in with Microsoft** button.
 
 ### 🌍 WHOIS / RDAP Providers
 | Variable | Default | Description |
@@ -435,6 +438,11 @@ pwsh -NoProfile -File .\Download-UiAssets.ps1
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ACS_RBL_ZONES` | _(built-in defaults)_ | Comma/semicolon/newline-delimited DNSBL zone names to query |
+| `ACS_RBL_MAX_ZONES` | `20` | Maximum DNSBL zones to query from `ACS_RBL_ZONES` or explicit API input (capped at 50) |
+| `ACS_RBL_MAX_IPS` | `10` | Maximum public IPv4 targets to check per reputation lookup (capped at 50) |
+| `ACS_RBL_MAX_PARALLELISM` | auto | Maximum concurrent DNSBL queries per reputation lookup (capped at 16) |
+
+The reputation checker only queries public IPv4 addresses and validates DNSBL zone names before use. DNSBL policy-block responses are counted as errors rather than listings, and positive listings also attempt to collect DNSBL TXT reason text when the provider publishes it.
 
 ### 🐛 Issue Reporting
 | Variable | Default | Description |
