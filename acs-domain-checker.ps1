@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.5.9'
+$script:AppVersion = '2.5.10'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -24000,27 +24000,28 @@ const INTAKE_STORAGE_KEY = 'acsIntakeRich';
 const INTAKE_TEMPLATE_HTML = [
   '<p><strong>Customer Information</strong></p>',
   '<ul>',
-  '<li>Company name: </li>',
-  '<li>Company website: </li>',
-  '<li>Provide a brief description of your business: </li>',
+  '<li>Company name:&nbsp;</li>',
+  '<li>Company website:&nbsp;</li>',
+  '<li>Provide a brief description of your business:&nbsp;</li>',
   '</ul>',
   '<p><strong>Email Service Information</strong></p>',
   '<ul>',
-  '<li>Subscription ID: </li>',
-  '<li>Azure Communication Services Resource Name: </li>',
-  '<li>Is your custom domain already set up and currently used for sending messages: </li>',
-  '<li>Indicate the domain from which you are currently sending emails: </li>',
+  '<li>Subscription ID:&nbsp;</li>',
+  '<li>Azure Communication Services Resource Name:&nbsp;</li>',
+  '<li>Is your custom domain already set up and currently used for sending messages:&nbsp;</li>',
+  '<li>Indicate the domain from which you are currently sending emails:&nbsp;</li>',
   '</ul>',
   '<p><strong>Usage Information</strong></p>',
   '<ol>',
-  '<li>What type of emails do you send? (such as Transactional, Marketing, Promotional) </li>',
+  '<li>What type of emails do you send? (such as Transactional, Marketing, Promotional)&nbsp;</li>',
   '<li>Specify the expected volume of emails you plan to send:',
   '<ul>',
-  '<li>What is the maximum rate of messages per minute that you require? </li>',
-  '<li>What is the maximum rate of messages per hour that you require? </li>',
-  '<li>What is the maximum rate of messages per day that you require? </li>',
+  '<li>What is the maximum rate of messages per minute that you require?&nbsp;</li>',
+  '<li>What is the maximum rate of messages per hour that you require?&nbsp;</li>',
+  '<li>What is the maximum rate of messages per day that you require?&nbsp;</li>',
   '</ul></li>',
-  '<li>What is the maximum attachment size (in MB) that you require? </li>',
+  '<li>What is the maximum attachment size (in MB) that you require?&nbsp;</li>',
+  '<li>What is the maximum recipient count per email that you require? (Default: 50)&nbsp;</li>',
   '</ol>',
   '<p><strong>Additional Information</strong></p>',
   '<p>What is the source of the email addresses that you use for sending your messages?</p>',
@@ -24177,6 +24178,7 @@ const INTAKE_EXTRACT_FIELDS = [
   { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'maximum per hour', 'max per hour', 'rate per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
   { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'maximum per day', 'max per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
   { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
+  { id: 'recipientCount',       label: 'Max recipients per email',                     patterns: ['what is the maximum recipient count per email', 'maximum recipient count per email', 'max recipient count per email', 'recipient count per email', 'recipients per email', 'maximum recipient count', 'max recipient count', 'recipient count', 'max recipients', 'recipient limit'] },
   { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
   { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced'] }
 ];
@@ -24327,6 +24329,10 @@ function normalizeIntakePlainText(plain) {
     'What is the maximum attachment size in MB?',
     'Max attachment size (MB):',
     'Max attachment size:',
+    'What is the maximum recipient count per email that you require?',
+    'Max recipients per email:',
+    'Recipient count per email:',
+    'Recipient count:',
     'Additional Information',
     'What is the source of the email addresses that you use for sending your messages?',
     'Source of email addresses:',
@@ -24849,6 +24855,7 @@ const INTAKE_REQUEST_TEMPLATE = [
   { id: 'ratePerHour',          label: 'What is the maximum rate of messages per hour that you require?', sub: true },
   { id: 'ratePerDay',           label: 'What is the maximum rate of messages per day that you require?', sub: true },
   { id: 'attachmentSizeMb',     label: 'What is the maximum attachment size (in MB) that you require?' },
+  { id: 'recipientCount',       label: 'What is the maximum recipient count per email that you require? (Default: 50)' },
   { id: 'addressSource',        label: 'What is the source of the email addresses that you use for sending your messages? (e.g., The source of the email addresses that you use for sending your messages plays a crucial role in the effectiveness and compliance of your email marketing campaigns. Providing details about the source of your email addresses will help us understand how you acquire and maintain your subscriber list).' },
   { id: 'bounceHandling',       label: 'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounces from your mailing list? (e.g., Explain whether you have an automated process in place that handles unsubscribes when recipients click on the \'unsubscribe\' link in your emails. Additionally, if you receive bounce notifications, can you mention how you handle those and whether you have any mechanism to automatically remove email addresses that result in consistent bounces).' }
 ];
