@@ -73,6 +73,16 @@ async function tryMsAutoSignIn() {
 }
 
 async function initMsAuth() {
+  // Defense in depth: never run MSAL inside its own hidden token-renewal
+  // iframe. startPageInitialization() already returns early when framed, but
+  // initMsAuth is also reachable from other call sites, so guard here too.
+  // Booting a second PublicClientApplication in the hidden frame is what
+  // triggers MSAL's `block_iframe_reload` guard and breaks the parent window's
+  // silent renewal (surfacing as redirect_bridge_timeout).
+  let inIframe = false;
+  try { inIframe = (window.self !== window.top); } catch (e) { inIframe = true; }
+  if (inIframe) { return; }
+
   const config = getMsalConfig();
   if (!config) {
     // No client ID configured; keep button visible and show guidance on click

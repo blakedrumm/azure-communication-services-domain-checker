@@ -4556,7 +4556,7 @@ const INTAKE_EXTRACT_FIELDS = [
   { id: 'acsResourceName',      label: 'Azure Communication Services Resource Name',   patterns: ['azure communication services resource name', 'acs resource name', 'communication services resource name', 'resource name'] },
   { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'custom domain already set up', 'custom domain set up', 'custom domain in use', 'domain already in use', 'custom domain'] },
   { id: 'currentSendingDomain', label: 'Current sending domain',                       patterns: ['indicate the domain from which you are currently sending emails', 'current sending domain', 'currently sending from', 'sending domain'] },
-  { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'type of emails do you send', 'type of emails', 'email type', 'types of emails'] },
+  { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'type of emails do you send', 'type of emails sent', 'type of email sent', 'type of emails', 'email type', 'types of emails'] },
   { id: 'currentTier',          label: 'Current tier level',                           patterns: ['current tier level', 'current tier', 'existing tier', 'throttling tier for current subscription', 'throttling tier'] },
   { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'estimated monthly volume', 'monthly volume', 'email volume', 'volume of emails'] },
   { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'maximum per minute', 'max per minute', 'rate per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
@@ -4600,7 +4600,11 @@ const INTAKE_TIERS = (function () {
     try { return decodeURIComponent(escape(atob(s))); }
     catch (_) { try { return atob(s); } catch (__) { return s; } }
   };
-  return raw.map(t => ({ name: decode(t.n), perMinute: t.perMinute, perHour: t.perHour }));
+  // Each tier's per-day ceiling is derived as perHour * 24 (ACS publishes only
+  // per-minute and per-hour caps; the daily limit is the hourly cap sustained
+  // across 24 hours). Exposing it here lets inferExpectedTierIndex match a
+  // customer's stated per-day requirement against the same tier model.
+  return raw.map(t => ({ name: decode(t.n), perMinute: t.perMinute, perHour: t.perHour, perDay: t.perHour * 24 }));
 })();
 
 function parseIntakeNumeric(text) {
@@ -4613,31 +4617,36 @@ function parseIntakeNumeric(text) {
   return isNaN(n) ? null : n;
 }
 
-function inferExpectedTierIndex(perMinute, perHour) {
-  // Returns the index of the smallest tier that meets both rates, or -1
-  // when the customer's request exceeds every published tier.
+function inferExpectedTierIndex(perMinute, perHour, perDay) {
+  // Returns the index of the smallest tier that meets ALL provided rates, or -1
+  // when the customer's request exceeds every published tier. Each rate is
+  // optional (null = "not stated"); a null rate simply imposes no constraint.
+  // The per-day ceiling is derived as the tier's perHour * 24, so a customer's
+  // stated daily volume is matched against the same tier model as minute/hour.
   const wantMin = parseIntakeNumeric(perMinute);
   const wantHour = parseIntakeNumeric(perHour);
-  if (wantMin === null && wantHour === null) return -1;
+  const wantDay = parseIntakeNumeric(perDay);
+  if (wantMin === null && wantHour === null && wantDay === null) return -1;
   for (let i = 0; i < INTAKE_TIERS.length; i++) {
     const t = INTAKE_TIERS[i];
     const okMin  = (wantMin  === null) || (t.perMinute >= wantMin);
     const okHour = (wantHour === null) || (t.perHour   >= wantHour);
-    if (okMin && okHour) return i;
+    const okDay  = (wantDay  === null) || (t.perDay    >= wantDay);
+    if (okMin && okHour && okDay) return i;
   }
   return -1;
 }
 
-function inferExpectedTier(perMinute, perHour) {
-  const idx = inferExpectedTierIndex(perMinute, perHour);
+function inferExpectedTier(perMinute, perHour, perDay) {
+  const idx = inferExpectedTierIndex(perMinute, perHour, perDay);
   return idx >= 0 ? INTAKE_TIERS[idx].name : null;
 }
 
-function formatExpectedTierValue(existingValue, perMinute, perHour) {
+function formatExpectedTierValue(existingValue, perMinute, perHour, perDay) {
   // Prefix the inferred tier label onto whatever the user wrote in the
   // expected-volume question. We never replace user-supplied text; we only
   // enrich it so support reviewers see the target level next to the raw ask.
-  let tierIndex = inferExpectedTierIndex(perMinute, perHour);
+  let tierIndex = inferExpectedTierIndex(perMinute, perHour, perDay);
   // Tier index 0 is the default/base level, so quota-increase requests start
   // at the next level up.
   if (tierIndex === 0) tierIndex = 1;
@@ -4836,18 +4845,30 @@ function matchIntakePattern(line, patterns) {
     if (idx > 0 && /^\d[\d,\.]*\s+/.test(norm)) continue;
     if (idx === 0 || idx <= 30 || pl.length >= 20) {
       let rest = norm.slice(idx + pl.length).trim();
-      // Strip a leading "(...)" clarifier such as "(such as Transactional...)".
-      rest = rest.replace(/^\([^)]*\)\s*/, '');
-      // Strip leading separator punctuation: : - ? \u2013 \u2014.
-      rest = rest.replace(/^[:?\-\u2013\u2014]+\s*/, '');
-      // Strip another parenthetical that may sit after the colon.
-      rest = rest.replace(/^\([^)]*\)\s*/, '');
-      // Strip a leading "Re:" / "Answer:" prefix on inline answers.
-      rest = rest.replace(/^(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*/i, '');
-      // Strip a trailing question clause that precedes the inline answer, e.g.
-      // "...per minute that you require? 3 aprox" -> "3 aprox".
-      rest = rest.replace(/^that\s+you\s+require\s*\??\s*/i, '');
-      rest = rest.replace(/^you\s+require\s*\??\s*/i, '');
+      // The tail can carry several stackable noise fragments in ANY order:
+      //   - a parenthetical clarifier: "(such as Transactional...)" / "(specific numbers)"
+      //   - leading separator punctuation: ":" "-" "?" en/em dash
+      //   - a "Re:" / "Answer:" inline-answer prefix
+      //   - a leftover question clause: "that you require?" / "you require?"
+      // They frequently combine, e.g. "that you require? (specific numbers) : 100",
+      // where removing the question clause re-exposes a parenthetical that in turn
+      // hides the real ": 100" separator. A single fixed-order pass cannot peel
+      // these reliably, so strip repeatedly until the string stops changing; that
+      // way the order the fragments appear in no longer matters.
+      let prevRest;
+      do {
+        prevRest = rest;
+        // Strip a leading "(...)" clarifier such as "(such as Transactional...)".
+        rest = rest.replace(/^\([^)]*\)\s*/, '');
+        // Strip leading separator punctuation: : - ? \u2013 \u2014.
+        rest = rest.replace(/^[:?\-\u2013\u2014]+\s*/, '');
+        // Strip a leading "Re:" / "Answer:" prefix on inline answers.
+        rest = rest.replace(/^(re|answer|ans|a)\s*[:\-\u2013\u2014]\s*/i, '');
+        // Strip a trailing question clause that precedes the inline answer, e.g.
+        // "...per minute that you require? 3 aprox" -> "3 aprox".
+        rest = rest.replace(/^that\s+you\s+require\s*\??\s*/i, '');
+        rest = rest.replace(/^you\s+require\s*\??\s*/i, '');
+      } while (rest !== prevRest);
       if (isLikelyNonAnswerTail(rest)) rest = '';
       return { rest: rest };
     }
@@ -4991,10 +5012,11 @@ function processIntakeForm() {
 
   const detected = extractIntakeFields(intake.plain);
   // Enrich "Expected tier level" with the inferred ACS throttling tier
-  // name when we have per-minute / per-hour rate values. The user's
+  // name when we have per-minute / per-hour / per-day rate values. The user's
   // original text (e.g. "100 / min, 1000 / hr") is preserved as a suffix.
+  // Per-day is matched against each tier's perHour * 24 ceiling.
   const inferredVolumeBase = detected.expectedVolume || '';
-  const enrichedVolume = formatExpectedTierValue(inferredVolumeBase, detected.ratePerMinute, detected.ratePerHour);
+  const enrichedVolume = formatExpectedTierValue(inferredVolumeBase, detected.ratePerMinute, detected.ratePerHour, detected.ratePerDay);
   if (enrichedVolume) detected.expectedVolume = enrichedVolume;
 
   // Merge with prior manual overrides so the user's edits survive a re-run.
@@ -5408,18 +5430,20 @@ function startPageInitialization() {
   if (pageInitializationHasStarted) return;
   pageInitializationHasStarted = true;
   // When the page is loaded inside an iframe it is almost always MSAL's hidden
-  // token-renewal frame (ssoSilent / acquireTokenSilent redirect the iframe
-  // back to our own origin). That frame only needs MSAL's redirect handler to
-  // run so the parent window can read the result; booting the entire SPA there
-  // wastes work and triggers a benign but noisy "Autofocus processing was
-  // blocked" console message because the hidden frame never has focus. Detect
-  // the framed case and run a minimal MSAL-only init instead of the full UI.
+  // token-renewal frame: ssoSilent() / acquireTokenSilent() navigate that frame
+  // to the Entra authorize endpoint, which redirects it back to our own origin
+  // with the auth response in the URL hash. MSAL's monitor in the PARENT window
+  // reads that hash directly from the iframe's URL -- the framed document does
+  // not need to (and must not) run MSAL itself. If we boot the app here and call
+  // any silent token API, MSAL sees a hidden iframe holding a server-response
+  // hash and throws `block_iframe_reload`, which aborts the parent's renewal and
+  // surfaces as `redirect_bridge_timeout`. So inside any iframe we do nothing at
+  // all: no UI bootstrap (avoids the benign "Autofocus blocked" notice) and no
+  // second MSAL instance (avoids block_iframe_reload). frame-ancestors 'self'
+  // guarantees the only thing that can frame us is our own MSAL iframe.
   let inIframe = false;
   try { inIframe = (window.self !== window.top); } catch (e) { inIframe = true; }
   if (inIframe) {
-    if (typeof initMsAuth === 'function') {
-      initMsAuth();
-    }
     return;
   }
   initializePage();
