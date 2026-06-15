@@ -267,7 +267,7 @@ if ($metricsEnabled) {
   }
 
   # 2) Serve individual API endpoints (/api/*)
-  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation")) {
+  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website")) {
     if (-not (Test-ApiKey -Context $ctx)) {
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
       return
@@ -320,6 +320,7 @@ if ($metricsEnabled) {
         "/api/dkim"  { Write-Json -Context $ctx -Object (Get-DnsDkimStatus  -Domain $domain) }
         "/api/cname" { Write-Json -Context $ctx -Object (Get-DnsCnameStatus -Domain $domain) }
         "/api/reputation" { Write-Json -Context $ctx -Object (Get-DnsReputationStatus -Domain $domain) }
+        "/api/website" { Write-Json -Context $ctx -Object (Get-WebsiteProbeStatus -Domain $domain) }
         default       { Write-Json -Context $ctx -Object @{ error = "Unknown endpoint." } -StatusCode 404 }
       }
     }

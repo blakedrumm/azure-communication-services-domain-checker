@@ -289,6 +289,37 @@ $env:ACS_RBL_ZONES = "zen.spamhaus.org,bl.spamcop.net"
 | 🟠 **Fair** | ≥ 50 % clean | 2+ (Elevated Risk) |
 | 🔴 **Poor** | < 50 % clean | 2+ (Elevated Risk) |
 
+## 🌐 Website Reachability Snapshot
+
+The `/api/website` endpoint performs a **security-guarded** HTTP(S) request to the queried domain so you can see, at a glance, whether it serves a real website or appears blank, parked, or "under construction". It tries `https://` first (apex, then `www.`) and falls back to `http://`, returning the first reachable terminal page.
+
+The output is intentionally **neutral and factual** — it reports only what was technically observed and makes no judgement about the domain owner:
+
+- Reachability + final HTTP status code
+- Redirect chain (each hop is independently re-validated)
+- Page `<title>` and meta/OpenGraph description
+- A short visible-text excerpt (never rendered as HTML)
+- Recognized placeholder/parked/default-server markers (e.g. "under construction", "domain is for sale", "welcome to nginx")
+- TLS/SSL handshake failures and near-empty pages
+
+Because the full-page screenshot button captures every rendered card, this snapshot is automatically included in the exported PNG.
+
+### Security guards (SSRF protection)
+
+- Only `http`/`https` schemes and only ports 80/443 are ever contacted
+- The target host must resolve **entirely** to public, routable IPs (IPv4 + IPv6, including IPv4-mapped IPv6) — private/loopback/link-local/CGNAT/unique-local targets are refused
+- Redirects are **not** auto-followed; each hop is re-validated before connecting, with a small hop cap
+- The response body is read under a hard byte cap and the whole operation runs under a short timeout
+
+### Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ACS_DISABLE_WEBSITE_PROBE` | _(unset)_ | Set to `1` to disable the probe entirely (the card renders a neutral "disabled" note) |
+| `ACS_WEBSITE_PROBE_TIMEOUT_SEC` | `8` | Per-request timeout in seconds (max 30) |
+| `ACS_WEBSITE_PROBE_MAX_BYTES` | `262144` | Hard cap on bytes read from the response body (max 2 MB) |
+| `ACS_WEBSITE_PROBE_MAX_REDIRECTS` | `5` | Maximum redirect hops to follow (max 10) |
+
 ## 🌍 WHOIS / RDAP Diagnostics
 
 The tool enriches results with domain registration metadata (creation date, expiry, registrar, domain age) using a priority-ordered chain of fallback providers:
@@ -326,6 +357,7 @@ The application exposes the following RESTful API endpoints:
 | `/api/dkim` | DKIM selectors | Checks DomainKeys Identified Mail signatures |
 | `/api/cname` | CNAME records | Validates canonical name records |
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
+| `/api/website` | Website reachability snapshot | Performs a security-guarded HTTP(S) probe (apex + www, HTTPS first) and returns a neutral, factual snapshot: reachability, HTTP status, redirect chain, page title/description, a short text excerpt, and recognized placeholder/parked-page markers |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
 | `/api/auth/event` | Anonymous Microsoft Entra ID sign-in ping | Header-only, consent-gated. SPA POSTs an opaque SHA-256 account hash and a Microsoft-employee boolean after client-side MSAL/Graph verification; the server never sees access tokens, UPN, oid, or tenant id. |
 | `/terms` | Terms of Service | Embedded, localized Terms of Service page |

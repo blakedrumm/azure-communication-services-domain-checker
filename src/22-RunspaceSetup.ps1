@@ -30,6 +30,7 @@ $functionNames = @(
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
+  'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
   'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-FirstNonEmptyPropertyValue','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Test-WhoisDomainNameSafe','Initialize-WhoisFieldRegexes','Get-WhoisParsedRegistrationData','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Invoke-WhoisProcess','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',

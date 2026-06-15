@@ -990,6 +990,38 @@ function localizeWhoisStatus(status) {
   return status;
 }
 
+// Map the neutral, server-emitted website-probe summary token to a localized,
+// human-friendly label. Kept deliberately factual (no abuse/spam wording): the
+// website probe only reports what was technically observed.
+function localizeWebsiteSummary(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'reachable') return t('websiteSummaryReachable');
+  if (normalized === 'placeholdercontent') return t('websiteSummaryPlaceholder');
+  if (normalized === 'servererror') return t('websiteSummaryServerError');
+  if (normalized === 'clienterror') return t('websiteSummaryClientError');
+  if (normalized === 'unreachable') return t('websiteSummaryUnreachable');
+  if (normalized === 'disabled') return t('websiteSummaryDisabled');
+  return value || t('unknown');
+}
+
+// Map a placeholder-signal token (server-emitted) to a localized phrase. These
+// describe common parked / default-server / placeholder page patterns the probe
+// recognized in the page text. Falls back to the raw token when unmapped.
+function localizeWebsiteSignal(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  const map = {
+    'underconstruction': 'websiteSignalUnderConstruction',
+    'comingsoon': 'websiteSignalComingSoon',
+    'domainforsale': 'websiteSignalDomainForSale',
+    'parked': 'websiteSignalParked',
+    'placeholder': 'websiteSignalPlaceholder',
+    'defaultpage': 'websiteSignalDefaultPage',
+    'suspended': 'websiteSignalSuspended',
+    'notconfigured': 'websiteSignalNotConfigured'
+  };
+  return map[normalized] ? t(map[normalized]) : (value || '');
+}
+
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
   // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...)

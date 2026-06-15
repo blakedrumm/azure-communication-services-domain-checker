@@ -230,12 +230,13 @@ function hideTopBarItem(element) {
     { key: "dmarc", path: "/api/dmarc" },
     { key: "dkim",  path: "/api/dkim"  },
     { key: "cname", path: "/api/cname" },
-    { key: "reputation", path: "/api/reputation" }
+    { key: "reputation", path: "/api/reputation" },
+    { key: "website", path: "/api/website" }
   ];
 
   // ---- Live check-progress popover state ----
   // Tracks the per-task status displayed in #checkProgressPopover so the
-  // user can see exactly which of the eight parallel backend calls is
+  // user can see exactly which of the nine parallel backend calls is
   // still in flight. We initialize the state here (per-lookup, not global)
   // so a fresh run always starts with a clean slate. The popover is
   // shown automatically while the lookup is active and hidden as soon
@@ -297,6 +298,8 @@ function hideTopBarItem(element) {
         lastResult.whoisRegistryWebForm = data.registryWebForm || null;
       } else if (key === 'reputation') {
         lastResult.reputation = data;
+      } else if (key === 'website') {
+        lastResult.website = data;
       } else if (key === 'records') {
         lastResult.dnsRecords = Array.isArray(data.records) ? data.records : [];
         lastResult.dnsRecordsError = data.error || null;
@@ -3277,6 +3280,36 @@ function render(r) {
     ? ` | ${t('zonesQueried')}: ${repStats.zones} | ${t('totalQueries')}: ${repStats.total} | ${t('listed')}: ${repStats.listed} | ${t('notListed')}: ${repStats.notListed}`
     : '');
 
+  // Website reachability summary for the Email Quota copy payload. Kept compact
+  // and strictly neutral/factual (mirrors the Website card): outcome + final URL
+  // + HTTP status, plus a short note for redirects / TLS / placeholder / parked
+  // signals when present. Falls back to a pending/error/unknown state so the row
+  // is always populated, matching the other quota rows.
+  const websiteSummaryText = (() => {
+    if (!loaded.website && !errors.website) { return t('pending'); }
+    if (errors.website) { return `${t('error')} - ${errors.website}`; }
+    const w = r.website || {};
+    if (w.checked === false && String(w.summary || '').toLowerCase() === 'disabled') {
+      return w.disabledReason || t('websiteSummaryDisabled');
+    }
+    const outcome = localizeWebsiteSummary(w.summary || (w.reachable ? 'Reachable' : 'Unreachable'));
+    const parts = [outcome];
+    if (w.finalUrl) { parts.push(w.finalUrl); }
+    if (w.statusCode) { parts.push(`${t('websiteHttpStatus')}: ${w.statusCode}`); }
+    if (w.redirected === true && Array.isArray(w.redirectChain)) {
+      parts.push(`${t('websiteRedirects')}: ${w.redirectChain.length}`);
+    }
+    if (w.tlsError === true) { parts.push(t('websiteTlsError')); }
+    if (w.placeholderDetected === true && Array.isArray(w.placeholderSignals) && w.placeholderSignals.length > 0) {
+      const sigText = w.placeholderSignals.map(s => localizeWebsiteSignal(s)).filter(Boolean).join(', ');
+      if (sigText) { parts.push(`${t('websitePlaceholderSignals')}: ${sigText}`); }
+    } else if (w.nearEmpty === true) {
+      parts.push(t('websiteNearEmpty'));
+    }
+    if (!w.reachable && w.error) { parts.push(w.error); }
+    return parts.join(' | ');
+  })();
+
   const domainStatusText = (!loaded.base && !errors.base)
     ? t('pending')
     : (errors.base
@@ -3322,6 +3355,7 @@ function render(r) {
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
   plainTable.push(`| ${t('reputationDnsbl')} | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
+  plainTable.push(`| ${t('websiteCheck')} | ${websiteSummaryText} |`);
   // Build the page/report link the same way the top-of-page "Copy link" button
   // does (copyShareLink in 20c): start from the current location, set the
   // queried domain (when valid) and the active language so the recipient lands
@@ -3353,6 +3387,7 @@ function render(r) {
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
   // Manual push for Reputation to include parsed HTML link (multiRblHtml)
   htmlTableRows.push(`<tr><th>${escapeHtml(t('reputationDnsbl'))}</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
+  addRow(t('websiteCheck'), websiteSummaryText);
   // Page/report link row below Reputation: render a clickable anchor in the
   // rich-text variant so pasting into Outlook/Teams/Word produces a usable link.
   htmlTableRows.push(`<tr><th>${escapeHtml(t('pageLinkLabel'))}</th><td><a href="${escapeHtml(reportLinkUrl)}">${escapeHtml(reportLinkUrl)}</a></td></tr>`);
@@ -4194,6 +4229,100 @@ function render(r) {
       false,
       `<button type="button" class="info-dot" aria-label="${escapeHtml(reputationInfo)}" data-info="${escapeHtml(reputationInfo)}">i</button> ${multiRblHtml}`
     ));
+  }
+
+  // Website reachability / parked-page snapshot.
+  // IMPORTANT: this card is intentionally NEUTRAL and FACTUAL. It reports only
+  // what was technically observed (reachability, status code, redirects, page
+  // title/description, a short text excerpt, and recognized placeholder/parked
+  // markers). It makes NO judgement about the site owner's intent. Because the
+  // full-page screenshot (screenshotPage / html2canvas) captures any rendered
+  // card, this snapshot is automatically included in the exported PNG.
+  const websiteInfo = t('websiteInfo');
+  if (!loaded.website && !errors.website) {
+    cards.push(card(
+      t('websiteCheck'),
+      t('loadingValue'),
+      "LOADING",
+      "tag-info",
+      "website",
+      false,
+      `<button type="button" class="info-dot" aria-label="${escapeHtml(websiteInfo)}" data-info="${escapeHtml(websiteInfo)}">i</button>`
+    ));
+  } else if (errors.website) {
+    cards.push(card(
+      t('websiteCheck'),
+      errors.website,
+      "ERROR",
+      "tag-fail",
+      "website",
+      false,
+      `<button type="button" class="info-dot" aria-label="${escapeHtml(websiteInfo)}" data-info="${escapeHtml(websiteInfo)}">i</button>`
+    ));
+  } else {
+    const w = r.website || {};
+
+    // Server-side opt-out: render a neutral INFO card explaining the probe is off.
+    if (w.checked === false && String(w.summary || '').toLowerCase() === 'disabled') {
+      cards.push(card(
+        t('websiteCheck'),
+        w.disabledReason || t('websiteSummaryDisabled'),
+        "INFO",
+        "tag-info",
+        "website",
+        false,
+        `<button type="button" class="info-dot" aria-label="${escapeHtml(websiteInfo)}" data-info="${escapeHtml(websiteInfo)}">i</button>`
+      ));
+    } else {
+      const summaryToken = String(w.summary || (w.reachable ? 'Reachable' : 'Unreachable'));
+      const summaryLabel = localizeWebsiteSummary(summaryToken);
+
+      // Status badge: neutral mapping.
+      //   Reachable          -> PASS
+      //   PlaceholderContent / ClientError / ServerError / TLS error -> WARN
+      //   Unreachable        -> FAIL
+      let badgeLabel = "FAIL";
+      let badgeClass = "tag-fail";
+      if (w.reachable === true) {
+        if (summaryToken.toLowerCase() === 'reachable') {
+          badgeLabel = "PASS"; badgeClass = "tag-pass";
+        } else {
+          badgeLabel = "WARN"; badgeClass = "tag-warn";
+        }
+      } else if (w.tlsError === true) {
+        badgeLabel = "WARN"; badgeClass = "tag-warn";
+      }
+
+      // Build a neutral, plain-text body (the Copy button reads this).
+      const lines = [];
+      lines.push(`${t('websiteOutcome')}: ${summaryLabel}`);
+      if (w.finalUrl) { lines.push(`${t('websiteFinalUrl')}: ${w.finalUrl}`); }
+      if (w.statusCode) { lines.push(`${t('websiteHttpStatus')}: ${w.statusCode}`); }
+      if (w.redirected === true) {
+        const hops = Array.isArray(w.redirectChain) ? w.redirectChain.length : 0;
+        lines.push(`${t('websiteRedirects')}: ${hops}`);
+      }
+      if (w.title) { lines.push(`${t('websiteTitle')}: ${w.title}`); }
+      if (w.metaDescription) { lines.push(`${t('websiteDescription')}: ${w.metaDescription}`); }
+      if (w.tlsError === true) { lines.push(`${t('websiteTlsError')}`); }
+      if (w.nearEmpty === true) { lines.push(`${t('websiteNearEmpty')}`); }
+      if (w.placeholderDetected === true && Array.isArray(w.placeholderSignals) && w.placeholderSignals.length > 0) {
+        const sigText = w.placeholderSignals.map(s => localizeWebsiteSignal(s)).filter(Boolean).join(', ');
+        if (sigText) { lines.push(`${t('websitePlaceholderSignals')}: ${sigText}`); }
+      }
+      if (!w.reachable && w.error) { lines.push(w.error); }
+      if (w.bodyExcerpt) { lines.push(`\n${t('websiteExcerpt')}:\n${w.bodyExcerpt}`); }
+
+      cards.push(card(
+        t('websiteCheck'),
+        lines.join("\n"),
+        badgeLabel,
+        badgeClass,
+        "website",
+        false,
+        `<button type="button" class="info-dot" aria-label="${escapeHtml(websiteInfo)}" data-info="${escapeHtml(websiteInfo)}">i</button>`
+      ));
+    }
   }
 
   cards.push(card(
