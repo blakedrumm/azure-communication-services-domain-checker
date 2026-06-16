@@ -323,6 +323,89 @@ function Get-DohDnssecAnomaly {
   }
 }
 
+# Probe a DoH endpoint *with* the Checking Disabled (`cd=1`) flag -- i.e. using
+# the exact same query shape our real lookups in Resolve-DohName issue -- purely
+# to observe the response *status code* for a given name/type. Resolve-DohName
+# intentionally discards everything except the Answer section and returns $null
+# on an empty answer, which makes an upstream SERVFAIL indistinguishable from a
+# legitimate "no records" reply. That collapse is what caused otherwise-healthy
+# domains to display "No SPF record detected" / "No Records Available" when, in
+# reality, the domain's authoritative nameservers were answering inconsistently
+# (a propagation / misconfiguration issue -- observed for zenithbank.com whose
+# TXT lookup SERVFAILs across public resolvers while its A/MX records resolve
+# fine, and which still resolves in tools that happen to hit a healthy
+# authoritative server).
+#
+# Because we pass `cd=1`, a SERVFAIL here is NOT a DNSSEC validation failure
+# (that case is already handled separately by Get-DohDnssecAnomaly, which probes
+# WITHOUT cd=1) -- it means the authoritative servers themselves could not
+# return a usable answer for this record type. We use this to show the operator
+# a precise "upstream DNS is broken / still propagating" message instead of the
+# misleading "no record" text.
+#
+# Returns $null when the lookup succeeded (NOERROR/Status 0), was a clean
+# NXDOMAIN (Status 3), or the probe could not be run. Returns a small object
+# with { status, statusLabel, isServfail, summary, queriedName, queriedType }
+# only when the resolver reports SERVFAIL (Status 2).
+function Get-DohResolutionStatus {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [string]$Type = 'TXT'
+  )
+
+  # Same endpoint resolution as Resolve-DohName so the probe matches the
+  # transport the rest of the app is actually using.
+  $endpoint = $env:ACS_DNS_DOH_ENDPOINT
+  if ([string]::IsNullOrWhiteSpace($endpoint)) {
+    $endpoint = 'https://cloudflare-dns.com/dns-query'
+  }
+
+  # Mirror Resolve-DohName exactly, including `cd=1`, so the observed status is
+  # the status our real lookup path would have seen.
+  $uri = "{0}?name={1}&type={2}&cd=1" -f $endpoint, ([uri]::EscapeDataString($Name)), ([uri]::EscapeDataString($Type))
+
+  $resp = $null
+  try {
+    $resp = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 8 -MaximumRedirection 3
+  } catch {
+    # The probe is purely informational; never let it throw into the base path.
+    return $null
+  }
+  if ($null -eq $resp) { return $null }
+
+  # Status is an integer per RFC 8484. 0 = NOERROR, 2 = SERVFAIL, 3 = NXDOMAIN.
+  $statusCode = $null
+  try { $statusCode = [int]$resp.Status } catch { $statusCode = $null }
+
+  # Only SERVFAIL is actionable here. NOERROR/NXDOMAIN are real answers and the
+  # normal "no record" handling already covers them correctly.
+  if ($statusCode -ne 2) { return $null }
+
+  $statusLabel = switch ($statusCode) {
+    0 { 'NOERROR' }
+    2 { 'SERVFAIL' }
+    3 { 'NXDOMAIN' }
+    default { if ($null -ne $statusCode) { "RCODE $statusCode" } else { 'unknown' } }
+  }
+
+  # Short, ready-to-display sentence. Deliberately frames this as an upstream
+  # authoritative-DNS problem (propagation / inconsistent nameservers) rather
+  # than a missing record, because the record may well exist on a subset of the
+  # domain's nameservers. The front-end localizes its own copy; this string is
+  # the server-side fallback / log line.
+  $summary = "Upstream DNS returned SERVFAIL for the $Type lookup of $Name. The domain's authoritative nameservers are answering inconsistently (a propagation or DNS-configuration issue); the record may resolve from some locations but not others."
+
+  [pscustomobject]@{
+    status      = $statusCode
+    statusLabel = $statusLabel
+    isServfail  = $true
+    summary     = $summary
+    queriedName = $Name
+    queriedType = $Type
+  }
+}
+
 # Unified DNS lookup wrapper: selects the appropriate resolver (System vs DoH vs Auto)
 # based on the ACS_DNS_RESOLVER env var, and optionally throws on failure.
 # All DNS lookups in the script go through this function.

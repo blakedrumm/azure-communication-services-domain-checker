@@ -1359,6 +1359,112 @@ input.dns-records-search-input {
   gap: 10px;
 }
 
+/* Per-nameserver TXT consistency details panel (toggled open by
+   toggleNameserverDetails). Each row shows one authoritative nameserver, its
+   response status pills, and the exact TXT records it returned so an operator
+   can spot which nameserver is out of sync. */
+.ns-detail-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.ns-detail-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--card-bg);
+}
+
+.ns-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.ns-detail-host {
+  font-weight: 700;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.ns-detail-ip {
+  font-size: 12px;
+  color: var(--status);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.ns-detail-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.ns-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.ns-pill-ok {
+  color: #065f46;
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.ns-pill-warn {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.ns-pill-bad {
+  color: #991b1b;
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.dark .ns-pill-ok { color: #6ee7b7; }
+.dark .ns-pill-warn { color: #fcd34d; }
+.dark .ns-pill-bad { color: #fca5a5; }
+
+.ns-txt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.ns-txt-list li {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--code-fg);
+  background: var(--code-bg);
+  padding: 4px 8px;
+  border-radius: 6px;
+  word-break: break-all;
+}
+
+.ns-txt-empty,
+.ns-txt-error {
+  font-size: 12px;
+  color: var(--status);
+  font-style: italic;
+}
+
+.ns-txt-error {
+  color: #991b1b;
+}
+
+.dark .ns-txt-error { color: #fca5a5; }
+
 .rdap-digest-wrapper {
   display: grid;
   gap: 10px;

@@ -232,29 +232,29 @@ async function ensureMsalLoaded() {
     <span class="chevron">&#x25BC;</span>
     <span class="tag tag-info">Form</span>
     <strong id="intakeFormTitle">Customer Intake Information (optional)</strong>
-    <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); prefillIntakeForm();">Insert template</button>
-    <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:6px;" onclick="event.stopPropagation(); clearIntakeForm();">Clear</button>
+    <button type="button" id="intakeInsertTemplateBtn" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); prefillIntakeForm();">Insert template</button>
+    <button type="button" id="intakeClearBtn" class="copy-btn hide-on-screenshot" style="margin-left:6px;" onclick="event.stopPropagation(); clearIntakeForm();">Clear</button>
   </div>
   <div class="card-content collapsed">
-    <p class="intake-form-hint" style="margin:0 0 10px 0; font-size:12px; opacity:0.8;">
+    <p id="intakeFormHint" class="intake-form-hint" style="margin:0 0 10px 0; font-size:12px; opacity:0.8;">
       Paste in here the customer intake form responses. Formatting (bold, italics, lists, tables, links, pasted images) is preserved. Contents are saved locally in your browser (functional cookies must be allowed) and are appended to the <strong>Copy Email Quota</strong> output.
     </p>
     <div id="intakeFormToolbar" class="intake-form-toolbar" role="toolbar" aria-label="Formatting">
-      <button type="button" data-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
-      <button type="button" data-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
-      <button type="button" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
-      <button type="button" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+      <button type="button" data-cmd="bold" data-i18n-title="intakeToolbarBold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+      <button type="button" data-cmd="italic" data-i18n-title="intakeToolbarItalic" title="Italic (Ctrl+I)"><em>I</em></button>
+      <button type="button" data-cmd="underline" data-i18n-title="intakeToolbarUnderline" title="Underline (Ctrl+U)"><u>U</u></button>
+      <button type="button" data-cmd="strikeThrough" data-i18n-title="intakeToolbarStrikethrough" title="Strikethrough"><s>S</s></button>
       <span class="intake-toolbar-sep"></span>
-      <button type="button" data-cmd="formatBlock" data-arg="H3" title="Heading">H</button>
-      <button type="button" data-cmd="insertUnorderedList" title="Bulleted list">&bull; List</button>
-      <button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
-      <button type="button" data-cmd="formatBlock" data-arg="BLOCKQUOTE" title="Quote">&ldquo; &rdquo;</button>
-      <button type="button" data-cmd="formatBlock" data-arg="PRE" title="Code block">{ }</button>
+      <button type="button" data-cmd="formatBlock" data-arg="H3" data-i18n-title="intakeToolbarHeading" title="Heading">H</button>
+      <button type="button" data-cmd="insertUnorderedList" data-i18n-title="intakeToolbarBulletList" title="Bulleted list">&bull; List</button>
+      <button type="button" data-cmd="insertOrderedList" data-i18n-title="intakeToolbarNumberList" title="Numbered list">1. List</button>
+      <button type="button" data-cmd="formatBlock" data-arg="BLOCKQUOTE" data-i18n-title="intakeToolbarQuote" title="Quote">&ldquo; &rdquo;</button>
+      <button type="button" data-cmd="formatBlock" data-arg="PRE" data-i18n-title="intakeToolbarCode" title="Code block">{ }</button>
       <span class="intake-toolbar-sep"></span>
-      <button type="button" data-cmd="createLink" title="Insert link">Link</button>
-      <button type="button" data-cmd="unlink" title="Remove link">Unlink</button>
+      <button type="button" data-cmd="createLink" data-i18n-title="intakeToolbarLink" title="Insert link">Link</button>
+      <button type="button" data-cmd="unlink" data-i18n-title="intakeToolbarUnlink" title="Remove link">Unlink</button>
       <span class="intake-toolbar-sep"></span>
-      <button type="button" data-cmd="removeFormat" title="Clear formatting">T&times;</button>
+      <button type="button" data-cmd="removeFormat" data-i18n-title="intakeToolbarClearFormat" title="Clear formatting">T&times;</button>
     </div>
     <div id="intakeRichEditor"
          class="intake-rich-editor"
@@ -277,11 +277,11 @@ async function ensureMsalLoaded() {
     </div>
 
     <div id="intakeExtractedWrap" class="intake-extracted-wrap" style="display:none;">
-      <h4 class="intake-extracted-title">Extracted fields</h4>
-      <p class="intake-extracted-hint">These are the values the app detected in the rich text box above. Edit any cell to correct it &mdash; edits are included in the <strong>Copy Email Quota</strong> output.</p>
+      <h4 id="intakeExtractedTitle" class="intake-extracted-title">Extracted fields</h4>
+      <p id="intakeExtractedHint" class="intake-extracted-hint">These are the values the app detected in the rich text box above. Edit any cell to correct it &mdash; edits are included in the <strong>Copy Email Quota</strong> output.</p>
       <table class="intake-extracted-table">
         <thead>
-          <tr><th style="width:42%;">Field</th><th>Detected value</th></tr>
+          <tr><th id="intakeExtractedColField" style="width:42%;">Field</th><th id="intakeExtractedColValue">Detected value</th></tr>
         </thead>
         <tbody id="intakeExtractedBody"></tbody>
       </table>

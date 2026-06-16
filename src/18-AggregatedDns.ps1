@@ -23,6 +23,13 @@ function Get-AcsDnsStatus {
   $dnssecAnomaly = $null
   try { $dnssecAnomaly = $base.dnssecAnomaly } catch { $dnssecAnomaly = $null }
 
+  # SERVFAIL on the TXT lookup is also detected in Get-DnsBaseStatus (only when
+  # no TXT records were found). Reuse it here so the aggregated /dns endpoint and
+  # the CLI surface the same "authoritative DNS is broken / still propagating"
+  # explanation instead of a misleading "no record" message.
+  $txtResolution = $null
+  try { $txtResolution = $base.txtResolution } catch { $txtResolution = $null }
+
   # Recover queried-domain TXT-derived state from the detailed DNS records payload
   # when the dedicated base TXT lookup timed out but record collection still
   # produced authoritative TXT rows for the queried domain.
@@ -104,7 +111,18 @@ function Get-AcsDnsStatus {
     if ($effectiveDnsFailed) {
         $guidance.Add("DNS TXT lookup failed or timed out. Other DNS records may still resolve.")
     } else {
-      if (-not $effectiveSpfPresent) {
+      # When the TXT lookup SERVFAILed (authoritative nameservers answering
+      # inconsistently / still propagating), the empty SPF + ACS TXT results are
+      # NOT reliable "the record is missing" answers -- the record may exist on a
+      # subset of the domain's nameservers. Surface that explanation and skip the
+      # normal "SPF is missing / ACS TXT is missing" advice, which would tell the
+      # operator to add records that may already exist.
+      $txtServfail = $false
+      try { $txtServfail = ($null -ne $txtResolution -and $txtResolution.isServfail -eq $true -and -not $effectiveSpfPresent) } catch { $txtServfail = $false }
+      if ($txtServfail) {
+        $guidance.Add([string]$txtResolution.summary)
+      }
+      if (-not $effectiveSpfPresent -and -not $txtServfail) {
         if ($base.parentSpfPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("SPF is missing on $Domain. Parent domain $($base.txtLookupDomain) publishes SPF, but SPF does not automatically apply to the queried subdomain.")
         } else {
@@ -114,7 +132,7 @@ function Get-AcsDnsStatus {
       foreach ($spfMessage in @($base.spfGuidance)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$spfMessage)) { $guidance.Add([string]$spfMessage) }
       }
-      if (-not $effectiveAcsPresent) {
+      if (-not $effectiveAcsPresent -and -not $txtServfail) {
         if ($base.parentAcsPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("ACS ms-domain-verification TXT is missing on $Domain. Parent domain $($base.txtLookupDomain) has an ACS TXT record, but it does not verify the queried subdomain.")
         } else {
@@ -199,6 +217,8 @@ function Get-AcsDnsStatus {
         dnsError   = $effectiveDnsError
 
         dnssecAnomaly = $dnssecAnomaly
+
+        txtResolution = $txtResolution
 
         txtLookupDomain = $base.txtLookupDomain
         txtUsedParent   = $base.txtUsedParent

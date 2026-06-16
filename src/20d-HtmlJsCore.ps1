@@ -37,7 +37,8 @@ const CHECK_PROGRESS_LABELS = {
   dmarc:      'dmarc',
   dkim:       null,
   cname:      'cname',
-  reputation: 'reputationDnsbl'
+  reputation: 'reputationDnsbl',
+  nameservers: 'nameserverCheck'
 };
 
 function getCheckProgressLabel(key) {
@@ -231,7 +232,8 @@ function hideTopBarItem(element) {
     { key: "dkim",  path: "/api/dkim"  },
     { key: "cname", path: "/api/cname" },
     { key: "reputation", path: "/api/reputation" },
-    { key: "website", path: "/api/website" }
+    { key: "website", path: "/api/website" },
+    { key: "nameservers", path: "/api/nameservers" }
   ];
 
   // ---- Live check-progress popover state ----
@@ -300,6 +302,8 @@ function hideTopBarItem(element) {
         lastResult.reputation = data;
       } else if (key === 'website') {
         lastResult.website = data;
+      } else if (key === 'nameservers') {
+        lastResult.nameservers = data;
       } else if (key === 'records') {
         lastResult.dnsRecords = Array.isArray(data.records) ? data.records : [];
         lastResult.dnsRecordsError = data.error || null;
@@ -1890,6 +1894,21 @@ function toggleWhoisRaw(element) {
   el.style.display = isOpen ? "block" : "none";
 }
 
+// Toggle the per-nameserver TXT details panel. Mirrors toggleWhoisRaw: the
+// button carries its open/close labels in data-* attributes so the text stays
+// localized without this helper needing to know the current language.
+function toggleNameserverDetails(element) {
+  const el = document.getElementById("nameserverDetails");
+  if (!el || !element) return;
+
+  const current = el.style.display;
+  const isOpen = (!current || current === "none");
+  element.textContent = isOpen
+    ? (element.dataset.closeLabel || `${t('nameserverDetailsButton')} \u2212`)
+    : (element.dataset.openLabel || `${t('nameserverDetailsButton')} +`);
+  el.style.display = isOpen ? "block" : "none";
+}
+
 // Convert RDAP JSON into small grouped sections first so the registration card
 // is readable before the user decides to expand the full raw payload.
 function getRdapVcardText(vcardArray, propertyName) {
@@ -2866,6 +2885,18 @@ function render(r) {
     || (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null);
   const effectiveAcsPresent = !!txtRecovery.acsPresent;
   const effectiveAcsValue = txtRecovery.acsValue || null;
+  // Upstream SERVFAIL on the TXT lookup: the server probed the DoH status (with
+  // cd=1, so this is NOT a DNSSEC issue) and found the domain's authoritative
+  // nameservers answering inconsistently -- a propagation / misconfiguration
+  // problem. We trigger on SPF absence (not a fully empty TXT set) because a
+  // broken zone can SERVFAIL while still returning a partial TXT answer that
+  // excludes the SPF record. A successful recovery of an actual SPF record from
+  // the detailed DNS records payload suppresses the warning. Used to replace the
+  // misleading "No SPF record detected" / "No Records Available" copy with an
+  // accurate "DNS is broken / propagating" explanation in the SPF card, the TXT
+  // card, and the Email-Quota SPF row.
+  const txtServfailDetected = !!(r && r.txtResolution && r.txtResolution.isServfail === true
+    && !effectiveSpfPresent);
   const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
   const mxFallbackUsed = !!(r && r.mxFallbackUsed);
   const mxFallbackChecked = r && r.mxFallbackDomainChecked ? r.mxFallbackDomainChecked : null;
@@ -3054,7 +3085,7 @@ function render(r) {
   const multiRblHtml = `<a href="${multiRblLink}" target="_blank" rel="noopener" style="font-size:11px; color:#2f80ed; text-decoration:none;">(MultiRBL &#x2197;)</a>`;
 
   // 2) Reputation
-  const reputationInfo = "Default DNSBL checks use a safer free/no-budget set: Spamcop, Barracuda, PSBL, DroneBL, and 0spam. Optional user-supplied zones may also be queried. Reputation = percent of not-listed over successful DNSBL queries. Ratings: Excellent \u226599%, Great \u226590%, Good \u226575%, Fair \u226550%, Poor otherwise. Risk summary: 0 hits = Clean, 1 hit = Warning, 2+ hits = ElevatedRisk. Listed entries are shown when present; errors reduce confidence.";
+  const reputationInfo = t('reputationInfo');
   let repStateForCopy = '';
   if (!loaded.reputation && !errors.reputation) {
     repCopyDetail = t('checkingDnsblReputation');
@@ -3241,11 +3272,16 @@ function render(r) {
   } else {
     const spfPassesRequirement = !!(effectiveSpfPresent && effectiveSpfHasRequiredInclude === true);
     const spfIsIndeterminate = !spfPassesRequirement && effectiveSpfPresent && effectiveSpfIsMacroDelegated;
+    // An upstream TXT SERVFAIL (authoritative DNS answering inconsistently /
+    // still propagating) is reported as WARN, not FAIL: the SPF record may well
+    // exist on a subset of the domain's nameservers, so asserting it is missing
+    // would be inaccurate. The detail explains the propagation issue.
+    const spfIsServfail = !spfPassesRequirement && !effectiveSpfPresent && txtServfailDetected;
     const spfDetail = effectiveSpfPresent
       ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
-      : t('noSpfRecordDetected');
-    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : (spfIsIndeterminate ? 'warn' : 'fail'), spfDetail, null, 'spf'));
-    const spfState = spfPassesRequirement ? 'PASS' : (spfIsIndeterminate ? 'WARN' : 'FAIL');
+      : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
+    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : ((spfIsIndeterminate || spfIsServfail) ? 'warn' : 'fail'), spfDetail, null, 'spf'));
+    const spfState = spfPassesRequirement ? 'PASS' : ((spfIsIndeterminate || spfIsServfail) ? 'WARN' : 'FAIL');
     quotaLines.push(`**${t('spfQueried')}:** ${spfState}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfState)}${spfDetail ? ' - ' + escapeHtml(spfDetail).replace(/\r?\n/g, '<br>') : ''}`);
   }
@@ -3863,7 +3899,7 @@ function render(r) {
 
   // Match card order to the Check Summary.
   const spfCardBaseValue = loaded.base
-    ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : null))
+    ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
@@ -3931,8 +3967,8 @@ function render(r) {
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : "FAIL"))),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : "tag-fail"))),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL")))),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail")))),
     "spf",
     true,
     spfExplainedTitleSuffix,
@@ -3967,9 +4003,13 @@ function render(r) {
 
   cards.push(card(
     t('txtRecordsQueried'),
-    loaded.base ? ((effectiveTxtRecords.join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noTxtRecordsOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainTxtRecordsInfo', { lookupDomain: r.txtLookupDomain })}\n${(r.parentTxtRecords || []).join("\n")}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : "INFO"),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : "tag-info"),
+    loaded.base ? ((effectiveTxtRecords.join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noTxtRecordsOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainTxtRecordsInfo', { lookupDomain: r.txtLookupDomain })}\n${(r.parentTxtRecords || []).join("\n")}`) : (txtServfailDetected ? t('txtServfailDetected') : null))) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    // Only flag the TXT card WARN when it actually shows the SERVFAIL message --
+    // i.e. there are no queried-domain TXT rows to display. A broken zone can
+    // SERVFAIL while still returning a partial TXT answer; in that case we show
+    // the partial rows as a normal INFO card rather than a misleading warning.
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((txtServfailDetected && effectiveTxtRecords.length === 0) ? "WARN" : "INFO")),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((txtServfailDetected && effectiveTxtRecords.length === 0) ? "tag-warn" : "tag-info")),
     "txtRecords",
     false
   ));
@@ -4325,6 +4365,166 @@ function render(r) {
     }
   }
 
+  // Nameserver TXT consistency snapshot.
+  // This card answers "all my nameservers respond, so why does TXT/SPF look
+  // missing?" by querying EACH authoritative nameserver directly for the
+  // domain's TXT records and comparing them. When the authoritative servers do
+  // not serve an identical zone (some are missing SPF / the verification token,
+  // or fail to resolve), public recursive resolvers see the record only
+  // intermittently -- which is exactly what makes ACS domain verification and
+  // SPF look broken. The "additional details" button reveals the exact TXT set
+  // each nameserver returned so the operator can see which server is out of sync.
+  const nameserverInfo = t('nameserverInfo');
+  if (!loaded.nameservers && !errors.nameservers) {
+    cards.push(card(
+      t('nameserverCheck'),
+      t('loadingValue'),
+      "LOADING",
+      "tag-info",
+      "nameservers",
+      false,
+      `<button type="button" class="info-dot" aria-label="${escapeHtml(nameserverInfo)}" data-info="${escapeHtml(nameserverInfo)}">i</button>`
+    ));
+  } else if (errors.nameservers) {
+    cards.push(card(
+      t('nameserverCheck'),
+      errors.nameservers,
+      "ERROR",
+      "tag-fail",
+      "nameservers",
+      false,
+      `<button type="button" class="info-dot" aria-label="${escapeHtml(nameserverInfo)}" data-info="${escapeHtml(nameserverInfo)}">i</button>`
+    ));
+  } else {
+    const ns = r.nameservers || {};
+    const nsState = String(ns.consistencyState || 'unknown');
+
+    // Server-side opt-out: render a neutral INFO card explaining the probe is off.
+    if (ns.checked === false && String(ns.summary || '').toLowerCase() === 'disabled') {
+      cards.push(card(
+        t('nameserverCheck'),
+        ns.disabledReason || t('nameserverSummaryDisabled'),
+        "INFO",
+        "tag-info",
+        "nameservers",
+        false,
+        `<button type="button" class="info-dot" aria-label="${escapeHtml(nameserverInfo)}" data-info="${escapeHtml(nameserverInfo)}">i</button>`
+      ));
+    } else if (nsState === 'none') {
+      // No authoritative nameservers were discoverable for the domain.
+      cards.push(card(
+        t('nameserverCheck'),
+        ns.error || t('nameserverNoneFound'),
+        "WARN",
+        "tag-warn",
+        "nameservers",
+        false,
+        `<button type="button" class="info-dot" aria-label="${escapeHtml(nameserverInfo)}" data-info="${escapeHtml(nameserverInfo)}">i</button>`
+      ));
+    } else {
+      const results = Array.isArray(ns.results) ? ns.results : [];
+
+      // Badge mapping:
+      //   consistent   -> PASS  (every responding NS returned the same TXT set)
+      //   partial      -> WARN  (responders agree, but some NS failed to answer)
+      //   inconsistent -> FAIL  (responding NS returned DIFFERENT TXT sets)
+      //   unknown/none -> WARN  (nobody answered cleanly)
+      let badgeLabel = "WARN";
+      let badgeClass = "tag-warn";
+      if (nsState === 'consistent') { badgeLabel = "PASS"; badgeClass = "tag-pass"; }
+      else if (nsState === 'inconsistent') { badgeLabel = "FAIL"; badgeClass = "tag-fail"; }
+      else if (nsState === 'partial') { badgeLabel = "WARN"; badgeClass = "tag-warn"; }
+
+      // Compact, neutral summary body (the Copy button reads this text).
+      const lines = [];
+      let stateLabel = t('nameserverStateUnknown');
+      if (nsState === 'consistent') stateLabel = t('nameserverStateConsistent');
+      else if (nsState === 'inconsistent') stateLabel = t('nameserverStateInconsistent');
+      else if (nsState === 'partial') stateLabel = t('nameserverStatePartial');
+      lines.push(`${t('nameserverOutcome')}: ${stateLabel}`);
+      lines.push(`${t('nameserverServersQueried')}: ${ns.nameserverCount || 0}`);
+      lines.push(`${t('nameserverResponding')}: ${ns.respondingCount || 0}`);
+      if ((ns.failingCount || 0) > 0) {
+        lines.push(`${t('nameserverFailing')}: ${ns.failingCount}`);
+      }
+      lines.push(`${t('nameserverDistinctSets')}: ${ns.distinctTxtSets || 0}`);
+      lines.push(`${t('nameserverSpfAllPresent')}: ${ns.spfAllPresent === true ? t('yes') : t('no')}`);
+      lines.push(`${t('nameserverAcsAllPresent')}: ${ns.acsAllPresent === true ? t('yes') : t('no')}`);
+
+      // When the nameservers disagree, add a one-line explanation of WHY the
+      // record can look missing to public resolvers.
+      if (nsState === 'inconsistent') {
+        lines.push(`\n${t('nameserverInconsistentExplain')}`);
+      } else if (nsState === 'partial') {
+        lines.push(`\n${t('nameserverPartialExplain')}`);
+      }
+
+      // Build the collapsible per-nameserver details panel. Each row shows the
+      // nameserver host/IP, its response status, SPF/ACS presence, and the exact
+      // TXT records it returned. This is the "additional details" the user asked
+      // for so they can see what each nameserver responds with.
+      let detailsHtml = '';
+      if (results.length > 0) {
+        const rows = results.map(item => {
+          const host = escapeHtml(String(item.host || ''));
+          const ip = item.ip ? escapeHtml(String(item.ip)) : '\u2014';
+          const ok = item.success === true;
+          const statusBadge = ok
+            ? `<span class="ns-pill ns-pill-ok">${escapeHtml(item.rcodeLabel || 'NOERROR')}</span>`
+            : `<span class="ns-pill ns-pill-bad">${escapeHtml(item.rcodeLabel || t('nameserverNoAnswer'))}</span>`;
+          const spfPill = item.spfPresent === true
+            ? `<span class="ns-pill ns-pill-ok">SPF \u2713</span>`
+            : `<span class="ns-pill ns-pill-warn">SPF \u2717</span>`;
+          const acsPill = item.acsPresent === true
+            ? `<span class="ns-pill ns-pill-ok">ACS \u2713</span>`
+            : `<span class="ns-pill ns-pill-warn">ACS \u2717</span>`;
+
+          let txtBlock = '';
+          if (ok) {
+            const txt = Array.isArray(item.txtRecords) ? item.txtRecords : [];
+            if (txt.length > 0) {
+              const items = txt.map(rec => `<li>${escapeHtml(String(rec))}</li>`).join('');
+              txtBlock = `<ul class="ns-txt-list">${items}</ul>`;
+            } else {
+              txtBlock = `<div class="ns-txt-empty">${escapeHtml(t('nameserverNoTxt'))}</div>`;
+            }
+          } else if (item.error) {
+            txtBlock = `<div class="ns-txt-error">${escapeHtml(String(item.error))}</div>`;
+          }
+
+          return `<div class="ns-detail-row">
+            <div class="ns-detail-head">
+              <span class="ns-detail-host">${host}</span>
+              <span class="ns-detail-ip">${ip}</span>
+              <span class="ns-detail-pills">${statusBadge} ${ok ? `${spfPill} ${acsPill}` : ''}</span>
+            </div>
+            ${txtBlock}
+          </div>`;
+        }).join('');
+
+        const openLabel = `${t('nameserverDetailsButton')} +`;
+        const closeLabel = `${t('nameserverDetailsButton')} \u2212`;
+        detailsHtml = `
+          <button type="button" class="copy-btn hide-on-screenshot" style="margin-top:10px;"
+            data-open-label="${escapeHtml(openLabel)}" data-close-label="${escapeHtml(closeLabel)}"
+            onclick="event.stopPropagation(); toggleNameserverDetails(this)">${escapeHtml(openLabel)}</button>
+          <div id="nameserverDetails" class="ns-detail-panel" style="margin-top:10px; display:none;">${rows}</div>`;
+      }
+
+      const appendHtml = `<button type="button" class="info-dot" aria-label="${escapeHtml(nameserverInfo)}" data-info="${escapeHtml(nameserverInfo)}">i</button>${detailsHtml}`;
+
+      cards.push(card(
+        t('nameserverCheck'),
+        lines.join("\n"),
+        badgeLabel,
+        badgeClass,
+        "nameservers",
+        false,
+        appendHtml
+      ));
+    }
+  }
+
   cards.push(card(
     t('cname'),
     loaded.cname ? (r.cname ? (r.cnameUsedWwwFallback && r.cnameLookupDomain && r.cnameLookupDomain !== r.domain ? (`${r.cname}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.cnameLookupDomain })}`) : r.cname) : null) : (errors.cname ? errors.cname : t('loadingValue')),
@@ -4512,6 +4712,257 @@ document.getElementById("domainInput").addEventListener("keyup", function (e) {
 // projection (used when the clipboard target only accepts text). Storage
 // is gated through the same consent-aware wrapper as the rest of the app.
 const INTAKE_STORAGE_KEY = 'acsIntakeRich';
+
+// Localized Customer Intake questionnaire data, keyed by app language code.
+// Each locale supplies: the section headers, the per-field canonical question
+// text (which doubles as both the inserted template line AND a primary
+// extraction pattern so the two never drift apart), a couple of clarifier
+// strings (email-type examples, default recipient note, the address-source /
+// bounce-handling explanatory notes), and the "replace template?" confirm
+// prompt. English is intentionally NOT included here: it remains the canonical
+// INTAKE_TEMPLATE_HTML below and the baseline INTAKE_EXTRACT_FIELDS patterns.
+// Languages without an entry simply fall back to the English template.
+//
+// NOTE: non-ASCII characters are \uXXXX-escaped per the repo i18n convention.
+// Machine-authored translations (especially ar/zh-CN/hi-IN/ja-JP/ru-RU) should
+// be reviewed by a native speaker; meaning is best-effort.
+const INTAKE_LOCALES = {
+  'es': {
+    replaceConfirm: '\u00bfReemplazar las notas de admisi\u00f3n actuales con la plantilla est\u00e1ndar?',
+    sections: { customer: 'Informaci\u00f3n del cliente', email: 'Informaci\u00f3n del servicio de correo electr\u00f3nico', usage: 'Informaci\u00f3n de uso', additional: 'Informaci\u00f3n adicional' },
+    emailTypeExamples: '(como Transaccional, Marketing, Promocional)',
+    recipientDefault: '(Predeterminado: 50)',
+    addressSourceNote: 'Nota: El origen de las direcciones de correo electr\u00f3nico a las que env\u00eda sus mensajes desempe\u00f1a un papel crucial en la eficacia y el cumplimiento de sus campa\u00f1as de marketing por correo electr\u00f3nico. Proporcionar detalles sobre el origen de sus direcciones nos ayuda a comprender c\u00f3mo adquiere y mantiene su lista de suscriptores.',
+    bounceNote: 'Explique si dispone de un proceso automatizado que gestione las bajas cuando los destinatarios hacen clic en el enlace de cancelar suscripci\u00f3n de sus correos. Adem\u00e1s, si recibe notificaciones de rebote o de no entrega, indique c\u00f3mo las gestiona y si dispone de alg\u00fan mecanismo para eliminar autom\u00e1ticamente las direcciones que generan rebotes constantes.',
+    fields: {
+      companyName: 'Nombre de la empresa',
+      companyWebsite: 'Sitio web de la empresa',
+      businessDescription: 'Proporcione una breve descripci\u00f3n de su empresa',
+      subscriptionId: 'ID de suscripci\u00f3n',
+      acsResourceName: 'Nombre del recurso de Azure Communication Services',
+      customDomainInUse: '\u00bfSu dominio personalizado ya est\u00e1 configurado y se utiliza actualmente para enviar mensajes?',
+      currentSendingDomain: 'Indique el dominio desde el que env\u00eda correos electr\u00f3nicos actualmente',
+      emailType: '\u00bfQu\u00e9 tipo de correos electr\u00f3nicos env\u00eda?',
+      expectedVolume: 'Especifique el volumen esperado de correos electr\u00f3nicos que planea enviar',
+      ratePerMinute: '\u00bfCu\u00e1l es la tasa m\u00e1xima de mensajes por minuto que necesita?',
+      ratePerHour: '\u00bfCu\u00e1l es la tasa m\u00e1xima de mensajes por hora que necesita?',
+      ratePerDay: '\u00bfCu\u00e1l es la tasa m\u00e1xima de mensajes por d\u00eda que necesita?',
+      attachmentSizeMb: '\u00bfCu\u00e1l es el tama\u00f1o m\u00e1ximo de adjunto (en MB) que necesita?',
+      recipientCount: '\u00bfCu\u00e1l es el n\u00famero m\u00e1ximo de destinatarios por correo electr\u00f3nico que necesita?',
+      addressSource: '\u00bfCu\u00e1l es el origen de las direcciones de correo electr\u00f3nico que utiliza para enviar sus mensajes?',
+      bounceHandling: '\u00bfC\u00f3mo gestiona y elimina actualmente las direcciones de correo electr\u00f3nico que se han dado de baja o que han resultado en rebotes de su lista de correo?'
+    }
+  },
+  'fr': {
+    replaceConfirm: 'Remplacer les notes d\u0027admission actuelles par le mod\u00e8le standard ?',
+    sections: { customer: 'Informations sur le client', email: 'Informations sur le service de messagerie', usage: 'Informations d\u0027utilisation', additional: 'Informations compl\u00e9mentaires' },
+    emailTypeExamples: '(par exemple Transactionnel, Marketing, Promotionnel)',
+    recipientDefault: '(Par d\u00e9faut : 50)',
+    addressSourceNote: 'Remarque : La source des adresses e-mail auxquelles vous envoyez vos messages joue un r\u00f4le crucial dans l\u0027efficacit\u00e9 et la conformit\u00e9 de vos campagnes de marketing par e-mail. Fournir des d\u00e9tails sur la source de vos adresses nous aide \u00e0 comprendre comment vous acqu\u00e9rez et maintenez votre liste d\u0027abonn\u00e9s.',
+    bounceNote: 'Expliquez si vous disposez d\u0027un processus automatis\u00e9 qui g\u00e8re les d\u00e9sabonnements lorsque les destinataires cliquent sur le lien de d\u00e9sabonnement de vos e-mails. De plus, si vous recevez des notifications de rejet ou de non-distribution, indiquez comment vous les traitez et si vous disposez d\u0027un m\u00e9canisme pour supprimer automatiquement les adresses qui g\u00e9n\u00e8rent des rejets constants.',
+    fields: {
+      companyName: 'Nom de l\u0027entreprise',
+      companyWebsite: 'Site web de l\u0027entreprise',
+      businessDescription: 'Fournissez une br\u00e8ve description de votre entreprise',
+      subscriptionId: 'ID d\u0027abonnement',
+      acsResourceName: 'Nom de la ressource Azure Communication Services',
+      customDomainInUse: 'Votre domaine personnalis\u00e9 est-il d\u00e9j\u00e0 configur\u00e9 et actuellement utilis\u00e9 pour l\u0027envoi de messages ?',
+      currentSendingDomain: 'Indiquez le domaine \u00e0 partir duquel vous envoyez actuellement des e-mails',
+      emailType: 'Quel type d\u0027e-mails envoyez-vous ?',
+      expectedVolume: 'Pr\u00e9cisez le volume d\u0027e-mails que vous pr\u00e9voyez d\u0027envoyer',
+      ratePerMinute: 'Quel est le d\u00e9bit maximal de messages par minute dont vous avez besoin ?',
+      ratePerHour: 'Quel est le d\u00e9bit maximal de messages par heure dont vous avez besoin ?',
+      ratePerDay: 'Quel est le d\u00e9bit maximal de messages par jour dont vous avez besoin ?',
+      attachmentSizeMb: 'Quelle est la taille maximale de pi\u00e8ce jointe (en Mo) dont vous avez besoin ?',
+      recipientCount: 'Quel est le nombre maximal de destinataires par e-mail dont vous avez besoin ?',
+      addressSource: 'Quelle est la source des adresses e-mail que vous utilisez pour envoyer vos messages ?',
+      bounceHandling: 'Comment g\u00e9rez-vous et supprimez-vous actuellement les adresses e-mail qui se sont d\u00e9sabonn\u00e9es ou qui ont entra\u00een\u00e9 des rejets de votre liste de diffusion ?'
+    }
+  },
+  'de': {
+    replaceConfirm: 'Die aktuellen Aufnahmenotizen durch die Standardvorlage ersetzen?',
+    sections: { customer: 'Kundeninformationen', email: 'Informationen zum E-Mail-Dienst', usage: 'Nutzungsinformationen', additional: 'Zus\u00e4tzliche Informationen' },
+    emailTypeExamples: '(z. B. Transaktional, Marketing, Werbung)',
+    recipientDefault: '(Standard: 50)',
+    addressSourceNote: 'Hinweis: Die Quelle der E-Mail-Adressen, an die Sie Ihre Nachrichten senden, spielt eine entscheidende Rolle f\u00fcr die Wirksamkeit und Compliance Ihrer E-Mail-Marketingkampagnen. Angaben zur Herkunft Ihrer Adressen helfen uns zu verstehen, wie Sie Ihre Abonnentenliste erwerben und pflegen.',
+    bounceNote: 'Erl\u00e4utern Sie, ob Sie \u00fcber einen automatisierten Prozess verf\u00fcgen, der Abmeldungen verarbeitet, wenn Empf\u00e4nger auf den Abmeldelink in Ihren E-Mails klicken. Falls Sie Unzustellbarkeitsbenachrichtigungen erhalten, geben Sie au\u00dferdem an, wie Sie damit umgehen und ob Sie \u00fcber einen Mechanismus verf\u00fcgen, um Adressen mit dauerhaften Unzustellbarkeiten automatisch zu entfernen.',
+    fields: {
+      companyName: 'Firmenname',
+      companyWebsite: 'Unternehmenswebsite',
+      businessDescription: 'Geben Sie eine kurze Beschreibung Ihres Unternehmens an',
+      subscriptionId: 'Abonnement-ID',
+      acsResourceName: 'Name der Azure Communication Services-Ressource',
+      customDomainInUse: 'Ist Ihre benutzerdefinierte Dom\u00e4ne bereits eingerichtet und wird derzeit zum Senden von Nachrichten verwendet?',
+      currentSendingDomain: 'Geben Sie die Dom\u00e4ne an, von der aus Sie derzeit E-Mails senden',
+      emailType: 'Welche Art von E-Mails senden Sie?',
+      expectedVolume: 'Geben Sie das erwartete Volumen an E-Mails an, das Sie senden m\u00f6chten',
+      ratePerMinute: 'Wie hoch ist die maximale Nachrichtenrate pro Minute, die Sie ben\u00f6tigen?',
+      ratePerHour: 'Wie hoch ist die maximale Nachrichtenrate pro Stunde, die Sie ben\u00f6tigen?',
+      ratePerDay: 'Wie hoch ist die maximale Nachrichtenrate pro Tag, die Sie ben\u00f6tigen?',
+      attachmentSizeMb: 'Wie gro\u00df ist die maximale Anhangsgr\u00f6\u00dfe (in MB), die Sie ben\u00f6tigen?',
+      recipientCount: 'Wie hoch ist die maximale Empf\u00e4ngeranzahl pro E-Mail, die Sie ben\u00f6tigen?',
+      addressSource: 'Was ist die Quelle der E-Mail-Adressen, die Sie zum Senden Ihrer Nachrichten verwenden?',
+      bounceHandling: 'Wie verwalten und entfernen Sie derzeit E-Mail-Adressen, die sich abgemeldet haben oder zu Unzustellbarkeiten in Ihrer Mailingliste gef\u00fchrt haben?'
+    }
+  },
+  'pt-BR': {
+    replaceConfirm: 'Substituir as anota\u00e7\u00f5es de admiss\u00e3o atuais pelo modelo padr\u00e3o?',
+    sections: { customer: 'Informa\u00e7\u00f5es do cliente', email: 'Informa\u00e7\u00f5es do servi\u00e7o de e-mail', usage: 'Informa\u00e7\u00f5es de uso', additional: 'Informa\u00e7\u00f5es adicionais' },
+    emailTypeExamples: '(como Transacional, Marketing, Promocional)',
+    recipientDefault: '(Padr\u00e3o: 50)',
+    addressSourceNote: 'Observa\u00e7\u00e3o: A origem dos endere\u00e7os de e-mail para os quais voc\u00ea envia suas mensagens desempenha um papel crucial na efic\u00e1cia e conformidade das suas campanhas de marketing por e-mail. Fornecer detalhes sobre a origem dos seus endere\u00e7os nos ajuda a entender como voc\u00ea adquire e mant\u00e9m sua lista de assinantes.',
+    bounceNote: 'Explique se voc\u00ea tem um processo automatizado que lida com cancelamentos de inscri\u00e7\u00e3o quando os destinat\u00e1rios clicam no link de cancelar inscri\u00e7\u00e3o nos seus e-mails. Al\u00e9m disso, se voc\u00ea recebe notifica\u00e7\u00f5es de devolu\u00e7\u00e3o ou de n\u00e3o entrega, informe como voc\u00ea as trata e se possui algum mecanismo para remover automaticamente os endere\u00e7os que resultam em devolu\u00e7\u00f5es constantes.',
+    fields: {
+      companyName: 'Nome da empresa',
+      companyWebsite: 'Site da empresa',
+      businessDescription: 'Forne\u00e7a uma breve descri\u00e7\u00e3o da sua empresa',
+      subscriptionId: 'ID da assinatura',
+      acsResourceName: 'Nome do recurso do Azure Communication Services',
+      customDomainInUse: 'Seu dom\u00ednio personalizado j\u00e1 est\u00e1 configurado e atualmente \u00e9 usado para enviar mensagens?',
+      currentSendingDomain: 'Indique o dom\u00ednio a partir do qual voc\u00ea est\u00e1 enviando e-mails atualmente',
+      emailType: 'Que tipo de e-mails voc\u00ea envia?',
+      expectedVolume: 'Especifique o volume esperado de e-mails que voc\u00ea planeja enviar',
+      ratePerMinute: 'Qual \u00e9 a taxa m\u00e1xima de mensagens por minuto que voc\u00ea precisa?',
+      ratePerHour: 'Qual \u00e9 a taxa m\u00e1xima de mensagens por hora que voc\u00ea precisa?',
+      ratePerDay: 'Qual \u00e9 a taxa m\u00e1xima de mensagens por dia que voc\u00ea precisa?',
+      attachmentSizeMb: 'Qual \u00e9 o tamanho m\u00e1ximo de anexo (em MB) que voc\u00ea precisa?',
+      recipientCount: 'Qual \u00e9 o n\u00famero m\u00e1ximo de destinat\u00e1rios por e-mail que voc\u00ea precisa?',
+      addressSource: 'Qual \u00e9 a origem dos endere\u00e7os de e-mail que voc\u00ea usa para enviar suas mensagens?',
+      bounceHandling: 'Como voc\u00ea gerencia e remove atualmente os endere\u00e7os de e-mail que cancelaram a inscri\u00e7\u00e3o ou que resultaram em devolu\u00e7\u00f5es da sua lista de e-mails?'
+    }
+  },
+  'ar': {
+    replaceConfirm: '\u0647\u0644 \u062a\u0631\u064a\u062f \u0627\u0633\u062a\u0628\u062f\u0627\u0644 \u0645\u0644\u0627\u062d\u0638\u0627\u062a \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645 \u0627\u0644\u062d\u0627\u0644\u064a\u0629 \u0628\u0627\u0644\u0642\u0627\u0644\u0628 \u0627\u0644\u0642\u064a\u0627\u0633\u064a\u061f',
+    sections: { customer: '\u0645\u0639\u0644\u0648\u0645\u0627\u062a \u0627\u0644\u0639\u0645\u064a\u0644', email: '\u0645\u0639\u0644\u0648\u0645\u0627\u062a \u062e\u062f\u0645\u0629 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a', usage: '\u0645\u0639\u0644\u0648\u0645\u0627\u062a \u0627\u0644\u0627\u0633\u062a\u062e\u062f\u0627\u0645', additional: '\u0645\u0639\u0644\u0648\u0645\u0627\u062a \u0625\u0636\u0627\u0641\u064a\u0629' },
+    emailTypeExamples: '(\u0645\u062b\u0644 \u0627\u0644\u0645\u0639\u0627\u0645\u0644\u0627\u062a\u060c \u0627\u0644\u062a\u0633\u0648\u064a\u0642\u060c \u0627\u0644\u062a\u0631\u0648\u064a\u062c)',
+    recipientDefault: '(\u0627\u0644\u0627\u0641\u062a\u0631\u0627\u0636\u064a: 50)',
+    addressSourceNote: '\u0645\u0644\u0627\u062d\u0638\u0629: \u064a\u0644\u0639\u0628 \u0645\u0635\u062f\u0631 \u0639\u0646\u0627\u0648\u064a\u0646 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0627\u0644\u062a\u064a \u062a\u0631\u0633\u0644 \u0625\u0644\u064a\u0647\u0627 \u0631\u0633\u0627\u0626\u0644\u0643 \u062f\u0648\u0631\u064b\u0627 \u062d\u0627\u0633\u0645\u064b\u0627 \u0641\u064a \u0641\u0639\u0627\u0644\u064a\u0629 \u062d\u0645\u0644\u0627\u062a\u0643 \u0627\u0644\u062a\u0633\u0648\u064a\u0642\u064a\u0629 \u0648\u0627\u0645\u062a\u062b\u0627\u0644\u0647\u0627. \u064a\u0633\u0627\u0639\u062f\u0646\u0627 \u062a\u0642\u062f\u064a\u0645 \u062a\u0641\u0627\u0635\u064a\u0644 \u062d\u0648\u0644 \u0645\u0635\u062f\u0631 \u0639\u0646\u0627\u0648\u064a\u0646\u0643 \u0639\u0644\u0649 \u0641\u0647\u0645 \u0643\u064a\u0641\u064a\u0629 \u062d\u0635\u0648\u0644\u0643 \u0639\u0644\u0649 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0634\u062a\u0631\u0643\u064a\u0646 \u0648\u0627\u0644\u062d\u0641\u0627\u0638 \u0639\u0644\u064a\u0647\u0627.',
+    bounceNote: '\u0648\u0636\u0651\u062d \u0645\u0627 \u0625\u0630\u0627 \u0643\u0627\u0646 \u0644\u062f\u064a\u0643 \u0639\u0645\u0644\u064a\u0629 \u0622\u0644\u064a\u0629 \u062a\u062a\u0639\u0627\u0645\u0644 \u0645\u0639 \u0625\u0644\u063a\u0627\u0621 \u0627\u0644\u0627\u0634\u062a\u0631\u0627\u0643 \u0639\u0646\u062f\u0645\u0627 \u064a\u0646\u0642\u0631 \u0627\u0644\u0645\u0633\u062a\u0644\u0645\u0648\u0646 \u0639\u0644\u0649 \u0631\u0627\u0628\u0637 \u0625\u0644\u063a\u0627\u0621 \u0627\u0644\u0627\u0634\u062a\u0631\u0627\u0643 \u0641\u064a \u0631\u0633\u0627\u0626\u0644\u0643. \u0648\u0625\u0630\u0627 \u062a\u0644\u0642\u064a\u062a \u0625\u0634\u0639\u0627\u0631\u0627\u062a \u0627\u0631\u062a\u062f\u0627\u062f \u0623\u0648 \u0639\u062f\u0645 \u062a\u0633\u0644\u064a\u0645\u060c \u0641\u0627\u0630\u0643\u0631 \u0643\u064a\u0641\u064a\u0629 \u062a\u0639\u0627\u0645\u0644\u0643 \u0645\u0639\u0647\u0627 \u0648\u0645\u0627 \u0625\u0630\u0627 \u0643\u0627\u0646 \u0644\u062f\u064a\u0643 \u0622\u0644\u064a\u0629 \u0644\u0625\u0632\u0627\u0644\u0629 \u0627\u0644\u0639\u0646\u0627\u0648\u064a\u0646 \u0627\u0644\u062a\u064a \u062a\u0624\u062f\u064a \u0625\u0644\u0649 \u0627\u0631\u062a\u062f\u0627\u062f\u0627\u062a \u0645\u062a\u0643\u0631\u0631\u0629 \u062a\u0644\u0642\u0627\u0626\u064a\u064b\u0627.',
+    fields: {
+      companyName: '\u0627\u0633\u0645 \u0627\u0644\u0634\u0631\u0643\u0629',
+      companyWebsite: '\u0645\u0648\u0642\u0639 \u0627\u0644\u0634\u0631\u0643\u0629 \u0639\u0644\u0649 \u0627\u0644\u0648\u064a\u0628',
+      businessDescription: '\u0642\u062f\u0651\u0645 \u0648\u0635\u0641\u064b\u0627 \u0645\u0648\u062c\u0632\u064b\u0627 \u0644\u0646\u0634\u0627\u0637\u0643 \u0627\u0644\u062a\u062c\u0627\u0631\u064a',
+      subscriptionId: '\u0645\u0639\u0631\u0651\u0641 \u0627\u0644\u0627\u0634\u062a\u0631\u0627\u0643',
+      acsResourceName: '\u0627\u0633\u0645 \u0645\u0648\u0631\u062f Azure Communication Services',
+      customDomainInUse: '\u0647\u0644 \u062a\u0645 \u0625\u0639\u062f\u0627\u062f \u0646\u0637\u0627\u0642\u0643 \u0627\u0644\u0645\u062e\u0635\u0635 \u0628\u0627\u0644\u0641\u0639\u0644 \u0648\u064a\u064f\u0633\u062a\u062e\u062f\u0645 \u062d\u0627\u0644\u064a\u064b\u0627 \u0644\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0631\u0633\u0627\u0626\u0644\u061f',
+      currentSendingDomain: '\u062d\u062f\u0651\u062f \u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u0630\u064a \u062a\u0631\u0633\u0644 \u0645\u0646\u0647 \u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u062d\u0627\u0644\u064a\u064b\u0627',
+      emailType: '\u0645\u0627 \u0646\u0648\u0639 \u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0627\u0644\u062a\u064a \u062a\u0631\u0633\u0644\u0647\u0627\u061f',
+      expectedVolume: '\u062d\u062f\u0651\u062f \u0627\u0644\u062d\u062c\u0645 \u0627\u0644\u0645\u062a\u0648\u0642\u0639 \u0644\u0631\u0633\u0627\u0626\u0644 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0627\u0644\u062a\u064a \u062a\u062e\u0637\u0637 \u0644\u0625\u0631\u0633\u0627\u0644\u0647\u0627',
+      ratePerMinute: '\u0645\u0627 \u0627\u0644\u062d\u062f \u0627\u0644\u0623\u0642\u0635\u0649 \u0644\u0645\u0639\u062f\u0644 \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0641\u064a \u0627\u0644\u062f\u0642\u064a\u0642\u0629 \u0627\u0644\u0630\u064a \u062a\u062d\u062a\u0627\u062c\u0647\u061f',
+      ratePerHour: '\u0645\u0627 \u0627\u0644\u062d\u062f \u0627\u0644\u0623\u0642\u0635\u0649 \u0644\u0645\u0639\u062f\u0644 \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0641\u064a \u0627\u0644\u0633\u0627\u0639\u0629 \u0627\u0644\u0630\u064a \u062a\u062d\u062a\u0627\u062c\u0647\u061f',
+      ratePerDay: '\u0645\u0627 \u0627\u0644\u062d\u062f \u0627\u0644\u0623\u0642\u0635\u0649 \u0644\u0645\u0639\u062f\u0644 \u0627\u0644\u0631\u0633\u0627\u0626\u0644 \u0641\u064a \u0627\u0644\u064a\u0648\u0645 \u0627\u0644\u0630\u064a \u062a\u062d\u062a\u0627\u062c\u0647\u061f',
+      attachmentSizeMb: '\u0645\u0627 \u0627\u0644\u062d\u062f \u0627\u0644\u0623\u0642\u0635\u0649 \u0644\u062d\u062c\u0645 \u0627\u0644\u0645\u0631\u0641\u0642 (\u0628\u0627\u0644\u0645\u064a\u063a\u0627\u0628\u0627\u064a\u062a) \u0627\u0644\u0630\u064a \u062a\u062d\u062a\u0627\u062c\u0647\u061f',
+      recipientCount: '\u0645\u0627 \u0627\u0644\u062d\u062f \u0627\u0644\u0623\u0642\u0635\u0649 \u0644\u0639\u062f\u062f \u0627\u0644\u0645\u0633\u062a\u0644\u0645\u064a\u0646 \u0644\u0643\u0644 \u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u0630\u064a \u062a\u062d\u062a\u0627\u062c\u0647\u061f',
+      addressSource: '\u0645\u0627 \u0645\u0635\u062f\u0631 \u0639\u0646\u0627\u0648\u064a\u0646 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0627\u0644\u062a\u064a \u062a\u0633\u062a\u062e\u062f\u0645\u0647\u0627 \u0644\u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0626\u0644\u0643\u061f',
+      bounceHandling: '\u0643\u064a\u0641 \u062a\u062f\u064a\u0631 \u0648\u062a\u0632\u064a\u0644 \u062d\u0627\u0644\u064a\u064b\u0627 \u0639\u0646\u0627\u0648\u064a\u0646 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0627\u0644\u062a\u064a \u0623\u0644\u063a\u062a \u0627\u0644\u0627\u0634\u062a\u0631\u0627\u0643 \u0623\u0648 \u0627\u0644\u062a\u064a \u0646\u062a\u062c \u0639\u0646\u0647\u0627 \u0627\u0631\u062a\u062f\u0627\u062f \u0645\u0646 \u0642\u0627\u0626\u0645\u062a\u0643 \u0627\u0644\u0628\u0631\u064a\u062f\u064a\u0629\u061f'
+    }
+  },
+  'zh-CN': {
+    replaceConfirm: '\u7528\u6807\u51c6\u6a21\u677f\u66ff\u6362\u5f53\u524d\u7684\u63a5\u6536\u5907\u6ce8\u5417\uff1f',
+    sections: { customer: '\u5ba2\u6237\u4fe1\u606f', email: '\u7535\u5b50\u90ae\u4ef6\u670d\u52a1\u4fe1\u606f', usage: '\u4f7f\u7528\u60c5\u51b5\u4fe1\u606f', additional: '\u5176\u4ed6\u4fe1\u606f' },
+    emailTypeExamples: '\uff08\u4f8b\u5982\u4e8b\u52a1\u6027\u3001\u8425\u9500\u3001\u4fc3\u9500\uff09',
+    recipientDefault: '\uff08\u9ed8\u8ba4\uff1a50\uff09',
+    addressSourceNote: '\u6ce8\u610f\uff1a\u60a8\u53d1\u9001\u90ae\u4ef6\u7684\u7535\u5b50\u90ae\u4ef6\u5730\u5740\u6765\u6e90\u5bf9\u7535\u5b50\u90ae\u4ef6\u8425\u9500\u6d3b\u52a8\u7684\u6709\u6548\u6027\u548c\u5408\u89c4\u6027\u8d77\u7740\u81f3\u5173\u91cd\u8981\u7684\u4f5c\u7528\u3002\u63d0\u4f9b\u6709\u5173\u5730\u5740\u6765\u6e90\u7684\u8be6\u7ec6\u4fe1\u606f\u6709\u52a9\u4e8e\u6211\u4eec\u4e86\u89e3\u60a8\u5982\u4f55\u83b7\u53d6\u548c\u7ef4\u62a4\u8ba2\u9605\u8005\u5217\u8868\u3002',
+    bounceNote: '\u8bf7\u8bf4\u660e\u5f53\u6536\u4ef6\u4eba\u70b9\u51fb\u90ae\u4ef6\u4e2d\u7684\u201c\u9000\u8ba2\u201d\u94fe\u63a5\u65f6\uff0c\u60a8\u662f\u5426\u6709\u81ea\u52a8\u5904\u7406\u9000\u8ba2\u7684\u6d41\u7a0b\u3002\u6b64\u5916\uff0c\u5982\u679c\u60a8\u6536\u5230\u9000\u4fe1\u6216\u65e0\u6cd5\u6295\u9012\u7684\u901a\u77e5\uff0c\u8bf7\u8bf4\u660e\u60a8\u5982\u4f55\u5904\u7406\u8fd9\u4e9b\u901a\u77e5\uff0c\u4ee5\u53ca\u60a8\u662f\u5426\u6709\u4efb\u4f55\u673a\u5236\u53ef\u4ee5\u81ea\u52a8\u5220\u9664\u6301\u7eed\u9000\u4fe1\u7684\u7535\u5b50\u90ae\u4ef6\u5730\u5740\u3002',
+    fields: {
+      companyName: '\u516c\u53f8\u540d\u79f0',
+      companyWebsite: '\u516c\u53f8\u7f51\u7ad9',
+      businessDescription: '\u8bf7\u7b80\u8981\u63cf\u8ff0\u60a8\u7684\u4e1a\u52a1',
+      subscriptionId: '\u8ba2\u9605 ID',
+      acsResourceName: 'Azure \u901a\u4fe1\u670d\u52a1\u8d44\u6e90\u540d\u79f0',
+      customDomainInUse: '\u60a8\u7684\u81ea\u5b9a\u4e49\u57df\u662f\u5426\u5df2\u8bbe\u7f6e\u5e76\u4e14\u5f53\u524d\u7528\u4e8e\u53d1\u9001\u90ae\u4ef6\uff1f',
+      currentSendingDomain: '\u8bf7\u6307\u660e\u60a8\u5f53\u524d\u53d1\u9001\u7535\u5b50\u90ae\u4ef6\u6240\u7528\u7684\u57df',
+      emailType: '\u60a8\u53d1\u9001\u54ea\u79cd\u7c7b\u578b\u7684\u7535\u5b50\u90ae\u4ef6\uff1f',
+      expectedVolume: '\u8bf7\u6307\u5b9a\u60a8\u8ba1\u5212\u53d1\u9001\u7684\u9884\u671f\u7535\u5b50\u90ae\u4ef6\u91cf',
+      ratePerMinute: '\u60a8\u6240\u9700\u7684\u6bcf\u5206\u949f\u6700\u5927\u90ae\u4ef6\u901f\u7387\u662f\u591a\u5c11\uff1f',
+      ratePerHour: '\u60a8\u6240\u9700\u7684\u6bcf\u5c0f\u65f6\u6700\u5927\u90ae\u4ef6\u901f\u7387\u662f\u591a\u5c11\uff1f',
+      ratePerDay: '\u60a8\u6240\u9700\u7684\u6bcf\u5929\u6700\u5927\u90ae\u4ef6\u901f\u7387\u662f\u591a\u5c11\uff1f',
+      attachmentSizeMb: '\u60a8\u6240\u9700\u7684\u6700\u5927\u9644\u4ef6\u5927\u5c0f\uff08MB\uff09\u662f\u591a\u5c11\uff1f',
+      recipientCount: '\u60a8\u6240\u9700\u7684\u6bcf\u5c01\u7535\u5b50\u90ae\u4ef6\u6700\u5927\u6536\u4ef6\u4eba\u6570\u662f\u591a\u5c11\uff1f',
+      addressSource: '\u60a8\u7528\u4e8e\u53d1\u9001\u90ae\u4ef6\u7684\u7535\u5b50\u90ae\u4ef6\u5730\u5740\u6765\u6e90\u662f\u4ec0\u4e48\uff1f',
+      bounceHandling: '\u60a8\u76ee\u524d\u5982\u4f55\u7ba1\u7406\u548c\u5220\u9664\u5df2\u9000\u8ba2\u6216\u5bfc\u81f4\u9000\u4fe1\u7684\u7535\u5b50\u90ae\u4ef6\u5730\u5740\uff1f'
+    }
+  },
+  'hi-IN': {
+    replaceConfirm: '\u0935\u0930\u094d\u0924\u092e\u093e\u0928 \u0907\u0928\u091f\u0947\u0915 \u0928\u094b\u091f\u094d\u0938 \u0915\u094b \u092e\u093e\u0928\u0915 \u091f\u0947\u092e\u094d\u092a\u0932\u0947\u091f \u0938\u0947 \u092c\u0926\u0932\u0947\u0902?',
+    sections: { customer: '\u0917\u094d\u0930\u093e\u0939\u0915 \u091c\u093e\u0928\u0915\u093e\u0930\u0940', email: '\u0908\u092e\u0947\u0932 \u0938\u0947\u0935\u093e \u091c\u093e\u0928\u0915\u093e\u0930\u0940', usage: '\u0909\u092a\u092f\u094b\u0917 \u091c\u093e\u0928\u0915\u093e\u0930\u0940', additional: '\u0905\u0924\u093f\u0930\u093f\u0915\u094d\u0924 \u091c\u093e\u0928\u0915\u093e\u0930\u0940' },
+    emailTypeExamples: '(\u091c\u0948\u0938\u0947 \u0932\u0947\u0928\u0926\u0947\u0928, \u092e\u093e\u0930\u094d\u0915\u0947\u091f\u093f\u0902\u0917, \u092a\u094d\u0930\u091a\u093e\u0930)',
+    recipientDefault: '(\u0921\u093f\u092b\u093c\u0949\u0932\u094d\u091f: 50)',
+    addressSourceNote: '\u0928\u094b\u091f: \u091c\u093f\u0928 \u0908\u092e\u0947\u0932 \u092a\u0924\u094b\u0902 \u092a\u0930 \u0906\u092a \u0905\u092a\u0928\u0947 \u0938\u0902\u0926\u0947\u0936 \u092d\u0947\u091c\u0924\u0947 \u0939\u0948\u0902 \u0909\u0928\u0915\u093e \u0938\u094d\u0930\u094b\u0924 \u0906\u092a\u0915\u0947 \u0908\u092e\u0947\u0932 \u092e\u093e\u0930\u094d\u0915\u0947\u091f\u093f\u0902\u0917 \u0905\u092d\u093f\u092f\u093e\u0928\u094b\u0902 \u0915\u0940 \u092a\u094d\u0930\u092d\u093e\u0935\u0936\u0940\u0932\u0924\u093e \u0914\u0930 \u0905\u0928\u0941\u092a\u093e\u0932\u0928 \u092e\u0947\u0902 \u092e\u0939\u0924\u094d\u0935\u092a\u0942\u0930\u094d\u0923 \u092d\u0942\u092e\u093f\u0915\u093e \u0928\u093f\u092d\u093e\u0924\u093e \u0939\u0948\u0964 \u0905\u092a\u0928\u0947 \u092a\u0924\u094b\u0902 \u0915\u0947 \u0938\u094d\u0930\u094b\u0924 \u0915\u0947 \u092c\u093e\u0930\u0947 \u092e\u0947\u0902 \u0935\u093f\u0935\u0930\u0923 \u092a\u094d\u0930\u0926\u093e\u0928 \u0915\u0930\u0928\u0947 \u0938\u0947 \u0939\u092e\u0947\u0902 \u092f\u0939 \u0938\u092e\u091d\u0928\u0947 \u092e\u0947\u0902 \u092e\u0926\u0926 \u092e\u093f\u0932\u0924\u0940 \u0939\u0948 \u0915\u093f \u0906\u092a \u0905\u092a\u0928\u0940 \u0938\u0926\u0938\u094d\u092f \u0938\u0942\u091a\u0940 \u0915\u0948\u0938\u0947 \u092a\u094d\u0930\u093e\u092a\u094d\u0924 \u0914\u0930 \u092c\u0928\u093e\u090f \u0930\u0916\u0924\u0947 \u0939\u0948\u0902\u0964',
+    bounceNote: '\u092c\u0924\u093e\u090f\u0902 \u0915\u093f \u0915\u094d\u092f\u093e \u0906\u092a\u0915\u0947 \u092a\u093e\u0938 \u090f\u0915 \u0938\u094d\u0935\u091a\u093e\u0932\u093f\u0924 \u092a\u094d\u0930\u0915\u094d\u0930\u093f\u092f\u093e \u0939\u0948 \u091c\u094b \u0924\u092c \u0938\u0926\u0938\u094d\u092f\u0924\u093e \u0938\u092e\u093e\u092a\u094d\u0924\u093f \u0915\u094b \u0938\u0902\u092d\u093e\u0932\u0924\u0940 \u0939\u0948 \u091c\u092c \u092a\u094d\u0930\u093e\u092a\u094d\u0924\u0915\u0930\u094d\u0924\u093e \u0906\u092a\u0915\u0947 \u0908\u092e\u0947\u0932 \u092e\u0947\u0902 \u0938\u0926\u0938\u094d\u092f\u0924\u093e \u0938\u092e\u093e\u092a\u094d\u0924 \u0932\u093f\u0902\u0915 \u092a\u0930 \u0915\u094d\u0932\u093f\u0915 \u0915\u0930\u0924\u0947 \u0939\u0948\u0902\u0964 \u0907\u0938\u0915\u0947 \u0905\u0932\u093e\u0935\u093e, \u092f\u0926\u093f \u0906\u092a\u0915\u094b \u092c\u093e\u0909\u0902\u0938/\u0905\u0935\u093f\u0924\u0930\u0923\u0940\u092f \u0938\u0942\u091a\u0928\u093e\u090f\u0902 \u092e\u093f\u0932\u0924\u0940 \u0939\u0948\u0902, \u0924\u094b \u092c\u0924\u093e\u090f\u0902 \u0915\u093f \u0906\u092a \u0909\u0928\u094d\u0939\u0947\u0902 \u0915\u0948\u0938\u0947 \u0938\u0902\u092d\u093e\u0932\u0924\u0947 \u0939\u0948\u0902 \u0914\u0930 \u0915\u094d\u092f\u093e \u0906\u092a\u0915\u0947 \u092a\u093e\u0938 \u0932\u0917\u093e\u0924\u093e\u0930 \u092c\u093e\u0909\u0902\u0938 \u0939\u094b\u0928\u0947 \u0935\u093e\u0932\u0947 \u092a\u0924\u094b\u0902 \u0915\u094b \u0938\u094d\u0935\u091a\u093e\u0932\u093f\u0924 \u0930\u0942\u092a \u0938\u0947 \u0939\u091f\u093e\u0928\u0947 \u0915\u093e \u0915\u094b\u0908 \u0924\u0902\u0924\u094d\u0930 \u0939\u0948\u0964',
+    fields: {
+      companyName: '\u0915\u0902\u092a\u0928\u0940 \u0915\u093e \u0928\u093e\u092e',
+      companyWebsite: '\u0915\u0902\u092a\u0928\u0940 \u0915\u0940 \u0935\u0947\u092c\u0938\u093e\u0907\u091f',
+      businessDescription: '\u0905\u092a\u0928\u0947 \u0935\u094d\u092f\u0935\u0938\u093e\u092f \u0915\u093e \u0938\u0902\u0915\u094d\u0937\u093f\u092a\u094d\u0924 \u0935\u093f\u0935\u0930\u0923 \u0926\u0947\u0902',
+      subscriptionId: '\u0938\u0926\u0938\u094d\u092f\u0924\u093e \u0906\u0908\u0921\u0940',
+      acsResourceName: 'Azure Communication Services \u0938\u0902\u0938\u093e\u0927\u0928 \u0915\u093e \u0928\u093e\u092e',
+      customDomainInUse: '\u0915\u094d\u092f\u093e \u0906\u092a\u0915\u093e \u0915\u0938\u094d\u091f\u092e \u0921\u094b\u092e\u0947\u0928 \u092a\u0939\u0932\u0947 \u0938\u0947 \u0938\u0947\u091f \u0939\u0948 \u0914\u0930 \u0935\u0930\u094d\u0924\u092e\u093e\u0928 \u092e\u0947\u0902 \u0938\u0902\u0926\u0947\u0936 \u092d\u0947\u091c\u0928\u0947 \u0915\u0947 \u0932\u093f\u090f \u0909\u092a\u092f\u094b\u0917 \u0915\u093f\u092f\u093e \u091c\u093e \u0930\u0939\u093e \u0939\u0948?',
+      currentSendingDomain: '\u0935\u0939 \u0921\u094b\u092e\u0947\u0928 \u092c\u0924\u093e\u090f\u0902 \u091c\u093f\u0938\u0938\u0947 \u0906\u092a \u0935\u0930\u094d\u0924\u092e\u093e\u0928 \u092e\u0947\u0902 \u0908\u092e\u0947\u0932 \u092d\u0947\u091c \u0930\u0939\u0947 \u0939\u0948\u0902',
+      emailType: '\u0906\u092a \u0915\u093f\u0938 \u092a\u094d\u0930\u0915\u093e\u0930 \u0915\u0947 \u0908\u092e\u0947\u0932 \u092d\u0947\u091c\u0924\u0947 \u0939\u0948\u0902?',
+      expectedVolume: '\u0906\u092a \u091c\u093f\u0924\u0928\u0947 \u0908\u092e\u0947\u0932 \u092d\u0947\u091c\u0928\u0947 \u0915\u0940 \u092f\u094b\u091c\u0928\u093e \u092c\u0928\u093e \u0930\u0939\u0947 \u0939\u0948\u0902 \u0909\u0938\u0915\u0940 \u0905\u092a\u0947\u0915\u094d\u0937\u093f\u0924 \u092e\u093e\u0924\u094d\u0930\u093e \u092c\u0924\u093e\u090f\u0902',
+      ratePerMinute: '\u0906\u092a\u0915\u094b \u092a\u094d\u0930\u0924\u093f \u092e\u093f\u0928\u091f \u0938\u0902\u0926\u0947\u0936\u094b\u0902 \u0915\u0940 \u0905\u0927\u093f\u0915\u0924\u092e \u0926\u0930 \u0915\u093f\u0924\u0928\u0940 \u091a\u093e\u0939\u093f\u090f?',
+      ratePerHour: '\u0906\u092a\u0915\u094b \u092a\u094d\u0930\u0924\u093f \u0918\u0902\u091f\u093e \u0938\u0902\u0926\u0947\u0936\u094b\u0902 \u0915\u0940 \u0905\u0927\u093f\u0915\u0924\u092e \u0926\u0930 \u0915\u093f\u0924\u0928\u0940 \u091a\u093e\u0939\u093f\u090f?',
+      ratePerDay: '\u0906\u092a\u0915\u094b \u092a\u094d\u0930\u0924\u093f \u0926\u093f\u0928 \u0938\u0902\u0926\u0947\u0936\u094b\u0902 \u0915\u0940 \u0905\u0927\u093f\u0915\u0924\u092e \u0926\u0930 \u0915\u093f\u0924\u0928\u0940 \u091a\u093e\u0939\u093f\u090f?',
+      attachmentSizeMb: '\u0906\u092a\u0915\u094b \u0905\u0927\u093f\u0915\u0924\u092e \u0905\u091f\u0948\u091a\u092e\u0947\u0902\u091f \u0906\u0915\u093e\u0930 (MB \u092e\u0947\u0902) \u0915\u093f\u0924\u0928\u093e \u091a\u093e\u0939\u093f\u090f?',
+      recipientCount: '\u0906\u092a\u0915\u094b \u092a\u094d\u0930\u0924\u093f \u0908\u092e\u0947\u0932 \u0905\u0927\u093f\u0915\u0924\u092e \u092a\u094d\u0930\u093e\u092a\u094d\u0924\u0915\u0930\u094d\u0924\u093e \u0938\u0902\u0916\u094d\u092f\u093e \u0915\u093f\u0924\u0928\u0940 \u091a\u093e\u0939\u093f\u090f?',
+      addressSource: '\u0906\u092a \u0905\u092a\u0928\u0947 \u0938\u0902\u0926\u0947\u0936 \u092d\u0947\u091c\u0928\u0947 \u0915\u0947 \u0932\u093f\u090f \u091c\u093f\u0928 \u0908\u092e\u0947\u0932 \u092a\u0924\u094b\u0902 \u0915\u093e \u0909\u092a\u092f\u094b\u0917 \u0915\u0930\u0924\u0947 \u0939\u0948\u0902 \u0909\u0928\u0915\u093e \u0938\u094d\u0930\u094b\u0924 \u0915\u094d\u092f\u093e \u0939\u0948?',
+      bounceHandling: '\u0906\u092a \u0935\u0930\u094d\u0924\u092e\u093e\u0928 \u092e\u0947\u0902 \u0909\u0928 \u0908\u092e\u0947\u0932 \u092a\u0924\u094b\u0902 \u0915\u094b \u0915\u0948\u0938\u0947 \u092a\u094d\u0930\u092c\u0902\u0927\u093f\u0924 \u0914\u0930 \u0939\u091f\u093e\u0924\u0947 \u0939\u0948\u0902 \u091c\u093f\u0928\u094d\u0939\u094b\u0902\u0928\u0947 \u0938\u0926\u0938\u094d\u092f\u0924\u093e \u0938\u092e\u093e\u092a\u094d\u0924 \u0915\u0930 \u0926\u0940 \u0939\u0948 \u092f\u093e \u0906\u092a\u0915\u0940 \u092e\u0947\u0932\u093f\u0902\u0917 \u0938\u0942\u091a\u0940 \u0938\u0947 \u092c\u093e\u0909\u0902\u0938 \u0939\u0941\u090f \u0939\u0948\u0902?'
+    }
+  },
+  'ja-JP': {
+    replaceConfirm: '\u73fe\u5728\u306e\u30a4\u30f3\u30c6\u30fc\u30af \u30e1\u30e2\u3092\u6a19\u6e96\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u306b\u7f6e\u304d\u63db\u3048\u307e\u3059\u304b\uff1f',
+    sections: { customer: '\u9867\u5ba2\u60c5\u5831', email: '\u30e1\u30fc\u30eb \u30b5\u30fc\u30d3\u30b9\u60c5\u5831', usage: '\u4f7f\u7528\u72b6\u6cc1\u60c5\u5831', additional: '\u8ffd\u52a0\u60c5\u5831' },
+    emailTypeExamples: '\uff08\u4f8b\uff1a\u30c8\u30e9\u30f3\u30b6\u30af\u30b7\u30e7\u30f3\u3001\u30de\u30fc\u30b1\u30c6\u30a3\u30f3\u30b0\u3001\u30d7\u30ed\u30e2\u30fc\u30b7\u30e7\u30f3\uff09',
+    recipientDefault: '\uff08\u65e2\u5b9a\uff1a50\uff09',
+    addressSourceNote: '\u6ce8\uff1a\u30e1\u30c3\u30bb\u30fc\u30b8\u306e\u9001\u4fe1\u5148\u3068\u306a\u308b\u30e1\u30fc\u30eb \u30a2\u30c9\u30ec\u30b9\u306e\u53d6\u5f97\u5143\u306f\u3001\u30e1\u30fc\u30eb \u30de\u30fc\u30b1\u30c6\u30a3\u30f3\u30b0 \u30ad\u30e3\u30f3\u30da\u30fc\u30f3\u306e\u52b9\u679c\u3068\u30b3\u30f3\u30d7\u30e9\u30a4\u30a2\u30f3\u30b9\u306b\u304a\u3044\u3066\u91cd\u8981\u306a\u5f79\u5272\u3092\u679c\u305f\u3057\u307e\u3059\u3002\u30a2\u30c9\u30ec\u30b9\u306e\u53d6\u5f97\u5143\u306b\u95a2\u3059\u308b\u8a73\u7d30\u3092\u3054\u63d0\u4f9b\u3044\u305f\u3060\u304f\u3053\u3068\u3067\u3001\u8cfc\u8aad\u8005\u30ea\u30b9\u30c8\u306e\u53d6\u5f97\u3068\u7dad\u6301\u306e\u65b9\u6cd5\u3092\u628a\u63e1\u3067\u304d\u307e\u3059\u3002',
+    bounceNote: '\u53d7\u4fe1\u8005\u304c\u30e1\u30fc\u30eb\u5185\u306e\u300c\u914d\u4fe1\u505c\u6b62\u300d\u30ea\u30f3\u30af\u3092\u30af\u30ea\u30c3\u30af\u3057\u305f\u969b\u306b\u914d\u4fe1\u505c\u6b62\u3092\u51e6\u7406\u3059\u308b\u81ea\u52d5\u5316\u3055\u308c\u305f\u30d7\u30ed\u30bb\u30b9\u304c\u3042\u308b\u304b\u3069\u3046\u304b\u3092\u8aac\u660e\u3057\u3066\u304f\u3060\u3055\u3044\u3002\u307e\u305f\u3001\u30d0\u30a6\u30f3\u30b9/\u914d\u4fe1\u4e0d\u80fd\u306e\u901a\u77e5\u3092\u53d7\u3051\u53d6\u3063\u305f\u5834\u5408\u306f\u3001\u305d\u308c\u3089\u3092\u3069\u306e\u3088\u3046\u306b\u51e6\u7406\u3059\u308b\u304b\u3001\u304a\u3088\u3073\u7d99\u7d9a\u7684\u306b\u30d0\u30a6\u30f3\u30b9\u3059\u308b\u30a2\u30c9\u30ec\u30b9\u3092\u81ea\u52d5\u7684\u306b\u524a\u9664\u3059\u308b\u4ed5\u7d44\u307f\u304c\u3042\u308b\u304b\u3069\u3046\u304b\u3082\u8a18\u8f09\u3057\u3066\u304f\u3060\u3055\u3044\u3002',
+    fields: {
+      companyName: '\u4f1a\u793e\u540d',
+      companyWebsite: '\u4f1a\u793e\u306e\u30a6\u30a7\u30d6\u30b5\u30a4\u30c8',
+      businessDescription: '\u4e8b\u696d\u306e\u6982\u8981\u3092\u7c21\u5358\u306b\u3054\u8a18\u5165\u304f\u3060\u3055\u3044',
+      subscriptionId: '\u30b5\u30d6\u30b9\u30af\u30ea\u30d7\u30b7\u30e7\u30f3 ID',
+      acsResourceName: 'Azure Communication Services \u30ea\u30bd\u30fc\u30b9\u540d',
+      customDomainInUse: '\u30ab\u30b9\u30bf\u30e0 \u30c9\u30e1\u30a4\u30f3\u306f\u65e2\u306b\u8a2d\u5b9a\u3055\u308c\u3001\u73fe\u5728\u30e1\u30c3\u30bb\u30fc\u30b8\u306e\u9001\u4fe1\u306b\u4f7f\u7528\u3055\u308c\u3066\u3044\u307e\u3059\u304b\uff1f',
+      currentSendingDomain: '\u73fe\u5728\u30e1\u30fc\u30eb\u3092\u9001\u4fe1\u3057\u3066\u3044\u308b\u30c9\u30e1\u30a4\u30f3\u3092\u6307\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044',
+      emailType: '\u3069\u306e\u3088\u3046\u306a\u7a2e\u985e\u306e\u30e1\u30fc\u30eb\u3092\u9001\u4fe1\u3057\u307e\u3059\u304b\uff1f',
+      expectedVolume: '\u9001\u4fe1\u4e88\u5b9a\u306e\u30e1\u30fc\u30eb\u306e\u60f3\u5b9a\u91cf\u3092\u6307\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044',
+      ratePerMinute: '\u5fc5\u8981\u306a1\u5206\u3042\u305f\u308a\u306e\u6700\u5927\u30e1\u30c3\u30bb\u30fc\u30b8 \u30ec\u30fc\u30c8\u306f\u3069\u308c\u304f\u3089\u3044\u3067\u3059\u304b\uff1f',
+      ratePerHour: '\u5fc5\u8981\u306a1\u6642\u9593\u3042\u305f\u308a\u306e\u6700\u5927\u30e1\u30c3\u30bb\u30fc\u30b8 \u30ec\u30fc\u30c8\u306f\u3069\u308c\u304f\u3089\u3044\u3067\u3059\u304b\uff1f',
+      ratePerDay: '\u5fc5\u8981\u306a1\u65e5\u3042\u305f\u308a\u306e\u6700\u5927\u30e1\u30c3\u30bb\u30fc\u30b8 \u30ec\u30fc\u30c8\u306f\u3069\u308c\u304f\u3089\u3044\u3067\u3059\u304b\uff1f',
+      attachmentSizeMb: '\u5fc5\u8981\u306a\u6700\u5927\u6dfb\u4ed8\u30d5\u30a1\u30a4\u30eb \u30b5\u30a4\u30ba\uff08MB\uff09\u306f\u3069\u308c\u304f\u3089\u3044\u3067\u3059\u304b\uff1f',
+      recipientCount: '\u5fc5\u8981\u306a\u30e1\u30fc\u30eb1\u901a\u3042\u305f\u308a\u306e\u6700\u5927\u53d7\u4fe1\u8005\u6570\u306f\u3069\u308c\u304f\u3089\u3044\u3067\u3059\u304b\uff1f',
+      addressSource: '\u30e1\u30c3\u30bb\u30fc\u30b8\u306e\u9001\u4fe1\u306b\u4f7f\u7528\u3059\u308b\u30e1\u30fc\u30eb \u30a2\u30c9\u30ec\u30b9\u306e\u53d6\u5f97\u5143\u306f\u4f55\u3067\u3059\u304b\uff1f',
+      bounceHandling: '\u914d\u4fe1\u505c\u6b62\u3055\u308c\u305f\u3001\u307e\u305f\u306f\u30e1\u30fc\u30ea\u30f3\u30b0 \u30ea\u30b9\u30c8\u304b\u3089\u30d0\u30a6\u30f3\u30b9\u3057\u305f\u30e1\u30fc\u30eb \u30a2\u30c9\u30ec\u30b9\u3092\u73fe\u5728\u3069\u306e\u3088\u3046\u306b\u7ba1\u7406\u304a\u3088\u3073\u524a\u9664\u3057\u3066\u3044\u307e\u3059\u304b\uff1f'
+    }
+  },
+  'ru-RU': {
+    replaceConfirm: '\u0417\u0430\u043c\u0435\u043d\u0438\u0442\u044c \u0442\u0435\u043a\u0443\u0449\u0438\u0435 \u0437\u0430\u043c\u0435\u0442\u043a\u0438 \u043f\u0440\u0438\u0451\u043c\u0430 \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u043c \u0448\u0430\u0431\u043b\u043e\u043d\u043e\u043c?',
+    sections: { customer: '\u0418\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f \u043e \u043a\u043b\u0438\u0435\u043d\u0442\u0435', email: '\u0418\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f \u043e \u043f\u043e\u0447\u0442\u043e\u0432\u043e\u0439 \u0441\u043b\u0443\u0436\u0431\u0435', usage: '\u0418\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f \u043e\u0431 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0438', additional: '\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f' },
+    emailTypeExamples: '(\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, \u0442\u0440\u0430\u043d\u0437\u0430\u043a\u0446\u0438\u043e\u043d\u043d\u044b\u0435, \u043c\u0430\u0440\u043a\u0435\u0442\u0438\u043d\u0433\u043e\u0432\u044b\u0435, \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u044b\u0435)',
+    recipientDefault: '(\u041f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e: 50)',
+    addressSourceNote: '\u041f\u0440\u0438\u043c\u0435\u0447\u0430\u043d\u0438\u0435. \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u0430\u0434\u0440\u0435\u0441\u043e\u0432 \u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043d\u043d\u043e\u0439 \u043f\u043e\u0447\u0442\u044b, \u043d\u0430 \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u0432\u044b \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f, \u0438\u0433\u0440\u0430\u0435\u0442 \u0440\u0435\u0448\u0430\u044e\u0449\u0443\u044e \u0440\u043e\u043b\u044c \u0432 \u044d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u043d\u043e\u0441\u0442\u0438 \u0438 \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0438 \u0432\u0430\u0448\u0438\u0445 \u043c\u0430\u0440\u043a\u0435\u0442\u0438\u043d\u0433\u043e\u0432\u044b\u0445 \u043a\u0430\u043c\u043f\u0430\u043d\u0438\u0439 \u043f\u043e \u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043d\u043d\u043e\u0439 \u043f\u043e\u0447\u0442\u0435. \u041f\u0440\u0435\u0434\u043e\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0441\u0432\u0435\u0434\u0435\u043d\u0438\u0439 \u043e\u0431 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0435 \u0432\u0430\u0448\u0438\u0445 \u0430\u0434\u0440\u0435\u0441\u043e\u0432 \u043f\u043e\u043c\u043e\u0433\u0430\u0435\u0442 \u043d\u0430\u043c \u043f\u043e\u043d\u044f\u0442\u044c, \u043a\u0430\u043a \u0432\u044b \u043f\u043e\u043b\u0443\u0447\u0430\u0435\u0442\u0435 \u0438 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0435 \u0441\u043f\u0438\u0441\u043e\u043a \u043f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u043e\u0432.',
+    bounceNote: '\u041e\u0431\u044a\u044f\u0441\u043d\u0438\u0442\u0435, \u0435\u0441\u0442\u044c \u043b\u0438 \u0443 \u0432\u0430\u0441 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0437\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u043f\u0440\u043e\u0446\u0435\u0441\u0441, \u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u0435\u0442 \u043e\u0442\u043f\u0438\u0441\u043a\u0438, \u043a\u043e\u0433\u0434\u0430 \u043f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0438 \u043d\u0430\u0436\u0438\u043c\u0430\u044e\u0442 \u0441\u0441\u044b\u043b\u043a\u0443 \u00ab\u043e\u0442\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f\u00bb \u0432 \u0432\u0430\u0448\u0438\u0445 \u043f\u0438\u0441\u044c\u043c\u0430\u0445. \u041a\u0440\u043e\u043c\u0435 \u0442\u043e\u0433\u043e, \u0435\u0441\u043b\u0438 \u0432\u044b \u043f\u043e\u043b\u0443\u0447\u0430\u0435\u0442\u0435 \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f \u043e \u0432\u043e\u0437\u0432\u0440\u0430\u0442\u0435 \u0438\u043b\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0430\u0432\u043a\u0435, \u0443\u043a\u0430\u0436\u0438\u0442\u0435, \u043a\u0430\u043a \u0432\u044b \u0438\u0445 \u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u0435\u0442\u0435 \u0438 \u0435\u0441\u0442\u044c \u043b\u0438 \u0443 \u0432\u0430\u0441 \u043c\u0435\u0445\u0430\u043d\u0438\u0437\u043c \u0434\u043b\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0433\u043e \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f \u0430\u0434\u0440\u0435\u0441\u043e\u0432 \u0441 \u043f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u043c\u0438 \u0432\u043e\u0437\u0432\u0440\u0430\u0442\u0430\u043c\u0438.',
+    fields: {
+      companyName: '\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043a\u043e\u043c\u043f\u0430\u043d\u0438\u0438',
+      companyWebsite: '\u0412\u0435\u0431-\u0441\u0430\u0439\u0442 \u043a\u043e\u043c\u043f\u0430\u043d\u0438\u0438',
+      businessDescription: '\u0414\u0430\u0439\u0442\u0435 \u043a\u0440\u0430\u0442\u043a\u043e\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0432\u0430\u0448\u0435\u0433\u043e \u0431\u0438\u0437\u043d\u0435\u0441\u0430',
+      subscriptionId: '\u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438',
+      acsResourceName: '\u0418\u043c\u044f \u0440\u0435\u0441\u0443\u0440\u0441\u0430 Azure Communication Services',
+      customDomainInUse: '\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043d \u043b\u0438 \u0443\u0436\u0435 \u0432\u0430\u0448 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0439 \u0434\u043e\u043c\u0435\u043d \u0438 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442\u0441\u044f \u043b\u0438 \u043e\u043d \u0441\u0435\u0439\u0447\u0430\u0441 \u0434\u043b\u044f \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439?',
+      currentSendingDomain: '\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0434\u043e\u043c\u0435\u043d, \u0441 \u043a\u043e\u0442\u043e\u0440\u043e\u0433\u043e \u0432\u044b \u0441\u0435\u0439\u0447\u0430\u0441 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442\u0435 \u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043d\u043d\u044b\u0435 \u043f\u0438\u0441\u044c\u043c\u0430',
+      emailType: '\u041a\u0430\u043a\u0438\u0435 \u0442\u0438\u043f\u044b \u043f\u0438\u0441\u0435\u043c \u0432\u044b \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442\u0435?',
+      expectedVolume: '\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u043e\u0436\u0438\u0434\u0430\u0435\u043c\u044b\u0439 \u043e\u0431\u044a\u0451\u043c \u043f\u0438\u0441\u0435\u043c, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u0432\u044b \u043f\u043b\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0435 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u044f\u0442\u044c',
+      ratePerMinute: '\u041a\u0430\u043a\u0430\u044f \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u0430\u044f \u0441\u043a\u043e\u0440\u043e\u0441\u0442\u044c \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0432 \u043c\u0438\u043d\u0443\u0442\u0443 \u0432\u0430\u043c \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f?',
+      ratePerHour: '\u041a\u0430\u043a\u0430\u044f \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u0430\u044f \u0441\u043a\u043e\u0440\u043e\u0441\u0442\u044c \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0432 \u0447\u0430\u0441 \u0432\u0430\u043c \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f?',
+      ratePerDay: '\u041a\u0430\u043a\u0430\u044f \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u0430\u044f \u0441\u043a\u043e\u0440\u043e\u0441\u0442\u044c \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0432 \u0434\u0435\u043d\u044c \u0432\u0430\u043c \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f?',
+      attachmentSizeMb: '\u041a\u0430\u043a\u043e\u0439 \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0430\u0437\u043c\u0435\u0440 \u0432\u043b\u043e\u0436\u0435\u043d\u0438\u044f (\u0432 \u041c\u0411) \u0432\u0430\u043c \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f?',
+      recipientCount: '\u041a\u0430\u043a\u043e\u0435 \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0435 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u043f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0435\u0439 \u043d\u0430 \u043e\u0434\u043d\u043e \u043f\u0438\u0441\u044c\u043c\u043e \u0432\u0430\u043c \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f?',
+      addressSource: '\u041a\u0430\u043a\u043e\u0432 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u0430\u0434\u0440\u0435\u0441\u043e\u0432 \u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043d\u043d\u043e\u0439 \u043f\u043e\u0447\u0442\u044b, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u0432\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442\u0435 \u0434\u043b\u044f \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439?',
+      bounceHandling: '\u041a\u0430\u043a \u0432\u044b \u0441\u0435\u0439\u0447\u0430\u0441 \u0443\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442\u0435 \u0430\u0434\u0440\u0435\u0441\u0430\u043c\u0438, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043e\u0442\u043f\u0438\u0441\u0430\u043b\u0438\u0441\u044c \u0438\u043b\u0438 \u043f\u0440\u0438\u0432\u0435\u043b\u0438 \u043a \u0432\u043e\u0437\u0432\u0440\u0430\u0442\u0430\u043c, \u0438 \u0443\u0434\u0430\u043b\u044f\u0435\u0442\u0435 \u0438\u0445 \u0438\u0437 \u0432\u0430\u0448\u0435\u0433\u043e \u0441\u043f\u0438\u0441\u043a\u0430 \u0440\u0430\u0441\u0441\u044b\u043b\u043a\u0438?'
+    }
+  }
+};
+
 const INTAKE_TEMPLATE_HTML = [
   '<p><strong>Customer Information</strong></p>',
   '<ul>',
@@ -4546,6 +4997,62 @@ const INTAKE_TEMPLATE_HTML = [
   '<p><em>Explain if you have an automated process in place that handles unsubscribes when recipients click on the \'unsubscribe\' link in your emails. Additionally, if you receive bounce/undeliverable notifications, can you include how you handle those and whether you have any mechanism to automatically remove email addresses that result in consistent bounces.</em></p>',
   '<p><br></p>'
 ].join('');
+
+// Builds the intake editor template HTML for a given language. Falls back to the
+// canonical English INTAKE_TEMPLATE_HTML when the language is English or has no
+// INTAKE_LOCALES entry. The structure (sections, lists, numbered usage block,
+// clarifier notes) mirrors the English template exactly; only the question text
+// is localized. escapeHtml() guards each interpolated string so a stray '<' in a
+// translation can never break the markup.
+function buildIntakeTemplateHtml(lang) {
+  const loc = (lang && lang !== 'en' && INTAKE_LOCALES) ? INTAKE_LOCALES[lang] : null;
+  if (!loc) return INTAKE_TEMPLATE_HTML;
+  const f = loc.fields;
+  const esc = (typeof escapeHtml === 'function') ? escapeHtml : (s => String(s == null ? '' : s));
+  const nbsp = '&nbsp;';
+  return [
+    '<p><strong>' + esc(loc.sections.customer) + '</strong></p>',
+    '<ul>',
+    '<li>' + esc(f.companyName) + ':' + nbsp + '</li>',
+    '<li>' + esc(f.companyWebsite) + ':' + nbsp + '</li>',
+    '<li>' + esc(f.businessDescription) + ':' + nbsp + '</li>',
+    '</ul>',
+    '<p><strong>' + esc(loc.sections.email) + '</strong></p>',
+    '<ul>',
+    '<li>' + esc(f.subscriptionId) + ':' + nbsp + '</li>',
+    '<li>' + esc(f.acsResourceName) + ':' + nbsp + '</li>',
+    '<li>' + esc(f.customDomainInUse) + ':' + nbsp + '</li>',
+    '<li>' + esc(f.currentSendingDomain) + ':' + nbsp + '</li>',
+    '</ul>',
+    '<p><strong>' + esc(loc.sections.usage) + '</strong></p>',
+    '<ol>',
+    '<li>' + esc(f.emailType) + ' ' + esc(loc.emailTypeExamples) + nbsp + '</li>',
+    '<li>' + esc(f.expectedVolume) + ':',
+    '<ul>',
+    '<li>' + esc(f.ratePerMinute) + nbsp + '</li>',
+    '<li>' + esc(f.ratePerHour) + nbsp + '</li>',
+    '<li>' + esc(f.ratePerDay) + nbsp + '</li>',
+    '</ul></li>',
+    '<li>' + esc(f.attachmentSizeMb) + nbsp + '</li>',
+    '<li>' + esc(f.recipientCount) + ' ' + esc(loc.recipientDefault) + nbsp + '</li>',
+    '</ol>',
+    '<p><strong>' + esc(loc.sections.additional) + '</strong></p>',
+    '<p>' + esc(f.addressSource) + '</p>',
+    '<p><em>' + esc(loc.addressSourceNote) + '</em></p>',
+    '<p><br></p>',
+    '<p>' + esc(f.bounceHandling) + '</p>',
+    '<p><em>' + esc(loc.bounceNote) + '</em></p>',
+    '<p><br></p>'
+  ].join('');
+}
+
+// Returns the localized "replace template?" confirm prompt for the current
+// language, falling back to English.
+function getIntakeReplaceConfirmText() {
+  const lang = (typeof currentLanguage !== 'undefined') ? currentLanguage : 'en';
+  const loc = (lang && lang !== 'en' && INTAKE_LOCALES) ? INTAKE_LOCALES[lang] : null;
+  return (loc && loc.replaceConfirm) ? loc.replaceConfirm : 'Replace the current intake notes with the standard template?';
+}
 
 function getIntakeEditor() { return document.getElementById('intakeRichEditor'); }
 
@@ -4588,8 +5095,12 @@ function prefillIntakeForm() {
   const editor = getIntakeEditor();
   if (!editor) return;
   const existing = (editor.innerHTML || '').trim();
-  if (existing && !window.confirm('Replace the current intake notes with the standard template?')) return;
-  editor.innerHTML = INTAKE_TEMPLATE_HTML;
+  if (existing && !window.confirm(getIntakeReplaceConfirmText())) return;
+  // Insert the template in whatever language the app is currently set to, so the
+  // operator gets a questionnaire that matches the customer's language. Falls
+  // back to the canonical English template for English / unsupported locales.
+  const lang = (typeof currentLanguage !== 'undefined') ? currentLanguage : 'en';
+  editor.innerHTML = buildIntakeTemplateHtml(lang);
   saveIntakeForm();
 }
 
@@ -4698,6 +5209,63 @@ const INTAKE_EXTRACT_FIELDS = [
   { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced'] }
 ];
 
+// ----- Multilingual extraction augmentation --------------------------------
+// The English patterns above are the baseline. Here we ADD every localized
+// question string from INTAKE_LOCALES into the matching field's `patterns` so a
+// customer form written in Spanish/French/German/Arabic/etc. is recognized too.
+// This is purely additive: the English matching is never removed or weakened,
+// and a localized question doubles as its own extraction pattern (so the
+// inserted template and the extractor can never drift apart). We lowercase each
+// localized phrase to match matchIntakePattern()'s case-insensitive compare and
+// strip a leading/trailing "?"/":" so the stored pattern is the stable phrase.
+// We also collect the localized SECTION HEADERS (used by isIntakeSectionHeader)
+// and a flat list of localized question phrases (used as soft split markers in
+// normalizeIntakePlainText) so multi-field single-paragraph pastes still split.
+const INTAKE_LOCALIZED_SECTION_HEADERS = [];
+const INTAKE_LOCALIZED_MARKERS = [];
+(function augmentIntakeExtractionForLocales() {
+  if (typeof INTAKE_LOCALES === 'undefined' || !INTAKE_LOCALES) return;
+  const fieldById = {};
+  for (const f of INTAKE_EXTRACT_FIELDS) fieldById[f.id] = f;
+  // Normalize a localized phrase into a lowercase, punctuation-trimmed pattern.
+  const toPattern = (s) => String(s == null ? '' : s)
+    .replace(/\u00A0/g, ' ')
+    .trim()
+    .replace(/[\s:?\uFF1F\uFF1A\u061F]+$/g, '') // trailing ? : (incl. full-width / Arabic)
+    .toLowerCase();
+  for (const lang of Object.keys(INTAKE_LOCALES)) {
+    const loc = INTAKE_LOCALES[lang];
+    if (!loc) continue;
+    // Section headers -> dedupe into the localized-header list.
+    if (loc.sections) {
+      for (const key of ['customer', 'email', 'usage', 'additional']) {
+        const h = toPattern(loc.sections[key]);
+        if (h && INTAKE_LOCALIZED_SECTION_HEADERS.indexOf(h) === -1) INTAKE_LOCALIZED_SECTION_HEADERS.push(h);
+      }
+    }
+    // Per-field localized questions -> add to that field's patterns + markers.
+    if (loc.fields) {
+      for (const fid of Object.keys(loc.fields)) {
+        const field = fieldById[fid];
+        const pat = toPattern(loc.fields[fid]);
+        if (!field || !pat) continue;
+        if (field.patterns.indexOf(pat) === -1) field.patterns.push(pat);
+        // Marker uses the ORIGINAL (cased, with trailing punctuation) phrase so
+        // normalizeIntakePlainText inserts a clean soft break before it.
+        const marker = String(loc.fields[fid]).replace(/\u00A0/g, ' ').trim();
+        if (marker && INTAKE_LOCALIZED_MARKERS.indexOf(marker) === -1) INTAKE_LOCALIZED_MARKERS.push(marker);
+      }
+    }
+    // Section headers are also useful split markers.
+    if (loc.sections) {
+      for (const key of ['customer', 'email', 'usage', 'additional']) {
+        const sec = String(loc.sections[key] || '').replace(/\u00A0/g, ' ').trim();
+        if (sec && INTAKE_LOCALIZED_MARKERS.indexOf(sec) === -1) INTAKE_LOCALIZED_MARKERS.push(sec);
+      }
+    }
+  }
+})();
+
 // Track manual edits made in the extracted-fields table so re-running
 // "Process Data" doesn't blow them away unless the user explicitly clears
 // the field first.
@@ -4740,9 +5308,21 @@ const INTAKE_TIERS = (function () {
 
 function parseIntakeNumeric(text) {
   if (text === null || text === undefined) return null;
+  // Normalize non-Western numerals to ASCII 0-9 first so localized answers
+  // (Arabic-Indic, Eastern Arabic-Indic, Devanagari, and full-width forms)
+  // feed tier inference correctly. Each block of ten digits is contiguous in
+  // Unicode, so we map by offset from the block's zero code point.
+  const normalizeDigits = (s) => String(s).replace(/[\u0660-\u0669\u06F0-\u06F9\u0966-\u096F\uFF10-\uFF19]/g, (ch) => {
+    const c = ch.charCodeAt(0);
+    if (c >= 0x0660 && c <= 0x0669) return String(c - 0x0660); // Arabic-Indic
+    if (c >= 0x06F0 && c <= 0x06F9) return String(c - 0x06F0); // Eastern Arabic-Indic (Persian/Urdu)
+    if (c >= 0x0966 && c <= 0x096F) return String(c - 0x0966); // Devanagari
+    if (c >= 0xFF10 && c <= 0xFF19) return String(c - 0xFF10); // Full-width
+    return ch;
+  });
   // Pull the first integer-like token out of the cell. Handles "1,000",
   // "1000 msgs", "~100", etc. Returns null when no number is present.
-  const m = String(text).replace(/[\u00A0\s]/g, '').match(/(\d{1,3}(?:,\d{3})+|\d+)/);
+  const m = normalizeDigits(text).replace(/[\u00A0\s]/g, '').match(/(\d{1,3}(?:,\d{3})+|\d+)/);
   if (!m) return null;
   const n = parseInt(m[1].replace(/,/g, ''), 10);
   return isNaN(n) ? null : n;
@@ -4863,6 +5443,16 @@ function normalizeIntakePlainText(plain) {
   // the middle of "Specify the expected volume of emails you plan to send:".
   // Sentinels are made of NUL bytes + an index, which can never appear in
   // pasted form text and can never match another marker.
+  // Append every localized question / section-header phrase (collected from
+  // INTAKE_LOCALES at load time) so non-English single-paragraph pastes split
+  // on the same boundaries the English markers above provide. This is additive
+  // and the longest-first ordering below keeps long localized phrases from
+  // being carved up by shorter ones.
+  if (typeof INTAKE_LOCALIZED_MARKERS !== 'undefined' && INTAKE_LOCALIZED_MARKERS.length) {
+    for (const lm of INTAKE_LOCALIZED_MARKERS) {
+      if (lm && markers.indexOf(lm) === -1) markers.push(lm);
+    }
+  }
   const ordered = markers
     .map((m, i) => ({ marker: m, i: i }))
     .sort(function (a, b) {
@@ -4903,10 +5493,18 @@ function isIntakeSectionHeader(line) {
   // them as hard boundaries so a previous answer never absorbs the next
   // section title (for example, "appmail.example.com Usage Information").
   const s = String(line || '').trim().toLowerCase().replace(/[\u00A0\s]+/g, ' ');
-  return s === 'customer information'
+  if (s === 'customer information'
     || s === 'email service information'
     || s === 'usage information'
-    || s === 'additional information';
+    || s === 'additional information') {
+    return true;
+  }
+  // Also treat the localized section headers (collected from INTAKE_LOCALES) as
+  // hard boundaries so non-English forms split cleanly on their dividers.
+  if (typeof INTAKE_LOCALIZED_SECTION_HEADERS !== 'undefined' && INTAKE_LOCALIZED_SECTION_HEADERS.length) {
+    if (INTAKE_LOCALIZED_SECTION_HEADERS.indexOf(s) !== -1) return true;
+  }
+  return false;
 }
 
 // Sub-questions / clarifying prompts that aren't extracted as their own field

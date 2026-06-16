@@ -142,12 +142,31 @@ function Get-DnsBaseStatus {
   $dnssecAnomaly = $null
   try { $dnssecAnomaly = Get-DohDnssecAnomaly -Name $Domain -Type 'MX' } catch { $dnssecAnomaly = $null }
 
+  # When the queried domain (and any parent) yielded NO SPF record, the cause is
+  # ambiguous: it could be a legitimate "this domain has no SPF" answer OR an
+  # upstream SERVFAIL where the authoritative nameservers are answering
+  # inconsistently (propagation / misconfiguration). Resolve-DohName collapses a
+  # SERVFAIL into an empty/partial result, so we run one extra cd=1 TXT probe to
+  # read the actual DoH status code. We trigger on SPF absence rather than a
+  # completely empty TXT set because a broken zone can SERVFAIL while STILL
+  # returning a partial TXT answer that happens to exclude the SPF record (the
+  # zenithbank.com case: SERVFAIL with one non-SPF TXT row, no v=spf1). A
+  # SERVFAIL here lets the UI explain *why* SPF is missing instead of asserting
+  # the record does not exist when it may exist on a subset of nameservers.
+  # The probe is skipped when an SPF record was found or the base lookup already
+  # failed, so it never adds latency to the common healthy path.
+  $txtResolution = $null
+  if (-not $dnsFailed -and -not $spf -and -not $parentSpf) {
+    try { $txtResolution = Get-DohResolutionStatus -Name $Domain -Type 'TXT' } catch { $txtResolution = $null }
+  }
+
   [pscustomobject]@{
     domain     = $Domain
     dnsFailed  = $dnsFailed
     dnsError   = $dnsError
 
     dnssecAnomaly = $dnssecAnomaly
+    txtResolution = $txtResolution
 
     txtLookupDomain = $txtLookupDomain
     txtUsedParent   = $txtUsedParent

@@ -237,6 +237,16 @@ http://localhost:8080/?lang=es
 
 The `/terms` and `/privacy` pages also respect the `?lang=` parameter and render in the selected language.
 
+### Customer Intake form (localized)
+
+The **Customer Intake Information** form (shown to signed-in users) is language-aware:
+
+- **Insert template** generates the ACS "email quota increase" questionnaire in whatever language the app is currently set to, so the template matches the customer's language.
+- **Process Data** extraction recognizes the questionnaire in all 10 supported languages, mapping each answer to the canonical English field labels reviewers expect. The extracted-field table and the **Copy Email Quota** payload remain in English (the canonical ACS questionnaire), while the customer's own answer values are preserved verbatim.
+- Numeric answers written in non-Western numerals (Arabic-Indic, Eastern Arabic-Indic/Persian, Devanagari, and full-width digits) are normalized so the throttling-tier inference still works.
+
+> Machine-translated questionnaire strings (especially for `ar`, `zh-CN`, `hi-IN`, `ja-JP`, `ru-RU`) are best-effort and benefit from native-speaker review. The form does **not** translate the customer's answers between languages; it structures and labels them.
+
 ## 🔍 DNS Checks & Guidance
 
 The tool performs the following DNS checks and generates actionable guidance strings for any issues found:
@@ -252,6 +262,8 @@ The tool performs the following DNS checks and generates actionable guidance str
 | **CNAME** | Root + `www` `CNAME` | Informational; conflicts may prevent domain use |
 
 Mail provider detection recognizes Microsoft 365, Google Workspace, Zoho, Proofpoint, Mimecast, and Cloudflare Email Routing out of the box.
+
+**Upstream SERVFAIL detection.** When no SPF record is found, the tool runs one extra DNS-over-HTTPS probe (with DNSSEC checking disabled via `cd=1`) to read the actual resolver status code. If the domain's authoritative nameservers return **SERVFAIL** — i.e. they are answering inconsistently because of a propagation delay or a DNS misconfiguration — the SPF and TXT cards (and the Email-Quota SPF row) show a precise **WARN** explaining that the record may still exist and resolve from some locations but not others, instead of the misleading "No SPF record detected". This is what makes a domain that resolves SPF in one external tool but not another (a classic split/propagating-nameserver situation) understandable at a glance. The probe only runs when SPF is absent, so it adds no latency to healthy domains, and it is distinct from the existing DNSSEC-validation anomaly note (which probes *without* `cd=1`).
 
 A separate **SPF Expansion Records** card sits directly below the SPF card and lists every `include:` / `redirect=` target the recursive SPF resolver visited, the parent record that referenced it, and the actual TXT record returned by each lookup. This keeps the main DNS Records table scoped to the queried domain while still surfacing the third-party SPF chain (for example `_u.<domain>._spf.smart.ondmarc.com`, `spf.protection.outlook.com`, `_spf.google.com`) for troubleshooting. The expansion card also reports a per-row "Lookups" contribution and a chain-wide "N of 10 DNS lookups used" summary against the SPF 10-lookup limit (RFC 7208 §4.6.4). Because the structured table now owns the expansion view, the SPF card itself is intentionally kept lean: it shows just the queried-domain SPF record value and the ACS Outlook-include verdict, without duplicating the indented per-node text dump that older versions appended.
 
@@ -320,6 +332,34 @@ Because the full-page screenshot button captures every rendered card, this snaps
 | `ACS_WEBSITE_PROBE_MAX_BYTES` | `262144` | Hard cap on bytes read from the response body (max 2 MB) |
 | `ACS_WEBSITE_PROBE_MAX_REDIRECTS` | `5` | Maximum redirect hops to follow (max 10) |
 
+## 🧭 Nameserver TXT Consistency Check
+
+The `/api/nameservers` endpoint answers a question operators hit constantly: *"all my nameservers respond, so why does my TXT / SPF record look missing?"*
+
+The usual culprit is that a domain's authoritative nameservers are **not serving an identical zone** — one or more is missing records (or fails to resolve entirely), so a public recursive resolver that happens to hit the "bad" nameserver returns an incomplete TXT set. Because resolvers pick a nameserver more-or-less at random and cache the result, the symptom is intermittent: the record "resolves in MXToolbox" but shows as missing here, or vice versa. This frequently breaks ACS domain verification and SPF.
+
+To surface this, the check queries **each** authoritative nameserver directly for the domain's TXT records and compares the answers. The card shows:
+
+- Whether every responding nameserver returned the **same** TXT records (consistent / inconsistent / partial)
+- How many nameservers responded vs. failed to answer
+- Whether the SPF record and the `ms-domain-verification` token are present on **every** nameserver
+- An **additional details** button revealing the exact TXT records each nameserver returned, so you can pinpoint which server is out of sync
+
+The check uses a small, self-contained raw DNS client (UDP with a TCP-on-truncation fallback) so it works identically on Windows and Linux containers without the Windows-only `Resolve-DnsName` cmdlet.
+
+### Security guards (SSRF protection)
+
+- Nameserver hostnames are resolved up-front and every target IP must be a **public, routable** address (reusing the website probe's IPv4 + IPv6 guard) — private/loopback/link-local/CGNAT targets are refused
+- The nameserver fan-out is bounded and each query runs under a short socket timeout so a slow/hostile nameserver cannot pin a worker
+
+### Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ACS_DISABLE_NAMESERVER_PROBE` | _(unset)_ | Set to `1` to disable the probe entirely (the card renders a neutral "disabled" note) |
+| `ACS_NAMESERVER_PROBE_MAX` | `12` | Maximum number of authoritative nameservers to query (max 25) |
+| `ACS_NAMESERVER_PROBE_TIMEOUT_MS` | `4000` | Per-nameserver query timeout in milliseconds (500–15000) |
+
 ## 🌍 WHOIS / RDAP Diagnostics
 
 The tool enriches results with domain registration metadata (creation date, expiry, registrar, domain age) using a priority-ordered chain of fallback providers:
@@ -358,6 +398,7 @@ The application exposes the following RESTful API endpoints:
 | `/api/cname` | CNAME records | Validates canonical name records |
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
 | `/api/website` | Website reachability snapshot | Performs a security-guarded HTTP(S) probe (apex + www, HTTPS first) and returns a neutral, factual snapshot: reachability, HTTP status, redirect chain, page title/description, a short text excerpt, and recognized placeholder/parked-page markers |
+| `/api/nameservers` | Per-nameserver TXT consistency | Queries each authoritative nameserver directly (raw UDP/TCP DNS) for the domain's TXT records and compares them, so you can see whether every nameserver serves the same SPF / verification records or whether divergence is making them resolve only intermittently |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
 | `/api/auth/event` | Anonymous Microsoft Entra ID sign-in ping | Header-only, consent-gated. SPA POSTs an opaque SHA-256 account hash and a Microsoft-employee boolean after client-side MSAL/Graph verification; the server never sees access tokens, UPN, oid, or tenant id. |
 | `/terms` | Terms of Service | Embedded, localized Terms of Service page |

@@ -527,6 +527,36 @@ function applyLanguageToStaticUi() {
   const signOutBtn = document.getElementById('msSignOutBtn');
   if (signOutBtn) signOutBtn.innerHTML = t('signOut');
 
+  // Customer Intake form (static chrome). The questionnaire CONTENT is localized
+  // separately via INTAKE_LOCALES (see prefillIntakeForm), but the card's own
+  // title / hint / toolbar tooltips / buttons / extracted-table headers are
+  // static HTML and must be re-localized here on every language switch.
+  const intakeTitle = document.getElementById('intakeFormTitle');
+  if (intakeTitle) intakeTitle.textContent = t('intakeFormTitle');
+  const intakeInsertBtn = document.getElementById('intakeInsertTemplateBtn');
+  if (intakeInsertBtn) intakeInsertBtn.textContent = t('intakeInsertTemplate');
+  const intakeClearBtn = document.getElementById('intakeClearBtn');
+  if (intakeClearBtn) intakeClearBtn.textContent = t('intakeClear');
+  const intakeHint = document.getElementById('intakeFormHint');
+  if (intakeHint) intakeHint.innerHTML = t('intakeFormHint');
+  const intakeEditor = document.getElementById('intakeRichEditor');
+  if (intakeEditor) intakeEditor.setAttribute('data-placeholder', t('intakePlaceholder'));
+  const intakeProcessBtn = document.getElementById('intakeProcessBtn');
+  if (intakeProcessBtn) intakeProcessBtn.textContent = t('intakeProcessData');
+  const intakeExtractedTitle = document.getElementById('intakeExtractedTitle');
+  if (intakeExtractedTitle) intakeExtractedTitle.textContent = t('intakeExtractedTitle');
+  const intakeExtractedHint = document.getElementById('intakeExtractedHint');
+  if (intakeExtractedHint) intakeExtractedHint.innerHTML = t('intakeExtractedHint');
+  const intakeColField = document.getElementById('intakeExtractedColField');
+  if (intakeColField) intakeColField.textContent = t('intakeExtractedColField');
+  const intakeColValue = document.getElementById('intakeExtractedColValue');
+  if (intakeColValue) intakeColValue.textContent = t('intakeExtractedColValue');
+  // Toolbar button tooltips: each carries a data-i18n-title key.
+  document.querySelectorAll('#intakeFormToolbar [data-i18n-title]').forEach(btn => {
+    const key = btn.getAttribute('data-i18n-title');
+    if (key) btn.title = t(key);
+  });
+
   const footer = document.getElementById('footerText');
   if (footer) {
     let footerHtml = t('footer', { version: appVersion });
@@ -1237,6 +1267,20 @@ function buildGuidance(r) {
       edeSuffix = t('guidanceDnssecAnomalyEdeSuffix', { code: String(r.dnssecAnomaly.primaryEdeCode), label });
     }
     guidance.push({ type: 'info', text: t('guidanceDnssecAnomaly', { edeSuffix }) });
+  }
+
+  // Surface an upstream TXT SERVFAIL (authoritative nameservers answering
+  // inconsistently / still propagating). The server probes the DoH status with
+  // cd=1, so this is distinct from the DNSSEC anomaly above. We only show it
+  // when no SPF/TXT was recovered, so a successful detailed-records recovery
+  // suppresses it. Kept as `attention` (not a hard `error`) because the record
+  // may exist on a subset of the domain's nameservers; this also prevents the
+  // generic "SPF is missing" guidance below from firing, since txtLookupResolved
+  // is false on SERVFAIL.
+  const txtServfailGuidance = !!(loaded.base && r.txtResolution && r.txtResolution.isServfail === true
+    && !txtRecovery.spfPresent);
+  if (txtServfailGuidance) {
+    guidance.push({ type: 'attention', text: t('guidanceTxtServfail', { domain: r.domain || '' }) });
   }
 
   // Only surface a terminal TXT lookup failure once the broader lookup workflow
