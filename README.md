@@ -347,6 +347,10 @@ To surface this, the check queries **each** authoritative nameserver directly fo
 
 The check uses a small, self-contained raw DNS client (UDP with a TCP-on-truncation fallback) so it works identically on Windows and Linux containers without the Windows-only `Resolve-DnsName` cmdlet.
 
+### Automatic SPF/TXT/ACS card recovery
+
+The SPF, ACS Domain Verification, and TXT Records cards are driven by a single public DNS-over-HTTPS resolver. For an inconsistent-nameserver zone, that resolver can hit a nameserver that lacks the records and return an empty answer — so those cards would show "No Records Available" even though the records exist. To stop the tool from contradicting itself, the nameserver check doubles as a **recovery source**: when the normal lookup returns no queried-domain TXT but the authoritative nameservers do have them, the cards backfill from the union of records across the responding nameservers. Recovered records are rendered as **WARN** (never PASS) with a note explaining the record exists on the nameservers but is not resolving reliably via public DNS — which is what governs real email delivery and Azure domain verification — so the operator knows to make the nameservers consistent.
+
 ### Security guards (SSRF protection)
 
 - Nameserver hostnames are resolved up-front and every target IP must be a **public, routable** address (reusing the website probe's IPv4 + IPv6 guard) — private/loopback/link-local/CGNAT targets are refused

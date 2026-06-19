@@ -1193,22 +1193,61 @@ function getDnsTxtRecoveryState(r) {
     : [];
   const recoveredFromDetailedRecords = !!(loaded.base && r && r.dnsFailed && detailedTxtRecords.length > 0);
   const recoveredAddressesFromDetailedRecords = !!(loaded.records && (detailedARecords.length > 0 || detailedAaaaRecords.length > 0));
-  const txtRecords = recoveredFromDetailedRecords
+
+  // ---- Third recovery source: the per-nameserver consistency check ----
+  // The SPF/ACS/TXT cards are driven by /api/base + /api/records, which both
+  // resolve through a single public DoH resolver. When a domain's authoritative
+  // nameservers are INCONSISTENT (some carry the SPF/verification TXT records,
+  // some don't), that resolver may hit a nameserver lacking the records and
+  // return an empty NOERROR answer -- so the cards show "No Records Available"
+  // even though the records demonstrably exist. The Nameserver TXT Consistency
+  // check (/api/nameservers) queries each authoritative nameserver DIRECTLY, so
+  // it sees the records the public resolver missed. We use the UNION of TXT
+  // records across all responding nameservers as a last-resort recovery source
+  // so the cards stop contradicting the nameserver card. Records recovered this
+  // way are flagged so the UI can render them as WARN (not PASS): public DNS --
+  // which governs real email delivery and Azure domain verification -- is not
+  // returning them reliably, so this is an "exists but not resolving" state.
+  const nameserverResults = (r && r.nameservers && Array.isArray(r.nameservers.results))
+    ? r.nameservers.results
+    : [];
+  const nameserverTxtUnion = [];
+  if (nameserverResults.length > 0) {
+    const seen = Object.create(null);
+    for (const ns of nameserverResults) {
+      // Only trust nameservers that returned a usable (NOERROR) answer.
+      if (!ns || ns.success !== true || !Array.isArray(ns.txtRecords)) { continue; }
+      for (const rec of ns.txtRecords) {
+        const value = String(rec || '').trim();
+        if (!value || seen[value]) { continue; }
+        seen[value] = true;
+        nameserverTxtUnion.push(value);
+      }
+    }
+  }
+  // Only fall back to the nameserver union when the normal sources produced
+  // nothing for the queried domain, so a healthy lookup is never altered.
+  const baseTxtRecords = recoveredFromDetailedRecords
     ? detailedTxtRecords
     : (Array.isArray(r && r.txtRecords) ? r.txtRecords.filter(Boolean) : []);
+  const recoveredFromNameservers = !!(loaded.base
+    && baseTxtRecords.length === 0
+    && nameserverTxtUnion.length > 0);
+
+  const txtRecords = recoveredFromNameservers ? nameserverTxtUnion : baseTxtRecords;
   const ipv4Addresses = recoveredAddressesFromDetailedRecords
     ? detailedARecords
     : (Array.isArray(r && r.ipv4Addresses) ? r.ipv4Addresses.filter(Boolean) : []);
   const ipv6Addresses = recoveredAddressesFromDetailedRecords
     ? detailedAaaaRecords
     : (Array.isArray(r && r.ipv6Addresses) ? r.ipv6Addresses.filter(Boolean) : []);
-  const spfValue = recoveredFromDetailedRecords
+  const spfValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
     ? (txtRecords.find(value => /^v=spf1/i.test(String(value || '').trim())) || null)
     : (r ? r.spfValue : null);
-  const acsValue = recoveredFromDetailedRecords
+  const acsValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
     ? (txtRecords.find(value => /ms-domain-verification/i.test(String(value || '').trim())) || null)
     : (r ? r.acsValue : null);
-  const spfHasRequiredInclude = recoveredFromDetailedRecords && spfValue
+  const spfHasRequiredInclude = (recoveredFromDetailedRecords || recoveredFromNameservers) && spfValue
     ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
     : (r ? r.spfHasRequiredInclude : null);
   // Macro-delegated SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...) cannot be
@@ -1217,7 +1256,7 @@ function getDnsTxtRecoveryState(r) {
   // recovered SPF from the detailed records payload (no server verdict), detect
   // the macro include locally so the UI can still soften the verdict rather than
   // showing a misleading hard FAIL.
-  const spfRequiredIncludeMatchType = recoveredFromDetailedRecords && spfValue
+  const spfRequiredIncludeMatchType = (recoveredFromDetailedRecords || recoveredFromNameservers) && spfValue
     ? (/include:[^\s]*%\{[^\s]*outlook\.com/i.test(String(spfValue || '')) || (/%\{/.test(String(spfValue || '')) && /include:|redirect=/i.test(String(spfValue || '')) && !spfHasRequiredInclude) ? 'macro-delegated' : (r ? r.spfRequiredIncludeMatchType : null))
     : (r ? r.spfRequiredIncludeMatchType : null);
   // Treat a macro-delegated verdict as indeterminate (null) rather than false so
@@ -1229,7 +1268,11 @@ function getDnsTxtRecoveryState(r) {
   return {
     recoveredFromDetailedRecords,
     recoveredAddressesFromDetailedRecords,
-    txtLookupResolved: !!(loaded.base && (!r.dnsFailed || recoveredFromDetailedRecords)),
+    recoveredFromNameservers,
+    nameserverConsistencyState: (r && r.nameservers && r.nameservers.consistencyState) ? String(r.nameservers.consistencyState) : null,
+    // txtLookupResolved stays true on a nameserver recovery so the cards switch
+    // from the "lookup failed" branch to the normal value-rendering branch.
+    txtLookupResolved: !!(loaded.base && (!r.dnsFailed || recoveredFromDetailedRecords || recoveredFromNameservers)),
     txtRecords,
     ipv4Addresses,
     ipv6Addresses,
@@ -1281,6 +1324,19 @@ function buildGuidance(r) {
     && !txtRecovery.spfPresent);
   if (txtServfailGuidance) {
     guidance.push({ type: 'attention', text: t('guidanceTxtServfail', { domain: r.domain || '' }) });
+  }
+
+  // When the SPF/TXT/ACS values were only recoverable by querying the
+  // authoritative nameservers directly (because the public resolver returned an
+  // empty answer for an inconsistent-nameserver zone), explain the situation.
+  // This is the signal that makes the SPF/ACS/TXT cards stop contradicting the
+  // Nameserver TXT Consistency card. Because the records ARE now present in
+  // txtRecovery, the generic "SPF/ACS is missing" advice below is naturally
+  // suppressed; this note replaces it with an accurate, actionable explanation.
+  // Kept as `attention` (not a hard error) because the records do exist on at
+  // least one nameserver -- the fix is to make every nameserver consistent.
+  if (loaded.base && txtRecovery.recoveredFromNameservers) {
+    guidance.push({ type: 'attention', text: t('guidanceRecoveredFromNameservers', { domain: r.domain || '' }) });
   }
 
   // Only surface a terminal TXT lookup failure once the broader lookup workflow
@@ -1428,7 +1484,14 @@ function recomputeDerived(r) {
   const loaded = r && r._loaded ? r._loaded : {};
   r._txtRecovery = getDnsTxtRecoveryState(r);
   if (loaded.base) {
-    r.acsReady = r._txtRecovery.txtLookupResolved && !!r._txtRecovery.acsPresent;
+    // Do NOT mark ACS ready when the verification TXT was only found by querying
+    // the authoritative nameservers directly. Azure verifies the domain through
+    // public/recursive DNS, which (in the inconsistent-nameserver case that
+    // triggers this recovery) is not reliably returning the record yet, so the
+    // domain is not actually verifiable until the nameservers are made consistent.
+    r.acsReady = r._txtRecovery.txtLookupResolved
+      && !!r._txtRecovery.acsPresent
+      && !r._txtRecovery.recoveredFromNameservers;
   } else {
     r.acsReady = false;
   }

@@ -2885,6 +2885,14 @@ function render(r) {
     || (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null);
   const effectiveAcsPresent = !!txtRecovery.acsPresent;
   const effectiveAcsValue = txtRecovery.acsValue || null;
+  // The SPF/ACS/TXT values were only recoverable by querying the authoritative
+  // nameservers directly because the public resolver returned an empty answer
+  // for an inconsistent-nameserver zone. When this is set, the SPF/ACS/TXT cards
+  // (and their Email-Quota / Domain-Verification rows) render WARN -- not PASS or
+  // a misleading "No Records Available" FAIL -- with a note explaining the record
+  // exists on the nameservers but is not resolving reliably via public DNS, which
+  // is what actually governs email delivery and Azure domain verification.
+  const recoveredFromNameservers = !!txtRecovery.recoveredFromNameservers;
   // Upstream SERVFAIL on the TXT lookup: the server probed the DoH status (with
   // cd=1, so this is NOT a DNSSEC issue) and found the domain's authoritative
   // nameservers answering inconsistently -- a propagation / misconfiguration
@@ -2928,6 +2936,11 @@ function render(r) {
     let domainVerStatus = `${escapeHtml(t('failed'))} &#x274C;`;
     if (r.acsReady) {
       domainVerStatus = `${escapeHtml(t('passing'))} &#x2705;`;
+    } else if (effectiveAcsPresent && recoveredFromNameservers) {
+      // The verification TXT exists on the nameservers but is not resolving via
+      // public DNS (which Azure uses to verify), so this is a Warning, not a
+      // hard Failure -- the operator just needs to make the nameservers consistent.
+      domainVerStatus = `${escapeHtml(t('warningState'))} &#x26A0;&#xFE0F;`;
     }
 
     // Email Quota: aggregation of MX, SPF, DMARC, DKIM, Reputation, Registration
@@ -2979,7 +2992,11 @@ function render(r) {
     }
 
     // 4. SPF
-    if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
+    if (recoveredFromNameservers && effectiveSpfPresent) {
+      // SPF exists only via direct nameserver query (not resolving via public
+      // DNS): a Warning rather than a hard Failure.
+      quotaWarn = true;
+    } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
 
     let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     if (quotaFail) {
@@ -3277,13 +3294,18 @@ function render(r) {
     // exist on a subset of the domain's nameservers, so asserting it is missing
     // would be inaccurate. The detail explains the propagation issue.
     const spfIsServfail = !spfPassesRequirement && !effectiveSpfPresent && txtServfailDetected;
+    // SPF recovered only from a direct nameserver query is WARN regardless of
+    // whether it satisfies the Outlook include: public DNS (the source of truth
+    // for delivery + Azure verification) is not returning it reliably.
+    const spfIsNameserverRecovered = effectiveSpfPresent && recoveredFromNameservers;
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
+      ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
-    quotaItems.push(quotaRow(t('spfQueried'), spfPassesRequirement ? 'pass' : ((spfIsIndeterminate || spfIsServfail) ? 'warn' : 'fail'), spfDetail, null, 'spf'));
-    const spfState = spfPassesRequirement ? 'PASS' : ((spfIsIndeterminate || spfIsServfail) ? 'WARN' : 'FAIL');
-    quotaLines.push(`**${t('spfQueried')}:** ${spfState}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
-    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfState)}${spfDetail ? ' - ' + escapeHtml(spfDetail).replace(/\r?\n/g, '<br>') : ''}`);
+    const spfState = (spfPassesRequirement && !spfIsNameserverRecovered) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered) ? 'warn' : 'fail');
+    quotaItems.push(quotaRow(t('spfQueried'), spfState, spfDetail, null, 'spf'));
+    const spfStateLabel = spfState.toUpperCase();
+    quotaLines.push(`**${t('spfQueried')}:** ${spfStateLabel}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
+    quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfStateLabel)}${spfDetail ? ' - ' + escapeHtml(spfDetail).replace(/\r?\n/g, '<br>') : ''}`);
   }
 
   // Domain age / expiry for copy block
@@ -3473,12 +3495,21 @@ function render(r) {
     verificationItems.push(verifyRow(t('dnsTxtLookup'), 'fail', r.dnsError || t('txtLookupFailedOrTimedOut'), 'txtRecords'));
     verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), 'fail', t('missingRequiredAcsTxt'), 'acsTxt'));
   } else {
-    verificationItems.push(verifyRow(t('dnsTxtLookup'), 'pass', t('resolvedSuccessfully'), 'txtRecords'));
-    verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), effectiveAcsPresent ? 'pass' : 'fail', effectiveAcsPresent ? t('msDomainVerificationFound') : t('addAcsTxtFromPortal'), 'acsTxt'));
+    // When the TXT data was only recoverable by querying the nameservers
+    // directly, the public DNS lookup the verification truly depends on did not
+    // return it -- so the DNS TXT Lookup and ACS rows are WARN, not PASS, with a
+    // note that the record exists on the nameservers but isn't resolving publicly.
+    if (recoveredFromNameservers) {
+      verificationItems.push(verifyRow(t('dnsTxtLookup'), 'warn', t('txtRecoveredFromNameservers'), 'txtRecords'));
+      verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), effectiveAcsPresent ? 'warn' : 'fail', effectiveAcsPresent ? t('acsRecoveredFromNameservers') : t('addAcsTxtFromPortal'), 'acsTxt'));
+    } else {
+      verificationItems.push(verifyRow(t('dnsTxtLookup'), 'pass', t('resolvedSuccessfully'), 'txtRecords'));
+      verificationItems.push(verifyRow(t('acsTxtMsDomainVerification'), effectiveAcsPresent ? 'pass' : 'fail', effectiveAcsPresent ? t('msDomainVerificationFound') : t('addAcsTxtFromPortal'), 'acsTxt'));
+    }
   }
 
   // Overall ACS readiness
-  verificationItems.push(verifyRow(t('acsReadiness'), (loaded.base && !errors.base && txtLookupResolved && effectiveAcsPresent) ? 'pass' : (loaded.base && !errors.base ? 'fail' : 'pending'), r.acsReady ? t('acsReadyMessage') : t('missingRequiredAcsTxt'), 'verification'));
+  verificationItems.push(verifyRow(t('acsReadiness'), (loaded.base && !errors.base && txtLookupResolved && effectiveAcsPresent && !recoveredFromNameservers) ? 'pass' : ((loaded.base && !errors.base && effectiveAcsPresent && recoveredFromNameservers) ? 'warn' : (loaded.base && !errors.base ? 'fail' : 'pending')), r.acsReady ? t('acsReadyMessage') : ((effectiveAcsPresent && recoveredFromNameservers) ? t('acsRecoveredFromNameservers') : t('missingRequiredAcsTxt')), 'verification'));
 
   cards.push(`
   <div class="card" id="card-verification">
@@ -3901,7 +3932,7 @@ function render(r) {
   const spfCardBaseValue = loaded.base
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -3967,8 +3998,8 @@ function render(r) {
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL")))),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail")))),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && recoveredFromNameservers) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL"))))),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && recoveredFromNameservers) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail"))))),
     "spf",
     true,
     spfExplainedTitleSuffix,
@@ -3995,21 +4026,23 @@ function render(r) {
 
   cards.push(card(
     t('acsDomainVerificationTxt'),
-    loaded.base ? (effectiveAcsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : (effectiveAcsPresent ? "PASS" : "MISSING")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : (effectiveAcsPresent ? "tag-pass" : "tag-fail")),
+    loaded.base ? ([(effectiveAcsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)), (recoveredFromNameservers && effectiveAcsPresent ? t('acsRecoveredFromNameservers') : '')].filter(Boolean).join("\n\n") || null) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveAcsPresent && recoveredFromNameservers) ? "WARN" : (effectiveAcsPresent ? "PASS" : "MISSING"))),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveAcsPresent && recoveredFromNameservers) ? "tag-warn" : (effectiveAcsPresent ? "tag-pass" : "tag-fail"))),
     "acsTxt"
   ));
 
   cards.push(card(
     t('txtRecordsQueried'),
-    loaded.base ? ((effectiveTxtRecords.join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noTxtRecordsOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainTxtRecordsInfo', { lookupDomain: r.txtLookupDomain })}\n${(r.parentTxtRecords || []).join("\n")}`) : (txtServfailDetected ? t('txtServfailDetected') : null))) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    loaded.base ? (((effectiveTxtRecords.length > 0 && recoveredFromNameservers) ? (`${t('txtRecoveredFromNameservers')}\n\n${effectiveTxtRecords.join("\n")}`) : effectiveTxtRecords.join("\n")) || ((r.parentTxtRecords && r.parentTxtRecords.length > 0 && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noTxtRecordsOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainTxtRecordsInfo', { lookupDomain: r.txtLookupDomain })}\n${(r.parentTxtRecords || []).join("\n")}`) : (txtServfailDetected ? t('txtServfailDetected') : null))) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     // Only flag the TXT card WARN when it actually shows the SERVFAIL message --
     // i.e. there are no queried-domain TXT rows to display. A broken zone can
     // SERVFAIL while still returning a partial TXT answer; in that case we show
     // the partial rows as a normal INFO card rather than a misleading warning.
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((txtServfailDetected && effectiveTxtRecords.length === 0) ? "WARN" : "INFO")),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((txtServfailDetected && effectiveTxtRecords.length === 0) ? "tag-warn" : "tag-info")),
+    // TXT rows recovered only from a direct nameserver query are also WARN (the
+    // public resolver returned nothing), with a note explaining why.
+    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveTxtRecords.length > 0 && recoveredFromNameservers) ? "WARN" : ((txtServfailDetected && effectiveTxtRecords.length === 0) ? "WARN" : "INFO"))),
+    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveTxtRecords.length > 0 && recoveredFromNameservers) ? "tag-warn" : ((txtServfailDetected && effectiveTxtRecords.length === 0) ? "tag-warn" : "tag-info"))),
     "txtRecords",
     false
   ));
