@@ -174,8 +174,17 @@ function Get-DnsBaseStatus {
     ipLookupDomain = $ipLookupDomain
     ipUsedParent   = $ipUsedParent
 
-    ipv4Addresses = $ipv4Addrs
-    ipv6Addresses = $ipv6Addrs
+    # Force array context with @() so ConvertTo-Json always serializes these as a
+    # JSON array, even when only ONE address was found. PowerShell unwraps a
+    # single-element array back into a scalar when it flows through an `if`
+    # expression (as the parent-domain IP fallback above does: `$ipv4Addrs = $v4p`
+    # where $v4p came from an `if {} else {}`), which made a single parent IP
+    # serialize as a bare JSON string. The SPA's getDnsTxtRecoveryState then did
+    # `Array.isArray(r.ipv4Addresses) ? ... : []`, so a string failed the check
+    # and the Domain card rendered "None" while still showing the "using parent
+    # domain IP" note -- a visible contradiction (ms2.sportslottery.com.tw).
+    ipv4Addresses = @($ipv4Addrs)
+    ipv6Addresses = @($ipv6Addrs)
 
     spfPresent = $spfPresent
     spfValue   = $spf
@@ -257,6 +266,25 @@ switch -Regex ($mxHost) {
           '(^|\.)mail\.protection\.partner\.outlook\.cn\.?$|(^|\.)protection\.partner\.outlook\.cn\.?$' {
             $result.mxProvider = 'Microsoft 365 China (21Vianet)'
             $result.mxProviderHint = 'MX points to Microsoft 365 operated by 21Vianet (China).'
+            break
+          }
+          # Azure Communication Services Email. Customers who configure a custom
+          # domain on an Email Communication Services resource are instructed to
+          # add an MX record pointing at the ACS inbound host, e.g.
+          # `xm.communication.azure.com` (and regional/cloud variants such as
+          # `<region>.xm.communication.azure.com`). ACS only sends outbound mail,
+          # but the MX is recommended to improve sender-domain reputation, so it
+          # shows up in customer DNS and we want to recognize it explicitly.
+          '(^|\.)xm\.communication\.azure\.com\.?$|(^|\.)communication\.azure\.com\.?$' {
+            $result.mxProvider = 'Azure Communication Services Email'
+            $result.mxProviderHint = 'MX points to Azure Communication Services email (xm.communication.azure.com).'
+            break
+          }
+          # Azure Communication Services managed-domain sending host. Azure
+          # Managed Domains send from `*.azurecomm.net`; recognize it as ACS too.
+          '(^|\.)azurecomm\.net\.?$' {
+            $result.mxProvider = 'Azure Communication Services Email'
+            $result.mxProviderHint = 'MX points to an Azure Communication Services managed domain (azurecomm.net).'
             break
           }
           'aspmx\.l\.google\.com\.?$|\.aspmx\.l\.google\.com\.?$|google\.com\.?$' {

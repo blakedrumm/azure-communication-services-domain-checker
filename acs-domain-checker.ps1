@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.8.1'
+$script:AppVersion = '2.8.4'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -7762,8 +7762,17 @@ function Get-DnsBaseStatus {
     ipLookupDomain = $ipLookupDomain
     ipUsedParent   = $ipUsedParent
 
-    ipv4Addresses = $ipv4Addrs
-    ipv6Addresses = $ipv6Addrs
+    # Force array context with @() so ConvertTo-Json always serializes these as a
+    # JSON array, even when only ONE address was found. PowerShell unwraps a
+    # single-element array back into a scalar when it flows through an `if`
+    # expression (as the parent-domain IP fallback above does: `$ipv4Addrs = $v4p`
+    # where $v4p came from an `if {} else {}`), which made a single parent IP
+    # serialize as a bare JSON string. The SPA's getDnsTxtRecoveryState then did
+    # `Array.isArray(r.ipv4Addresses) ? ... : []`, so a string failed the check
+    # and the Domain card rendered "None" while still showing the "using parent
+    # domain IP" note -- a visible contradiction (ms2.sportslottery.com.tw).
+    ipv4Addresses = @($ipv4Addrs)
+    ipv6Addresses = @($ipv6Addrs)
 
     spfPresent = $spfPresent
     spfValue   = $spf
@@ -7845,6 +7854,25 @@ switch -Regex ($mxHost) {
           '(^|\.)mail\.protection\.partner\.outlook\.cn\.?$|(^|\.)protection\.partner\.outlook\.cn\.?$' {
             $result.mxProvider = 'Microsoft 365 China (21Vianet)'
             $result.mxProviderHint = 'MX points to Microsoft 365 operated by 21Vianet (China).'
+            break
+          }
+          # Azure Communication Services Email. Customers who configure a custom
+          # domain on an Email Communication Services resource are instructed to
+          # add an MX record pointing at the ACS inbound host, e.g.
+          # `xm.communication.azure.com` (and regional/cloud variants such as
+          # `<region>.xm.communication.azure.com`). ACS only sends outbound mail,
+          # but the MX is recommended to improve sender-domain reputation, so it
+          # shows up in customer DNS and we want to recognize it explicitly.
+          '(^|\.)xm\.communication\.azure\.com\.?$|(^|\.)communication\.azure\.com\.?$' {
+            $result.mxProvider = 'Azure Communication Services Email'
+            $result.mxProviderHint = 'MX points to Azure Communication Services email (xm.communication.azure.com).'
+            break
+          }
+          # Azure Communication Services managed-domain sending host. Azure
+          # Managed Domains send from `*.azurecomm.net`; recognize it as ACS too.
+          '(^|\.)azurecomm\.net\.?$' {
+            $result.mxProvider = 'Azure Communication Services Email'
+            $result.mxProviderHint = 'MX points to an Azure Communication Services managed domain (azurecomm.net).'
             break
           }
           'aspmx\.l\.google\.com\.?$|\.aspmx\.l\.google\.com\.?$|google\.com\.?$' {
@@ -14118,10 +14146,10 @@ const TRANSLATIONS = {
     nameserverNoTxt: 'No TXT records returned by this nameserver.',
     nameserverSummaryDisabled: 'Nameserver TXT probe disabled by server configuration.',
     nameserverDetailsButton: 'Show what each nameserver returned',
-    spfRecoveredFromNameservers: 'This record was found by querying the domain\u0027s authoritative nameservers directly, but public DNS resolvers returned no record. Email delivery and Azure verification rely on public DNS, so until every authoritative nameserver serves this record consistently it may resolve only intermittently. See the Nameserver TXT Consistency card below.',
-    acsRecoveredFromNameservers: 'The ms-domain-verification TXT was found on the authoritative nameservers but is not resolving via public DNS. Azure verifies domains through public DNS, so verification may fail until every nameserver serves the record consistently. See the Nameserver TXT Consistency card below.',
-    txtRecoveredFromNameservers: 'These TXT records were retrieved by querying the authoritative nameservers directly. Public DNS resolvers returned no TXT records for this name, which usually means the domain\u0027s nameservers are inconsistent. See the Nameserver TXT Consistency card below.',
-    guidanceRecoveredFromNameservers: 'SPF/TXT/verification records for {domain} were found on the authoritative nameservers but did not resolve through public DNS. This points to inconsistent nameservers (some serve the records, some do not). Make every authoritative nameserver serve the same TXT records so they resolve reliably \u2014 see the Nameserver TXT Consistency card for which servers are out of sync.',
+    spfRecoveredFromNameservers: 'This record was found by querying the domain\u0027s authoritative nameservers directly, but the public DNS resolver returned no record for this lookup. Email delivery and Azure verification rely on public DNS, so until the authoritative nameservers answer this query reliably the record may resolve only intermittently. This is usually an intermittent authoritative-DNS failure (SERVFAIL/timeout) or nameservers that are out of sync \u2014 see the Nameserver TXT Consistency card below.',
+    acsRecoveredFromNameservers: 'The ms-domain-verification TXT was found on the authoritative nameservers but the public DNS resolver returned no record for this lookup. Azure verifies domains through public DNS, so verification may fail intermittently until the authoritative nameservers answer reliably. See the Nameserver TXT Consistency card below.',
+    txtRecoveredFromNameservers: 'These TXT records were retrieved by querying the authoritative nameservers directly. The public DNS resolver returned no TXT records for this lookup \u2014 usually an intermittent authoritative-DNS failure (SERVFAIL/timeout) or nameservers that are out of sync. See the Nameserver TXT Consistency card below.',
+    guidanceRecoveredFromNameservers: 'SPF/TXT/verification records for {domain} were found by querying the authoritative nameservers directly, but the public DNS resolver returned no record for this lookup. Public DNS is what governs email delivery and Azure domain verification, so these may work only intermittently until the domain\u0027s authoritative DNS answers reliably (this is usually a transient SERVFAIL/timeout, or nameservers that are out of sync). Check the Nameserver TXT Consistency card and confirm every authoritative nameserver consistently serves these records.',
     cname: 'CNAME',
     guidance: 'Guidance',
     helpfulLinks: 'Helpful Links',
@@ -15400,6 +15428,7 @@ const TRANSLATION_EXTENSIONS = {
     wordExpired: 'Expired',
     mxPriorityLabel: 'Priority',
     providerHintMicrosoft365: 'MX points to Exchange Online Protection (EOP).',
+    providerHintAcsEmail: 'MX points to Azure Communication Services email (xm.communication.azure.com).',
     providerHintGoogleWorkspace: 'MX points to Google mail exchangers.',
     providerHintCloudflare: 'MX points to Cloudflare (mx.cloudflare.net).',
     providerHintProofpoint: 'MX points to Proofpoint-hosted mail.',
@@ -20824,6 +20853,7 @@ function stripSpfRequirementSection(text) {
 function getLocalizedMxProviderHint(provider, fallbackHint) {
   switch (String(provider || '')) {
     case 'Microsoft 365 / Exchange Online': return t('providerHintMicrosoft365');
+    case 'Azure Communication Services Email': return t('providerHintAcsEmail');
     case 'Google Workspace / Gmail': return t('providerHintGoogleWorkspace');
     case 'Cloudflare Email Routing': return t('providerHintCloudflare');
     case 'Proofpoint': return t('providerHintProofpoint');
@@ -20895,6 +20925,23 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   return guidance;
 }
 
+// Normalize a server-provided value that is conceptually a list of strings but
+// may arrive as a single scalar string. PowerShell's ConvertTo-Json serializes a
+// single-element array as a bare JSON string (not a 1-element array), so fields
+// like ipv4Addresses/txtRecords can reach the SPA as a string when the server
+// found exactly one value. Treating that scalar as "not an array" silently
+// dropped it (e.g. the Domain card showing IPv4 "None" while still showing the
+// "using parent domain IP" note). asStringArray collapses both shapes to a clean
+// string array so downstream array logic is robust regardless of arity.
+function asStringArray(value) {
+  if (Array.isArray(value)) {
+    return value.map(v => String(v == null ? '' : v).trim()).filter(Boolean);
+  }
+  if (value == null) { return []; }
+  const single = String(value).trim();
+  return single ? [single] : [];
+}
+
 function getDnsTxtRecoveryState(r) {
   const loaded = r && r._loaded ? r._loaded : {};
   const domain = String(r && r.domain || '').trim().toLowerCase();
@@ -20957,7 +21004,7 @@ function getDnsTxtRecoveryState(r) {
   // nothing for the queried domain, so a healthy lookup is never altered.
   const baseTxtRecords = recoveredFromDetailedRecords
     ? detailedTxtRecords
-    : (Array.isArray(r && r.txtRecords) ? r.txtRecords.filter(Boolean) : []);
+    : asStringArray(r && r.txtRecords);
   const recoveredFromNameservers = !!(loaded.base
     && baseTxtRecords.length === 0
     && nameserverTxtUnion.length > 0);
@@ -20965,10 +21012,10 @@ function getDnsTxtRecoveryState(r) {
   const txtRecords = recoveredFromNameservers ? nameserverTxtUnion : baseTxtRecords;
   const ipv4Addresses = recoveredAddressesFromDetailedRecords
     ? detailedARecords
-    : (Array.isArray(r && r.ipv4Addresses) ? r.ipv4Addresses.filter(Boolean) : []);
+    : asStringArray(r && r.ipv4Addresses);
   const ipv6Addresses = recoveredAddressesFromDetailedRecords
     ? detailedAaaaRecords
-    : (Array.isArray(r && r.ipv6Addresses) ? r.ipv6Addresses.filter(Boolean) : []);
+    : asStringArray(r && r.ipv6Addresses);
   const spfValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
     ? (txtRecords.find(value => /^v=spf1/i.test(String(value || '').trim())) || null)
     : (r ? r.spfValue : null);

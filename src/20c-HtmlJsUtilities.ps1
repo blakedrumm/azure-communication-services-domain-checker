@@ -1096,6 +1096,7 @@ function stripSpfRequirementSection(text) {
 function getLocalizedMxProviderHint(provider, fallbackHint) {
   switch (String(provider || '')) {
     case 'Microsoft 365 / Exchange Online': return t('providerHintMicrosoft365');
+    case 'Azure Communication Services Email': return t('providerHintAcsEmail');
     case 'Google Workspace / Gmail': return t('providerHintGoogleWorkspace');
     case 'Cloudflare Email Routing': return t('providerHintCloudflare');
     case 'Proofpoint': return t('providerHintProofpoint');
@@ -1167,6 +1168,23 @@ function getDmarcSecurityGuidance(dmarcRecord, domain, lookupDomain, inherited) 
   return guidance;
 }
 
+// Normalize a server-provided value that is conceptually a list of strings but
+// may arrive as a single scalar string. PowerShell's ConvertTo-Json serializes a
+// single-element array as a bare JSON string (not a 1-element array), so fields
+// like ipv4Addresses/txtRecords can reach the SPA as a string when the server
+// found exactly one value. Treating that scalar as "not an array" silently
+// dropped it (e.g. the Domain card showing IPv4 "None" while still showing the
+// "using parent domain IP" note). asStringArray collapses both shapes to a clean
+// string array so downstream array logic is robust regardless of arity.
+function asStringArray(value) {
+  if (Array.isArray(value)) {
+    return value.map(v => String(v == null ? '' : v).trim()).filter(Boolean);
+  }
+  if (value == null) { return []; }
+  const single = String(value).trim();
+  return single ? [single] : [];
+}
+
 function getDnsTxtRecoveryState(r) {
   const loaded = r && r._loaded ? r._loaded : {};
   const domain = String(r && r.domain || '').trim().toLowerCase();
@@ -1229,7 +1247,7 @@ function getDnsTxtRecoveryState(r) {
   // nothing for the queried domain, so a healthy lookup is never altered.
   const baseTxtRecords = recoveredFromDetailedRecords
     ? detailedTxtRecords
-    : (Array.isArray(r && r.txtRecords) ? r.txtRecords.filter(Boolean) : []);
+    : asStringArray(r && r.txtRecords);
   const recoveredFromNameservers = !!(loaded.base
     && baseTxtRecords.length === 0
     && nameserverTxtUnion.length > 0);
@@ -1237,10 +1255,10 @@ function getDnsTxtRecoveryState(r) {
   const txtRecords = recoveredFromNameservers ? nameserverTxtUnion : baseTxtRecords;
   const ipv4Addresses = recoveredAddressesFromDetailedRecords
     ? detailedARecords
-    : (Array.isArray(r && r.ipv4Addresses) ? r.ipv4Addresses.filter(Boolean) : []);
+    : asStringArray(r && r.ipv4Addresses);
   const ipv6Addresses = recoveredAddressesFromDetailedRecords
     ? detailedAaaaRecords
-    : (Array.isArray(r && r.ipv6Addresses) ? r.ipv6Addresses.filter(Boolean) : []);
+    : asStringArray(r && r.ipv6Addresses);
   const spfValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
     ? (txtRecords.find(value => /^v=spf1/i.test(String(value || '').trim())) || null)
     : (r ? r.spfValue : null);
