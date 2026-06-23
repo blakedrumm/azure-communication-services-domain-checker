@@ -45,6 +45,7 @@
   - Root TXT/SPF records validation
   - ACS-specific verification TXT records (`ms-domain-verification`)
   - MX records with A/AAAA resolution and mail provider detection
+  - Null MX records (`MX 0 .`) are treated as explicit no-mail configuration and fail the MX readiness row instead of being counted as usable mail routing
   - DMARC policy verification (including inherited parent-domain DMARC)
   - DKIM selector validation (`selector1-azurecomm-prod-net`, `selector2-azurecomm-prod-net`)
   - CNAME record checks (root and `www` prefix)
@@ -128,6 +129,8 @@ http://localhost:8080
 $env:ACS_API_KEY = "your-secret-key"
 ./acs-domain-checker.ps1
 ```
+
+Press **Ctrl+C** (or **Q**) in the terminal running `acs-domain-checker.ps1` to stop the local server gracefully. The listener is closed, in-flight cleanup runs, metrics are persisted when enabled, and the terminal returns to the prompt without closing it.
 
 ## 🐳 Quick Start (Docker)
 
@@ -244,6 +247,8 @@ The **Customer Intake Information** form (shown to signed-in users) is language-
 - **Insert template** generates the ACS "email quota increase" questionnaire in whatever language the app is currently set to, so the template matches the customer's language.
 - **Process Data** extraction recognizes the questionnaire in all 10 supported languages, mapping each answer to the canonical English field labels reviewers expect. The extracted-field table and the **Copy Email Quota** payload remain in English (the canonical ACS questionnaire), while the customer's own answer values are preserved verbatim.
 - Numeric answers written in non-Western numerals (Arabic-Indic, Eastern Arabic-Indic/Persian, Devanagari, and full-width digits) are normalized so the throttling-tier inference still works.
+- The extracted **Type of emails sent**, **Current tier level**, and **Expected tier level** rows provide dropdown suggestions when empty while keeping the cell editable for any custom text. Tier rows include an info button that expands a reference table of ACS tier names with per-minute and per-hour limits.
+- When the intake form contains a current sending domain that differs from the active lookup, the checker automatically runs against that domain and clears the temporary "Running checker against ..." status once the lookup completes.
 
 > Machine-translated questionnaire strings (especially for `ar`, `zh-CN`, `hi-IN`, `ja-JP`, `ru-RU`) are best-effort and benefit from native-speaker review. The form does **not** translate the customer's answers between languages; it structures and labels them.
 

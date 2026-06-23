@@ -119,6 +119,27 @@ $listener = $null
 $tcpListener = $null
 $serverStarted = $false
 $startupErrorMessage = $null
+$script:ShutdownRequested = $false
+$script:AcsServerHttpListener = $null
+$script:AcsServerTcpListener = $null
+$script:ConsoleCancelHandler = $null
+$script:PreviousTreatControlCAsInput = $null
+$script:ReturnToPromptAfterCtrlC = $false
+try {
+  # If Visual Studio (or another launcher) starts this script as the shell's
+  # command itself, e.g. `pwsh -File .\acs-domain-checker.ps1`, then a clean
+  # script return exits that pwsh process and the terminal shows "process
+  # exited" instead of a reusable prompt. Detect that launch shape so shutdown
+  # can offer an interactive PowerShell prompt after Ctrl+C. When the script is
+  # run from an already-open prompt (`.\acs-domain-checker.ps1`), these process
+  # arguments do not contain -File/-Command and normal return-to-parent-prompt
+  # behavior is preserved.
+  $hostArgs = @([Environment]::GetCommandLineArgs())
+  $launchRunsAndExits = ($hostArgs -match '^(?i:-file|-f|-command|-c)$') -and -not ($hostArgs -match '^(?i:-noexit)$')
+  $script:ReturnToPromptAfterCtrlC = [Environment]::UserInteractive -and $launchRunsAndExits
+} catch {
+  $script:ReturnToPromptAfterCtrlC = $false
+}
 
 $displayUrl = "http://localhost:$Port"
 
@@ -182,7 +203,43 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
   }
 
   if ($serverStarted) {
+    # In some integrated terminals, a normal Ctrl+C interrupt can terminate the
+    # hosting pwsh process (exit code 2) instead of unwinding back to the prompt.
+    # While the server is running, treat Ctrl+C as regular console input and let
+    # the request loop poll for char 0x03. The shutdown file restores the prior
+    # console setting so Ctrl+C behaves normally after the server stops.
+    try {
+      $script:PreviousTreatControlCAsInput = [Console]::TreatControlCAsInput
+      [Console]::TreatControlCAsInput = $true
+    } catch {
+      $script:PreviousTreatControlCAsInput = $null
+      Write-Warning "Ctrl+C input mode could not be enabled: $($_.Exception.Message)"
+    }
+
+    # Ctrl+C must stop the underlying listener so the blocking GetContext() /
+    # AcceptTcpClient() call in the request loop wakes up and can enter the
+    # normal finally{} shutdown path. We cancel the default process abort so
+    # metrics/in-flight cleanup still runs and the terminal can be reused.
+    $script:AcsServerHttpListener = $listener
+    $script:AcsServerTcpListener = $tcpListener
+    try {
+      if ($null -eq $script:ConsoleCancelHandler) {
+        $script:ConsoleCancelHandler = [System.ConsoleCancelEventHandler]{
+          param($sender, $eventArgs)
+          $eventArgs.Cancel = $true
+          $script:ShutdownRequested = $true
+          try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
+          try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }
+          try { [Console]::Error.WriteLine('Stopping ACS Email Domain Checker...') } catch { }
+        }
+        [Console]::add_CancelKeyPress($script:ConsoleCancelHandler)
+      }
+    } catch {
+      Write-Warning "Ctrl+C shutdown handler could not be registered: $($_.Exception.Message)"
+    }
+
     Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker running at $displayUrl"
+    Write-Information -InformationAction Continue -MessageData 'Press Ctrl+C (or Q) to stop the server.'
 
     # Also write version to the console for quick visibility during startup.
     Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker version: $($script:AppVersion)"

@@ -348,7 +348,9 @@ function hideTopBarItem(element) {
     }
   });
 
-  Promise.allSettled(tasks)
+  // Return the settle chain so callers (e.g. the intake re-run) can await the
+  // lookup completing and then restore their own status text.
+  return Promise.allSettled(tasks)
     .catch(() => {})
     .finally(() => {
       if (runId !== activeLookup.runId) return;
@@ -2962,7 +2964,8 @@ function render(r) {
     let quotaWarn = false;
 
     // 1. MX
-    if (!r.mxRecords || r.mxRecords.length === 0) { quotaFail = true; }
+    const hasUsableMxForQuota = (r.hasUsableMx === true) || (r.hasUsableMx === undefined && Array.isArray(r.mxRecords) && r.mxRecords.length > 0);
+    if (!hasUsableMxForQuota) { quotaFail = true; }
 
     // 2. Reputation
     // Logic from card: state is 'warn' if listed or poor reputation.
@@ -3073,7 +3076,7 @@ function render(r) {
     quotaLinesHtml.push(`<strong>MX Records:</strong> ERROR${mxCopyDetail ? ' - ' + escapeHtml(mxCopyDetail) : ''}`);
     mxStatusText = t('error');
   } else {
-    const hasMx = Array.isArray(r.mxRecords) && r.mxRecords.length > 0;
+    const hasMx = (r.hasUsableMx === true) || (r.hasUsableMx === undefined && Array.isArray(r.mxRecords) && r.mxRecords.length > 0);
     const mxRecordsText = (r.mxRecords || []).join(', ');
     if (hasMx) {
       let note = '';
@@ -3082,7 +3085,9 @@ function render(r) {
       }
       mxCopyDetail = localizeMxRecordText(mxRecordsText || t('mxRecords')) + note;
     } else {
-      mxCopyDetail = t('noMxRecordsDetected');
+      mxCopyDetail = r.nullMx === true
+        ? 'Domain publishes a Null MX record (MX 0 .), which means it does not accept email.'
+        : t('noMxRecordsDetected');
       if (mxFallbackChecked && mxFallbackChecked !== r.domain) {
         mxCopyDetail += ` ${t('parentCheckedNoMx', { parentDomain: mxFallbackChecked })}`;
       }
@@ -5225,20 +5230,20 @@ function getIntakeContent() {
 const INTAKE_EXTRACT_FIELDS = [
   { id: 'companyName',          label: 'Company name',                                 patterns: ['company name', 'customer name', 'organization name', 'organisation name'] },
   { id: 'companyWebsite',       label: 'Company website',                              patterns: ['company website', 'website', 'company url', 'web site'] },
-  { id: 'businessDescription',  label: 'Brief description of your business',           rich: true, patterns: ['provide a brief description of your business', 'brief description of your business', 'business description', 'description of your business', 'description of business', 'brief description', 'about the business', 'about your business'] },
+  { id: 'businessDescription',  label: 'Brief description of your business',           rich: true, patterns: ['provide a brief description of your business', 'brief description of your business', 'brief description of its activity', 'business description', 'description of your business', 'description of business', 'brief description', 'about the business', 'about your business'] },
   { id: 'subscriptionId',       label: 'Subscription ID',                              patterns: ['subscription id', 'azure subscription id', 'subscription'] },
   { id: 'acsResourceName',      label: 'Azure Communication Services Resource Name',   patterns: ['azure communication services resource name', 'acs resource name', 'communication services resource name', 'resource name'] },
-  { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'custom domain already set up', 'custom domain set up', 'custom domain in use', 'domain already in use', 'custom domain'] },
-  { id: 'currentSendingDomain', label: 'Current sending domain',                       patterns: ['indicate the domain from which you are currently sending emails', 'current sending domain', 'currently sending from', 'sending domain'] },
-  { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'type of emails do you send', 'type of emails sent', 'type of email sent', 'type of emails', 'email type', 'types of emails'] },
+  { id: 'customDomainInUse',    label: 'Custom domain already set up and in use',      patterns: ['is your custom domain already set up and currently used for sending messages', 'is your custom domain already set up and used to send messages', 'custom domain already set up', 'custom domain set up', 'custom domain in use', 'domain already in use', 'custom domain'] },
+  { id: 'currentSendingDomain', label: 'Current sending domain',                       patterns: ['indicate the domain from which you are currently sending emails', 'specify the domain you\'re currently sending email from', 'specify the domain you are currently sending email from', 'domain you\'re currently sending email from', 'domain you are currently sending email from', 'current sending domain', 'currently sending from', 'sending domain'] },
+  { id: 'emailType',            label: 'Type of emails sent',                          patterns: ['what type of emails do you send', 'what kind of emails do you send', 'type of emails do you send', 'kind of emails do you send', 'type of emails sent', 'type of email sent', 'type of emails', 'email type', 'types of emails'] },
   { id: 'currentTier',          label: 'Current tier level',                           patterns: ['current tier level', 'current tier', 'existing tier', 'throttling tier for current subscription', 'throttling tier'] },
-  { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'estimated monthly volume', 'monthly volume', 'email volume', 'volume of emails'] },
+  { id: 'expectedVolume',       label: 'Expected tier level',                          patterns: ['specify the expected volume of emails you plan to send', 'expected volume of emails you plan to send', 'expected volume of emails', 'expected value of email', 'expected volume', 'expected tier level', 'expected tier', 'requested tier', 'estimated monthly volume', 'monthly volume', 'email volume', 'volume of emails'] },
   { id: 'ratePerMinute',        label: 'Max rate per minute',                          patterns: ['maximum rate of messages per minute', 'maximum messages per minute', 'max messages per minute', 'messages per minute', 'maximum per minute', 'max per minute', 'rate per minute', 'msgs per minute', 'msg/min', 'messages/minute'] },
   { id: 'ratePerHour',          label: 'Max rate per hour',                            patterns: ['maximum rate of messages per hour', 'maximum messages per hour', 'max messages per hour', 'messages per hour', 'maximum per hour', 'max per hour', 'rate per hour', 'msgs per hour', 'msg/hour', 'messages/hour'] },
   { id: 'ratePerDay',           label: 'Max rate per day',                             patterns: ['maximum rate of messages per day', 'maximum messages per day', 'max messages per day', 'messages per day', 'maximum per day', 'max per day', 'rate per day', 'msgs per day', 'msg/day', 'messages/day'] },
   { id: 'attachmentSizeMb',      label: 'Max attachment size (MB)',                     patterns: ['what is the maximum attachment size in mb', 'maximum attachment size in mb', 'max attachment size in mb', 'attachment size in mb', 'maximum attachment size', 'max attachment size', 'attachment size'] },
-  { id: 'recipientCount',       label: 'Max recipients per email',                     patterns: ['what is the maximum recipient count per email', 'maximum recipient count per email', 'max recipient count per email', 'recipient count per email', 'recipients per email', 'maximum recipient count', 'max recipient count', 'recipient count', 'max recipients', 'recipient limit'] },
-  { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
+  { id: 'recipientCount',       label: 'Max recipients per email',                     patterns: ['what is the maximum recipient count per email', 'maximum number of recipients per email', 'maximum recipient count per email', 'max recipient count per email', 'recipient count per email', 'recipients per email', 'maximum recipient count', 'max recipient count', 'recipient count', 'max recipients', 'recipient limit'] },
+  { id: 'addressSource',        label: 'Source of email addresses',                    patterns: ['what is the source of the email addresses that you use for sending your messages', 'what is the source of the email addresses you use to send your messages', 'source of the email addresses', 'source of email addresses', 'how do you acquire', 'how are addresses acquired', 'source of addresses'] },
   { id: 'bounceHandling',       label: 'Unsubscribe / bounce handling',                rich: true, patterns: ['how do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list', 'how do you currently manage and remove email addresses that have unsubscribed', 'manage and remove email addresses that have unsubscribed', 'manage and remove email addresses', 'unsubscribe handling', 'bounce handling', 'handle bounces', 'remove bounced'] }
 ];
 
@@ -5403,6 +5408,64 @@ function formatExpectedTierValue(existingValue, perMinute, perHour, perDay) {
   return tier + ' \u2014 ' + existing;
 }
 
+// ----- Intake option dropdowns + tier rate info ---------------------------
+// A handful of extracted fields are far easier to fill from a fixed list than
+// by free typing. For those we render a <select> in the cell (shown only when
+// the cell is empty) alongside an inner contenteditable value element, so the
+// operator can either pick from the dropdown or still type/correct by hand.
+// Option VALUES stay English on purpose (the extracted answers are the
+// canonical ACS questionnaire and are never machine-translated -- see repo
+// guidance #18); only surrounding UI chrome is localized via t().
+const INTAKE_FIELD_OPTIONS = {
+  // "Type of emails sent" -- the common ACS categories.
+  emailType: ['Transactional', 'Marketing', 'Promotional', 'Notifications', 'Newsletters', 'OTP / Verification'],
+  // Current/Expected tier level -- the published ACS throttling tier names.
+  // Derived from INTAKE_TIERS so the dropdown always matches the rate table.
+  currentTier: INTAKE_TIERS.map(function (tr) { return tr.name; }),
+  expectedVolume: INTAKE_TIERS.map(function (tr) { return tr.name; })
+};
+
+// Fields whose label should carry an "i" info button that reveals the full
+// throttling-tier rate table (so the operator can see every tier's per-minute
+// and per-hour caps and choose the right one).
+const INTAKE_TIER_INFO_FIELDS = { currentTier: true, expectedVolume: true };
+
+// Build the read-only tier reference table (Tier / Per minute / Per hour) shown
+// when a tier-row info button is toggled open. Numbers are locale-grouped for
+// readability; tier names come straight from the decoded INTAKE_TIERS model.
+function buildIntakeTierTableHtml() {
+  const fmt = function (n) {
+    try { return Number(n).toLocaleString(); } catch (_) { return String(n); }
+  };
+  const rows = INTAKE_TIERS.map(function (tr) {
+    return '<tr>' +
+      '<td>' + escapeHtml(tr.name) + '</td>' +
+      '<td>' + escapeHtml(fmt(tr.perMinute)) + '</td>' +
+      '<td>' + escapeHtml(fmt(tr.perHour)) + '</td>' +
+      '</tr>';
+  }).join('');
+  return '<table class="intake-tier-table">' +
+    '<thead><tr>' +
+    '<th>' + escapeHtml(t('intakeTierTableTier')) + '</th>' +
+    '<th>' + escapeHtml(t('intakeTierTablePerMinute')) + '</th>' +
+    '<th>' + escapeHtml(t('intakeTierTablePerHour')) + '</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+// Toggle a tier-row info detail row open/closed. Mirrors toggleSpfCidrDetail:
+// flip the sibling detail row's display plus the button's aria-expanded and
+// open-state class. The detail row is emitted (closed) at render time.
+function toggleIntakeTierInfo(element, detailId) {
+  if (!element || !detailId) return;
+  const row = document.getElementById(detailId);
+  if (!row) return;
+  const current = row.style.display;
+  const isOpen = (!current || current === 'none');
+  row.style.display = isOpen ? 'table-row' : 'none';
+  if (element.setAttribute) element.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  if (element.classList) element.classList.toggle('intake-tier-info-btn--open', isOpen);
+}
+
 function normalizeIntakePlainText(plain) {
   // Collapse non-breaking spaces and trim each line. Keep blank lines so
   // we can detect multi-line answers under a question heading. Before
@@ -5423,24 +5486,30 @@ function normalizeIntakePlainText(plain) {
     'Company website:',
     'Please provide a brief description of your business:',
     'Provide a brief description of your business:',
+    'Brief description of its activity:',
     'Brief description of your business:',
     'Brief description:',
     'Email Service Information',
     'Subscription ID:',
     'Azure Communication Services Resource Name:',
     'Is your custom domain already set up and currently used for sending messages:',
+    'Is your custom domain already set up and used to send messages?',
     'Custom domain already set up and in use:',
     'Custom domain already set up:',
     'Custom domain set up:',
     'Indicate the domain from which you are currently sending emails:',
+    'Specify the domain you\'re currently sending email from:',
+    'Specify the domain you are currently sending email from:',
     'Current sending domain:',
     'Sending domain:',
     'Usage Information',
     'What type of emails do you send?',
+    'What kind of emails do you send?',
     'Type of emails sent:',
     'Type of emails:',
     'Please specify the expected volume of emails you plan to send:',
     'Specify the expected volume of emails you plan to send:',
+    'Expected Value of Email:',
     'Expected tier level:',
     'Expected volume:',
     'Current tier level:',
@@ -5458,11 +5527,13 @@ function normalizeIntakePlainText(plain) {
     'Max attachment size (MB):',
     'Max attachment size:',
     'What is the maximum recipient count per email that you require?',
+    'Maximum number of recipients per email:',
     'Max recipients per email:',
     'Recipient count per email:',
     'Recipient count:',
     'Additional Information',
     'What is the source of the email addresses that you use for sending your messages?',
+    'What is the source of the email addresses you use to send your messages?',
     'Source of email addresses:',
     'How do you currently manage and remove email addresses that have unsubscribed or resulted in bounce backs from your mailing list?',
     'Unsubscribe / bounce handling:',
@@ -5570,6 +5641,10 @@ function isLikelyNonAnswerTail(text) {
     || s === 'that you require'
     || s === 'you require?'
     || s === 'you require'
+    || /^\(?default\s*:/.test(s)
+    || /^and used to send messages\??$/.test(s)
+    || /^used to send messages\??$/.test(s)
+    || /^you use to send your messages\??$/.test(s)
     || /^or resulted\b/.test(s)
     || /^resulted in bounce backs\b/.test(s)
     || /^from your mailing list\??$/.test(s);
@@ -5858,14 +5933,33 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
 
   if (input) input.value = sendingDomain;
   if (typeof toggleClearBtn === 'function') toggleClearBtn();
+  // Remember the status text we are about to replace (e.g. the "Detected N of M
+  // fields" message) so we can restore it once the re-run completes instead of
+  // leaving the transient "Running checker against ..." text on screen forever.
+  const priorStatus = status ? status.textContent : '';
+  const runningText = 'Running checker against ' + sendingDomain + '\u2026';
   if (status) {
     // Replace the status text (don't append) so repeated edits to the sending
     // domain don't pile up multiple "Running checker against ..." fragments.
-    status.textContent = 'Running checker against ' + sendingDomain + '\u2026';
+    status.textContent = runningText;
   }
   // Pass the sending domain explicitly so the lookup is not affected by any
   // race with the input value update above.
-  lookup({ domainOverride: sendingDomain, animateTopIntro: true });
+  const pending = lookup({ domainOverride: sendingDomain, animateTopIntro: true });
+  // Clear the transient "Running checker against ..." status once the lookup
+  // settles. We only touch the status if it still shows OUR running text, so a
+  // newer message (from another edit/run) is never clobbered. lookup() returns
+  // undefined on its early-return guard paths, so guard for a thenable first.
+  const restore = () => {
+    if (!status) return;
+    if (status.textContent !== runningText) return;
+    status.textContent = priorStatus || '';
+  };
+  if (pending && typeof pending.then === 'function') {
+    pending.then(restore, restore);
+  } else {
+    restore();
+  }
 }
 
 function renderExtractedIntakeTable(values) {
@@ -5884,30 +5978,70 @@ function renderExtractedIntakeTable(values) {
     // handling) keep rich-text behavior. Every other cell is marked as a plain
     // single-line field so the blur handler can flatten and trim it.
     const plainAttr = f.rich ? '' : ' data-plain-field="true"';
-    rows.push(
-      '<tr' + emptyCls + ' data-field-id="' + escapeHtml(f.id) + '">' +
-      '<th>' + escapeHtml(f.label) + '</th>' +
-      '<td contenteditable="true" data-empty-text="(not detected)"' + plainAttr + '>' +
-      (val ? escapeHtml(val) : '(not detected)') +
-      '</td></tr>'
-    );
+    const options = INTAKE_FIELD_OPTIONS[f.id];
+    const hasTierInfo = !!INTAKE_TIER_INFO_FIELDS[f.id];
+
+    // Label cell: tier fields carry an "i" button that toggles a detail row
+    // (emitted directly below) holding the full throttling-tier rate table.
+    let labelHtml = '<th>' + escapeHtml(f.label);
+    if (hasTierInfo) {
+      const detailId = 'intake-tier-detail-' + f.id;
+      labelHtml += ' <button type="button" class="intake-tier-info-btn" aria-expanded="false" aria-controls="' +
+        escapeHtml(detailId) + '" title="' + escapeHtml(t('intakeTierInfoLabel')) +
+        '" onclick="toggleIntakeTierInfo(this, \'' + escapeHtml(detailId) + '\')">i</button>';
+    }
+    labelHtml += '</th>';
+
+    // Value cell. Option fields render an inner contenteditable value element
+    // plus a <select>; CSS shows the dropdown while the row is empty but keeps
+    // the editable value visible too, so operators can type custom text or pick
+    // from common suggestions.
+    let valueCellHtml;
+    if (options && options.length) {
+      let optionsHtml = '<option value="">' + escapeHtml(t('intakeSelectPrompt')) + '</option>';
+      for (const opt of options) {
+        const sel = (val && val === opt) ? ' selected' : '';
+        optionsHtml += '<option value="' + escapeHtml(opt) + '"' + sel + '>' + escapeHtml(opt) + '</option>';
+      }
+      valueCellHtml = '<td class="intake-option-cell">' +
+        '<span class="intake-cell-value" contenteditable="true" data-empty-text="(not detected)"' + plainAttr + '>' +
+        (val ? escapeHtml(val) : '(not detected)') +
+        '</span>' +
+        '<select class="intake-cell-select" aria-label="' + escapeHtml(f.label) + '">' + optionsHtml + '</select>' +
+        '</td>';
+    } else {
+      valueCellHtml = '<td contenteditable="true" data-empty-text="(not detected)"' + plainAttr + '>' +
+        (val ? escapeHtml(val) : '(not detected)') +
+        '</td>';
+    }
+
+    rows.push('<tr' + emptyCls + ' data-field-id="' + escapeHtml(f.id) + '">' + labelHtml + valueCellHtml + '</tr>');
+
+    // Hidden detail row carrying the tier rate table (toggled by the info btn).
+    if (hasTierInfo) {
+      rows.push('<tr class="intake-tier-detail-row" id="intake-tier-detail-' + escapeHtml(f.id) +
+        '" style="display:none;"><td colspan="2">' + buildIntakeTierTableHtml() + '</td></tr>');
+    }
   }
   body.innerHTML = rows.join('');
-  // Wire up edit tracking.
-  Array.from(body.querySelectorAll('td[contenteditable="true"]')).forEach(td => {
-    const isPlainField = td.getAttribute('data-plain-field') === 'true';
-    // Clear placeholder text on focus when the cell has the empty marker.
-    td.addEventListener('focus', () => {
-      const tr = td.parentElement;
+
+  // Wire up edit tracking. The editable element is the <td> itself for normal
+  // fields and the inner <span class="intake-cell-value"> for option fields,
+  // so we select by [contenteditable] and resolve the row via closest().
+  Array.from(body.querySelectorAll('[contenteditable="true"]')).forEach(el => {
+    const isPlainField = el.getAttribute('data-plain-field') === 'true';
+    // Clear placeholder text on focus when the row still carries the empty marker.
+    el.addEventListener('focus', () => {
+      const tr = el.closest('tr[data-field-id]');
       if (tr && tr.classList.contains('intake-extracted-empty')) {
-        td.textContent = '';
+        el.textContent = '';
         tr.classList.remove('intake-extracted-empty');
       }
     });
     // For plain (non-rich) fields, intercept paste so rich clipboard content
     // is inserted as plain text only. Rich fields keep the default behavior.
     if (isPlainField) {
-      td.addEventListener('paste', (e) => {
+      el.addEventListener('paste', (e) => {
         e.preventDefault();
         const clip = (e.clipboardData || window.clipboardData);
         const pasted = clip ? clip.getData('text/plain') : '';
@@ -5916,32 +6050,35 @@ function renderExtractedIntakeTable(values) {
         if (typeof document.execCommand === 'function') {
           document.execCommand('insertText', false, flat);
         } else {
-          td.textContent = (td.innerText || '') + flat;
+          el.textContent = (el.innerText || '') + flat;
         }
       });
     }
-    td.addEventListener('blur', () => {
-      const tr = td.parentElement;
+    el.addEventListener('blur', () => {
+      const tr = el.closest('tr[data-field-id]');
       const fieldId = tr ? tr.getAttribute('data-field-id') : null;
       // Plain fields are flattened to a single line and have leading/trailing
       // whitespace removed. Rich fields keep their internal formatting but are
       // still trimmed of surrounding whitespace.
       let text;
       if (isPlainField) {
-        text = (td.innerText || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+        text = (el.innerText || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
         // Re-render the cell as flat text so any pasted markup/line breaks are
         // visually removed too, not just stripped from the stored value.
-        if (text) td.textContent = text;
+        if (text) el.textContent = text;
       } else {
-        text = (td.innerText || '').replace(/^\s+|\s+$/g, '');
+        text = (el.innerText || '').replace(/^\s+|\s+$/g, '');
       }
       if (fieldId) {
         if (text) {
           intakeExtractedOverrides[fieldId] = text;
         } else {
           delete intakeExtractedOverrides[fieldId];
-          td.textContent = '(not detected)';
+          el.textContent = '(not detected)';
           tr.classList.add('intake-extracted-empty');
+          // Reset any sibling dropdown back to its prompt so it reflects "empty".
+          const sel = tr.querySelector('select.intake-cell-select');
+          if (sel) sel.value = '';
         }
         // When the user edits the "Current sending domain" cell, re-run the
         // checker against it immediately (using the first valid domain when
@@ -5949,6 +6086,30 @@ function renderExtractedIntakeTable(values) {
         if (fieldId === 'currentSendingDomain' && text) {
           maybeRunCheckerForIntakeDomain(text, document.getElementById('intakeProcessStatus'));
         }
+      }
+    });
+  });
+
+  // Wire up the option dropdowns. Picking a value fills the editable value
+  // element, records the override, and clears the empty marker so the <select>
+  // hides; choosing the blank prompt clears the field again. Users can also
+  // ignore the dropdown and type any custom text directly in the value element.
+  Array.from(body.querySelectorAll('select.intake-cell-select')).forEach(sel => {
+    sel.addEventListener('change', () => {
+      const tr = sel.closest('tr[data-field-id]');
+      if (!tr) return;
+      const fieldId = tr.getAttribute('data-field-id');
+      const valueEl = tr.querySelector('.intake-cell-value');
+      const value = sel.value;
+      if (value) {
+        if (valueEl) valueEl.textContent = value;
+        tr.classList.remove('intake-extracted-empty');
+        if (fieldId) intakeExtractedOverrides[fieldId] = value;
+        if (valueEl && typeof valueEl.focus === 'function') valueEl.focus();
+      } else {
+        if (valueEl) valueEl.textContent = '(not detected)';
+        tr.classList.add('intake-extracted-empty');
+        if (fieldId) delete intakeExtractedOverrides[fieldId];
       }
     });
   });
@@ -5963,8 +6124,10 @@ function getExtractedIntakeValues() {
   for (const f of INTAKE_EXTRACT_FIELDS) {
     const tr = body.querySelector('tr[data-field-id="' + f.id + '"]');
     if (!tr || tr.classList.contains('intake-extracted-empty')) continue;
-    const td = tr.querySelector('td[contenteditable="true"]');
-    const val = td ? (td.innerText || '').trim() : '';
+    // The value element is the <td> itself for normal fields and the inner
+    // <span class="intake-cell-value"> for option fields, so select either.
+    const cell = tr.querySelector('.intake-cell-value, td[contenteditable="true"]');
+    const val = cell ? (cell.innerText || '').trim() : '';
     if (val) out.push({ id: f.id, label: f.label, value: val });
   }
   return out;

@@ -229,6 +229,8 @@ function Get-DnsMxStatus {
     $result = [pscustomobject]@{
       mxRecords = @()
       mxRecordsDetailed = @()
+      hasUsableMx = $false
+      nullMx = $false
       mxProvider = $null
       mxProviderHint = $null
     }
@@ -246,6 +248,11 @@ function Get-DnsMxStatus {
 
       if ($primaryMx) {
         $mxHost = $primaryMx.ToString().Trim().TrimEnd('.').ToLowerInvariant()
+        if ($mxHost -eq '') {
+          $result.nullMx = $true
+          $result.mxProvider = 'No mail service (Null MX)'
+          $result.mxProviderHint = 'Domain publishes a Null MX record (MX 0 .), which explicitly says it does not accept email.'
+        } else {
 switch -Regex ($mxHost) {
           # --- Microsoft & Google ---
           'mail\.protection\.outlook\.com\.?$' {
@@ -866,14 +873,42 @@ switch -Regex ($mxHost) {
             $result.mxProviderHint = 'Provider not recognized from MX hostname.'
           }
         }
+        }
       }
 
       foreach ($m in $mxSorted) {
         $mxHost = [string]$m.NameExchange
-        if ([string]::IsNullOrWhiteSpace($mxHost)) { continue }
+        if ([string]::IsNullOrWhiteSpace($mxHost)) {
+          # RFC 7505 Null MX is published as "MX 0 .". PowerShell DNS APIs can
+          # surface the root exchange as an empty NameExchange after trimming;
+          # keep it visible for diagnostics, but never count it as usable mail
+          # routing because it intentionally means "this domain accepts no mail".
+          $result.nullMx = $true
+          $result.mxRecords += "(Null MX: no mail service) (Priority $($m.Preference))"
+          $result.mxRecordsDetailed += [pscustomobject]@{
+            Hostname = '(Null MX)'
+            Priority = $m.Preference
+            Type = "N/A"
+            IPAddress = "No mail service (MX 0 .)"
+          }
+          continue
+        }
         $mxHost = $mxHost.Trim().TrimEnd('.')
 
+        if ([string]::IsNullOrWhiteSpace($mxHost)) {
+          $result.nullMx = $true
+          $result.mxRecords += "(Null MX: no mail service) (Priority $($m.Preference))"
+          $result.mxRecordsDetailed += [pscustomobject]@{
+            Hostname = '(Null MX)'
+            Priority = $m.Preference
+            Type = "N/A"
+            IPAddress = "No mail service (MX 0 .)"
+          }
+          continue
+        }
+
         $result.mxRecords += "$mxHost (Priority $($m.Preference))"
+        $result.hasUsableMx = $true
 
         $ipv4 = @()
         $ipv6 = @()
@@ -950,6 +985,8 @@ switch -Regex ($mxHost) {
     mxFallbackUsed          = $mxFallbackUsed
     mxRecords               = $mxResult.mxRecords
     mxRecordsDetailed       = $mxResult.mxRecordsDetailed
+    hasUsableMx             = $mxResult.hasUsableMx
+    nullMx                  = $mxResult.nullMx
     mxProvider              = $mxResult.mxProvider
     mxProviderHint          = $mxResult.mxProviderHint
   }

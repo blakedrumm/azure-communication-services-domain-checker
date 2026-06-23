@@ -139,9 +139,12 @@ function Get-AcsDnsStatus {
           $guidance.Add("ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.")
         }
       }
-      if (-not $mx.mxRecords)    {
+      if (-not $mx.hasUsableMx)    {
         if ($mx.mxFallbackDomainChecked -and $mx.mxFallbackUsed -and $mx.mxLookupDomain) {
           $guidance.Add("No MX records found on $Domain; using parent domain $($mx.mxLookupDomain) MX records as a fallback.")
+        }
+        elseif ($mx.nullMx) {
+          $guidance.Add("Domain publishes a Null MX record (MX 0 .), which explicitly means it does not accept email. Configure a real MX record before using this domain for mail flow.")
         }
         elseif ($mx.mxFallbackDomainChecked -and -not $mx.mxFallbackUsed) {
           $guidance.Add("No MX records detected for $Domain or its parent $($mx.mxFallbackDomainChecked). Mail flow will not function until MX records are configured.")
@@ -248,6 +251,8 @@ function Get-AcsDnsStatus {
 
         mxRecords         = $mx.mxRecords
         mxRecordsDetailed = $mx.mxRecordsDetailed
+        hasUsableMx       = $mx.hasUsableMx
+        nullMx            = $mx.nullMx
         mxProvider        = $mx.mxProvider
         mxProviderHint    = $mx.mxProviderHint
         mxLookupDomain          = $mx.mxLookupDomain

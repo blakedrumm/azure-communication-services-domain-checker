@@ -553,6 +553,111 @@ html[dir="rtl"] .check-progress-popover {
   font-style: italic;
 }
 
+/* ----- Customer Intake: option dropdowns + tier rate info -----------------
+   Option fields (Type of emails sent, Current/Expected tier level) render an
+   inner contenteditable value element plus a <select>. Per the UX rule the
+   <select> is shown while the row is empty (.intake-extracted-empty), but the
+   editable text area stays visible too so users can type a custom value. Once
+   a value is chosen/typed the dropdown hides and the value text remains.
+   Tier rows also carry a small "i" info button (mirrors .spf-cidr-info-btn)
+   that toggles a sibling detail row holding the full tier rate table. */
+.intake-form-card .intake-option-cell {
+  white-space: normal;
+}
+.intake-form-card .intake-cell-value {
+  display: inline-block;
+  cursor: text;
+  min-height: 18px;
+  min-width: 180px;
+  max-width: 100%;
+  padding: 2px 4px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  vertical-align: middle;
+}
+.intake-form-card .intake-cell-value:focus {
+  outline: 2px solid #2f80ed;
+  outline-offset: -2px;
+}
+.intake-form-card .intake-cell-select {
+  display: none;
+  width: 100%;
+  max-width: 320px;
+  height: 30px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--input-border);
+  background: var(--card-bg);
+  color: var(--fg);
+  font-size: 13px;
+  font-family: inherit;
+}
+/* Empty option cell: keep the editable placeholder visible, surface the
+   dropdown suggestions, and undo the faded/italic empty-row treatment so both
+   controls read clearly. */
+.intake-form-card .intake-extracted-table tr.intake-extracted-empty td.intake-option-cell {
+  opacity: 1;
+  font-style: normal;
+}
+.intake-form-card tr.intake-extracted-empty .intake-option-cell .intake-cell-select { display: inline-block; }
+
+/* Tier-rate info "i" button shown beside the Current/Expected tier labels. */
+.intake-form-card .intake-tier-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--status);
+  margin-left: 6px;
+  cursor: pointer;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  vertical-align: middle;
+}
+.intake-form-card .intake-tier-info-btn:hover,
+.intake-form-card .intake-tier-info-btn:focus,
+.intake-form-card .intake-tier-info-btn:focus-visible {
+  color: var(--fg);
+  border-color: var(--status);
+  outline: none;
+}
+.intake-form-card .intake-tier-info-btn--open {
+  background: rgba(46, 204, 113, 0.18);
+  border-color: rgba(46, 204, 113, 0.55);
+  color: var(--fg);
+}
+.intake-form-card .intake-tier-detail-row > td {
+  background: rgba(46, 204, 113, 0.04);
+  padding: 8px 10px;
+}
+.intake-form-card .intake-tier-table {
+  width: auto;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.intake-form-card .intake-tier-table th,
+.intake-form-card .intake-tier-table td {
+  border: 1px solid var(--input-border);
+  padding: 4px 10px;
+  text-align: left;
+}
+.intake-form-card .intake-tier-table th {
+  background: rgba(127, 127, 127, 0.10);
+  font-weight: 600;
+}
+.intake-form-card .intake-tier-table td:nth-child(2),
+.intake-form-card .intake-tier-table td:nth-child(3) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 input[type=text] {
   flex: 1;
   height: 38px;

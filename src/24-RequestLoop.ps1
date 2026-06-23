@@ -1,6 +1,28 @@
 # ===== HTTP Accept Loop & TcpListener Shim =====
 
 try {
+  function Test-ConsoleShutdownKey {
+    # When [Console]::TreatControlCAsInput is enabled during server mode,
+    # pressing Ctrl+C produces character 0x03 instead of aborting the pwsh
+    # process. Poll non-blockingly so the accept loop can stop and return to the
+    # terminal prompt. Also accept Q/q as a convenience when running manually.
+    if ($script:ShutdownRequested) { return $true }
+    try {
+      while ([Console]::KeyAvailable) {
+        $key = [Console]::ReadKey($true)
+        $ch = [int][char]$key.KeyChar
+        if ($ch -eq 3 -or $key.Key -eq [ConsoleKey]::Q) {
+          $script:ShutdownRequested = $true
+          try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
+          try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }
+          try { [Console]::Error.WriteLine('Stopping ACS Email Domain Checker...') } catch { }
+          return $true
+        }
+      }
+    } catch { }
+    return $false
+  }
+
   function ConvertFrom-QueryString {
     param([string]$Query)
     # Minimal query-string parser used by the TcpListener fallback.
@@ -269,7 +291,13 @@ try {
     # Primary server mode: HttpListener (best supported on Windows).
     while ($listener.IsListening) {
       try {
-        $ctx = $listener.GetContext()
+        if (Test-ConsoleShutdownKey) { break }
+        $asyncContext = $listener.BeginGetContext($null, $null)
+        while (-not $asyncContext.AsyncWaitHandle.WaitOne(200)) {
+          if (Test-ConsoleShutdownKey -or -not $listener.IsListening) { break }
+        }
+        if ($script:ShutdownRequested -or -not $listener.IsListening) { break }
+        $ctx = $listener.EndGetContext($asyncContext)
 
         # Handle CORS preflight (OPTIONS) requests inline to avoid RunspacePool overhead.
         try {
@@ -316,10 +344,12 @@ try {
         Invoke-InflightCleanup
       }
       catch [System.Net.HttpListenerException] {
+        if ($script:ShutdownRequested) { break }
         Write-Error -Message "HttpListenerException: $($_.Exception.Message)" -ErrorAction Continue
         break
       }
       catch {
+        if ($script:ShutdownRequested) { break }
         Write-Error -Message "HttpListener loop error: $($_.Exception.Message)" -ErrorAction Continue
         break
       }
@@ -329,7 +359,13 @@ try {
     # Fallback server mode: TcpListener (for platforms where HttpListener is unavailable).
     # Only GET is supported here; it's enough for the SPA + JSON endpoints.
     while ($true) {
-      $client = $tcpListener.AcceptTcpClient()
+      if (Test-ConsoleShutdownKey) { break }
+      $asyncClient = $tcpListener.BeginAcceptTcpClient($null, $null)
+      while (-not $asyncClient.AsyncWaitHandle.WaitOne(200)) {
+        if (Test-ConsoleShutdownKey) { break }
+      }
+      if ($script:ShutdownRequested) { break }
+      $client = $tcpListener.EndAcceptTcpClient($asyncClient)
       if ($null -eq $client) { continue }
 
       $req = $null
@@ -376,10 +412,12 @@ try {
         Invoke-InflightCleanup
       }
       catch [System.Net.Sockets.SocketException] {
+        if ($script:ShutdownRequested) { break }
         Write-Error -Message "TcpListener SocketException: $($_.Exception.Message)" -ErrorAction Continue
         try { $client.Close() } catch { }
       }
       catch {
+        if ($script:ShutdownRequested) { break }
         Write-Error -Message "TcpListener loop error: $($_.Exception.Message)" -ErrorAction Continue
         try { $client.Close() } catch { }
       }
