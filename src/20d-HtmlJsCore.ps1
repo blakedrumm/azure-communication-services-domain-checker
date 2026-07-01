@@ -2995,15 +2995,12 @@ function render(r) {
     }
 
     // 4. SPF
-    const spfLookupCountForStatus = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-      ? Number(r.spfAnalysis.totalLookupTerms)
-      : null;
     if (recoveredFromNameservers && effectiveSpfPresent) {
       // SPF exists only via direct nameserver query (not resolving via public
       // DNS): a Warning rather than a hard Failure.
       quotaWarn = true;
     } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
-    if (effectiveSpfPresent && Number.isFinite(spfLookupCountForStatus) && spfLookupCountForStatus > 10) {
+    if (doesSpfExceedLookupLimit(r, effectiveSpfPresent)) {
       quotaWarn = true;
     }
 
@@ -3309,13 +3306,8 @@ function render(r) {
     // whether it satisfies the Outlook include: public DNS (the source of truth
     // for delivery + Azure verification) is not returning it reliably.
     const spfIsNameserverRecovered = effectiveSpfPresent && recoveredFromNameservers;
-    const spfLookupCountForChecklist = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-      ? Number(r.spfAnalysis.totalLookupTerms)
-      : null;
-    const spfExceedsLookupLimit = effectiveSpfPresent && Number.isFinite(spfLookupCountForChecklist) && spfLookupCountForChecklist > 10;
-    const spfLookupLimitDetail = spfExceedsLookupLimit
-      ? `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCountForChecklist} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.`
-      : '';
+    const spfExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
+    const spfLookupLimitDetail = spfExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
     const spfDetail = effectiveSpfPresent
       ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
@@ -3392,20 +3384,15 @@ function render(r) {
       ? t('error')
       : (effectiveAcsPresent ? t('verified') : t('notVerified')));
 
+  const spfCopyExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
   const spfStatusText = (!loaded.base && !errors.base)
     ? t('pending')
     : (errors.base
       ? t('error')
-      : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude !== false) ? t('verified') : t('notStarted')));
-
-  const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-    ? Number(r.spfAnalysis.totalLookupTerms)
-    : null;
-  const spfLookupCopyDetail = (Number.isFinite(spfLookupCount) && spfLookupCount >= 0)
-    ? (spfLookupCount > 10
-      ? `SPF DNS lookups: ${spfLookupCount} (exceeds the RFC 7208 limit of 10; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors)`
-      : `SPF DNS lookups: ${spfLookupCount} (within the RFC 7208 limit of 10)`)
-    : '';
+      : (spfCopyExceedsLookupLimit
+        ? t('warningState')
+        : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude !== false) ? t('verified') : t('notStarted'))));
+  const spfLookupCopyDetail = getSpfLookupCountCopyText(r, effectiveSpfPresent);
   const spfStatusCopyText = spfLookupCopyDetail ? `${spfStatusText} - ${spfLookupCopyDetail}` : spfStatusText;
 
   const dkim1StatusText = (!loaded.dkim && !errors.dkim)
@@ -3960,7 +3947,9 @@ function render(r) {
   const spfCardBaseValue = loaded.base
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
+  const spfCardExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
+  const spfLookupLimitCardDetail = spfCardExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
+  const spfCardValue = [spfCardBaseValue, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -4009,7 +3998,10 @@ function render(r) {
       const spfRequirementNote = spfRequirementText
         ? `<div class="spf-explained-requirement">${escapeHtml(spfRequirementText)}</div>`
         : '';
-      const explainedHtml = spfInheritedNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
+      const spfLookupLimitNote = spfLookupLimitCardDetail
+        ? `<div class="spf-explained-requirement" style="border-color:#f59e0b;background:#422006;color:#fde68a;">${escapeHtml(spfLookupLimitCardDetail)}</div>`
+        : '';
+      const explainedHtml = spfInheritedNote + spfLookupLimitNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
       spfExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleSpfExplained(this)" title="${escapeHtml(t('spfExplainedTooltip'))}">${escapeHtml(t('spfExplainedShow'))}</button>`;
       spfExplainedAppend = `<div id="spfExplained" class="card-content" style="display:none;">${explainedHtml}</div>`;
 
@@ -4020,14 +4012,16 @@ function render(r) {
       // sufficient. innerText of #field-spf still reads as clean plain
       // text for the Copy button.
       const spfRecordBoxHtml = `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
-      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfRequirementNote;
+      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfLookupLimitNote + spfRequirementNote;
     }
   }
+  const spfCardTag = basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL")))));
+  const spfCardTagClass = basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail")))));
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && recoveredFromNameservers) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL"))))),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && recoveredFromNameservers) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail"))))),
+    spfCardTag,
+    spfCardTagClass,
     "spf",
     true,
     spfExplainedTitleSuffix,
@@ -4045,7 +4039,7 @@ function render(r) {
   <div class="card" id="card-spfExpansion">
     <div class="card-header" onclick="toggleCard(this)">
       <span class="chevron">&#x25BC;</span>
-      <span class="tag tag-info">${escapeHtml(translateBadge('INFO'))}</span>
+      <span class="tag ${spfCardExceedsLookupLimit ? 'tag-warn' : 'tag-info'}">${escapeHtml(translateBadge(spfCardExceedsLookupLimit ? 'WARN' : 'INFO'))}</span>
       <strong>${escapeHtml(t('spfExpansionRecordsTitle'))}</strong>
     </div>
     <div class="card-content">${spfExpansionBodyHtml}</div>
@@ -4658,6 +4652,7 @@ function render(r) {
           <li><a href="https://learn.microsoft.com/azure/communication-services/quickstarts/email/add-custom-verified-domains" target="_blank" rel="noopener">${escapeHtml(t('acsEmailDomainVerification'))}</a></li>
           <li><a href="https://learn.microsoft.com/azure/communication-services/concepts/email/email-quota-increase" target="_blank" rel="noopener">${escapeHtml(t('acsEmailQuotaLimitIncrease'))}</a></li>
           <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure" target="_blank" rel="noopener">${escapeHtml(t('spfRecordBasics'))}</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure#troubleshooting-spf-txt-records" target="_blank" rel="noopener">${escapeHtml(t('spfTroubleshooting'))}</a></li>
           <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records" target="_blank" rel="noopener">${escapeHtml(t('dmarcRecordBasics'))}</a></li>
           <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dkim-configure" target="_blank" rel="noopener">${escapeHtml(t('dkimRecordBasics'))}</a></li>
           <li><a href="https://learn.microsoft.com/microsoft-365/admin/get-help-with-domains/create-dns-records-at-any-dns-hosting-provider?view=o365-worldwide" target="_blank" rel="noopener">${escapeHtml(t('mxRecordBasics'))}</a></li>
@@ -6193,7 +6188,7 @@ const INTAKE_REQUEST_TEMPLATE = [
   { id: 'companyName',          label: 'Company Name' },
   { id: 'companyWebsite',       label: 'Company Website' },
   { id: 'businessDescription',  label: 'Brief Description of Your Business' },
-  { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a pre-requisite before the quota increase and AMD domain is only for testing purpose, not allowed for quota increase and the failure rate should be less than 1%.' },
+  { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a prerequisite before the quota increase. Azure Managed Domains are only for testing and are not eligible for quota increases; current Microsoft guidance says delivery failure rates must be below 2% for quota-review approval.' },
   { id: 'currentSendingDomain', label: 'What is the domain you are currently sending emails from? Please make sure it has successfully sent emails.' },
   { id: 'acsResourceName',      label: 'ACS Resource Name' },
   { id: 'emailType',            label: 'What type of emails do you send? (e.g., Transactional, Marketing, Promotional)' },

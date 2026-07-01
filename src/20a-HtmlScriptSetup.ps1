@@ -24,8 +24,8 @@ const appVersion = '__APP_VERSION__';
 // without SRI (the previous behavior), so this is purely additive hardening.
 const msalSources = [
   '/assets/msal-browser.min.js',
-  'https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js',
-  'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/dist/msal-browser.min.js'
+  'https://cdn.jsdelivr.net/npm/@azure/msal-browser@5.11.0/lib/msal-browser.min.js',
+  'https://unpkg.com/@azure/msal-browser@5.11.0/lib/msal-browser.min.js'
 ];
 
 let msalIntegrity = {};

@@ -1,17 +1,18 @@
 <#
 .SYNOPSIS
-  Downloads third-party UI SVG assets into the local `assets/` folder.
+  Downloads third-party UI assets into the local `assets/` folder.
 
 .DESCRIPTION
-  Fetches the Lucide toolbar/status icons and the flag-icons SVG files used by the
-  ACS Email Domain Checker SPA so they can be served from same-origin `/assets/*`
-  paths instead of loading from public CDNs. It also refreshes the local Public
-  Suffix List cache (`public_suffix_list.dat`) used by the registrable-domain
-  resolver for WHOIS/RDAP lookups.
+  Fetches the Lucide toolbar/status icons, flag-icons SVG files, and MSAL browser
+  bundle used by the ACS Email Domain Checker SPA so they can be served from
+  same-origin `/assets/*` paths instead of loading from public CDNs. It also
+  refreshes the local Public Suffix List cache (`public_suffix_list.dat`) used by
+  the registrable-domain resolver for WHOIS/RDAP lookups.
 
   By default, files are stored under:
     assets/vendor/lucide-static/icons
     assets/vendor/flag-icons/flags/4x3
+    assets/msal-browser.min.js
 
 .PARAMETER DestinationRoot
   Root directory that will contain the downloaded assets. Defaults to `assets`
@@ -68,6 +69,8 @@ function Save-RemoteFile {
 
 $lucideBase = 'https://cdn.jsdelivr.net/npm/lucide-static/icons'
 $flagBase = 'https://cdn.jsdelivr.net/gh/lipis/flag-icons@7.0.0/flags/4x3'
+$msalBrowserVersion = '5.11.0'
+$msalBrowserUrl = "https://cdn.jsdelivr.net/npm/@azure/msal-browser@$msalBrowserVersion/lib/msal-browser.min.js"
 
 # Keep this list in sync with the icon names referenced by `UI_LABEL_ICONS` and
 # the guidance/status rendering in `src/20c-HtmlJsUtilities.ps1` and `src/20d-HtmlJsCore.ps1`.
@@ -123,6 +126,12 @@ foreach ($flagFile in $flagFiles) {
   $result = Save-RemoteFile -Uri $uri -Path $path -ForceDownload:$Force
   if ($result -eq 'Downloaded') { $downloaded++ } else { $skipped++ }
 }
+
+Write-Host ''
+Write-Host 'Downloading MSAL browser bundle...' -ForegroundColor Green
+$msalTargetPath = Join-Path -Path $DestinationRoot -ChildPath 'msal-browser.min.js'
+$result = Save-RemoteFile -Uri $msalBrowserUrl -Path $msalTargetPath -ForceDownload:$Force
+if ($result -eq 'Downloaded') { $downloaded++ } else { $skipped++ }
 
 Write-Host ''
 Write-Host 'Downloading Public Suffix List...' -ForegroundColor Green

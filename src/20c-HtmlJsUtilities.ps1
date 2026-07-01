@@ -1087,6 +1087,33 @@ function getLocalizedSpfRequirementSummary(result) {
   return null;
 }
 
+function getSpfLookupCount(result) {
+  const raw = result && result.spfAnalysis ? result.spfAnalysis.totalLookupTerms : null;
+  if (raw === null || raw === undefined) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function doesSpfExceedLookupLimit(result, spfPresent) {
+  const count = getSpfLookupCount(result);
+  return !!spfPresent && count !== null && count > 10;
+}
+
+function getSpfLookupLimitWarningText(result) {
+  const count = getSpfLookupCount(result);
+  if (count === null || count <= 10) return '';
+  return t('spfLookupLimitWarning', { count: String(count) });
+}
+
+function getSpfLookupCountCopyText(result, spfPresent) {
+  const count = getSpfLookupCount(result);
+  if (count === null) return '';
+  if (doesSpfExceedLookupLimit(result, spfPresent)) {
+    return t('spfLookupCountExceeded', { count: String(count) });
+  }
+  return t('spfLookupCountWithin', { count: String(count) });
+}
+
 function stripSpfRequirementSection(text) {
   const source = String(text || '');
   if (!source) return '';
@@ -1372,11 +1399,9 @@ function buildGuidance(r) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
       }
     }
-    const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-      ? Number(r.spfAnalysis.totalLookupTerms)
-      : null;
-    if (txtRecovery.spfPresent && Number.isFinite(spfLookupCount) && spfLookupCount > 10) {
-      guidance.push({ type: 'attention', text: `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCount} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.` });
+    const spfLookupLimitGuidance = getSpfLookupLimitWarningText(r);
+    if (txtRecovery.spfPresent && spfLookupLimitGuidance) {
+      guidance.push({ type: 'attention', text: spfLookupLimitGuidance });
     }
     if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
       // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
@@ -1589,13 +1614,16 @@ function buildTestSummaryHtml(r) {
   } else {
     // SPF: a macro-delegated / hosted SPF service (Valimail, OnDMARC, ...) cannot
     // be statically confirmed for the Outlook include, so report it as WARN
-    // (indeterminate) rather than FAIL. A literal/flattened include is PASS;
-    // a present record without the include is a real FAIL.
+    // (indeterminate) rather than FAIL. A literal/flattened include is PASS only
+    // when the expanded SPF chain also stays within RFC 7208's 10-DNS-lookup
+    // limit; exceeding that limit is a deliverability warning even when the ACS
+    // Outlook include requirement is otherwise satisfied.
     const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
+    const spfExceedsLookupLimit = doesSpfExceedLookupLimit(r, txtRecovery.spfPresent);
     let spfState;
-    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) {
+    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true && !spfExceedsLookupLimit) {
       spfState = "pass";
-    } else if (txtRecovery.spfPresent && (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null)) {
+    } else if (txtRecovery.spfPresent && (spfExceedsLookupLimit || spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null)) {
       spfState = "warn";
     } else {
       spfState = "fail";

@@ -14229,8 +14229,8 @@ const appVersion = '__APP_VERSION__';
 // without SRI (the previous behavior), so this is purely additive hardening.
 const msalSources = [
   '/assets/msal-browser.min.js',
-  'https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js',
-  'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/dist/msal-browser.min.js'
+  'https://cdn.jsdelivr.net/npm/@azure/msal-browser@5.11.0/lib/msal-browser.min.js',
+  'https://unpkg.com/@azure/msal-browser@5.11.0/lib/msal-browser.min.js'
 ];
 
 let msalIntegrity = {};
@@ -14681,6 +14681,7 @@ const TRANSLATIONS = {
     acsEmailDomainVerification: 'ACS Email Domain Verification',
     acsEmailQuotaLimitIncrease: 'ACS Email Quota Limit Increase',
     spfRecordBasics: 'SPF Record Basics',
+    spfTroubleshooting: 'SPF Troubleshooting',
     spfExpansionRecordsTitle: 'SPF Expansion Records',
     spfExpansionEmpty: 'This SPF record has no include or redirect mechanisms to expand.',
     spfExpansionDepth: 'Depth',
@@ -14695,6 +14696,9 @@ const TRANSLATIONS = {
     spfExpansionLookupSummary: '{total} of 10 DNS lookups used in the expanded SPF chain \u2014 {status}.',
     spfExpansionWithinLimit: 'within the SPF 10-lookup limit',
     spfExpansionExceededLimit: 'exceeds the SPF 10-lookup limit',
+    spfLookupLimitWarning: 'SPF exceeds the RFC 7208 DNS lookup limit. Detected {count} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.',
+    spfLookupCountWithin: 'SPF DNS lookups: {count} (within the RFC 7208 limit of 10)',
+    spfLookupCountExceeded: 'SPF DNS lookups: {count} (exceeds the RFC 7208 limit of 10; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors)',
     spfExpansionParentRepeatHint: 'Same as the previous row\u0027s target (continued chain).',
     // SPF Explained (per-record decomposition, no DNS). Inspired by MXToolbox's
     // SPF Record Lookup table. The toggle button label flips between Show / Hide
@@ -15139,6 +15143,7 @@ const TRANSLATIONS = {
     acsEmailDomainVerification: 'Verificaci\u00F3n de dominio de correo ACS',
     acsEmailQuotaLimitIncrease: 'Aumento del l\u00EDmite de cuota de correo ACS',
     spfRecordBasics: 'Conceptos b\u00E1sicos de SPF',
+    spfTroubleshooting: 'Soluci\u00F3n de problemas de SPF',
     dmarcRecordBasics: 'Conceptos b\u00E1sicos de DMARC',
     dkimRecordBasics: 'Conceptos b\u00E1sicos de DKIM',
     mxRecordBasics: 'Conceptos b\u00E1sicos de MX',
@@ -15379,6 +15384,7 @@ const TRANSLATIONS = {
     acsEmailDomainVerification: 'V\u00E9rification du domaine e-mail ACS',
     acsEmailQuotaLimitIncrease: 'Augmentation de la limite de quota e-mail ACS',
     spfRecordBasics: 'Notions de base SPF',
+    spfTroubleshooting: 'R\u00E9solution des probl\u00E8mes SPF',
     dmarcRecordBasics: 'Notions de base DMARC',
     dkimRecordBasics: 'Notions de base DKIM',
     mxRecordBasics: 'Notions de base MX',
@@ -15561,6 +15567,7 @@ const TRANSLATIONS = {
     acsEmailDomainVerification: 'ACS-E-Mail-Domainverifizierung',
     acsEmailQuotaLimitIncrease: 'ACS-E-Mail-Kontingenterh\u00F6hung',
     spfRecordBasics: 'SPF-Grundlagen',
+    spfTroubleshooting: 'SPF-Problembehandlung',
     dmarcRecordBasics: 'DMARC-Grundlagen',
     dkimRecordBasics: 'DKIM-Grundlagen',
     mxRecordBasics: 'MX-Grundlagen',
@@ -15743,6 +15750,7 @@ const TRANSLATIONS = {
     acsEmailDomainVerification: 'Verifica\u00E7\u00E3o de dom\u00EDnio de e-mail ACS',
     acsEmailQuotaLimitIncrease: 'Aumento do limite de cota de e-mail ACS',
     spfRecordBasics: 'No\u00E7\u00F5es b\u00E1sicas de SPF',
+    spfTroubleshooting: 'Solu\u00E7\u00E3o de problemas de SPF',
     dmarcRecordBasics: 'No\u00E7\u00F5es b\u00E1sicas de DMARC',
     dkimRecordBasics: 'No\u00E7\u00F5es b\u00E1sicas de DKIM',
     mxRecordBasics: 'No\u00E7\u00F5es b\u00E1sicas de MX',
@@ -17585,6 +17593,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     riskLabel: '\u0627\u0644\u0645\u062E\u0627\u0637\u0631',
     source: '\u0627\u0644\u0645\u0635\u062F\u0631',
     spfRecordBasics: '\u0623\u0633\u0627\u0633\u064A\u0627\u062A SPF',
+    spfTroubleshooting: '\u0627\u0633\u062a\u0643\u0634\u0627\u0641 \u0623\u062e\u0637\u0627\u0621 SPF \u0648\u0625\u0635\u0644\u0627\u062d\u0647\u0627',
     status: '\u0627\u0644\u062D\u0627\u0644\u0629',
     statusChecking: '\u062C\u0627\u0631\u064D \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 {domain} \u23F3',
     statusCollectedOn: '\u062A\u0645 \u0627\u0644\u062C\u0645\u0639 \u0641\u064A: {value}',
@@ -17746,6 +17755,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     intakeToolbarClearFormat: '\u6e05\u9664\u683c\u5f0f',
     resolvedUsingGuidance: '\u4F7F\u7528 {lookupDomain} \u8FDB\u884C\u53C2\u8003\u89E3\u6790\u3002',
     spfRecordBasics: 'SPF \u57FA\u7840\u77E5\u8BC6',
+    spfTroubleshooting: 'SPF \u6545\u969c\u6392\u9664',
     status: '\u72B6\u6001',
     statusChecking: '\u6B63\u5728\u68C0\u67E5 {domain} \u23F3',
     statusCollectedOn: '\u6536\u96C6\u65F6\u95F4\uFF1A{value}',
@@ -17903,6 +17913,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     intakeToolbarClearFormat: '\u092b\u093c\u0949\u0930\u094d\u092e\u0947\u091f\u093f\u0902\u0917 \u0938\u093e\u092b\u093c \u0915\u0930\u0947\u0902',
     resolvedUsingGuidance: '{lookupDomain} \u0915\u094B \u092E\u093E\u0930\u094D\u0917\u0926\u0930\u094D\u0936\u0928 \u0915\u0947 \u0932\u093F\u090F \u0909\u092A\u092F\u094B\u0917 \u0915\u0930\u0915\u0947 resolve \u0915\u093F\u092F\u093E \u0917\u092F\u093E\u0964',
     spfRecordBasics: 'SPF \u0915\u0940 \u092E\u0942\u0932 \u092C\u093E\u0924\u0947\u0902',
+    spfTroubleshooting: 'SPF \u0938\u092e\u0938\u094d\u092f\u093e \u0928\u093f\u0935\u093e\u0930\u0923',
     status: '\u0938\u094D\u0925\u093F\u0924\u093F',
     statusChecking: '{domain} \u091C\u093E\u0901\u091A\u093E \u091C\u093E \u0930\u0939\u093E \u0939\u0948 \u23F3',
     statusCollectedOn: '\u0938\u0902\u0917\u094D\u0930\u0939\u093F\u0924 \u0938\u092E\u092F: {value}',
@@ -18060,6 +18071,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     intakeToolbarClearFormat: '\u66f8\u5f0f\u3092\u30af\u30ea\u30a2',
     resolvedUsingGuidance: '\u30AC\u30A4\u30C0\u30F3\u30B9\u306E\u305F\u3081 {lookupDomain} \u3092\u4F7F\u7528\u3057\u3066\u89E3\u6C7A\u3057\u307E\u3057\u305F\u3002',
     spfRecordBasics: 'SPF \u306E\u57FA\u790E',
+    spfTroubleshooting: 'SPF \u30C8\u30E9\u30D6\u30EB\u30B7\u30E5\u30FC\u30C6\u30A3\u30F3\u30B0',
     status: '\u72B6\u614B',
     statusChecking: '{domain} \u3092\u78BA\u8A8D\u3057\u3066\u3044\u307E\u3059 \u23F3',
     statusCollectedOn: '\u53CE\u96C6\u65E5\u6642: {value}',
@@ -18217,6 +18229,7 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     intakeToolbarClearFormat: '\u041e\u0447\u0438\u0441\u0442\u0438\u0442\u044c \u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435',
     resolvedUsingGuidance: '\u0420\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u043E \u0441 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0438\u0435\u043C {lookupDomain} \u0434\u043B\u044F \u0441\u043F\u0440\u0430\u0432\u043A\u0438.',
     spfRecordBasics: '\u041E\u0441\u043D\u043E\u0432\u044B SPF',
+    spfTroubleshooting: '\u0423\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u0435 \u043D\u0435\u043F\u043E\u043B\u0430\u0434\u043E\u043A SPF',
     status: '\u0421\u0442\u0430\u0442\u0443\u0441',
     statusChecking: '\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 {domain} \u23F3',
     statusCollectedOn: '\u0421\u043E\u0431\u0440\u0430\u043D\u043E: {value}',
@@ -19412,6 +19425,9 @@ const EXPLAINED_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '{total} de 10 consultas DNS usadas en la cadena SPF expandida \u2014 {status}.',
     spfExpansionWithinLimit: 'dentro del l\u00EDmite de 10 consultas SPF',
     spfExpansionExceededLimit: 'supera el l\u00EDmite de 10 consultas SPF',
+    spfLookupLimitWarning: 'SPF supera el l\u00EDmite de consultas DNS de RFC 7208. Se detectaron {count} t\u00E9rminos de consulta DNS en la cadena SPF expandida; debes reducir las consultas DNS de SPF a 10 o menos para evitar errores de SPF del lado del destinatario.',
+    spfLookupCountWithin: 'Consultas DNS de SPF: {count} (dentro del l\u00EDmite de 10 de RFC 7208)',
+    spfLookupCountExceeded: 'Consultas DNS de SPF: {count} (supera el l\u00EDmite de 10 de RFC 7208; debes reducir las consultas DNS de SPF a 10 o menos para evitar errores de SPF del lado del destinatario)',
     spfExpansionParentRepeatHint: 'Igual que el destino de la fila anterior (cadena continuada).',
     spfExplainedPrefix: 'Prefijo',
     spfExplainedType: 'Tipo',
@@ -19499,6 +19515,9 @@ const EXPLAINED_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '{total} requ\u00EAtes DNS sur 10 utilis\u00E9es dans la cha\u00EEne SPF d\u00E9velopp\u00E9e \u2014 {status}.',
     spfExpansionWithinLimit: 'dans la limite de 10 requ\u00EAtes SPF',
     spfExpansionExceededLimit: 'd\u00E9passe la limite de 10 requ\u00EAtes SPF',
+    spfLookupLimitWarning: 'SPF d\u00E9passe la limite de recherches DNS RFC 7208. {count} termes de recherche DNS ont \u00E9t\u00E9 d\u00E9tect\u00E9s dans la cha\u00EEne SPF d\u00E9velopp\u00E9e ; vous devez r\u00E9duire les recherches DNS SPF \u00E0 10 ou moins pour \u00E9viter des erreurs SPF c\u00F4t\u00E9 destinataire.',
+    spfLookupCountWithin: 'Recherches DNS SPF : {count} (dans la limite RFC 7208 de 10)',
+    spfLookupCountExceeded: 'Recherches DNS SPF : {count} (d\u00E9passe la limite RFC 7208 de 10 ; vous devez r\u00E9duire les recherches DNS SPF \u00E0 10 ou moins pour \u00E9viter des erreurs SPF c\u00F4t\u00E9 destinataire)',
     spfExpansionParentRepeatHint: 'Identique \u00E0 la cible de la ligne pr\u00E9c\u00E9dente (cha\u00EEne continue).',
     spfExplainedPrefix: 'Pr\u00E9fixe',
     spfExplainedType: 'Type',
@@ -19586,6 +19605,9 @@ const EXPLAINED_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '{total} von 10 DNS-Abfragen in der erweiterten SPF-Kette verwendet \u2014 {status}.',
     spfExpansionWithinLimit: 'innerhalb des SPF-Limits von 10 Abfragen',
     spfExpansionExceededLimit: '\u00FCberschreitet das SPF-Limit von 10 Abfragen',
+    spfLookupLimitWarning: 'SPF \u00FCberschreitet das DNS-Abfragelimit nach RFC 7208. In der erweiterten SPF-Kette wurden {count} DNS-Abfrageterme erkannt; Sie sollten die SPF-DNS-Abfragen auf 10 oder weniger reduzieren, um SPF-Fehler auf Empf\u00E4ngerseite zu vermeiden.',
+    spfLookupCountWithin: 'SPF-DNS-Abfragen: {count} (innerhalb des RFC-7208-Limits von 10)',
+    spfLookupCountExceeded: 'SPF-DNS-Abfragen: {count} (\u00FCberschreitet das RFC-7208-Limit von 10; Sie sollten die SPF-DNS-Abfragen auf 10 oder weniger reduzieren, um SPF-Fehler auf Empf\u00E4ngerseite zu vermeiden)',
     spfExpansionParentRepeatHint: 'Identisch mit dem Ziel der vorherigen Zeile (fortgesetzte Kette).',
     spfExplainedPrefix: 'Pr\u00E4fix',
     spfExplainedType: 'Typ',
@@ -19707,6 +19729,9 @@ const EXPLAINED_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '{total} de 10 consultas DNS usadas na cadeia SPF expandida \u2014 {status}.',
     spfExpansionWithinLimit: 'dentro do limite de 10 consultas SPF',
     spfExpansionExceededLimit: 'excede o limite de 10 consultas SPF',
+    spfLookupLimitWarning: 'O SPF excede o limite de consultas DNS da RFC 7208. Foram detectados {count} termos de consulta DNS na cadeia SPF expandida; voc\u00EA deve reduzir as consultas DNS de SPF para 10 ou menos para evitar erros de SPF no lado do destinat\u00E1rio.',
+    spfLookupCountWithin: 'Consultas DNS de SPF: {count} (dentro do limite de 10 da RFC 7208)',
+    spfLookupCountExceeded: 'Consultas DNS de SPF: {count} (excede o limite de 10 da RFC 7208; voc\u00EA deve reduzir as consultas DNS de SPF para 10 ou menos para evitar erros de SPF no lado do destinat\u00E1rio)',
     spfExpansionParentRepeatHint: 'Igual ao destino da linha anterior (cadeia continuada).',
     spfExplainedPrefix: 'Prefixo',
     spfExplainedType: 'Tipo',
@@ -19896,6 +19921,9 @@ const EXPLAINED_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '{total} \u0438\u0437 10 DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u043E \u0432 \u0440\u0430\u0441\u043A\u0440\u044B\u0442\u043E\u0439 SPF-\u0446\u0435\u043F\u043E\u0447\u043A\u0435 \u2014 {status}.',
     spfExpansionWithinLimit: '\u0432 \u043F\u0440\u0435\u0434\u0435\u043B\u0430\u0445 \u043B\u0438\u043C\u0438\u0442\u0430 SPF \u0432 10 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432',
     spfExpansionExceededLimit: '\u043F\u0440\u0435\u0432\u044B\u0448\u0430\u0435\u0442 \u043B\u0438\u043C\u0438\u0442 SPF \u0432 10 \u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432',
+    spfLookupLimitWarning: 'SPF \u043F\u0440\u0435\u0432\u044B\u0448\u0430\u0435\u0442 \u043B\u0438\u043C\u0438\u0442 DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 RFC 7208. \u0412 \u0440\u0430\u0441\u043A\u0440\u044B\u0442\u043E\u0439 SPF-\u0446\u0435\u043F\u043E\u0447\u043A\u0435 \u043E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u043E {count} DNS-\u0442\u0435\u0440\u043C\u0438\u043D\u043E\u0432; \u0432\u0430\u043C \u0441\u043B\u0435\u0434\u0443\u0435\u0442 \u0441\u043E\u043A\u0440\u0430\u0442\u0438\u0442\u044C DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B SPF \u0434\u043E 10 \u0438\u043B\u0438 \u043C\u0435\u043D\u044C\u0448\u0435, \u0447\u0442\u043E\u0431\u044B \u0438\u0437\u0431\u0435\u0436\u0430\u0442\u044C SPF-\u043E\u0448\u0438\u0431\u043E\u043A \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u043F\u043E\u043B\u0443\u0447\u0430\u0442\u0435\u043B\u044F.',
+    spfLookupCountWithin: 'DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B SPF: {count} (\u0432 \u043F\u0440\u0435\u0434\u0435\u043B\u0430\u0445 \u043B\u0438\u043C\u0438\u0442\u0430 RFC 7208 \u0432 10)',
+    spfLookupCountExceeded: 'DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B SPF: {count} (\u043F\u0440\u0435\u0432\u044B\u0448\u0430\u0435\u0442 \u043B\u0438\u043C\u0438\u0442 RFC 7208 \u0432 10; \u0432\u0430\u043C \u0441\u043B\u0435\u0434\u0443\u0435\u0442 \u0441\u043E\u043A\u0440\u0430\u0442\u0438\u0442\u044C DNS-\u0437\u0430\u043F\u0440\u043E\u0441\u044B SPF \u0434\u043E 10 \u0438\u043B\u0438 \u043C\u0435\u043D\u044C\u0448\u0435, \u0447\u0442\u043E\u0431\u044B \u0438\u0437\u0431\u0435\u0436\u0430\u0442\u044C SPF-\u043E\u0448\u0438\u0431\u043E\u043A \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u043F\u043E\u043B\u0443\u0447\u0430\u0442\u0435\u043B\u044F)',
     spfExpansionParentRepeatHint: '\u0421\u043E\u0432\u043F\u0430\u0434\u0430\u0435\u0442 \u0441 \u0446\u0435\u043B\u044C\u044E \u043F\u0440\u0435\u0434\u044B\u0434\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u043E\u043A\u0438 (\u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0435\u043D\u0438\u0435 \u0446\u0435\u043F\u043E\u0447\u043A\u0438).',
     spfExplainedPrefix: '\u041F\u0440\u0435\u0444\u0438\u043A\u0441',
     spfExplainedType: '\u0422\u0438\u043F',
@@ -19980,6 +20008,9 @@ const EXPLAINED_DETAIL_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '\u062a\u0645 \u0627\u0633\u062a\u062e\u062f\u0627\u0645 {total} \u0645\u0646 10 \u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a DNS \u0641\u064a \u0633\u0644\u0633\u0644\u0629 SPF \u0627\u0644\u0645\u0648\u0633\u0639\u0629 \u2014 {status}.',
     spfExpansionWithinLimit: '\u0636\u0645\u0646 \u062d\u062f SPF \u0627\u0644\u0628\u0627\u0644\u063a 10 \u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a',
     spfExpansionExceededLimit: '\u064a\u062a\u062c\u0627\u0648\u0632 \u062d\u062f SPF \u0627\u0644\u0628\u0627\u0644\u063a 10 \u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a',
+    spfLookupLimitWarning: '\u064a\u062a\u062c\u0627\u0648\u0632 SPF \u062d\u062f \u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a DNS \u0641\u064a RFC 7208. \u062a\u0645 \u0627\u0643\u062a\u0634\u0627\u0641 {count} \u0645\u0646 \u0645\u0635\u0637\u0644\u062d\u0627\u062a \u0627\u0633\u062a\u0639\u0644\u0627\u0645 DNS \u0639\u0628\u0631 \u0633\u0644\u0633\u0644\u0629 SPF \u0627\u0644\u0645\u0648\u0633\u0639\u0629\u061b \u064a\u062c\u0628 \u0639\u0644\u064a\u0643 \u062a\u0642\u0644\u064a\u0644 \u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a DNS \u0644\u0640 SPF \u0625\u0644\u0649 10 \u0623\u0648 \u0623\u0642\u0644 \u0644\u062a\u062c\u0646\u0628 \u0623\u062e\u0637\u0627\u0621 SPF \u0644\u062f\u0649 \u062c\u0647\u0629 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645.',
+    spfLookupCountWithin: '\u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a DNS \u0644\u0640 SPF: {count} (\u0636\u0645\u0646 \u062d\u062f RFC 7208 \u0627\u0644\u0628\u0627\u0644\u063a 10)',
+    spfLookupCountExceeded: '\u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a DNS \u0644\u0640 SPF: {count} (\u064a\u062a\u062c\u0627\u0648\u0632 \u062d\u062f RFC 7208 \u0627\u0644\u0628\u0627\u0644\u063a 10\u061b \u064a\u062c\u0628 \u0639\u0644\u064a\u0643 \u062a\u0642\u0644\u064a\u0644 \u0627\u0633\u062a\u0639\u0644\u0627\u0645\u0627\u062a DNS \u0644\u0640 SPF \u0625\u0644\u0649 10 \u0623\u0648 \u0623\u0642\u0644 \u0644\u062a\u062c\u0646\u0628 \u0623\u062e\u0637\u0627\u0621 SPF \u0644\u062f\u0649 \u062c\u0647\u0629 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645)',
     spfExpansionParentRepeatHint: '\u0645\u0645\u0627\u062b\u0644 \u0644\u0647\u062f\u0641 \u0627\u0644\u0635\u0641 \u0627\u0644\u0633\u0627\u0628\u0642 (\u0633\u0644\u0633\u0644\u0629 \u0645\u0633\u062a\u0645\u0631\u0629).',
     spfExplainedLegend: '\u0645\u0624\u0647\u0644\u0627\u062a \u0627\u0644\u0628\u0627\u062f\u0626\u0629: + Pass (\u0627\u0641\u062a\u0631\u0627\u0636\u064a)\u060c - HardFail\u060c ~ SoftFail\u060c ? Neutral.',
     spfExplainedCidrInfoLabel: '\u0625\u0638\u0647\u0627\u0631 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0634\u0628\u0643\u0629 \u0648\u0627\u0644\u0646\u0637\u0627\u0642 \u0648\u0627\u0644\u062d\u062c\u0645 \u0644\u0647\u0630\u0627 CIDR.',
@@ -20035,6 +20066,9 @@ const EXPLAINED_DETAIL_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '\u5c55\u5f00\u7684 SPF \u94fe\u4e2d\u5df2\u4f7f\u7528 10 \u6b21 DNS \u67e5\u8be2\u4e2d\u7684 {total} \u6b21 \u2014 {status}\u3002',
     spfExpansionWithinLimit: '\u5728 SPF 10 \u6b21\u67e5\u8be2\u9650\u5236\u5185',
     spfExpansionExceededLimit: '\u8d85\u8fc7 SPF 10 \u6b21\u67e5\u8be2\u9650\u5236',
+    spfLookupLimitWarning: 'SPF \u8d85\u8fc7 RFC 7208 DNS \u67e5\u8be2\u9650\u5236\u3002\u5728\u6269\u5c55 SPF \u94fe\u4e2d\u68c0\u6d4b\u5230 {count} \u4e2a DNS \u67e5\u8be2\u9879\uff1b\u4f60\u5e94\u5c06 SPF DNS \u67e5\u8be2\u51cf\u5c11\u5230 10 \u4e2a\u6216\u66f4\u5c11\uff0c\u4ee5\u907f\u514d\u6536\u4ef6\u65b9 SPF \u9519\u8bef\u3002',
+    spfLookupCountWithin: 'SPF DNS \u67e5\u8be2\uff1a{count}\uff08\u5728 RFC 7208 \u7684 10 \u6b21\u9650\u5236\u5185\uff09',
+    spfLookupCountExceeded: 'SPF DNS \u67e5\u8be2\uff1a{count}\uff08\u8d85\u8fc7 RFC 7208 \u7684 10 \u6b21\u9650\u5236\uff1b\u4f60\u5e94\u5c06 SPF DNS \u67e5\u8be2\u51cf\u5c11\u5230 10 \u4e2a\u6216\u66f4\u5c11\uff0c\u4ee5\u907f\u514d\u6536\u4ef6\u65b9 SPF \u9519\u8bef\uff09',
     spfExpansionParentRepeatHint: '\u4e0e\u4e0a\u4e00\u884c\u7684\u76ee\u6807\u76f8\u540c\uff08\u94fe\u7ee7\u7eed\uff09\u3002',
     spfExplainedLegend: '\u524d\u7f00\u9650\u5b9a\u7b26\uff1a+ Pass\uff08\u9ed8\u8ba4\uff09\u3001- HardFail\u3001~ SoftFail\u3001? Neutral\u3002',
     spfExplainedCidrInfoLabel: '\u663e\u793a\u6b64 CIDR \u7684\u7f51\u7edc\u3001\u8303\u56f4\u548c\u5927\u5c0f\u8be6\u7ec6\u4fe1\u606f\u3002',
@@ -20090,6 +20124,9 @@ const EXPLAINED_DETAIL_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '\u0935\u093f\u0938\u094d\u0924\u093e\u0930\u093f\u0924 SPF \u0936\u094d\u0930\u0943\u0902\u0916\u0932\u093e \u092e\u0947\u0902 10 \u092e\u0947\u0902 \u0938\u0947 {total} DNS \u0932\u0941\u0915\u0905\u092a \u0909\u092a\u092f\u094b\u0917 \u0939\u0941\u090f \u2014 {status}\u0964',
     spfExpansionWithinLimit: 'SPF \u0915\u0940 10-\u0932\u0941\u0915\u0905\u092a \u0938\u0940\u092e\u093e \u0915\u0947 \u092d\u0940\u0924\u0930',
     spfExpansionExceededLimit: 'SPF \u0915\u0940 10-\u0932\u0941\u0915\u0905\u092a \u0938\u0940\u092e\u093e \u0938\u0947 \u0905\u0927\u093f\u0915',
+    spfLookupLimitWarning: 'SPF RFC 7208 DNS \u0932\u0941\u0915\u0905\u092a \u0938\u0940\u092e\u093e \u0938\u0947 \u0905\u0927\u093f\u0915 \u0939\u0948\u0964 \u0935\u093f\u0938\u094d\u0924\u093e\u0930\u093f\u0924 SPF \u0936\u094d\u0930\u0943\u0902\u0916\u0932\u093e \u092e\u0947\u0902 {count} DNS-\u0932\u0941\u0915\u0905\u092a \u091f\u0930\u094d\u092e \u092e\u093f\u0932\u0947; \u0906\u092a\u0915\u094b \u092a\u094d\u0930\u093e\u092a\u094d\u0924\u0915\u0930\u094d\u0924\u093e \u092a\u0915\u094d\u0937 \u092a\u0930 SPF \u0924\u094d\u0930\u0941\u091f\u093f\u092f\u094b\u0902 \u0938\u0947 \u092c\u091a\u0928\u0947 \u0915\u0947 \u0932\u093f\u090f SPF DNS \u0932\u0941\u0915\u0905\u092a \u0915\u094b 10 \u092f\u093e \u0909\u0938\u0938\u0947 \u0915\u092e \u0915\u0930\u0928\u093e \u091a\u093e\u0939\u093f\u090f\u0964',
+    spfLookupCountWithin: 'SPF DNS \u0932\u0941\u0915\u0905\u092a: {count} (RFC 7208 \u0915\u0940 10 \u0938\u0940\u092e\u093e \u0915\u0947 \u092d\u0940\u0924\u0930)',
+    spfLookupCountExceeded: 'SPF DNS \u0932\u0941\u0915\u0905\u092a: {count} (RFC 7208 \u0915\u0940 10 \u0938\u0940\u092e\u093e \u0938\u0947 \u0905\u0927\u093f\u0915; \u0906\u092a\u0915\u094b \u092a\u094d\u0930\u093e\u092a\u094d\u0924\u0915\u0930\u094d\u0924\u093e \u092a\u0915\u094d\u0937 \u092a\u0930 SPF \u0924\u094d\u0930\u0941\u091f\u093f\u092f\u094b\u0902 \u0938\u0947 \u092c\u091a\u0928\u0947 \u0915\u0947 \u0932\u093f\u090f SPF DNS \u0932\u0941\u0915\u0905\u092a \u0915\u094b 10 \u092f\u093e \u0909\u0938\u0938\u0947 \u0915\u092e \u0915\u0930\u0928\u093e \u091a\u093e\u0939\u093f\u090f)',
     spfExpansionParentRepeatHint: '\u092a\u093f\u091b\u0932\u0940 \u092a\u0902\u0915\u094d\u0924\u093f \u0915\u0947 \u0932\u0915\u094d\u0937\u094d\u092f \u091c\u0948\u0938\u093e \u0939\u0940 (\u0936\u094d\u0930\u0943\u0902\u0916\u0932\u093e \u091c\u093e\u0930\u0940)\u0964',
     spfExplainedLegend: '\u0909\u092a\u0938\u0930\u094d\u0917 \u0915\u094d\u0935\u093e\u0932\u093f\u092b\u093c\u093e\u092f\u0930: + Pass (\u0921\u093f\u092b\u093c\u0949\u0932\u094d\u091f), - HardFail, ~ SoftFail, ? Neutral\u0964',
     spfExplainedCidrInfoLabel: '\u0907\u0938 CIDR \u0915\u0947 \u0932\u093f\u090f \u0928\u0947\u091f\u0935\u0930\u094d\u0915, \u0930\u0947\u0902\u091c \u0914\u0930 \u0906\u0915\u093e\u0930 \u0935\u093f\u0935\u0930\u0923 \u0926\u093f\u0916\u093e\u090f\u0901\u0964',
@@ -20145,6 +20182,9 @@ const EXPLAINED_DETAIL_TRANSLATION_OVERRIDES = {
     spfExpansionLookupSummary: '\u5c55\u958b\u3055\u308c\u305f SPF \u30c1\u30a7\u30fc\u30f3\u3067 10 \u4ef6\u4e2d {total} \u4ef6\u306e DNS \u30eb\u30c3\u30af\u30a2\u30c3\u30d7\u3092\u4f7f\u7528 \u2014 {status}\u3002',
     spfExpansionWithinLimit: 'SPF \u306e 10 \u30eb\u30c3\u30af\u30a2\u30c3\u30d7\u5236\u9650\u5185',
     spfExpansionExceededLimit: 'SPF \u306e 10 \u30eb\u30c3\u30af\u30a2\u30c3\u30d7\u5236\u9650\u3092\u8d85\u904e',
+    spfLookupLimitWarning: 'SPF \u304c RFC 7208 \u306e DNS \u30eb\u30c3\u30af\u30a2\u30c3\u30d7\u5236\u9650\u3092\u8d85\u3048\u3066\u3044\u307e\u3059\u3002\u5c55\u958b\u3055\u308c\u305f SPF \u30c1\u30a7\u30fc\u30f3\u5168\u4f53\u3067 {count} \u4ef6\u306e DNS \u30eb\u30c3\u30af\u30a2\u30c3\u30d7\u9805\u76ee\u304c\u691c\u51fa\u3055\u308c\u307e\u3057\u305f\u3002\u53d7\u4fe1\u5074\u306e SPF \u30a8\u30e9\u30fc\u3092\u907f\u3051\u308b\u305f\u3081\u3001SPF DNS \u30eb\u30c3\u30af\u30a2\u30c3\u30d7\u3092 10 \u4ef6\u4ee5\u4e0b\u306b\u6e1b\u3089\u3057\u3066\u304f\u3060\u3055\u3044\u3002',
+    spfLookupCountWithin: 'SPF DNS \u30eb\u30c3\u30af\u30a2\u30c3\u30d7: {count}\uff08RFC 7208 \u306e 10 \u4ef6\u5236\u9650\u5185\uff09',
+    spfLookupCountExceeded: 'SPF DNS \u30eb\u30c3\u30af\u30a2\u30c3\u30d7: {count}\uff08RFC 7208 \u306e 10 \u4ef6\u5236\u9650\u3092\u8d85\u904e\u3002\u53d7\u4fe1\u5074\u306e SPF \u30a8\u30e9\u30fc\u3092\u907f\u3051\u308b\u305f\u3081\u3001SPF DNS \u30eb\u30c3\u30af\u30a2\u30c3\u30d7\u3092 10 \u4ef6\u4ee5\u4e0b\u306b\u6e1b\u3089\u3057\u3066\u304f\u3060\u3055\u3044\uff09',
     spfExpansionParentRepeatHint: '\u524d\u306e\u884c\u306e\u30bf\u30fc\u30b2\u30c3\u30c8\u3068\u540c\u3058\u3067\u3059\uff08\u30c1\u30a7\u30fc\u30f3\u306e\u7d9a\u304d\uff09\u3002',
     spfExplainedLegend: '\u30d7\u30ec\u30d5\u30a3\u30c3\u30af\u30b9\u4fee\u98fe\u5b50: + Pass (\u65e2\u5b9a)\u3001- HardFail\u3001~ SoftFail\u3001? Neutral\u3002',
     spfExplainedCidrInfoLabel: '\u3053\u306e CIDR \u306e\u30cd\u30c3\u30c8\u30ef\u30fc\u30af\u3001\u7bc4\u56f2\u3001\u30b5\u30a4\u30ba\u306e\u8a73\u7d30\u3092\u8868\u793a\u3057\u307e\u3059\u3002',
@@ -21324,6 +21364,33 @@ function getLocalizedSpfRequirementSummary(result) {
   return null;
 }
 
+function getSpfLookupCount(result) {
+  const raw = result && result.spfAnalysis ? result.spfAnalysis.totalLookupTerms : null;
+  if (raw === null || raw === undefined) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function doesSpfExceedLookupLimit(result, spfPresent) {
+  const count = getSpfLookupCount(result);
+  return !!spfPresent && count !== null && count > 10;
+}
+
+function getSpfLookupLimitWarningText(result) {
+  const count = getSpfLookupCount(result);
+  if (count === null || count <= 10) return '';
+  return t('spfLookupLimitWarning', { count: String(count) });
+}
+
+function getSpfLookupCountCopyText(result, spfPresent) {
+  const count = getSpfLookupCount(result);
+  if (count === null) return '';
+  if (doesSpfExceedLookupLimit(result, spfPresent)) {
+    return t('spfLookupCountExceeded', { count: String(count) });
+  }
+  return t('spfLookupCountWithin', { count: String(count) });
+}
+
 function stripSpfRequirementSection(text) {
   const source = String(text || '');
   if (!source) return '';
@@ -21609,11 +21676,9 @@ function buildGuidance(r) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
       }
     }
-    const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-      ? Number(r.spfAnalysis.totalLookupTerms)
-      : null;
-    if (txtRecovery.spfPresent && Number.isFinite(spfLookupCount) && spfLookupCount > 10) {
-      guidance.push({ type: 'attention', text: `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCount} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.` });
+    const spfLookupLimitGuidance = getSpfLookupLimitWarningText(r);
+    if (txtRecovery.spfPresent && spfLookupLimitGuidance) {
+      guidance.push({ type: 'attention', text: spfLookupLimitGuidance });
     }
     if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
       // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
@@ -21826,13 +21891,16 @@ function buildTestSummaryHtml(r) {
   } else {
     // SPF: a macro-delegated / hosted SPF service (Valimail, OnDMARC, ...) cannot
     // be statically confirmed for the Outlook include, so report it as WARN
-    // (indeterminate) rather than FAIL. A literal/flattened include is PASS;
-    // a present record without the include is a real FAIL.
+    // (indeterminate) rather than FAIL. A literal/flattened include is PASS only
+    // when the expanded SPF chain also stays within RFC 7208's 10-DNS-lookup
+    // limit; exceeding that limit is a deliverability warning even when the ACS
+    // Outlook include requirement is otherwise satisfied.
     const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
+    const spfExceedsLookupLimit = doesSpfExceedLookupLimit(r, txtRecovery.spfPresent);
     let spfState;
-    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true) {
+    if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === true && !spfExceedsLookupLimit) {
       spfState = "pass";
-    } else if (txtRecovery.spfPresent && (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null)) {
+    } else if (txtRecovery.spfPresent && (spfExceedsLookupLimit || spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null)) {
       spfState = "warn";
     } else {
       spfState = "fail";
@@ -25234,15 +25302,12 @@ function render(r) {
     }
 
     // 4. SPF
-    const spfLookupCountForStatus = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-      ? Number(r.spfAnalysis.totalLookupTerms)
-      : null;
     if (recoveredFromNameservers && effectiveSpfPresent) {
       // SPF exists only via direct nameserver query (not resolving via public
       // DNS): a Warning rather than a hard Failure.
       quotaWarn = true;
     } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
-    if (effectiveSpfPresent && Number.isFinite(spfLookupCountForStatus) && spfLookupCountForStatus > 10) {
+    if (doesSpfExceedLookupLimit(r, effectiveSpfPresent)) {
       quotaWarn = true;
     }
 
@@ -25548,13 +25613,8 @@ function render(r) {
     // whether it satisfies the Outlook include: public DNS (the source of truth
     // for delivery + Azure verification) is not returning it reliably.
     const spfIsNameserverRecovered = effectiveSpfPresent && recoveredFromNameservers;
-    const spfLookupCountForChecklist = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-      ? Number(r.spfAnalysis.totalLookupTerms)
-      : null;
-    const spfExceedsLookupLimit = effectiveSpfPresent && Number.isFinite(spfLookupCountForChecklist) && spfLookupCountForChecklist > 10;
-    const spfLookupLimitDetail = spfExceedsLookupLimit
-      ? `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCountForChecklist} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.`
-      : '';
+    const spfExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
+    const spfLookupLimitDetail = spfExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
     const spfDetail = effectiveSpfPresent
       ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
@@ -25631,20 +25691,15 @@ function render(r) {
       ? t('error')
       : (effectiveAcsPresent ? t('verified') : t('notVerified')));
 
+  const spfCopyExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
   const spfStatusText = (!loaded.base && !errors.base)
     ? t('pending')
     : (errors.base
       ? t('error')
-      : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude !== false) ? t('verified') : t('notStarted')));
-
-  const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
-    ? Number(r.spfAnalysis.totalLookupTerms)
-    : null;
-  const spfLookupCopyDetail = (Number.isFinite(spfLookupCount) && spfLookupCount >= 0)
-    ? (spfLookupCount > 10
-      ? `SPF DNS lookups: ${spfLookupCount} (exceeds the RFC 7208 limit of 10; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors)`
-      : `SPF DNS lookups: ${spfLookupCount} (within the RFC 7208 limit of 10)`)
-    : '';
+      : (spfCopyExceedsLookupLimit
+        ? t('warningState')
+        : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude !== false) ? t('verified') : t('notStarted'))));
+  const spfLookupCopyDetail = getSpfLookupCountCopyText(r, effectiveSpfPresent);
   const spfStatusCopyText = spfLookupCopyDetail ? `${spfStatusText} - ${spfLookupCopyDetail}` : spfStatusText;
 
   const dkim1StatusText = (!loaded.dkim && !errors.dkim)
@@ -26199,7 +26254,9 @@ function render(r) {
   const spfCardBaseValue = loaded.base
     ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
-  const spfCardValue = [spfCardBaseValue, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
+  const spfCardExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
+  const spfLookupLimitCardDetail = spfCardExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
+  const spfCardValue = [spfCardBaseValue, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -26248,7 +26305,10 @@ function render(r) {
       const spfRequirementNote = spfRequirementText
         ? `<div class="spf-explained-requirement">${escapeHtml(spfRequirementText)}</div>`
         : '';
-      const explainedHtml = spfInheritedNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
+      const spfLookupLimitNote = spfLookupLimitCardDetail
+        ? `<div class="spf-explained-requirement" style="border-color:#f59e0b;background:#422006;color:#fde68a;">${escapeHtml(spfLookupLimitCardDetail)}</div>`
+        : '';
+      const explainedHtml = spfInheritedNote + spfLookupLimitNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
       spfExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleSpfExplained(this)" title="${escapeHtml(t('spfExplainedTooltip'))}">${escapeHtml(t('spfExplainedShow'))}</button>`;
       spfExplainedAppend = `<div id="spfExplained" class="card-content" style="display:none;">${explainedHtml}</div>`;
 
@@ -26259,14 +26319,16 @@ function render(r) {
       // sufficient. innerText of #field-spf still reads as clean plain
       // text for the Copy button.
       const spfRecordBoxHtml = `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
-      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfRequirementNote;
+      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfLookupLimitNote + spfRequirementNote;
     }
   }
+  const spfCardTag = basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL")))));
+  const spfCardTagClass = basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail")))));
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
-    basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && recoveredFromNameservers) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL"))))),
-    basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && recoveredFromNameservers) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail"))))),
+    spfCardTag,
+    spfCardTagClass,
     "spf",
     true,
     spfExplainedTitleSuffix,
@@ -26284,7 +26346,7 @@ function render(r) {
   <div class="card" id="card-spfExpansion">
     <div class="card-header" onclick="toggleCard(this)">
       <span class="chevron">&#x25BC;</span>
-      <span class="tag tag-info">${escapeHtml(translateBadge('INFO'))}</span>
+      <span class="tag ${spfCardExceedsLookupLimit ? 'tag-warn' : 'tag-info'}">${escapeHtml(translateBadge(spfCardExceedsLookupLimit ? 'WARN' : 'INFO'))}</span>
       <strong>${escapeHtml(t('spfExpansionRecordsTitle'))}</strong>
     </div>
     <div class="card-content">${spfExpansionBodyHtml}</div>
@@ -26897,6 +26959,7 @@ function render(r) {
           <li><a href="https://learn.microsoft.com/azure/communication-services/quickstarts/email/add-custom-verified-domains" target="_blank" rel="noopener">${escapeHtml(t('acsEmailDomainVerification'))}</a></li>
           <li><a href="https://learn.microsoft.com/azure/communication-services/concepts/email/email-quota-increase" target="_blank" rel="noopener">${escapeHtml(t('acsEmailQuotaLimitIncrease'))}</a></li>
           <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure" target="_blank" rel="noopener">${escapeHtml(t('spfRecordBasics'))}</a></li>
+          <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure#troubleshooting-spf-txt-records" target="_blank" rel="noopener">${escapeHtml(t('spfTroubleshooting'))}</a></li>
           <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records" target="_blank" rel="noopener">${escapeHtml(t('dmarcRecordBasics'))}</a></li>
           <li><a href="https://learn.microsoft.com/defender-office-365/email-authentication-dkim-configure" target="_blank" rel="noopener">${escapeHtml(t('dkimRecordBasics'))}</a></li>
           <li><a href="https://learn.microsoft.com/microsoft-365/admin/get-help-with-domains/create-dns-records-at-any-dns-hosting-provider?view=o365-worldwide" target="_blank" rel="noopener">${escapeHtml(t('mxRecordBasics'))}</a></li>
@@ -28432,7 +28495,7 @@ const INTAKE_REQUEST_TEMPLATE = [
   { id: 'companyName',          label: 'Company Name' },
   { id: 'companyWebsite',       label: 'Company Website' },
   { id: 'businessDescription',  label: 'Brief Description of Your Business' },
-  { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a pre-requisite before the quota increase and AMD domain is only for testing purpose, not allowed for quota increase and the failure rate should be less than 1%.' },
+  { id: 'customDomainInUse',    label: 'Is your custom domain already set up and currently used for sending emails? This is a prerequisite before the quota increase. Azure Managed Domains are only for testing and are not eligible for quota increases; current Microsoft guidance says delivery failure rates must be below 2% for quota-review approval.' },
   { id: 'currentSendingDomain', label: 'What is the domain you are currently sending emails from? Please make sure it has successfully sent emails.' },
   { id: 'acsResourceName',      label: 'ACS Resource Name' },
   { id: 'emailType',            label: 'What type of emails do you send? (e.g., Transactional, Marketing, Promotional)' },
