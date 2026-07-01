@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.8.7'
+$script:AppVersion = '2.8.8'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1742,6 +1742,247 @@ if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
   $env:ACS_DNS_DOH_ENDPOINT = $DohEndpoint
 }
 
+# ===== Secure Structured Logging =====
+# Privacy-first diagnostics for security review readiness.
+#
+# Design principles:
+# - Deny-by-default fields: only the allowlisted keys in Get-AcsApprovedLogFields
+#   can be emitted.
+# - No request/response bodies, headers, query strings, domains, IP addresses,
+#   user-entered text, identifiers, tokens, secrets, or local usernames/paths are
+#   logged.
+# - Correlation IDs are random non-semantic values generated per operation.
+# - Exception objects are never serialized; only sanitized summaries are emitted.
+# - Logging failures are swallowed so diagnostics cannot break primary flows.
+
+$script:AcsLogAppName = 'ACS Email Domain Checker'
+$script:AcsLogMinLevel = if ([string]::IsNullOrWhiteSpace($env:ACS_LOG_LEVEL)) { 'Information' } else { [string]$env:ACS_LOG_LEVEL }
+$script:AcsLogFilePath = if ([string]::IsNullOrWhiteSpace($env:ACS_LOG_FILE)) { $null } else { [string]$env:ACS_LOG_FILE }
+$script:AcsLogMaxBytes = 5242880
+try {
+  if ($env:ACS_LOG_MAX_BYTES -and $env:ACS_LOG_MAX_BYTES -match '^\d+$') {
+	$script:AcsLogMaxBytes = [Math]::Max(65536, [Math]::Min([int64]$env:ACS_LOG_MAX_BYTES, 104857600))
+  }
+} catch { $script:AcsLogMaxBytes = 5242880 }
+
+function Get-AcsApprovedLogFields {
+  return @(
+	'timestampUtc','level','app','version','environment','component','operation',
+	'eventId','message','correlationId','errorCode','exceptionType',
+	'exceptionMessage','stackTraceHash','innerExceptionType','durationMs',
+	'dependency','statusCode','resultCategory','retryAfterSec','fallback',
+	'listenerMode','port','limit','remaining','shutdownRequested'
+  )
+}
+
+function Get-AcsLogLevelValue {
+  param([string]$Level)
+  switch -Regex ([string]$Level) {
+	'^(?i:trace)$'       { return 0 }
+	'^(?i:debug)$'       { return 1 }
+	'^(?i:information|info)$' { return 2 }
+	'^(?i:warning|warn)$' { return 3 }
+	'^(?i:error)$'       { return 4 }
+	'^(?i:critical|fatal)$' { return 5 }
+	default              { return 2 }
+  }
+}
+
+function Test-AcsLogLevelEnabled {
+  param([string]$Level)
+  try {
+	return ((Get-AcsLogLevelValue -Level $Level) -ge (Get-AcsLogLevelValue -Level $script:AcsLogMinLevel))
+  } catch { return $true }
+}
+
+function New-AcsCorrelationId {
+  # 128 bits of randomness, base64url encoded. No semantics, no user data.
+  $bytes = [byte[]]::new(16)
+  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  return ([Convert]::ToBase64String($bytes).TrimEnd('=') -replace '\+','-' -replace '/','_')
+}
+
+function Get-AcsLogEnvironmentName {
+  $raw = [string]$env:ACS_ENVIRONMENT
+  if ([string]::IsNullOrWhiteSpace($raw)) { return 'unspecified' }
+  $v = $raw.Trim()
+  if ($v -match '^(?i:prod|production)$') { return 'production' }
+  if ($v -match '^(?i:dev|development)$') { return 'development' }
+  if ($v -match '^(?i:test|testing)$') { return 'test' }
+  if ($v -match '^(?i:stage|staging)$') { return 'staging' }
+  return 'custom'
+}
+
+function ConvertTo-AcsLogToken {
+  param(
+	[AllowNull()]$Value,
+	[int]$MaxLength = 96
+  )
+  if ($null -eq $Value) { return $null }
+  $s = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+  $s = $s.Trim()
+
+  # Defense-in-depth redaction. The logger still uses an allowlist, but any
+  # string that reaches this point is sanitized before output.
+  $s = $s -replace '(?i)\bBearer\s+[A-Za-z0-9._~+\-/]+=*', '[REDACTED_TOKEN]'
+	$s = $s -replace '(?i)\b(ApiKey|X-Api-Key|X-ACS-API-Key|Authorization|Cookie|Set-Cookie|Password|Secret|Token)\b\s*[:=]\s*\S+', '[REDACTED_SECRET_FIELD]'
+  $s = $s -replace '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', '[REDACTED_EMAIL]'
+  $s = $s -replace '\b(?:\d{1,3}\.){3}\d{1,3}\b', '[REDACTED_IP]'
+  $s = $s -replace '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b', '[REDACTED_ID]'
+	$s = $s -replace '(?i)(AccountKey|SharedAccessKey|Endpoint|DefaultEndpointsProtocol|ConnectionString)=[^;\s]+', '[REDACTED_CONNECTION_FIELD]'
+  $s = $s -replace '(?i)\b(?:[a-z]:\\|/home/|/users/|/var/|/etc/)\S+', '[REDACTED_PATH]'
+  $s = $s -replace '[\r\n\t]+', ' '
+  if ($s.Length -gt $MaxLength) { $s = $s.Substring(0, $MaxLength) + '…' }
+  return $s
+}
+
+function Get-AcsSafeExceptionSummary {
+  param(
+	[AllowNull()]$Exception,
+	[string]$ErrorCode = 'ACS-ERR-UNSPECIFIED'
+  )
+
+  $ex = $Exception
+  if ($ex -is [System.Management.Automation.ErrorRecord]) { $ex = $ex.Exception }
+  if ($null -eq $ex) {
+	return [ordered]@{
+	  errorCode = $ErrorCode
+	  exceptionType = $null
+	  exceptionMessage = $null
+	  innerExceptionType = $null
+	  stackTraceHash = $null
+	}
+  }
+
+  $typeName = 'Exception'
+  try { $typeName = $ex.GetType().FullName } catch { $typeName = 'Exception' }
+  $innerType = $null
+  try { if ($ex.InnerException) { $innerType = $ex.InnerException.GetType().FullName } } catch { $innerType = $null }
+
+  # Secure default: do not emit raw exception messages or stack traces because
+  # they frequently include request values, file paths, DNS names, URLs, tokens,
+  # or user-entered content. Emit a generic sanitized message and a stack hash.
+  $stackHash = $null
+  try {
+	$stack = [string]$ex.StackTrace
+	if (-not [string]::IsNullOrWhiteSpace($stack)) {
+	  $bytes = [Text.Encoding]::UTF8.GetBytes($stack)
+	  $hash = [System.Security.Cryptography.SHA256]::HashData($bytes)
+	  $stackHash = ([Convert]::ToBase64String($hash).TrimEnd('=') -replace '\+','-' -replace '/','_')
+	}
+  } catch { $stackHash = $null }
+
+  return [ordered]@{
+	errorCode = $ErrorCode
+	exceptionType = ConvertTo-AcsLogToken -Value $typeName -MaxLength 160
+	exceptionMessage = 'Exception message suppressed by secure logging policy.'
+	innerExceptionType = ConvertTo-AcsLogToken -Value $innerType -MaxLength 160
+	stackTraceHash = $stackHash
+  }
+}
+
+function ConvertTo-AcsAllowedLogEvent {
+  param([hashtable]$Fields)
+
+  $approved = Get-AcsApprovedLogFields
+  $out = [ordered]@{}
+  foreach ($k in $approved) {
+	if (-not $Fields.ContainsKey($k)) { continue }
+	$v = $Fields[$k]
+	if ($null -eq $v) { continue }
+	switch ($k) {
+	  'durationMs' { try { $out[$k] = [int64]$v } catch { } ; break }
+	  'statusCode' { try { $out[$k] = [int]$v } catch { } ; break }
+	  'retryAfterSec' { try { $out[$k] = [int]$v } catch { } ; break }
+	  'port' { try { $out[$k] = [int]$v } catch { } ; break }
+	  'limit' { try { $out[$k] = [int64]$v } catch { } ; break }
+	  'remaining' { try { $out[$k] = [int64]$v } catch { } ; break }
+	  'shutdownRequested' { try { $out[$k] = [bool]$v } catch { } ; break }
+	  default { $out[$k] = ConvertTo-AcsLogToken -Value $v }
+	}
+  }
+  return $out
+}
+
+function Write-AcsLogEvent {
+  param(
+	[ValidateSet('Trace','Debug','Information','Warning','Error','Critical')]
+	[string]$Level = 'Information',
+	[string]$Component,
+	[string]$Operation,
+	[string]$EventId,
+	[string]$Message,
+	[string]$CorrelationId,
+	[string]$ErrorCode,
+	[AllowNull()]$Exception,
+	[hashtable]$Fields
+  )
+
+  try {
+	if (-not (Test-AcsLogLevelEnabled -Level $Level)) { return }
+	$event = @{
+	  timestampUtc = [DateTimeOffset]::UtcNow.ToString('o')
+	  level = $Level
+	  app = $script:AcsLogAppName
+	  version = $script:AppVersion
+	  environment = Get-AcsLogEnvironmentName
+	  component = $Component
+	  operation = $Operation
+	  eventId = $EventId
+	  message = $Message
+	  correlationId = $CorrelationId
+	  errorCode = $ErrorCode
+	}
+	if ($Fields) {
+	  foreach ($k in $Fields.Keys) { $event[$k] = $Fields[$k] }
+	}
+	if ($Exception) {
+	  $summary = Get-AcsSafeExceptionSummary -Exception $Exception -ErrorCode $ErrorCode
+	  foreach ($k in $summary.Keys) { $event[$k] = $summary[$k] }
+	}
+
+	$safe = ConvertTo-AcsAllowedLogEvent -Fields $event
+	$json = $safe | ConvertTo-Json -Compress -Depth 3
+	if ([string]::IsNullOrWhiteSpace($json)) { return }
+
+	Write-Information -InformationAction Continue -MessageData $json
+
+	if (-not [string]::IsNullOrWhiteSpace($script:AcsLogFilePath)) {
+	  try {
+		$logDir = Split-Path -Parent $script:AcsLogFilePath
+		if (-not [string]::IsNullOrWhiteSpace($logDir) -and -not (Test-Path -LiteralPath $logDir)) {
+		  New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+		}
+		if (Test-Path -LiteralPath $script:AcsLogFilePath) {
+		  $len = 0
+		  try { $len = (Get-Item -LiteralPath $script:AcsLogFilePath).Length } catch { $len = 0 }
+		  if ($len -gt $script:AcsLogMaxBytes) {
+			$archive = "$($script:AcsLogFilePath).1"
+			try { if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue } } catch { }
+			try { Move-Item -LiteralPath $script:AcsLogFilePath -Destination $archive -Force -ErrorAction SilentlyContinue } catch { }
+		  }
+		}
+		Add-Content -LiteralPath $script:AcsLogFilePath -Value $json -Encoding UTF8 -ErrorAction SilentlyContinue
+	  } catch { }
+	}
+  } catch { }
+}
+
+function Write-AcsLogException {
+  param(
+	[string]$Component,
+	[string]$Operation,
+	[string]$EventId,
+	[string]$ErrorCode,
+	[AllowNull()]$Exception,
+	[string]$CorrelationId,
+	[hashtable]$Fields,
+	[ValidateSet('Warning','Error','Critical')]
+	[string]$Level = 'Error'
+  )
+  Write-AcsLogEvent -Level $Level -Component $Component -Operation $Operation -EventId $EventId -Message 'Operation failed. See errorCode and correlationId.' -CorrelationId $CorrelationId -ErrorCode $ErrorCode -Exception $Exception -Fields $Fields
+}
 # ===== RDAP / Whois API Lookup Providers =====
 # ============================
 # RDAP lookup helpers (fixed)
@@ -3073,22 +3314,6 @@ $script:AcsServerHttpListener = $null
 $script:AcsServerTcpListener = $null
 $script:ConsoleCancelHandler = $null
 $script:PreviousTreatControlCAsInput = $null
-$script:ReturnToPromptAfterCtrlC = $false
-try {
-  # If Visual Studio (or another launcher) starts this script as the shell's
-  # command itself, e.g. `pwsh -File .\acs-domain-checker.ps1`, then a clean
-  # script return exits that pwsh process and the terminal shows "process
-  # exited" instead of a reusable prompt. Detect that launch shape so shutdown
-  # can offer an interactive PowerShell prompt after Ctrl+C. When the script is
-  # run from an already-open prompt (`.\acs-domain-checker.ps1`), these process
-  # arguments do not contain -File/-Command and normal return-to-parent-prompt
-  # behavior is preserved.
-  $hostArgs = @([Environment]::GetCommandLineArgs())
-  $launchRunsAndExits = ($hostArgs -match '^(?i:-file|-f|-command|-c)$') -and -not ($hostArgs -match '^(?i:-noexit)$')
-  $script:ReturnToPromptAfterCtrlC = [Environment]::UserInteractive -and $launchRunsAndExits
-} catch {
-  $script:ReturnToPromptAfterCtrlC = $false
-}
 
 $displayUrl = "http://localhost:$Port"
 
@@ -3127,7 +3352,7 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       $serverMode = 'TcpListener'
     } else {
       $startupErrorMessage = Get-ListenerStartupErrorMessage -Port $Port -DisplayUrl $displayUrl -BindMode $Bind -AttemptedPrefix $prefix -FailureMessage $_.Exception.Message
-      Write-Error -Message $startupErrorMessage -ErrorAction Continue
+      Write-AcsLogException -Level 'Error' -Component 'ServerStartup' -Operation 'http-listener-start' -EventId 'HTTP-LISTENER-START-FAILED' -ErrorCode 'ACS-HTTP-LISTENER-START' -Exception $_ -Fields @{ listenerMode = 'HttpListener'; port = $Port }
       return
     }
   }
@@ -3162,7 +3387,7 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       [Console]::TreatControlCAsInput = $true
     } catch {
       $script:PreviousTreatControlCAsInput = $null
-      Write-Warning "Ctrl+C input mode could not be enabled: $($_.Exception.Message)"
+      Write-AcsLogException -Level 'Warning' -Component 'ServerStartup' -Operation 'console-ctrlc-mode' -EventId 'CONSOLE-CTRLC-MODE-WARN' -ErrorCode 'ACS-CONSOLE-CTRLC' -Exception $_
     }
 
     # Ctrl+C must stop the underlying listener so the blocking GetContext() /
@@ -3179,42 +3404,38 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
           $script:ShutdownRequested = $true
           try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
           try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }
-          try { [Console]::Error.WriteLine('Stopping ACS Email Domain Checker...') } catch { }
         }
         [Console]::add_CancelKeyPress($script:ConsoleCancelHandler)
       }
     } catch {
-      Write-Warning "Ctrl+C shutdown handler could not be registered: $($_.Exception.Message)"
+      Write-AcsLogException -Level 'Warning' -Component 'ServerStartup' -Operation 'register-shutdown-handler' -EventId 'SERVER-SHUTDOWN-HANDLER-WARN' -ErrorCode 'ACS-SERVER-SHUTDOWN-HANDLER' -Exception $_
     }
 
-    Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker running at $displayUrl"
-    Write-Information -InformationAction Continue -MessageData 'Press Ctrl+C (or Q) to stop the server.'
-
-    # Also write version to the console for quick visibility during startup.
-    Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker version: $($script:AppVersion)"
+    Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'server-start' -EventId 'SERVER-STARTED' -Message 'Server started.' -Fields @{ listenerMode = $serverMode; port = $Port }
+    Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'shutdown-instructions' -EventId 'SERVER-SHUTDOWN-INSTRUCTIONS' -Message 'Press Ctrl+C or Q to stop the server.'
 
     if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
-      Write-Information -InformationAction Continue -MessageData "Anonymous metrics: ENABLED (no PII). Metrics file: $([System.IO.Path]::GetFullPath($env:ACS_ANON_METRICS_FILE))"
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'metrics-config' -EventId 'METRICS-ENABLED' -Message 'Anonymous metrics enabled.'
     } else {
-      Write-Information -InformationAction Continue -MessageData "Anonymous metrics: DISABLED. Start with -EnableAnonymousMetrics to enable /api/metrics counters."
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'metrics-config' -EventId 'METRICS-DISABLED' -Message 'Anonymous metrics disabled.'
     }
 
     if (-not [string]::IsNullOrWhiteSpace($env:ACS_API_KEY)) {
-      Write-Information -InformationAction Continue -MessageData 'API key authentication: ENABLED (send X-Api-Key to /api/* and /dns).'
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-ENABLED' -Message 'API key authentication enabled.'
     } else {
-      Write-Information -InformationAction Continue -MessageData 'API key authentication: DISABLED.'
+      Write-AcsLogEvent -Level 'Warning' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-DISABLED' -Message 'API key authentication disabled.'
     }
 
     if ($rateLimitPerMinute -gt 0) {
-      Write-Information -InformationAction Continue -MessageData "Rate limiting: $rateLimitPerMinute requests/min per client IP."
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'rate-limit-config' -EventId 'RATE-LIMIT-ENABLED' -Message 'Rate limiting enabled.' -Fields @{ limit = $rateLimitPerMinute }
     } else {
-      Write-Information -InformationAction Continue -MessageData 'Rate limiting: DISABLED.'
+      Write-AcsLogEvent -Level 'Warning' -Component 'ServerStartup' -Operation 'rate-limit-config' -EventId 'RATE-LIMIT-DISABLED' -Message 'Rate limiting disabled.'
     }
   } else {
     if (-not [string]::IsNullOrWhiteSpace($startupErrorMessage)) {
-      Write-Error -Message $startupErrorMessage -ErrorAction Continue
+      Write-AcsLogEvent -Level 'Error' -Component 'ServerStartup' -Operation 'server-start' -EventId 'SERVER-START-FAILED' -Message 'Server failed to start.' -ErrorCode 'ACS-SERVER-START' -Fields @{ port = $Port }
     } else {
-      Write-Error -Message "Server did not start. The port may be in use or requires additional permissions. Try a different -Port or adjust -Bind (Auto/Localhost/Any)." -ErrorAction Continue
+      Write-AcsLogEvent -Level 'Error' -Component 'ServerStartup' -Operation 'server-start' -EventId 'SERVER-START-FAILED' -Message 'Server failed to start.' -ErrorCode 'ACS-SERVER-START' -Fields @{ port = $Port }
     }
     return
   }
@@ -7332,8 +7553,53 @@ function Write-RequestLog {
     [string]$Domain
   )
 
-  # Do not log IP addresses or user agents (PII). Only log minimal non-identifying data.
-  Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Action for '$Domain'"
+  # Domain, IP, user agent, headers, query strings, and user input are treated as
+  # sensitive. Log only a route/category and a random correlation ID.
+  $correlationId = Get-RequestCorrelationId -Context $Context
+  $operation = 'request'
+  $statusCode = $null
+  if ($Action -match '^(?i)api\s+') {
+    $operation = 'api-request'
+  } elseif ($Action -match '^(?i)dns') {
+    $operation = 'dns-request'
+  }
+  try { $statusCode = [int]$Context.Response.StatusCode } catch { $statusCode = $null }
+  Write-AcsLogEvent -Level 'Information' -Component 'Request' -Operation $operation -EventId 'REQ-RECEIVED' -Message 'Request received.' -CorrelationId $correlationId -Fields @{
+    statusCode = $statusCode
+  }
+}
+
+function Get-RequestCorrelationId {
+  param($Context)
+
+  try {
+    if ($Context -and $Context.PSObject.Properties['AcsCorrelationId'] -and -not [string]::IsNullOrWhiteSpace([string]$Context.AcsCorrelationId)) {
+      return [string]$Context.AcsCorrelationId
+    }
+  } catch { }
+
+  $id = New-AcsCorrelationId
+  try {
+    if ($Context -and -not $Context.PSObject.Properties['AcsCorrelationId']) {
+      $Context | Add-Member -NotePropertyName AcsCorrelationId -NotePropertyValue $id -Force
+    } elseif ($Context) {
+      $Context.AcsCorrelationId = $id
+    }
+  } catch { }
+  return $id
+}
+
+function Set-RequestCorrelationHeader {
+  param($Context)
+  try {
+    $id = Get-RequestCorrelationId -Context $Context
+    if ([string]::IsNullOrWhiteSpace($id)) { return }
+    if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+      $Context.Response.Headers['X-Correlation-Id'] = $id
+    } elseif ($Context.Response.PSObject.Properties['_extraHeaders']) {
+      $Context.Response._extraHeaders['X-Correlation-Id'] = $id
+    }
+  } catch { }
 }
 
 # Extract the client's IP address from the request.
@@ -7478,7 +7744,7 @@ function Get-ApiKeyFromRequest {
 
   $key = $null
   if ($headers) {
-    foreach ($name in @('X-Api-Key','x-api-key','X-ACS-API-Key','x-acs-api-key')) {
+    foreach ($name in @('X-Api-Key','X-ACS-API-Key')) {
       try {
         $key = [string]$headers[$name]
       } catch { $key = $null }
@@ -7487,9 +7753,6 @@ function Get-ApiKeyFromRequest {
 
     $authHeader = $null
     try { $authHeader = [string]$headers['Authorization'] } catch { $authHeader = $null }
-    if ([string]::IsNullOrWhiteSpace($authHeader)) {
-      try { $authHeader = [string]$headers['authorization'] } catch { $authHeader = $null }
-    }
     if ($authHeader -and $authHeader -match '^(?i)ApiKey\s+(.+)$') {
       return $Matches[1].Trim()
     }
@@ -7575,7 +7838,15 @@ function Test-RateLimit {
     return [pscustomobject]@{ allowed = $true; remaining = $null; retryAfterSec = $null; limit = $limit }
   }
   if ($Multiplier -lt 1) { $Multiplier = 1 }
-  $effectiveLimit = $limit * $Multiplier
+  # Clamp effective limit arithmetic so an unusually large environment value or
+  # multiplier cannot overflow Int32 and accidentally disable/throttle the wrong
+  # clients. Normal deployments use small values (for example 60 * 10).
+  $effectiveLimit64 = [int64]$limit * [int64]$Multiplier
+  if ($effectiveLimit64 -gt [int64][int]::MaxValue) {
+    $effectiveLimit = [int]::MaxValue
+  } else {
+    $effectiveLimit = [int]$effectiveLimit64
+  }
 
   $clientIp = Get-ClientIp -Context $Context
   if ([string]::IsNullOrWhiteSpace($clientIp)) { $clientIp = 'unknown' }
@@ -21338,6 +21609,12 @@ function buildGuidance(r) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
       }
     }
+    const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+      ? Number(r.spfAnalysis.totalLookupTerms)
+      : null;
+    if (txtRecovery.spfPresent && Number.isFinite(spfLookupCount) && spfLookupCount > 10) {
+      guidance.push({ type: 'attention', text: `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCount} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.` });
+    }
     if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
       // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
       // informational note explaining the indeterminate verdict (and how to
@@ -24957,11 +25234,17 @@ function render(r) {
     }
 
     // 4. SPF
+    const spfLookupCountForStatus = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+      ? Number(r.spfAnalysis.totalLookupTerms)
+      : null;
     if (recoveredFromNameservers && effectiveSpfPresent) {
       // SPF exists only via direct nameserver query (not resolving via public
       // DNS): a Warning rather than a hard Failure.
       quotaWarn = true;
     } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
+    if (effectiveSpfPresent && Number.isFinite(spfLookupCountForStatus) && spfLookupCountForStatus > 10) {
+      quotaWarn = true;
+    }
 
     let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     if (quotaFail) {
@@ -25265,10 +25548,17 @@ function render(r) {
     // whether it satisfies the Outlook include: public DNS (the source of truth
     // for delivery + Azure verification) is not returning it reliably.
     const spfIsNameserverRecovered = effectiveSpfPresent && recoveredFromNameservers;
+    const spfLookupCountForChecklist = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+      ? Number(r.spfAnalysis.totalLookupTerms)
+      : null;
+    const spfExceedsLookupLimit = effectiveSpfPresent && Number.isFinite(spfLookupCountForChecklist) && spfLookupCountForChecklist > 10;
+    const spfLookupLimitDetail = spfExceedsLookupLimit
+      ? `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCountForChecklist} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.`
+      : '';
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
+      ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
-    const spfState = (spfPassesRequirement && !spfIsNameserverRecovered) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered) ? 'warn' : 'fail');
+    const spfState = (spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail');
     quotaItems.push(quotaRow(t('spfQueried'), spfState, spfDetail, null, 'spf'));
     const spfStateLabel = spfState.toUpperCase();
     quotaLines.push(`**${t('spfQueried')}:** ${spfStateLabel}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
@@ -25347,6 +25637,16 @@ function render(r) {
       ? t('error')
       : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude !== false) ? t('verified') : t('notStarted')));
 
+  const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+    ? Number(r.spfAnalysis.totalLookupTerms)
+    : null;
+  const spfLookupCopyDetail = (Number.isFinite(spfLookupCount) && spfLookupCount >= 0)
+    ? (spfLookupCount > 10
+      ? `SPF DNS lookups: ${spfLookupCount} (exceeds the RFC 7208 limit of 10; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors)`
+      : `SPF DNS lookups: ${spfLookupCount} (within the RFC 7208 limit of 10)`)
+    : '';
+  const spfStatusCopyText = spfLookupCopyDetail ? `${spfStatusText} - ${spfLookupCopyDetail}` : spfStatusText;
+
   const dkim1StatusText = (!loaded.dkim && !errors.dkim)
     ? t('pending')
     : (errors.dkim
@@ -25375,7 +25675,7 @@ function render(r) {
   plainTable.push(`| ${t('mxRecordsLabel')} | ${mxStatusText || t('unknown')}${mxCopyDetail ? ` - ${mxCopyDetail}` : ''} |`);
   plainTable.push(`| ${t('domainAgeLabel')} | ${ageText} |`);
   plainTable.push(`| ${t('domainExpiringIn')} | ${expiryText} |`);
-  plainTable.push(`| ${t('spfStatusLabel')} | ${spfStatusText} |`);
+  plainTable.push(`| ${t('spfStatusLabel')} | ${spfStatusCopyText} |`);
   plainTable.push(`| ${t('dkim1StatusLabel')} | ${dkim1StatusText} |`);
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
@@ -25406,7 +25706,7 @@ function render(r) {
   addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
   addRow(t('domainAgeLabel'), ageText);
   addRow(t('domainExpiringIn'), expiryText);
-  addRow(t('spfStatusLabel'), spfStatusText);
+  addRow(t('spfStatusLabel'), spfStatusCopyText);
   addRow(t('dkim1StatusLabel'), dkim1StatusText);
   addRow(t('dkim2StatusLabel'), dkim2StatusText);
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
@@ -27711,7 +28011,15 @@ function extractIntakeFields(plain) {
       let span = 1;
       for (const c of candidates) {
         const m = matchIntakePattern(c.text, field.patterns);
-        if (m) { match = m; span = c.span; break; }
+        if (m) {
+          match = m;
+          // Keep the source question text so field-specific cleanup can tell
+          // whether a numeric-looking tail came from a printed default hint
+          // such as "(Default: 50)" rather than a customer answer.
+          match.sourceText = c.text;
+          span = c.span;
+          break;
+        }
       }
       if (!match) continue;
 
@@ -27740,6 +28048,15 @@ function extractIntakeFields(plain) {
         }
       }
       if (reValue) value = reValue;
+
+      // Some forms include printed defaults inside the question text, e.g.
+      // "Maximum number of recipients per email: (Default: 50)". Depending on
+      // how the rich text was pasted, the generic cleanup may leave just "50)".
+      // That is a hint, not an answer, so keep the field empty unless the user
+      // supplied an explicit Re:/Answer: value (handled above).
+      if (!reValue && field.id === 'recipientCount' && /\bdefault\s*:/i.test(match.sourceText || '') && /^\(?\s*(?:default\s*:\s*)?\d+[\s\)]*$/i.test(value)) {
+        value = '';
+      }
 
       // If still empty, gather following non-blank lines until a blank
       // line or another known question.
@@ -29399,25 +29716,22 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
   try { $npmCmd = Get-Command -Name npm -ErrorAction SilentlyContinue } catch { $npmCmd = $null }
   if ($npmCmd) {
     try {
-      Write-Information -InformationAction Continue -MessageData "MSAL bundle missing. Running npm install @azure/msal-browser@latest in $PSScriptRoot..."
+      Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-START' -Message 'MSAL bundle missing; auto-install starting.' -Fields @{ dependency = 'npm' }
       & $npmCmd.Source install --no-fund --no-audit --prefix $PSScriptRoot @azure/msal-browser@latest | Out-Null
       if ($LASTEXITCODE -ne 0) {
-        Write-Information -InformationAction Continue -MessageData "MSAL auto-install exited with code $LASTEXITCODE."
+        Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-EXIT' -Message 'MSAL auto-install exited with non-zero status.' -ErrorCode 'ACS-MSAL-INSTALL-EXIT' -Fields @{ dependency = 'npm'; statusCode = $LASTEXITCODE }
       }
     } catch {
-      Write-Information -InformationAction Continue -MessageData "MSAL auto-install failed: $($_.Exception.Message)"
+      Write-AcsLogException -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-ERROR' -ErrorCode 'ACS-MSAL-INSTALL' -Exception $_ -Fields @{ dependency = 'npm' }
     }
   } else {
-    Write-Information -InformationAction Continue -MessageData 'MSAL auto-install skipped: npm not found in PATH.'
+    Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-SKIPPED' -Message 'MSAL auto-install skipped because dependency was unavailable.' -Fields @{ dependency = 'npm'; resultCategory = 'not-found' }
   }
 
   $npmRoot = $null
   try {
     $npmRoot = (& $npmCmd.Source root --prefix $PSScriptRoot 2>$null | Select-Object -First 1)
   } catch { $npmRoot = $null }
-  if (-not [string]::IsNullOrWhiteSpace($npmRoot)) {
-    Write-Information -InformationAction Continue -MessageData "npm root (local): $npmRoot"
-  }
   if (-not [string]::IsNullOrWhiteSpace($npmRoot)) {
     $msalNodePath = Join-Path -Path $npmRoot -ChildPath '@azure\msal-browser\lib\msal-browser.min.js'
   } else {
@@ -29428,10 +29742,6 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
   try {
     $npmGlobalRoot = (& $npmCmd.Source root -g 2>$null | Select-Object -First 1)
   } catch { $npmGlobalRoot = $null }
-  if (-not [string]::IsNullOrWhiteSpace($npmGlobalRoot)) {
-    Write-Information -InformationAction Continue -MessageData "npm root (global): $npmGlobalRoot"
-  }
-
   if (Test-Path -LiteralPath $msalNodePath) {
     $msalLocalPath = [System.IO.Path]::GetFullPath($msalNodePath)
   } else {
@@ -29439,7 +29749,7 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
     if ($globalCandidate -and (Test-Path -LiteralPath $globalCandidate)) {
       $msalLocalPath = [System.IO.Path]::GetFullPath($globalCandidate)
     } else {
-      Write-Information -InformationAction Continue -MessageData "MSAL bundle not found after npm install. Expected at: $msalNodePath"
+      Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-resolve' -EventId 'MSAL-BUNDLE-NOT-FOUND' -Message 'MSAL bundle was not found after install attempt.' -ErrorCode 'ACS-MSAL-NOT-FOUND' -Fields @{ dependency = 'msal-browser'; resultCategory = 'not-found' }
     }
   }
 }
@@ -29450,21 +29760,21 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
 $script:AssetsRoot = Join-Path -Path $PSScriptRoot -ChildPath 'assets'
 
 if (Test-Path -LiteralPath $msalLocalPath) {
-  Write-Information -InformationAction Continue -MessageData "MSAL local script detected at: $msalLocalPath"
+  Write-AcsLogEvent -Level 'Information' -Component 'StaticAssets' -Operation 'msal-resolve' -EventId 'MSAL-BUNDLE-FOUND' -Message 'MSAL local script is available.' -Fields @{ dependency = 'msal-browser'; resultCategory = 'found' }
 } else {
-  Write-Information -InformationAction Continue -MessageData "MSAL local script not found at: $msalLocalPath"
+  Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-resolve' -EventId 'MSAL-BUNDLE-MISSING' -Message 'MSAL local script is unavailable.' -ErrorCode 'ACS-MSAL-MISSING' -Fields @{ dependency = 'msal-browser'; resultCategory = 'not-found' }
 }
 
 if ([string]::IsNullOrWhiteSpace($entraClientId)) {
-  Write-Information -InformationAction Continue -MessageData 'ACS_ENTRA_CLIENT_ID not detected. Microsoft sign-in will be disabled.'
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-client-config' -EventId 'ENTRA-CLIENT-MISSING' -Message 'Optional Microsoft sign-in client ID is not configured.' -Fields @{ resultCategory = 'disabled' }
 } else {
-  Write-Information -InformationAction Continue -MessageData "ACS_ENTRA_CLIENT_ID detected"
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-client-config' -EventId 'ENTRA-CLIENT-CONFIGURED' -Message 'Microsoft sign-in client ID is configured.' -Fields @{ resultCategory = 'enabled' }
 }
 
 if ([string]::IsNullOrWhiteSpace($entraTenantId)) {
-  Write-Information -InformationAction Continue -MessageData 'ACS_ENTRA_TENANT_ID not set. Using organizations authority.'
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-tenant-config' -EventId 'ENTRA-TENANT-DEFAULT' -Message 'Microsoft sign-in tenant ID is not configured; default authority will be used.' -Fields @{ resultCategory = 'default' }
 } else {
-  Write-Information -InformationAction Continue -MessageData "ACS_ENTRA_TENANT_ID detected"
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-tenant-config' -EventId 'ENTRA-TENANT-CONFIGURED' -Message 'Microsoft sign-in tenant ID is configured.' -Fields @{ resultCategory = 'configured' }
 }
 
 # ===== Runspace Pool Initialization =====
@@ -29487,6 +29797,7 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # List all functions that need to be available inside the runspace workers.
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
+  'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Write-AcsLogEvent','Write-AcsLogException',
   'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain','Handle-MetricsRequest','Acquire-MetricsFileMutex',
@@ -29496,7 +29807,7 @@ $functionNames = @(
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
-  'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit',
+  'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
@@ -29516,6 +29827,10 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('MetricsHashKey', $MetricsHashKey, 'Hash key used for anonymous domain hashing'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('GoDaddyApiKey', $script:GoDaddyApiKey, 'GoDaddy API key'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('GoDaddyApiSecret', $script:GoDaddyApiSecret, 'GoDaddy API secret'))
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogAppName', $script:AcsLogAppName, 'Secure logging application name'))
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMinLevel', $script:AcsLogMinLevel, 'Secure logging minimum level'))
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogFilePath', $script:AcsLogFilePath, 'Secure logging JSONL file path'))
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMaxBytes', $script:AcsLogMaxBytes, 'Secure logging file size cap'))
 
 # Share the global metrics objects with handler runspaces (must be added before pool creation).
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsMetrics', $global:AcsMetrics, 'Shared metrics object'))
@@ -29657,6 +29972,9 @@ if ([string]::IsNullOrWhiteSpace($path)) {
 }
 if ([string]::IsNullOrWhiteSpace($path)) { $path = '/' }
 
+$correlationId = Get-RequestCorrelationId -Context $ctx
+Set-RequestCorrelationHeader -Context $ctx
+
 # SECURITY: Cap POST/PUT/PATCH request bodies before any handler runs. The
 # only POST today is /api/consent which is header-driven and ignores the
 # body, so any oversized body is wasted bandwidth and a tying-up vector for
@@ -29694,6 +30012,7 @@ try {
         }
       } catch { $contentLength = -1 }
       if ($contentLength -gt $bodyCap) {
+        Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'body-size-check' -EventId 'REQ-BODY-TOO-LARGE' -Message 'Request rejected because body exceeded configured size limit.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-413' -Fields @{ statusCode = 413; limit = $bodyCap }
         Write-Json -Context $ctx -Object @{ error = 'Request body too large.'; maxBytes = $bodyCap } -StatusCode 413
         return
       }
@@ -29895,6 +30214,7 @@ if ($metricsEnabled) {
   # 2) Serve individual API endpoints (/api/*)
   if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers")) {
     if (-not (Test-ApiKey -Context $ctx)) {
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-auth' -EventId 'REQ-AUTH-FAILED' -Message 'Request rejected by API key validation.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-401' -Fields @{ statusCode = 401 }
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
       return
     }
@@ -29906,6 +30226,7 @@ if ($metricsEnabled) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
       Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
       return
     }
@@ -30052,6 +30373,7 @@ if ($metricsEnabled) {
   # 3) Serve the aggregated endpoint used by the UI (/dns)
   if ($path -eq "/dns") {
     if (-not (Test-ApiKey -Context $ctx)) {
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-auth' -EventId 'REQ-AUTH-FAILED' -Message 'Request rejected by API key validation.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-401' -Fields @{ statusCode = 401 }
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.'; acsReady = $false } -StatusCode 401
       return
     }
@@ -30063,6 +30385,7 @@ if ($metricsEnabled) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
       Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec; acsReady = $false } -StatusCode 429
       return
     }
@@ -30112,15 +30435,12 @@ catch {
   # generic error keeps the failure observable for the SPA without leaking
   # those details to anonymous callers.
   #
-  # The original message is still emitted to the server console via
-  # Write-Information so operators can correlate the request log line with
-  # the underlying exception when triaging.
   try {
-    $errMsg = $null
-    try { $errMsg = [string]$_.Exception.Message } catch { $errMsg = '<unavailable>' }
-    Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] handler error for path '$path': $errMsg"
+    $cid = $correlationId
+    if ([string]::IsNullOrWhiteSpace($cid)) { $cid = Get-RequestCorrelationId -Context $ctx }
+    Write-AcsLogException -Level 'Error' -Component 'RequestHandler' -Operation 'handle-request' -EventId 'REQ-HANDLER-ERROR' -ErrorCode 'ACS-REQ-500' -Exception $_ -CorrelationId $cid -Fields @{ statusCode = 500 }
   } catch { }
-  try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.' } -StatusCode 500 } catch {}
+  try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.'; correlationId = $correlationId } -StatusCode 500 } catch {}
   try { if ($ctx -and $ctx.Response) { $ctx.Response.Close() } } catch {}
 }
 '@
@@ -30141,7 +30461,7 @@ try {
           $script:ShutdownRequested = $true
           try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
           try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }
-          try { [Console]::Error.WriteLine('Stopping ACS Email Domain Checker...') } catch { }
+          Write-AcsLogEvent -Level 'Information' -Component 'RequestLoop' -Operation 'shutdown-request' -EventId 'SERVER-SHUTDOWN-REQUESTED' -Message 'Server shutdown requested.' -Fields @{ shutdownRequested = $true }
           return $true
         }
       }
@@ -30358,7 +30678,11 @@ try {
     $method = $parts[0].Trim().ToUpperInvariant()
     $target = $parts[1].Trim()
 
-    $headers = @{}
+    # Header names are case-insensitive by HTTP semantics. Use an ordinal
+    # case-insensitive dictionary so fallback requests behave like
+    # HttpListenerRequest.Headers and callers do not need duplicate casing
+    # lookups for X-Api-Key / Authorization / Content-Length.
+    $headers = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
     $headerCount = 0
     while ($true) {
       try {
@@ -30374,7 +30698,7 @@ try {
       if ($headerCount -gt $maxHeaderCount) { return $null }
       $idx = $line.IndexOf(':')
       if ($idx -le 0) { continue }
-      $hName = $line.Substring(0, $idx).Trim().ToLowerInvariant()
+      $hName = $line.Substring(0, $idx).Trim()
       $hValue = $line.Substring($idx + 1).Trim()
       $headers[$hName] = $hValue
     }
@@ -30416,6 +30740,7 @@ try {
   if ($serverMode -eq 'HttpListener') {
     # Primary server mode: HttpListener (best supported on Windows).
     while ($listener.IsListening) {
+      $asyncContext = $null
       try {
         if (Test-ConsoleShutdownKey) { break }
         $asyncContext = $listener.BeginGetContext($null, $null)
@@ -30471,13 +30796,16 @@ try {
       }
       catch [System.Net.HttpListenerException] {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "HttpListenerException: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'http-listener-accept' -EventId 'LISTENER-HTTP-ERROR' -ErrorCode 'ACS-LISTENER-HTTP' -Exception $_ -Fields @{ listenerMode = 'HttpListener' }
         break
       }
       catch {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "HttpListener loop error: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'http-listener-loop' -EventId 'LISTENER-HTTP-UNEXPECTED' -ErrorCode 'ACS-LISTENER-UNEXPECTED' -Exception $_ -Fields @{ listenerMode = 'HttpListener' }
         break
+      }
+      finally {
+        try { if ($asyncContext -and $asyncContext.AsyncWaitHandle) { $asyncContext.AsyncWaitHandle.Close() } } catch { }
       }
     }
   }
@@ -30485,17 +30813,19 @@ try {
     # Fallback server mode: TcpListener (for platforms where HttpListener is unavailable).
     # Only GET is supported here; it's enough for the SPA + JSON endpoints.
     while ($true) {
+      $asyncClient = $null
+      $client = $null
       if (Test-ConsoleShutdownKey) { break }
-      $asyncClient = $tcpListener.BeginAcceptTcpClient($null, $null)
-      while (-not $asyncClient.AsyncWaitHandle.WaitOne(200)) {
-        if (Test-ConsoleShutdownKey) { break }
-      }
-      if ($script:ShutdownRequested) { break }
-      $client = $tcpListener.EndAcceptTcpClient($asyncClient)
-      if ($null -eq $client) { continue }
-
       $req = $null
       try {
+        $asyncClient = $tcpListener.BeginAcceptTcpClient($null, $null)
+        while (-not $asyncClient.AsyncWaitHandle.WaitOne(200)) {
+          if (Test-ConsoleShutdownKey) { break }
+        }
+        if ($script:ShutdownRequested) { break }
+        $client = $tcpListener.EndAcceptTcpClient($asyncClient)
+        if ($null -eq $client) { continue }
+
         $req = Read-TcpHttpRequest -Client $client
         if ($null -eq $req) {
           try { $client.Close() } catch { }
@@ -30539,22 +30869,25 @@ try {
       }
       catch [System.Net.Sockets.SocketException] {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "TcpListener SocketException: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'tcp-listener-accept' -EventId 'LISTENER-TCP-ERROR' -ErrorCode 'ACS-LISTENER-TCP' -Exception $_ -Fields @{ listenerMode = 'TcpListener' }
         try { $client.Close() } catch { }
       }
       catch {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "TcpListener loop error: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'tcp-listener-loop' -EventId 'LISTENER-TCP-UNEXPECTED' -ErrorCode 'ACS-LISTENER-UNEXPECTED' -Exception $_ -Fields @{ listenerMode = 'TcpListener' }
         try { $client.Close() } catch { }
+      }
+      finally {
+        try { if ($asyncClient -and $asyncClient.AsyncWaitHandle) { $asyncClient.AsyncWaitHandle.Close() } } catch { }
       }
     }
   }
   else {
-    Write-Error -Message "Server did not start. HttpListener unavailable and TcpListener could not be initialized." -ErrorAction Continue
+    Write-AcsLogEvent -Level 'Error' -Component 'RequestLoop' -Operation 'server-start' -EventId 'SERVER-NOT-STARTED' -Message 'Server did not start.' -ErrorCode 'ACS-SERVER-NOT-STARTED'
   }
 }
 catch {
-  Write-Error -ErrorRecord $_
+  Write-AcsLogException -Level 'Critical' -Component 'RequestLoop' -Operation 'request-loop' -EventId 'REQUEST-LOOP-CRITICAL' -ErrorCode 'ACS-LOOP-CRITICAL' -Exception $_
 }
 # ===== Graceful Shutdown =====
 finally {
@@ -30583,5 +30916,5 @@ try {
     Complete-InflightInvocation -InvocationId $invocationId -Force
   }
   try { $pool.Close(); $pool.Dispose() } catch { $null = $_ }
-  Write-Information -InformationAction Continue -MessageData "Server stopped."
+  Write-AcsLogEvent -Level 'Information' -Component 'Shutdown' -Operation 'server-stop' -EventId 'SERVER-STOPPED' -Message 'Server stopped.' -Fields @{ shutdownRequested = $script:ShutdownRequested }
 }

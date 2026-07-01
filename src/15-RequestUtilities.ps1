@@ -6,8 +6,53 @@ function Write-RequestLog {
     [string]$Domain
   )
 
-  # Do not log IP addresses or user agents (PII). Only log minimal non-identifying data.
-  Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $Action for '$Domain'"
+  # Domain, IP, user agent, headers, query strings, and user input are treated as
+  # sensitive. Log only a route/category and a random correlation ID.
+  $correlationId = Get-RequestCorrelationId -Context $Context
+  $operation = 'request'
+  $statusCode = $null
+  if ($Action -match '^(?i)api\s+') {
+    $operation = 'api-request'
+  } elseif ($Action -match '^(?i)dns') {
+    $operation = 'dns-request'
+  }
+  try { $statusCode = [int]$Context.Response.StatusCode } catch { $statusCode = $null }
+  Write-AcsLogEvent -Level 'Information' -Component 'Request' -Operation $operation -EventId 'REQ-RECEIVED' -Message 'Request received.' -CorrelationId $correlationId -Fields @{
+    statusCode = $statusCode
+  }
+}
+
+function Get-RequestCorrelationId {
+  param($Context)
+
+  try {
+    if ($Context -and $Context.PSObject.Properties['AcsCorrelationId'] -and -not [string]::IsNullOrWhiteSpace([string]$Context.AcsCorrelationId)) {
+      return [string]$Context.AcsCorrelationId
+    }
+  } catch { }
+
+  $id = New-AcsCorrelationId
+  try {
+    if ($Context -and -not $Context.PSObject.Properties['AcsCorrelationId']) {
+      $Context | Add-Member -NotePropertyName AcsCorrelationId -NotePropertyValue $id -Force
+    } elseif ($Context) {
+      $Context.AcsCorrelationId = $id
+    }
+  } catch { }
+  return $id
+}
+
+function Set-RequestCorrelationHeader {
+  param($Context)
+  try {
+    $id = Get-RequestCorrelationId -Context $Context
+    if ([string]::IsNullOrWhiteSpace($id)) { return }
+    if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+      $Context.Response.Headers['X-Correlation-Id'] = $id
+    } elseif ($Context.Response.PSObject.Properties['_extraHeaders']) {
+      $Context.Response._extraHeaders['X-Correlation-Id'] = $id
+    }
+  } catch { }
 }
 
 # Extract the client's IP address from the request.
@@ -152,7 +197,7 @@ function Get-ApiKeyFromRequest {
 
   $key = $null
   if ($headers) {
-    foreach ($name in @('X-Api-Key','x-api-key','X-ACS-API-Key','x-acs-api-key')) {
+    foreach ($name in @('X-Api-Key','X-ACS-API-Key')) {
       try {
         $key = [string]$headers[$name]
       } catch { $key = $null }
@@ -161,9 +206,6 @@ function Get-ApiKeyFromRequest {
 
     $authHeader = $null
     try { $authHeader = [string]$headers['Authorization'] } catch { $authHeader = $null }
-    if ([string]::IsNullOrWhiteSpace($authHeader)) {
-      try { $authHeader = [string]$headers['authorization'] } catch { $authHeader = $null }
-    }
     if ($authHeader -and $authHeader -match '^(?i)ApiKey\s+(.+)$') {
       return $Matches[1].Trim()
     }
@@ -249,7 +291,15 @@ function Test-RateLimit {
     return [pscustomobject]@{ allowed = $true; remaining = $null; retryAfterSec = $null; limit = $limit }
   }
   if ($Multiplier -lt 1) { $Multiplier = 1 }
-  $effectiveLimit = $limit * $Multiplier
+  # Clamp effective limit arithmetic so an unusually large environment value or
+  # multiplier cannot overflow Int32 and accidentally disable/throttle the wrong
+  # clients. Normal deployments use small values (for example 60 * 10).
+  $effectiveLimit64 = [int64]$limit * [int64]$Multiplier
+  if ($effectiveLimit64 -gt [int64][int]::MaxValue) {
+    $effectiveLimit = [int]::MaxValue
+  } else {
+    $effectiveLimit = [int]$effectiveLimit64
+  }
 
   $clientIp = Get-ClientIp -Context $Context
   if ([string]::IsNullOrWhiteSpace($clientIp)) { $clientIp = 'unknown' }

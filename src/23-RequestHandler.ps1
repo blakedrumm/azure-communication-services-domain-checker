@@ -31,6 +31,9 @@ if ([string]::IsNullOrWhiteSpace($path)) {
 }
 if ([string]::IsNullOrWhiteSpace($path)) { $path = '/' }
 
+$correlationId = Get-RequestCorrelationId -Context $ctx
+Set-RequestCorrelationHeader -Context $ctx
+
 # SECURITY: Cap POST/PUT/PATCH request bodies before any handler runs. The
 # only POST today is /api/consent which is header-driven and ignores the
 # body, so any oversized body is wasted bandwidth and a tying-up vector for
@@ -68,6 +71,7 @@ try {
         }
       } catch { $contentLength = -1 }
       if ($contentLength -gt $bodyCap) {
+        Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'body-size-check' -EventId 'REQ-BODY-TOO-LARGE' -Message 'Request rejected because body exceeded configured size limit.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-413' -Fields @{ statusCode = 413; limit = $bodyCap }
         Write-Json -Context $ctx -Object @{ error = 'Request body too large.'; maxBytes = $bodyCap } -StatusCode 413
         return
       }
@@ -269,6 +273,7 @@ if ($metricsEnabled) {
   # 2) Serve individual API endpoints (/api/*)
   if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers")) {
     if (-not (Test-ApiKey -Context $ctx)) {
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-auth' -EventId 'REQ-AUTH-FAILED' -Message 'Request rejected by API key validation.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-401' -Fields @{ statusCode = 401 }
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
       return
     }
@@ -280,6 +285,7 @@ if ($metricsEnabled) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
       Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
       return
     }
@@ -426,6 +432,7 @@ if ($metricsEnabled) {
   # 3) Serve the aggregated endpoint used by the UI (/dns)
   if ($path -eq "/dns") {
     if (-not (Test-ApiKey -Context $ctx)) {
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-auth' -EventId 'REQ-AUTH-FAILED' -Message 'Request rejected by API key validation.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-401' -Fields @{ statusCode = 401 }
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.'; acsReady = $false } -StatusCode 401
       return
     }
@@ -437,6 +444,7 @@ if ($metricsEnabled) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
       Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec; acsReady = $false } -StatusCode 429
       return
     }
@@ -486,15 +494,12 @@ catch {
   # generic error keeps the failure observable for the SPA without leaking
   # those details to anonymous callers.
   #
-  # The original message is still emitted to the server console via
-  # Write-Information so operators can correlate the request log line with
-  # the underlying exception when triaging.
   try {
-    $errMsg = $null
-    try { $errMsg = [string]$_.Exception.Message } catch { $errMsg = '<unavailable>' }
-    Write-Information -InformationAction Continue -MessageData "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] handler error for path '$path': $errMsg"
+    $cid = $correlationId
+    if ([string]::IsNullOrWhiteSpace($cid)) { $cid = Get-RequestCorrelationId -Context $ctx }
+    Write-AcsLogException -Level 'Error' -Component 'RequestHandler' -Operation 'handle-request' -EventId 'REQ-HANDLER-ERROR' -ErrorCode 'ACS-REQ-500' -Exception $_ -CorrelationId $cid -Fields @{ statusCode = 500 }
   } catch { }
-  try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.' } -StatusCode 500 } catch {}
+  try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.'; correlationId = $correlationId } -StatusCode 500 } catch {}
   try { if ($ctx -and $ctx.Response) { $ctx.Response.Close() } } catch {}
 }
 '@

@@ -25,5 +25,5 @@ try {
     Complete-InflightInvocation -InvocationId $invocationId -Force
   }
   try { $pool.Close(); $pool.Dispose() } catch { $null = $_ }
-  Write-Information -InformationAction Continue -MessageData "Server stopped."
+  Write-AcsLogEvent -Level 'Information' -Component 'Shutdown' -Operation 'server-stop' -EventId 'SERVER-STOPPED' -Message 'Server stopped.' -Fields @{ shutdownRequested = $script:ShutdownRequested }
 }

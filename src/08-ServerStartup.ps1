@@ -124,22 +124,6 @@ $script:AcsServerHttpListener = $null
 $script:AcsServerTcpListener = $null
 $script:ConsoleCancelHandler = $null
 $script:PreviousTreatControlCAsInput = $null
-$script:ReturnToPromptAfterCtrlC = $false
-try {
-  # If Visual Studio (or another launcher) starts this script as the shell's
-  # command itself, e.g. `pwsh -File .\acs-domain-checker.ps1`, then a clean
-  # script return exits that pwsh process and the terminal shows "process
-  # exited" instead of a reusable prompt. Detect that launch shape so shutdown
-  # can offer an interactive PowerShell prompt after Ctrl+C. When the script is
-  # run from an already-open prompt (`.\acs-domain-checker.ps1`), these process
-  # arguments do not contain -File/-Command and normal return-to-parent-prompt
-  # behavior is preserved.
-  $hostArgs = @([Environment]::GetCommandLineArgs())
-  $launchRunsAndExits = ($hostArgs -match '^(?i:-file|-f|-command|-c)$') -and -not ($hostArgs -match '^(?i:-noexit)$')
-  $script:ReturnToPromptAfterCtrlC = [Environment]::UserInteractive -and $launchRunsAndExits
-} catch {
-  $script:ReturnToPromptAfterCtrlC = $false
-}
 
 $displayUrl = "http://localhost:$Port"
 
@@ -178,7 +162,7 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       $serverMode = 'TcpListener'
     } else {
       $startupErrorMessage = Get-ListenerStartupErrorMessage -Port $Port -DisplayUrl $displayUrl -BindMode $Bind -AttemptedPrefix $prefix -FailureMessage $_.Exception.Message
-      Write-Error -Message $startupErrorMessage -ErrorAction Continue
+      Write-AcsLogException -Level 'Error' -Component 'ServerStartup' -Operation 'http-listener-start' -EventId 'HTTP-LISTENER-START-FAILED' -ErrorCode 'ACS-HTTP-LISTENER-START' -Exception $_ -Fields @{ listenerMode = 'HttpListener'; port = $Port }
       return
     }
   }
@@ -213,7 +197,7 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       [Console]::TreatControlCAsInput = $true
     } catch {
       $script:PreviousTreatControlCAsInput = $null
-      Write-Warning "Ctrl+C input mode could not be enabled: $($_.Exception.Message)"
+      Write-AcsLogException -Level 'Warning' -Component 'ServerStartup' -Operation 'console-ctrlc-mode' -EventId 'CONSOLE-CTRLC-MODE-WARN' -ErrorCode 'ACS-CONSOLE-CTRLC' -Exception $_
     }
 
     # Ctrl+C must stop the underlying listener so the blocking GetContext() /
@@ -230,42 +214,38 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
           $script:ShutdownRequested = $true
           try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
           try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }
-          try { [Console]::Error.WriteLine('Stopping ACS Email Domain Checker...') } catch { }
         }
         [Console]::add_CancelKeyPress($script:ConsoleCancelHandler)
       }
     } catch {
-      Write-Warning "Ctrl+C shutdown handler could not be registered: $($_.Exception.Message)"
+      Write-AcsLogException -Level 'Warning' -Component 'ServerStartup' -Operation 'register-shutdown-handler' -EventId 'SERVER-SHUTDOWN-HANDLER-WARN' -ErrorCode 'ACS-SERVER-SHUTDOWN-HANDLER' -Exception $_
     }
 
-    Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker running at $displayUrl"
-    Write-Information -InformationAction Continue -MessageData 'Press Ctrl+C (or Q) to stop the server.'
-
-    # Also write version to the console for quick visibility during startup.
-    Write-Information -InformationAction Continue -MessageData "ACS Email Domain Checker version: $($script:AppVersion)"
+    Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'server-start' -EventId 'SERVER-STARTED' -Message 'Server started.' -Fields @{ listenerMode = $serverMode; port = $Port }
+    Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'shutdown-instructions' -EventId 'SERVER-SHUTDOWN-INSTRUCTIONS' -Message 'Press Ctrl+C or Q to stop the server.'
 
     if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
-      Write-Information -InformationAction Continue -MessageData "Anonymous metrics: ENABLED (no PII). Metrics file: $([System.IO.Path]::GetFullPath($env:ACS_ANON_METRICS_FILE))"
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'metrics-config' -EventId 'METRICS-ENABLED' -Message 'Anonymous metrics enabled.'
     } else {
-      Write-Information -InformationAction Continue -MessageData "Anonymous metrics: DISABLED. Start with -EnableAnonymousMetrics to enable /api/metrics counters."
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'metrics-config' -EventId 'METRICS-DISABLED' -Message 'Anonymous metrics disabled.'
     }
 
     if (-not [string]::IsNullOrWhiteSpace($env:ACS_API_KEY)) {
-      Write-Information -InformationAction Continue -MessageData 'API key authentication: ENABLED (send X-Api-Key to /api/* and /dns).'
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-ENABLED' -Message 'API key authentication enabled.'
     } else {
-      Write-Information -InformationAction Continue -MessageData 'API key authentication: DISABLED.'
+      Write-AcsLogEvent -Level 'Warning' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-DISABLED' -Message 'API key authentication disabled.'
     }
 
     if ($rateLimitPerMinute -gt 0) {
-      Write-Information -InformationAction Continue -MessageData "Rate limiting: $rateLimitPerMinute requests/min per client IP."
+      Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'rate-limit-config' -EventId 'RATE-LIMIT-ENABLED' -Message 'Rate limiting enabled.' -Fields @{ limit = $rateLimitPerMinute }
     } else {
-      Write-Information -InformationAction Continue -MessageData 'Rate limiting: DISABLED.'
+      Write-AcsLogEvent -Level 'Warning' -Component 'ServerStartup' -Operation 'rate-limit-config' -EventId 'RATE-LIMIT-DISABLED' -Message 'Rate limiting disabled.'
     }
   } else {
     if (-not [string]::IsNullOrWhiteSpace($startupErrorMessage)) {
-      Write-Error -Message $startupErrorMessage -ErrorAction Continue
+      Write-AcsLogEvent -Level 'Error' -Component 'ServerStartup' -Operation 'server-start' -EventId 'SERVER-START-FAILED' -Message 'Server failed to start.' -ErrorCode 'ACS-SERVER-START' -Fields @{ port = $Port }
     } else {
-      Write-Error -Message "Server did not start. The port may be in use or requires additional permissions. Try a different -Port or adjust -Bind (Auto/Localhost/Any)." -ErrorAction Continue
+      Write-AcsLogEvent -Level 'Error' -Component 'ServerStartup' -Operation 'server-start' -EventId 'SERVER-START-FAILED' -Message 'Server failed to start.' -ErrorCode 'ACS-SERVER-START' -Fields @{ port = $Port }
     }
     return
   }

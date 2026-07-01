@@ -2995,11 +2995,17 @@ function render(r) {
     }
 
     // 4. SPF
+    const spfLookupCountForStatus = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+      ? Number(r.spfAnalysis.totalLookupTerms)
+      : null;
     if (recoveredFromNameservers && effectiveSpfPresent) {
       // SPF exists only via direct nameserver query (not resolving via public
       // DNS): a Warning rather than a hard Failure.
       quotaWarn = true;
     } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
+    if (effectiveSpfPresent && Number.isFinite(spfLookupCountForStatus) && spfLookupCountForStatus > 10) {
+      quotaWarn = true;
+    }
 
     let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
     if (quotaFail) {
@@ -3303,10 +3309,17 @@ function render(r) {
     // whether it satisfies the Outlook include: public DNS (the source of truth
     // for delivery + Azure verification) is not returning it reliably.
     const spfIsNameserverRecovered = effectiveSpfPresent && recoveredFromNameservers;
+    const spfLookupCountForChecklist = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+      ? Number(r.spfAnalysis.totalLookupTerms)
+      : null;
+    const spfExceedsLookupLimit = effectiveSpfPresent && Number.isFinite(spfLookupCountForChecklist) && spfLookupCountForChecklist > 10;
+    const spfLookupLimitDetail = spfExceedsLookupLimit
+      ? `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCountForChecklist} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.`
+      : '';
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
+      ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
-    const spfState = (spfPassesRequirement && !spfIsNameserverRecovered) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered) ? 'warn' : 'fail');
+    const spfState = (spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail');
     quotaItems.push(quotaRow(t('spfQueried'), spfState, spfDetail, null, 'spf'));
     const spfStateLabel = spfState.toUpperCase();
     quotaLines.push(`**${t('spfQueried')}:** ${spfStateLabel}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
@@ -3385,6 +3398,16 @@ function render(r) {
       ? t('error')
       : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude !== false) ? t('verified') : t('notStarted')));
 
+  const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+    ? Number(r.spfAnalysis.totalLookupTerms)
+    : null;
+  const spfLookupCopyDetail = (Number.isFinite(spfLookupCount) && spfLookupCount >= 0)
+    ? (spfLookupCount > 10
+      ? `SPF DNS lookups: ${spfLookupCount} (exceeds the RFC 7208 limit of 10; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors)`
+      : `SPF DNS lookups: ${spfLookupCount} (within the RFC 7208 limit of 10)`)
+    : '';
+  const spfStatusCopyText = spfLookupCopyDetail ? `${spfStatusText} - ${spfLookupCopyDetail}` : spfStatusText;
+
   const dkim1StatusText = (!loaded.dkim && !errors.dkim)
     ? t('pending')
     : (errors.dkim
@@ -3413,7 +3436,7 @@ function render(r) {
   plainTable.push(`| ${t('mxRecordsLabel')} | ${mxStatusText || t('unknown')}${mxCopyDetail ? ` - ${mxCopyDetail}` : ''} |`);
   plainTable.push(`| ${t('domainAgeLabel')} | ${ageText} |`);
   plainTable.push(`| ${t('domainExpiringIn')} | ${expiryText} |`);
-  plainTable.push(`| ${t('spfStatusLabel')} | ${spfStatusText} |`);
+  plainTable.push(`| ${t('spfStatusLabel')} | ${spfStatusCopyText} |`);
   plainTable.push(`| ${t('dkim1StatusLabel')} | ${dkim1StatusText} |`);
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
@@ -3444,7 +3467,7 @@ function render(r) {
   addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
   addRow(t('domainAgeLabel'), ageText);
   addRow(t('domainExpiringIn'), expiryText);
-  addRow(t('spfStatusLabel'), spfStatusText);
+  addRow(t('spfStatusLabel'), spfStatusCopyText);
   addRow(t('dkim1StatusLabel'), dkim1StatusText);
   addRow(t('dkim2StatusLabel'), dkim2StatusText);
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
@@ -5749,7 +5772,15 @@ function extractIntakeFields(plain) {
       let span = 1;
       for (const c of candidates) {
         const m = matchIntakePattern(c.text, field.patterns);
-        if (m) { match = m; span = c.span; break; }
+        if (m) {
+          match = m;
+          // Keep the source question text so field-specific cleanup can tell
+          // whether a numeric-looking tail came from a printed default hint
+          // such as "(Default: 50)" rather than a customer answer.
+          match.sourceText = c.text;
+          span = c.span;
+          break;
+        }
       }
       if (!match) continue;
 
@@ -5778,6 +5809,15 @@ function extractIntakeFields(plain) {
         }
       }
       if (reValue) value = reValue;
+
+      // Some forms include printed defaults inside the question text, e.g.
+      // "Maximum number of recipients per email: (Default: 50)". Depending on
+      // how the rich text was pasted, the generic cleanup may leave just "50)".
+      // That is a hint, not an answer, so keep the field empty unless the user
+      // supplied an explicit Re:/Answer: value (handled above).
+      if (!reValue && field.id === 'recipientCount' && /\bdefault\s*:/i.test(match.sourceText || '') && /^\(?\s*(?:default\s*:\s*)?\d+[\s\)]*$/i.test(value)) {
+        value = '';
+      }
 
       // If still empty, gather following non-blank lines until a blank
       // line or another known question.

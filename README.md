@@ -526,6 +526,25 @@ When automatic Entra sign-in is enabled, the SPA only calls MSAL `ssoSilent()` w
 
 The reputation checker only queries public IPv4 addresses and validates DNSBL zone names before use. DNSBL policy-block responses are counted as errors rather than listings, and positive listings also attempt to collect DNSBL TXT reason text when the provider publishes it.
 
+### 🧾 Secure Diagnostics & Logging
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_LOG_LEVEL` | `Information` | Minimum structured log level (`Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical`). Increased verbosity never enables PII, secrets, headers, query strings, request/response bodies, or raw exception messages. |
+| `ACS_LOG_FILE` | _(none)_ | Optional JSONL log file path. Console logging is always structured JSON; file logging is opt-in. Do not place the file path in a user-controlled location. |
+| `ACS_LOG_MAX_BYTES` | `5242880` | Maximum JSONL log file size before single-file rotation to `.1` (clamped between 64 KB and 100 MB). |
+
+Structured diagnostics use a secure-by-default allowlist. Approved fields are: UTC timestamp, severity, app name/version, environment category, component, operation, event ID, non-sensitive message, random correlation ID, stable error code, sanitized exception type, generic sanitized exception message, stack-trace hash, inner exception type, duration, dependency name, status code/result category, retry/fallback metadata, listener mode, port, rate-limit counters, and shutdown state.
+
+Prohibited log content includes names, email addresses, phone numbers, physical addresses, usernames, domains entered by users, IP addresses, device identifiers, tenant/subscription/account/customer identifiers, API keys, passwords, tokens, cookies, authorization headers, connection strings, request/response bodies, query strings, headers, route parameters that may contain user values, raw exception messages, raw stack traces, environment variables, and serialized objects. The logger drops unknown fields and applies redaction before writing to console or file.
+
+Correlation IDs are generated from 128 bits of randomness and are not derived from domains, users, tenants, sessions, requests, or tokens. User-facing internal-server-error responses include only a generic message and the correlation ID.
+
+Run the secure logging validation suite with:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
+```
+
 ### 🐛 Issue Reporting
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -798,6 +817,22 @@ Security is a top priority for the ACS Domain Checker:
 - 🔒 **HTTPS recommended:** Always use HTTPS in production deployments
 - 🚫 **No credential storage:** The application never stores credentials or sensitive data
 - ✅ **Input validation:** All user inputs are validated and sanitized
+- 🧾 **Secure structured logging:** Logs use an approved-field allowlist, random correlation IDs, sanitized exception summaries, stack hashes instead of raw stack traces, and defense-in-depth redaction. Logging failures never fail the primary operation.
+
+### Formal security review logging deliverables
+
+1. **Current implementation summary:** Runtime diagnostics are emitted through `Write-AcsLogEvent` / `Write-AcsLogException` in `src/03a-SecureLogging.ps1`; legacy request logs now call the centralized logger.
+2. **Destinations and exporters:** Console structured JSON is always enabled. Optional local JSONL file logging is enabled only when `ACS_LOG_FILE` is set. There are no built-in third-party telemetry exporters.
+3. **Identified gaps addressed:** Raw request-domain logging, raw handler exception messages, local path output, startup diagnostics with secrets-adjacent paths, listener-loop raw exceptions, dead nested-prompt diagnostic logic, async wait-handle leaks, and rate-limit overflow risk were remediated.
+4. **Code changes:** Central logger/sanitizer, random correlation IDs, safe handler/listener/startup/shutdown events, optional capped JSONL sink, and `tools/Test-SecureLogging.ps1` validation.
+5. **Approved fields:** Listed in the Secure Diagnostics & Logging configuration section above and enforced by `Get-AcsApprovedLogFields`.
+6. **Prohibited data:** PII, secrets, credentials, tokens, cookies, request/response payloads, headers, query strings, user-entered values, domains, IPs, tenant/subscription/account/customer IDs, raw exception messages, and raw stack traces.
+7. **Sanitization strategy:** Deny-by-default field allowlist first, then central redaction/truncation for allowed string fields, generic exception messages, exception type only, and stack-trace hash for grouping.
+8. **Access/retention/rotation/encryption/deletion:** Console access is controlled by terminal/session access. Optional file logs inherit host filesystem controls; store them on encrypted volumes with least-privilege ACLs. File logs rotate to one `.1` archive at `ACS_LOG_MAX_BYTES`; external retention/archival/deletion policies are operator responsibilities.
+9. **Automated tests:** `tools/Test-SecureLogging.ps1` uses synthetic PII/secrets/tokens/headers/query/body/exception data and fails if prohibited patterns appear in captured log output.
+10. **Sanitized examples:** Informational `SERVER-STARTED`, warning `REQ-RATE-LIMITED`, error `REQ-HANDLER-ERROR`, dependency-style `TEST-DEPENDENCY`, and critical `REQUEST-LOOP-CRITICAL` events are JSON objects with only approved fields.
+11. **Troubleshooting:** Use `correlationId` + `errorCode` + `eventId` + `component` + `operation` to locate related events. Do not request or inspect PII to troubleshoot; re-run with synthetic data when reproducing issues.
+12. **Remaining assumptions:** Organizational controls for central log aggregation, SIEM access, immutable audit storage, retention approval, encryption at rest/in transit outside the local host, and third-party exporter review must be approved by the operating security team.
 
 ### 🛡️ Security Recommendations
 

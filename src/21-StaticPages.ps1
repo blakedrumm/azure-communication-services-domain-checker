@@ -532,25 +532,22 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
   try { $npmCmd = Get-Command -Name npm -ErrorAction SilentlyContinue } catch { $npmCmd = $null }
   if ($npmCmd) {
     try {
-      Write-Information -InformationAction Continue -MessageData "MSAL bundle missing. Running npm install @azure/msal-browser@latest in $PSScriptRoot..."
+      Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-START' -Message 'MSAL bundle missing; auto-install starting.' -Fields @{ dependency = 'npm' }
       & $npmCmd.Source install --no-fund --no-audit --prefix $PSScriptRoot @azure/msal-browser@latest | Out-Null
       if ($LASTEXITCODE -ne 0) {
-        Write-Information -InformationAction Continue -MessageData "MSAL auto-install exited with code $LASTEXITCODE."
+        Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-EXIT' -Message 'MSAL auto-install exited with non-zero status.' -ErrorCode 'ACS-MSAL-INSTALL-EXIT' -Fields @{ dependency = 'npm'; statusCode = $LASTEXITCODE }
       }
     } catch {
-      Write-Information -InformationAction Continue -MessageData "MSAL auto-install failed: $($_.Exception.Message)"
+      Write-AcsLogException -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-ERROR' -ErrorCode 'ACS-MSAL-INSTALL' -Exception $_ -Fields @{ dependency = 'npm' }
     }
   } else {
-    Write-Information -InformationAction Continue -MessageData 'MSAL auto-install skipped: npm not found in PATH.'
+    Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-auto-install' -EventId 'MSAL-AUTO-INSTALL-SKIPPED' -Message 'MSAL auto-install skipped because dependency was unavailable.' -Fields @{ dependency = 'npm'; resultCategory = 'not-found' }
   }
 
   $npmRoot = $null
   try {
     $npmRoot = (& $npmCmd.Source root --prefix $PSScriptRoot 2>$null | Select-Object -First 1)
   } catch { $npmRoot = $null }
-  if (-not [string]::IsNullOrWhiteSpace($npmRoot)) {
-    Write-Information -InformationAction Continue -MessageData "npm root (local): $npmRoot"
-  }
   if (-not [string]::IsNullOrWhiteSpace($npmRoot)) {
     $msalNodePath = Join-Path -Path $npmRoot -ChildPath '@azure\msal-browser\lib\msal-browser.min.js'
   } else {
@@ -561,10 +558,6 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
   try {
     $npmGlobalRoot = (& $npmCmd.Source root -g 2>$null | Select-Object -First 1)
   } catch { $npmGlobalRoot = $null }
-  if (-not [string]::IsNullOrWhiteSpace($npmGlobalRoot)) {
-    Write-Information -InformationAction Continue -MessageData "npm root (global): $npmGlobalRoot"
-  }
-
   if (Test-Path -LiteralPath $msalNodePath) {
     $msalLocalPath = [System.IO.Path]::GetFullPath($msalNodePath)
   } else {
@@ -572,7 +565,7 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
     if ($globalCandidate -and (Test-Path -LiteralPath $globalCandidate)) {
       $msalLocalPath = [System.IO.Path]::GetFullPath($globalCandidate)
     } else {
-      Write-Information -InformationAction Continue -MessageData "MSAL bundle not found after npm install. Expected at: $msalNodePath"
+      Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-resolve' -EventId 'MSAL-BUNDLE-NOT-FOUND' -Message 'MSAL bundle was not found after install attempt.' -ErrorCode 'ACS-MSAL-NOT-FOUND' -Fields @{ dependency = 'msal-browser'; resultCategory = 'not-found' }
     }
   }
 }
@@ -583,20 +576,20 @@ if (-not (Test-Path -LiteralPath $msalLocalPath) -and $env:ACS_MSAL_AUTO_INSTALL
 $script:AssetsRoot = Join-Path -Path $PSScriptRoot -ChildPath 'assets'
 
 if (Test-Path -LiteralPath $msalLocalPath) {
-  Write-Information -InformationAction Continue -MessageData "MSAL local script detected at: $msalLocalPath"
+  Write-AcsLogEvent -Level 'Information' -Component 'StaticAssets' -Operation 'msal-resolve' -EventId 'MSAL-BUNDLE-FOUND' -Message 'MSAL local script is available.' -Fields @{ dependency = 'msal-browser'; resultCategory = 'found' }
 } else {
-  Write-Information -InformationAction Continue -MessageData "MSAL local script not found at: $msalLocalPath"
+  Write-AcsLogEvent -Level 'Warning' -Component 'StaticAssets' -Operation 'msal-resolve' -EventId 'MSAL-BUNDLE-MISSING' -Message 'MSAL local script is unavailable.' -ErrorCode 'ACS-MSAL-MISSING' -Fields @{ dependency = 'msal-browser'; resultCategory = 'not-found' }
 }
 
 if ([string]::IsNullOrWhiteSpace($entraClientId)) {
-  Write-Information -InformationAction Continue -MessageData 'ACS_ENTRA_CLIENT_ID not detected. Microsoft sign-in will be disabled.'
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-client-config' -EventId 'ENTRA-CLIENT-MISSING' -Message 'Optional Microsoft sign-in client ID is not configured.' -Fields @{ resultCategory = 'disabled' }
 } else {
-  Write-Information -InformationAction Continue -MessageData "ACS_ENTRA_CLIENT_ID detected"
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-client-config' -EventId 'ENTRA-CLIENT-CONFIGURED' -Message 'Microsoft sign-in client ID is configured.' -Fields @{ resultCategory = 'enabled' }
 }
 
 if ([string]::IsNullOrWhiteSpace($entraTenantId)) {
-  Write-Information -InformationAction Continue -MessageData 'ACS_ENTRA_TENANT_ID not set. Using organizations authority.'
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-tenant-config' -EventId 'ENTRA-TENANT-DEFAULT' -Message 'Microsoft sign-in tenant ID is not configured; default authority will be used.' -Fields @{ resultCategory = 'default' }
 } else {
-  Write-Information -InformationAction Continue -MessageData "ACS_ENTRA_TENANT_ID detected"
+  Write-AcsLogEvent -Level 'Information' -Component 'AuthConfig' -Operation 'entra-tenant-config' -EventId 'ENTRA-TENANT-CONFIGURED' -Message 'Microsoft sign-in tenant ID is configured.' -Fields @{ resultCategory = 'configured' }
 }
 

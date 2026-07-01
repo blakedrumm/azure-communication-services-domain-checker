@@ -1372,6 +1372,12 @@ function buildGuidance(r) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
       }
     }
+    const spfLookupCount = (r.spfAnalysis && r.spfAnalysis.totalLookupTerms !== null && r.spfAnalysis.totalLookupTerms !== undefined)
+      ? Number(r.spfAnalysis.totalLookupTerms)
+      : null;
+    if (txtRecovery.spfPresent && Number.isFinite(spfLookupCount) && spfLookupCount > 10) {
+      guidance.push({ type: 'attention', text: `SPF exceeds the RFC 7208 DNS lookup limit. Detected ${spfLookupCount} DNS-lookup terms across the expanded SPF chain; you should reduce SPF DNS lookups to 10 or fewer to avoid recipient-side SPF errors.` });
+    }
     if (txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude !== true) {
       // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
       // informational note explaining the indeterminate verdict (and how to

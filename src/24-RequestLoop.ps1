@@ -15,7 +15,7 @@ try {
           $script:ShutdownRequested = $true
           try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
           try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }
-          try { [Console]::Error.WriteLine('Stopping ACS Email Domain Checker...') } catch { }
+          Write-AcsLogEvent -Level 'Information' -Component 'RequestLoop' -Operation 'shutdown-request' -EventId 'SERVER-SHUTDOWN-REQUESTED' -Message 'Server shutdown requested.' -Fields @{ shutdownRequested = $true }
           return $true
         }
       }
@@ -232,7 +232,11 @@ try {
     $method = $parts[0].Trim().ToUpperInvariant()
     $target = $parts[1].Trim()
 
-    $headers = @{}
+    # Header names are case-insensitive by HTTP semantics. Use an ordinal
+    # case-insensitive dictionary so fallback requests behave like
+    # HttpListenerRequest.Headers and callers do not need duplicate casing
+    # lookups for X-Api-Key / Authorization / Content-Length.
+    $headers = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
     $headerCount = 0
     while ($true) {
       try {
@@ -248,7 +252,7 @@ try {
       if ($headerCount -gt $maxHeaderCount) { return $null }
       $idx = $line.IndexOf(':')
       if ($idx -le 0) { continue }
-      $hName = $line.Substring(0, $idx).Trim().ToLowerInvariant()
+      $hName = $line.Substring(0, $idx).Trim()
       $hValue = $line.Substring($idx + 1).Trim()
       $headers[$hName] = $hValue
     }
@@ -290,6 +294,7 @@ try {
   if ($serverMode -eq 'HttpListener') {
     # Primary server mode: HttpListener (best supported on Windows).
     while ($listener.IsListening) {
+      $asyncContext = $null
       try {
         if (Test-ConsoleShutdownKey) { break }
         $asyncContext = $listener.BeginGetContext($null, $null)
@@ -345,13 +350,16 @@ try {
       }
       catch [System.Net.HttpListenerException] {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "HttpListenerException: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'http-listener-accept' -EventId 'LISTENER-HTTP-ERROR' -ErrorCode 'ACS-LISTENER-HTTP' -Exception $_ -Fields @{ listenerMode = 'HttpListener' }
         break
       }
       catch {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "HttpListener loop error: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'http-listener-loop' -EventId 'LISTENER-HTTP-UNEXPECTED' -ErrorCode 'ACS-LISTENER-UNEXPECTED' -Exception $_ -Fields @{ listenerMode = 'HttpListener' }
         break
+      }
+      finally {
+        try { if ($asyncContext -and $asyncContext.AsyncWaitHandle) { $asyncContext.AsyncWaitHandle.Close() } } catch { }
       }
     }
   }
@@ -359,17 +367,19 @@ try {
     # Fallback server mode: TcpListener (for platforms where HttpListener is unavailable).
     # Only GET is supported here; it's enough for the SPA + JSON endpoints.
     while ($true) {
+      $asyncClient = $null
+      $client = $null
       if (Test-ConsoleShutdownKey) { break }
-      $asyncClient = $tcpListener.BeginAcceptTcpClient($null, $null)
-      while (-not $asyncClient.AsyncWaitHandle.WaitOne(200)) {
-        if (Test-ConsoleShutdownKey) { break }
-      }
-      if ($script:ShutdownRequested) { break }
-      $client = $tcpListener.EndAcceptTcpClient($asyncClient)
-      if ($null -eq $client) { continue }
-
       $req = $null
       try {
+        $asyncClient = $tcpListener.BeginAcceptTcpClient($null, $null)
+        while (-not $asyncClient.AsyncWaitHandle.WaitOne(200)) {
+          if (Test-ConsoleShutdownKey) { break }
+        }
+        if ($script:ShutdownRequested) { break }
+        $client = $tcpListener.EndAcceptTcpClient($asyncClient)
+        if ($null -eq $client) { continue }
+
         $req = Read-TcpHttpRequest -Client $client
         if ($null -eq $req) {
           try { $client.Close() } catch { }
@@ -413,20 +423,23 @@ try {
       }
       catch [System.Net.Sockets.SocketException] {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "TcpListener SocketException: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'tcp-listener-accept' -EventId 'LISTENER-TCP-ERROR' -ErrorCode 'ACS-LISTENER-TCP' -Exception $_ -Fields @{ listenerMode = 'TcpListener' }
         try { $client.Close() } catch { }
       }
       catch {
         if ($script:ShutdownRequested) { break }
-        Write-Error -Message "TcpListener loop error: $($_.Exception.Message)" -ErrorAction Continue
+        Write-AcsLogException -Level 'Error' -Component 'RequestLoop' -Operation 'tcp-listener-loop' -EventId 'LISTENER-TCP-UNEXPECTED' -ErrorCode 'ACS-LISTENER-UNEXPECTED' -Exception $_ -Fields @{ listenerMode = 'TcpListener' }
         try { $client.Close() } catch { }
+      }
+      finally {
+        try { if ($asyncClient -and $asyncClient.AsyncWaitHandle) { $asyncClient.AsyncWaitHandle.Close() } } catch { }
       }
     }
   }
   else {
-    Write-Error -Message "Server did not start. HttpListener unavailable and TcpListener could not be initialized." -ErrorAction Continue
+    Write-AcsLogEvent -Level 'Error' -Component 'RequestLoop' -Operation 'server-start' -EventId 'SERVER-NOT-STARTED' -Message 'Server did not start.' -ErrorCode 'ACS-SERVER-NOT-STARTED'
   }
 }
 catch {
-  Write-Error -ErrorRecord $_
+  Write-AcsLogException -Level 'Critical' -Component 'RequestLoop' -Operation 'request-loop' -EventId 'REQUEST-LOOP-CRITICAL' -ErrorCode 'ACS-LOOP-CRITICAL' -Exception $_
 }
