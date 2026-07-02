@@ -80,7 +80,12 @@ body {
   transition: 0.25s background-color ease-in-out;
   width: 100%;
   max-width: 100%;
-  overflow-x: hidden;
+  /* Use `overflow-x: clip` (NOT `hidden`) to suppress horizontal overflow.
+     `hidden` turns <body> into a scroll container for its descendants, which
+     silently breaks `position: sticky` (the #domainTabs bar would scroll away
+     instead of pinning to the top). `clip` prevents horizontal scrolling
+     without establishing a scroll container, so sticky keeps working. */
+  overflow-x: clip;
 }
 
 .search-box, .card, input, button, .code, .mx-table, .history-chip {
@@ -1892,6 +1897,23 @@ html.dark .dns-records-filter-select option {
   flex: 0 0 auto;
 }
 
+/* Horizontal-scroll container for the DNS records table. The Name and Type
+   columns are intentionally `white-space: nowrap` (long DKIM selector
+   hostnames, etc.), so the table can be wider than its card. Wrapping it in an
+   `overflow-x: auto` box keeps that overflow scrollable INSIDE the card at any
+   viewport width instead of being clipped by the page. The table keeps its
+   natural (min-content) width so the scrollbar appears only when needed. */
+.dns-records-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  -webkit-overflow-scrolling: touch;
+}
+.dns-records-table-wrap .dns-records-table {
+  width: auto;
+  min-width: 100%;
+}
+
 .dns-records-table .dns-record-row {
   cursor: pointer;
 }
@@ -1937,7 +1959,14 @@ html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
 
 .dns-records-table td.dns-record-data {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  /* Guarantee a readable minimum width for the DATA column. Without this the
+     auto table layout squeezes DATA to a few px (because its content is
+     breakable), which wraps even a short timestamp one character per line. The
+     floor forces the table wider than its card so the .dns-records-table-wrap
+     horizontal scroll engages instead, keeping values legible. */
+  min-width: 340px;
 }
 
 .dns-records-table th {
@@ -1978,7 +2007,10 @@ html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
 .dns-record-detail-value {
   min-width: 0;
   white-space: pre-wrap;
-  word-break: break-word;
+  /* Break only when a token (e.g. a long base64 signature) can't fit, and never
+     mid-word for ordinary text like dates -- avoids the one-char-per-line wrap. */
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 ul.guidance {
@@ -2047,11 +2079,73 @@ ul.guidance li {
 .input-wrapper {
   position: relative;
   flex: 1;
+  /* The wrapper is styled to look like the text field itself so committed
+     domain chips can live INSIDE the address box alongside the live input. */
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 3px 34px 3px 6px; /* right padding leaves room for the clear button */
+  border-radius: 4px;
+  border: 1px solid var(--input-border);
+  background: var(--card-bg);
 }
-.input-wrapper input {
-  width: 100%;
-  padding-right: 30px;
+.input-wrapper:focus-within {
+  border-color: #2f80ed;
+}
+/* The actual input becomes borderless/transparent since the wrapper draws the
+   field border. Scoped to #domainInput so other text inputs are unaffected. */
+.input-wrapper input#domainInput {
+  flex: 1 1 140px;
+  width: auto;
+  min-width: 140px;
+  height: 30px;
+  padding: 4px 4px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+.input-wrapper input#domainInput:focus {
+  outline: none;
+}
+/* Chips render as direct flex children of the wrapper. */
+.domain-chips {
+  display: contents;
+}
+.domain-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 22px 3px 8px; /* right padding reserves space for the X */
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.domain-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.domain-chip-remove {
+  position: absolute;
+  top: 1px;
+  right: 3px;
+  background: none;
+  border: none;
+  color: var(--status);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 1px 2px;
+}
+.domain-chip-remove:hover {
+  color: var(--fg);
 }
 .clear-btn {
   position: absolute;
@@ -2067,7 +2161,70 @@ ul.guidance li {
   display: none;
 }
 .clear-btn:hover { color: var(--fg); }
-
+/* ===== Per-domain result tabs ===== */
+.domain-tabs {
+  display: none; /* toggled to flex by JS whenever >=1 domain has been checked */
+  /* Stick to the top of the viewport while scrolling so the domain currently
+     being viewed is always labeled. Opaque page-colored background + bottom
+     border so result cards scroll cleanly underneath. */
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  margin: 0 0 12px 0;
+  padding: 8px 0 0 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.domain-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 280px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.domain-tab:hover {
+  filter: brightness(1.05);
+}
+.domain-tab.active {
+  background: var(--card-bg);
+  color: var(--fg);
+  font-weight: 600;
+  border-bottom: 2px solid #2f80ed;
+}
+.domain-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.domain-tab-status {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status);
+}
+.domain-tab-status.loading {
+  background: #2f80ed;
+  animation: domainTabPulse 1s ease-in-out infinite;
+}
+.domain-tab-status.done {
+  background: #2e9e5b;
+}
+@keyframes domainTabPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 .history {
   margin-top: 12px;
   font-size: 12px;

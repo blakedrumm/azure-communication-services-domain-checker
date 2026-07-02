@@ -168,7 +168,7 @@ function shouldShowCookieConsent() {
   return getCookieConsent() === null;
 }
 
-// Gate-aware wrapper for localStorage.setItem — only writes if the category is consented.
+// Gate-aware wrapper for localStorage.setItem ï¿½ only writes if the category is consented.
 // category: 'functional' | 'analytics' | 'essential'
 function consentAwareSetItem(key, value, category) {
   if (!hasConsentFor(category || 'functional')) return false;
@@ -179,7 +179,7 @@ function consentAwareSetItem(key, value, category) {
   return false;
 }
 
-// Gate-aware wrapper for localStorage.getItem — reads are allowed for essential,
+// Gate-aware wrapper for localStorage.getItem ï¿½ reads are allowed for essential,
 // but functional/analytics reads return null if consent was not given.
 function consentAwareGetItem(key, category) {
   if (!hasConsentFor(category || 'functional')) return null;
@@ -661,7 +661,10 @@ function isValidDomain(domain) {
 function toggleClearBtn() {
   const input = document.getElementById("domainInput");
   const btn = document.getElementById("clearBtn");
-  if (btn) btn.style.display = input.value ? "block" : "none";
+  // Show the clear button when there is either typed text OR committed domain
+  // chips, so users can wipe a multi-domain entry in one click.
+  const hasChips = (typeof domainChipTokens !== 'undefined') && Array.isArray(domainChipTokens) && domainChipTokens.length > 0;
+  if (btn) btn.style.display = ((input && input.value) || hasChips) ? "block" : "none";
 }
 
 // Build the document/tab title, optionally suffixing the queried domain so the
@@ -687,6 +690,13 @@ function updatePageTitle(domain) {
 function clearInput() {
   const input = document.getElementById("domainInput");
   input.value = "";
+  // Also drop any committed multi-domain chips and hide the per-domain tabs so
+  // the address box returns to a clean single-entry state.
+  if (typeof domainChipTokens !== 'undefined' && Array.isArray(domainChipTokens)) {
+    domainChipTokens.length = 0;
+  }
+  if (typeof renderDomainChips === 'function') renderDomainChips();
+  if (typeof resetMultiDomainState === 'function') resetMultiDomainState('');
   input.focus();
   toggleClearBtn();
   updatePageTitle('');

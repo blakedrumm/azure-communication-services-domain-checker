@@ -154,10 +154,11 @@ async function ensureMsalLoaded() {
         ?domain= bootstrap value (in that case we are about to launch a lookup
         and don't want to steal focus from the in-flight workflow).
       -->
+      <span id="domainChips" class="domain-chips"></span>
       <input id="domainInput" type="text" placeholder="example.com" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="toggleClearBtn()" />
       <button id="clearBtn" class="clear-btn" type="button" onclick="clearInput()">&#x2715;</button>
     </div>
-    <button id="lookupBtn" class="primary hide-on-screenshot" type="button" onclick="lookup()">Lookup</button>
+    <button id="lookupBtn" class="primary hide-on-screenshot" type="button" onclick="runLookupFromInput()">Lookup</button>
     <!--
       Live progress popover. While a domain check runs the SPA fans out
       to 8 backend endpoints in parallel (/api/base, /api/mx, /api/records,
@@ -297,6 +298,13 @@ async function ensureMsalLoaded() {
   (the inline "Jump to Section" card covers those cases).
 -->
 <nav id="sectionRail" class="section-rail hide-on-screenshot" aria-label="Section navigation"></nav>
+
+<!--
+  Per-domain result tabs. Populated by updateDomainTabsUI() only when more than
+  one domain is being checked at once; hidden (and empty) for single-domain
+  lookups. Clicking a tab swaps #results to that domain's cached results.
+-->
+<div id="domainTabs" class="domain-tabs hide-on-screenshot" role="tablist" aria-label="Checked domains"></div>
 
 <div id="results" class="cards"></div>
 

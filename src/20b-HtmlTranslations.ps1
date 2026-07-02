@@ -3769,6 +3769,67 @@ Object.keys(GUIDANCE_AND_AZURE_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, GUIDANCE_AND_AZURE_OVERRIDES[code]);
 });
 
+// Multi-domain UI strings (address-box chips, per-domain result tabs, and the
+// multi-domain progress status). Applied as an override layer so the base 'en'
+// keys always exist for the t() English fallback, with full localizations for
+// every supported language. {domain}/{count} are substituted by t().
+const MULTI_DOMAIN_TRANSLATION_OVERRIDES = {
+  en: {
+    removeDomainLabel: 'Remove {domain}',
+    domainCheckQueued: 'Preparing to check this domain\u2026',
+    checkingMultipleDomains: 'Checking {count} domains\u2026'
+  },
+  es: {
+    removeDomainLabel: 'Quitar {domain}',
+    domainCheckQueued: 'Preparando la comprobaci\u00F3n de este dominio\u2026',
+    checkingMultipleDomains: 'Comprobando {count} dominios\u2026'
+  },
+  'fr': {
+    removeDomainLabel: 'Supprimer {domain}',
+    domainCheckQueued: 'Pr\u00E9paration de la v\u00E9rification de ce domaine\u2026',
+    checkingMultipleDomains: 'V\u00E9rification de {count} domaines\u2026'
+  },
+  'de': {
+    removeDomainLabel: '{domain} entfernen',
+    domainCheckQueued: 'Pr\u00FCfung dieser Dom\u00E4ne wird vorbereitet\u2026',
+    checkingMultipleDomains: '{count} Dom\u00E4nen werden gepr\u00FCft\u2026'
+  },
+  'pt-BR': {
+    removeDomainLabel: 'Remover {domain}',
+    domainCheckQueued: 'Preparando para verificar este dom\u00EDnio\u2026',
+    checkingMultipleDomains: 'Verificando {count} dom\u00EDnios\u2026'
+  },
+  'ar': {
+    removeDomainLabel: '\u0625\u0632\u0627\u0644\u0629 {domain}',
+    domainCheckQueued: '\u062C\u0627\u0631\u064D \u0627\u0644\u062A\u062D\u0636\u064A\u0631 \u0644\u0641\u062D\u0635 \u0647\u0630\u0627 \u0627\u0644\u0646\u0637\u0627\u0642\u2026',
+    checkingMultipleDomains: '\u062C\u0627\u0631\u064D \u0641\u062D\u0635 {count} \u0646\u0637\u0627\u0642\u2026'
+  },
+  'zh-CN': {
+    removeDomainLabel: '\u79FB\u9664 {domain}',
+    domainCheckQueued: '\u6B63\u5728\u51C6\u5907\u68C0\u67E5\u6B64\u57DF\u540D\u2026',
+    checkingMultipleDomains: '\u6B63\u5728\u68C0\u67E5 {count} \u4E2A\u57DF\u540D\u2026'
+  },
+  'hi-IN': {
+    removeDomainLabel: '{domain} \u0939\u091F\u093E\u090F\u0902',
+    domainCheckQueued: '\u0907\u0938 \u0921\u094B\u092E\u0947\u0928 \u0915\u0940 \u091C\u093E\u0902\u091A \u0915\u0940 \u0924\u0948\u092F\u093E\u0930\u0940\u2026',
+    checkingMultipleDomains: '{count} \u0921\u094B\u092E\u0947\u0928 \u091C\u093E\u0901\u091A\u0947 \u091C\u093E \u0930\u0939\u0947 \u0939\u0948\u0902\u2026'
+  },
+  'ja-JP': {
+    removeDomainLabel: '{domain} \u3092\u524A\u9664',
+    domainCheckQueued: '\u3053\u306E\u30C9\u30E1\u30A4\u30F3\u306E\u78BA\u8A8D\u3092\u6E96\u5099\u3057\u3066\u3044\u307E\u3059\u2026',
+    checkingMultipleDomains: '{count} \u4EF6\u306E\u30C9\u30E1\u30A4\u30F3\u3092\u78BA\u8A8D\u3057\u3066\u3044\u307E\u3059\u2026'
+  },
+  'ru-RU': {
+    removeDomainLabel: '\u0423\u0434\u0430\u043B\u0438\u0442\u044C {domain}',
+    domainCheckQueued: '\u041F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0430 \u043A \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0435 \u044D\u0442\u043E\u0433\u043E \u0434\u043E\u043C\u0435\u043D\u0430\u2026',
+    checkingMultipleDomains: '\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 {count} \u0434\u043E\u043C\u0435\u043D\u043E\u0432\u2026'
+  }
+};
+
+Object.keys(MULTI_DOMAIN_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, MULTI_DOMAIN_TRANSLATION_OVERRIDES[code]);
+});
+
 const DNS_RECORD_TRANSLATION_OVERRIDES = {
   en: {
     dnsRecords: 'DNS records',
@@ -5709,5 +5770,20 @@ let lookupInProgress = false;
 let lastAuthData = null;
 
 let activeLookup = { runId: 0, controllers: [] };
+
+// ===== Multi-domain lookup state =====
+// The address box can hold several domains (rendered as removable chips). When
+// more than one domain is checked, results are stored per-domain and shown one
+// at a time via tabs (a single #results container is reused, since result card
+// element IDs are global and cannot be duplicated across panels).
+//   domains  : ordered, deduped list currently being checked
+//   results  : domain -> result object (the same shape as lastResult)
+//   active   : the domain currently displayed in #results / driving the tabs
+//   running  : true while a multi-domain sweep is in flight
+let multiDomainState = { domains: [], results: {}, active: null, running: false };
+// Committed domain chips in the address box (entry order, normalized+lowercased).
+let domainChipTokens = [];
+// Monotonic token so a newer multi-domain sweep supersedes an older one.
+let multiRunToken = 0;
 
 '@

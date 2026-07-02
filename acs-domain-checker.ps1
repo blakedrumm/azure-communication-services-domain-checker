@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.9.0'
+$script:AppVersion = '2.10.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -11292,7 +11292,12 @@ body {
   transition: 0.25s background-color ease-in-out;
   width: 100%;
   max-width: 100%;
-  overflow-x: hidden;
+  /* Use `overflow-x: clip` (NOT `hidden`) to suppress horizontal overflow.
+     `hidden` turns <body> into a scroll container for its descendants, which
+     silently breaks `position: sticky` (the #domainTabs bar would scroll away
+     instead of pinning to the top). `clip` prevents horizontal scrolling
+     without establishing a scroll container, so sticky keeps working. */
+  overflow-x: clip;
 }
 
 .search-box, .card, input, button, .code, .mx-table, .history-chip {
@@ -13104,6 +13109,23 @@ html.dark .dns-records-filter-select option {
   flex: 0 0 auto;
 }
 
+/* Horizontal-scroll container for the DNS records table. The Name and Type
+   columns are intentionally `white-space: nowrap` (long DKIM selector
+   hostnames, etc.), so the table can be wider than its card. Wrapping it in an
+   `overflow-x: auto` box keeps that overflow scrollable INSIDE the card at any
+   viewport width instead of being clipped by the page. The table keeps its
+   natural (min-content) width so the scrollbar appears only when needed. */
+.dns-records-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  -webkit-overflow-scrolling: touch;
+}
+.dns-records-table-wrap .dns-records-table {
+  width: auto;
+  min-width: 100%;
+}
+
 .dns-records-table .dns-record-row {
   cursor: pointer;
 }
@@ -13149,7 +13171,14 @@ html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
 
 .dns-records-table td.dns-record-data {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  /* Guarantee a readable minimum width for the DATA column. Without this the
+     auto table layout squeezes DATA to a few px (because its content is
+     breakable), which wraps even a short timestamp one character per line. The
+     floor forces the table wider than its card so the .dns-records-table-wrap
+     horizontal scroll engages instead, keeping values legible. */
+  min-width: 340px;
 }
 
 .dns-records-table th {
@@ -13190,7 +13219,10 @@ html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
 .dns-record-detail-value {
   min-width: 0;
   white-space: pre-wrap;
-  word-break: break-word;
+  /* Break only when a token (e.g. a long base64 signature) can't fit, and never
+     mid-word for ordinary text like dates -- avoids the one-char-per-line wrap. */
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 ul.guidance {
@@ -13259,11 +13291,73 @@ ul.guidance li {
 .input-wrapper {
   position: relative;
   flex: 1;
+  /* The wrapper is styled to look like the text field itself so committed
+     domain chips can live INSIDE the address box alongside the live input. */
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 3px 34px 3px 6px; /* right padding leaves room for the clear button */
+  border-radius: 4px;
+  border: 1px solid var(--input-border);
+  background: var(--card-bg);
 }
-.input-wrapper input {
-  width: 100%;
-  padding-right: 30px;
+.input-wrapper:focus-within {
+  border-color: #2f80ed;
+}
+/* The actual input becomes borderless/transparent since the wrapper draws the
+   field border. Scoped to #domainInput so other text inputs are unaffected. */
+.input-wrapper input#domainInput {
+  flex: 1 1 140px;
+  width: auto;
+  min-width: 140px;
+  height: 30px;
+  padding: 4px 4px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+.input-wrapper input#domainInput:focus {
+  outline: none;
+}
+/* Chips render as direct flex children of the wrapper. */
+.domain-chips {
+  display: contents;
+}
+.domain-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 22px 3px 8px; /* right padding reserves space for the X */
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.domain-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.domain-chip-remove {
+  position: absolute;
+  top: 1px;
+  right: 3px;
+  background: none;
+  border: none;
+  color: var(--status);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 1px 2px;
+}
+.domain-chip-remove:hover {
+  color: var(--fg);
 }
 .clear-btn {
   position: absolute;
@@ -13279,7 +13373,70 @@ ul.guidance li {
   display: none;
 }
 .clear-btn:hover { color: var(--fg); }
-
+/* ===== Per-domain result tabs ===== */
+.domain-tabs {
+  display: none; /* toggled to flex by JS whenever >=1 domain has been checked */
+  /* Stick to the top of the viewport while scrolling so the domain currently
+     being viewed is always labeled. Opaque page-colored background + bottom
+     border so result cards scroll cleanly underneath. */
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  margin: 0 0 12px 0;
+  padding: 8px 0 0 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.domain-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 280px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.domain-tab:hover {
+  filter: brightness(1.05);
+}
+.domain-tab.active {
+  background: var(--card-bg);
+  color: var(--fg);
+  font-weight: 600;
+  border-bottom: 2px solid #2f80ed;
+}
+.domain-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.domain-tab-status {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status);
+}
+.domain-tab-status.loading {
+  background: #2f80ed;
+  animation: domainTabPulse 1s ease-in-out infinite;
+}
+.domain-tab-status.done {
+  background: #2e9e5b;
+}
+@keyframes domainTabPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 .history {
   margin-top: 12px;
   font-size: 12px;
@@ -14359,10 +14516,11 @@ async function ensureMsalLoaded() {
         ?domain= bootstrap value (in that case we are about to launch a lookup
         and don't want to steal focus from the in-flight workflow).
       -->
+      <span id="domainChips" class="domain-chips"></span>
       <input id="domainInput" type="text" placeholder="example.com" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="toggleClearBtn()" />
       <button id="clearBtn" class="clear-btn" type="button" onclick="clearInput()">&#x2715;</button>
     </div>
-    <button id="lookupBtn" class="primary hide-on-screenshot" type="button" onclick="lookup()">Lookup</button>
+    <button id="lookupBtn" class="primary hide-on-screenshot" type="button" onclick="runLookupFromInput()">Lookup</button>
     <!--
       Live progress popover. While a domain check runs the SPA fans out
       to 8 backend endpoints in parallel (/api/base, /api/mx, /api/records,
@@ -14502,6 +14660,13 @@ async function ensureMsalLoaded() {
   (the inline "Jump to Section" card covers those cases).
 -->
 <nav id="sectionRail" class="section-rail hide-on-screenshot" aria-label="Section navigation"></nav>
+
+<!--
+  Per-domain result tabs. Populated by updateDomainTabsUI() only when more than
+  one domain is being checked at once; hidden (and empty) for single-domain
+  lookups. Clicking a tab swaps #results to that domain's cached results.
+-->
+<div id="domainTabs" class="domain-tabs hide-on-screenshot" role="tablist" aria-label="Checked domains"></div>
 
 <div id="results" class="cards"></div>
 
@@ -18333,6 +18498,67 @@ Object.keys(GUIDANCE_AND_AZURE_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, GUIDANCE_AND_AZURE_OVERRIDES[code]);
 });
 
+// Multi-domain UI strings (address-box chips, per-domain result tabs, and the
+// multi-domain progress status). Applied as an override layer so the base 'en'
+// keys always exist for the t() English fallback, with full localizations for
+// every supported language. {domain}/{count} are substituted by t().
+const MULTI_DOMAIN_TRANSLATION_OVERRIDES = {
+  en: {
+    removeDomainLabel: 'Remove {domain}',
+    domainCheckQueued: 'Preparing to check this domain\u2026',
+    checkingMultipleDomains: 'Checking {count} domains\u2026'
+  },
+  es: {
+    removeDomainLabel: 'Quitar {domain}',
+    domainCheckQueued: 'Preparando la comprobaci\u00F3n de este dominio\u2026',
+    checkingMultipleDomains: 'Comprobando {count} dominios\u2026'
+  },
+  'fr': {
+    removeDomainLabel: 'Supprimer {domain}',
+    domainCheckQueued: 'Pr\u00E9paration de la v\u00E9rification de ce domaine\u2026',
+    checkingMultipleDomains: 'V\u00E9rification de {count} domaines\u2026'
+  },
+  'de': {
+    removeDomainLabel: '{domain} entfernen',
+    domainCheckQueued: 'Pr\u00FCfung dieser Dom\u00E4ne wird vorbereitet\u2026',
+    checkingMultipleDomains: '{count} Dom\u00E4nen werden gepr\u00FCft\u2026'
+  },
+  'pt-BR': {
+    removeDomainLabel: 'Remover {domain}',
+    domainCheckQueued: 'Preparando para verificar este dom\u00EDnio\u2026',
+    checkingMultipleDomains: 'Verificando {count} dom\u00EDnios\u2026'
+  },
+  'ar': {
+    removeDomainLabel: '\u0625\u0632\u0627\u0644\u0629 {domain}',
+    domainCheckQueued: '\u062C\u0627\u0631\u064D \u0627\u0644\u062A\u062D\u0636\u064A\u0631 \u0644\u0641\u062D\u0635 \u0647\u0630\u0627 \u0627\u0644\u0646\u0637\u0627\u0642\u2026',
+    checkingMultipleDomains: '\u062C\u0627\u0631\u064D \u0641\u062D\u0635 {count} \u0646\u0637\u0627\u0642\u2026'
+  },
+  'zh-CN': {
+    removeDomainLabel: '\u79FB\u9664 {domain}',
+    domainCheckQueued: '\u6B63\u5728\u51C6\u5907\u68C0\u67E5\u6B64\u57DF\u540D\u2026',
+    checkingMultipleDomains: '\u6B63\u5728\u68C0\u67E5 {count} \u4E2A\u57DF\u540D\u2026'
+  },
+  'hi-IN': {
+    removeDomainLabel: '{domain} \u0939\u091F\u093E\u090F\u0902',
+    domainCheckQueued: '\u0907\u0938 \u0921\u094B\u092E\u0947\u0928 \u0915\u0940 \u091C\u093E\u0902\u091A \u0915\u0940 \u0924\u0948\u092F\u093E\u0930\u0940\u2026',
+    checkingMultipleDomains: '{count} \u0921\u094B\u092E\u0947\u0928 \u091C\u093E\u0901\u091A\u0947 \u091C\u093E \u0930\u0939\u0947 \u0939\u0948\u0902\u2026'
+  },
+  'ja-JP': {
+    removeDomainLabel: '{domain} \u3092\u524A\u9664',
+    domainCheckQueued: '\u3053\u306E\u30C9\u30E1\u30A4\u30F3\u306E\u78BA\u8A8D\u3092\u6E96\u5099\u3057\u3066\u3044\u307E\u3059\u2026',
+    checkingMultipleDomains: '{count} \u4EF6\u306E\u30C9\u30E1\u30A4\u30F3\u3092\u78BA\u8A8D\u3057\u3066\u3044\u307E\u3059\u2026'
+  },
+  'ru-RU': {
+    removeDomainLabel: '\u0423\u0434\u0430\u043B\u0438\u0442\u044C {domain}',
+    domainCheckQueued: '\u041F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043A\u0430 \u043A \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0435 \u044D\u0442\u043E\u0433\u043E \u0434\u043E\u043C\u0435\u043D\u0430\u2026',
+    checkingMultipleDomains: '\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 {count} \u0434\u043E\u043C\u0435\u043D\u043E\u0432\u2026'
+  }
+};
+
+Object.keys(MULTI_DOMAIN_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, MULTI_DOMAIN_TRANSLATION_OVERRIDES[code]);
+});
+
 const DNS_RECORD_TRANSLATION_OVERRIDES = {
   en: {
     dnsRecords: 'DNS records',
@@ -20274,6 +20500,21 @@ let lastAuthData = null;
 
 let activeLookup = { runId: 0, controllers: [] };
 
+// ===== Multi-domain lookup state =====
+// The address box can hold several domains (rendered as removable chips). When
+// more than one domain is checked, results are stored per-domain and shown one
+// at a time via tabs (a single #results container is reused, since result card
+// element IDs are global and cannot be duplicated across panels).
+//   domains  : ordered, deduped list currently being checked
+//   results  : domain -> result object (the same shape as lastResult)
+//   active   : the domain currently displayed in #results / driving the tabs
+//   running  : true while a multi-domain sweep is in flight
+let multiDomainState = { domains: [], results: {}, active: null, running: false };
+// Committed domain chips in the address box (entry order, normalized+lowercased).
+let domainChipTokens = [];
+// Monotonic token so a newer multi-domain sweep supersedes an older one.
+let multiRunToken = 0;
+
 '@
 # ===== JavaScript Utility Functions =====
 $htmlPage += @'
@@ -20938,7 +21179,10 @@ function isValidDomain(domain) {
 function toggleClearBtn() {
   const input = document.getElementById("domainInput");
   const btn = document.getElementById("clearBtn");
-  if (btn) btn.style.display = input.value ? "block" : "none";
+  // Show the clear button when there is either typed text OR committed domain
+  // chips, so users can wipe a multi-domain entry in one click.
+  const hasChips = (typeof domainChipTokens !== 'undefined') && Array.isArray(domainChipTokens) && domainChipTokens.length > 0;
+  if (btn) btn.style.display = ((input && input.value) || hasChips) ? "block" : "none";
 }
 
 // Build the document/tab title, optionally suffixing the queried domain so the
@@ -20964,6 +21208,13 @@ function updatePageTitle(domain) {
 function clearInput() {
   const input = document.getElementById("domainInput");
   input.value = "";
+  // Also drop any committed multi-domain chips and hide the per-domain tabs so
+  // the address box returns to a clean single-entry state.
+  if (typeof domainChipTokens !== 'undefined' && Array.isArray(domainChipTokens)) {
+    domainChipTokens.length = 0;
+  }
+  if (typeof renderDomainChips === 'function') renderDomainChips();
+  if (typeof resetMultiDomainState === 'function') resetMultiDomainState('');
   input.focus();
   toggleClearBtn();
   updatePageTitle('');
@@ -22402,6 +22653,244 @@ function setCheckProgressActive(active) {
   }
 }
 
+// ===================== Multi-domain address box + orchestration =====================
+// The address box accepts several space/comma-separated domains, each shown as
+// a removable chip. When more than one domain is checked, per-domain results
+// are cached and shown one at a time through the #domainTabs tab bar (a single
+// #results container is reused because result-card element IDs are global).
+const MAX_LOOKUP_DOMAINS = 10;
+
+function isMultiDomainActive() {
+  return !!(multiDomainState && Array.isArray(multiDomainState.domains) && multiDomainState.domains.length > 1);
+}
+
+// Render the committed domain chips into the address box.
+function renderDomainChips() {
+  const wrap = document.getElementById('domainChips');
+  if (!wrap) return;
+  wrap.innerHTML = (domainChipTokens || []).map((d, i) =>
+    '<span class="domain-chip" data-index="' + i + '">'
+      + '<span class="domain-chip-label">' + escapeHtml(d) + '</span>'
+      + '<button type="button" class="domain-chip-remove" aria-label="'
+        + escapeHtml(t('removeDomainLabel', { domain: d }))
+        + '" onclick="removeDomainChip(' + i + ')">&#x2715;</button>'
+    + '</span>'
+  ).join('');
+}
+
+// Commit a raw token as a chip. Only valid, non-duplicate domains are added so
+// the box never fills with junk; returns true when a chip exists afterward.
+function addDomainChip(raw) {
+  const d = normalizeDomain(raw);
+  if (!d || !isValidDomain(d)) return false;
+  if (domainChipTokens.indexOf(d) !== -1) return true;
+  domainChipTokens.push(d);
+  renderDomainChips();
+  toggleClearBtn();
+  return true;
+}
+
+function removeDomainChip(index) {
+  if (index < 0 || index >= domainChipTokens.length) return;
+  domainChipTokens.splice(index, 1);
+  renderDomainChips();
+  toggleClearBtn();
+  const input = document.getElementById('domainInput');
+  if (input) input.focus();
+}
+
+// All entered domains = committed chips + any valid trailing input text.
+// Normalized, validated, deduped, order-preserving, and capped.
+function getEnteredDomains() {
+  const input = document.getElementById('domainInput');
+  const raw = (domainChipTokens || []).slice();
+  if (input && input.value && input.value.trim()) raw.push(input.value.trim());
+  const seen = {};
+  const out = [];
+  for (const item of raw) {
+    const d = normalizeDomain(item);
+    if (!d || !isValidDomain(d) || seen[d]) continue;
+    seen[d] = true;
+    out.push(d);
+  }
+  return out.slice(0, MAX_LOOKUP_DOMAINS);
+}
+
+// Reflect a domain list in the address box: one domain => plain input text (no
+// chip); several => chips + empty input; none => cleared.
+function applyDomainsToInputBox(domains) {
+  const input = document.getElementById('domainInput');
+  if (!Array.isArray(domains) || domains.length === 0) {
+    domainChipTokens = [];
+    if (input) input.value = '';
+  } else if (domains.length === 1) {
+    domainChipTokens = [];
+    if (input) input.value = domains[0];
+  } else {
+    domainChipTokens = domains.slice();
+    if (input) input.value = '';
+  }
+  renderDomainChips();
+  toggleClearBtn();
+}
+
+// ---- address-box input handlers (attached in the DOM init block below) ----
+function handleDomainInputKeydown(e) {
+  const input = e.target;
+  if (e.key === ' ' || e.key === ',' || e.key === ';') {
+    // Separators commit the typed token as a chip; never insert the separator.
+    e.preventDefault();
+    const val = (input.value || '').trim();
+    if (val && addDomainChip(val)) { input.value = ''; toggleClearBtn(); }
+    return;
+  }
+  if (e.key === 'Backspace' && !input.value && domainChipTokens.length > 0) {
+    // Backspace on an empty input removes the most recently added chip.
+    domainChipTokens.pop();
+    renderDomainChips();
+    toggleClearBtn();
+    e.preventDefault();
+  }
+}
+
+function handleDomainInputPaste(e) {
+  const dt = e.clipboardData || window.clipboardData;
+  if (!dt) return;
+  const text = dt.getData('text') || '';
+  if (!/[\s,;]/.test(text)) return; // single token: allow the normal paste
+  e.preventDefault();
+  const input = e.target;
+  const parts = ((input.value || '') + ' ' + text).split(/[\s,;]+/).filter(Boolean);
+  input.value = '';
+  for (const p of parts) addDomainChip(p);
+  toggleClearBtn();
+}
+
+function handleDomainInputBlur(e) {
+  const input = e.target;
+  const val = (input.value || '').trim();
+  if (val && addDomainChip(val)) { input.value = ''; toggleClearBtn(); }
+}
+
+// Entry point for the Lookup button and the Enter key.
+function runLookupFromInput() {
+  const domains = getEnteredDomains();
+  if (domains.length === 0) {
+    lookup(); // reuse the single-domain empty/invalid prompts
+    return;
+  }
+  runMultiDomainLookup(domains, { animateTopIntro: false });
+}
+
+// Reset multi-domain bookkeeping back to a single (or empty) domain and hide
+// the tabs. Called by single-domain lookups so a prior sweep leaves no stale
+// tabs/chips behind.
+function resetMultiDomainState(domain) {
+  multiDomainState.domains = domain ? [domain] : [];
+  multiDomainState.results = {};
+  multiDomainState.active = domain || null;
+  multiDomainState.running = false;
+  domainChipTokens = [];
+  if (typeof renderDomainChips === 'function') renderDomainChips();
+  updateDomainTabsUI();
+}
+
+// Build / refresh the per-domain tab bar. Shown whenever at least one domain
+// has been checked (including a single domain) so the active domain is always
+// clearly labeled; hidden only before the first lookup.
+function updateDomainTabsUI() {
+  const bar = document.getElementById('domainTabs');
+  if (!bar) return;
+  const domains = (multiDomainState && Array.isArray(multiDomainState.domains)) ? multiDomainState.domains : [];
+  if (domains.length === 0) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.innerHTML = domains.map(d => {
+    const isActive = d === multiDomainState.active;
+    const res = multiDomainState.results[d];
+    const done = !!(res && res._loaded && res._loaded.base && res._loaded.mx && res._loaded.records
+      && res._loaded.whois && res._loaded.dmarc && res._loaded.dkim && res._loaded.cname && res._loaded.reputation);
+    const statusCls = done ? 'done' : 'loading';
+    // Domains are validated to [a-z0-9.-] only, so inlining them into the
+    // onclick/title attributes is safe from injection.
+    return '<button type="button" role="tab" aria-selected="' + (isActive ? 'true' : 'false') + '" '
+      + 'class="domain-tab' + (isActive ? ' active' : '') + '" '
+      + 'onclick="showDomainTab(\'' + d + '\')" title="' + escapeHtml(d) + '">'
+      + '<span class="domain-tab-status ' + statusCls + '"></span>'
+      + '<span class="domain-tab-label">' + escapeHtml(d) + '</span>'
+      + '</button>';
+  }).join('');
+}
+
+// Switch the visible results to a domain's cached results, or show a queued
+// placeholder if its lookup has not run yet.
+function showDomainTab(domain) {
+  if (!domain || multiDomainState.domains.indexOf(domain) === -1) return;
+  multiDomainState.active = domain;
+  updateDomainTabsUI();
+  const res = multiDomainState.results[domain];
+  if (res) {
+    lastResult = res;
+    render(res);
+  } else {
+    renderResultsMarkup('<div class="card"><div class="card-content" style="padding:16px;">'
+      + escapeHtml(t('domainCheckQueued')) + '</div></div>');
+  }
+}
+
+// Run a sweep over multiple domains. Domains are checked SEQUENTIALLY (one fully
+// completes before the next starts) so the shared #results container and the
+// per-run request cancellation never collide, and the server's per-IP rate
+// limiter is not hit with N*10 concurrent requests. A single domain takes the
+// classic path (no chips, no tabs).
+async function runMultiDomainLookup(domains, options = {}) {
+  domains = (domains || []).slice(0, MAX_LOOKUP_DOMAINS);
+  if (domains.length === 0) { lookup(); return; }
+
+  if (domains.length === 1) {
+    applyDomainsToInputBox(domains);
+    // lookup() resets multi-domain state itself via resetMultiDomainState().
+    await lookup({ domainOverride: domains[0], animateTopIntro: !!options.animateTopIntro });
+    return;
+  }
+
+  applyDomainsToInputBox(domains);
+  const token = ++multiRunToken;
+  multiDomainState.domains = domains.slice();
+  multiDomainState.results = {};
+  multiDomainState.active = domains[0];
+  multiDomainState.running = true;
+  updateDomainTabsUI();
+
+  // Put every domain in the URL (space-separated) for shareable multi links.
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('domain', domains.join(' '));
+    url.searchParams.set(LANG_PARAM, currentLanguage);
+    window.history.replaceState({}, '', url);
+  } catch (_) {}
+
+  updatePageTitle(domains[0]);
+  setStatus(escapeHtml(t('checkingMultipleDomains', { count: String(domains.length) })));
+
+  for (let i = 0; i < domains.length; i++) {
+    if (token !== multiRunToken) return; // a newer sweep superseded this one
+    const d = domains[i];
+    // fromMulti prevents lookup() from resetting the multi state; skipUrlUpdate
+    // keeps it from overwriting the multi-domain URL set above.
+    await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: false });
+    if (token !== multiRunToken) return;
+    multiDomainState.results[d] = lastResult; // snapshot (render() also stores it)
+    updateDomainTabsUI();
+  }
+
+  multiDomainState.running = false;
+  updateDomainTabsUI();
+  // Ensure the currently-active tab is the one painted (the sweep may have left
+  // lastResult on the final domain while the user is viewing another tab).
+  const activeRes = multiDomainState.results[multiDomainState.active];
+  if (activeRes) { lastResult = activeRes; render(activeRes); }
+}
+
 function lookup(options = {}) {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
@@ -22411,11 +22900,17 @@ function lookup(options = {}) {
   const animateTopIntro = !!options.animateTopIntro;
   const domainSource = Object.prototype.hasOwnProperty.call(options, 'domainOverride') ? options.domainOverride : input.value;
   const domain = normalizeDomain(domainSource);
-  input.value = domain;
-  toggleClearBtn();
-  // Reflect the queried domain in the document/tab title so browser
-  // shortcuts/bookmarks created from this page show what was checked.
-  updatePageTitle(domain);
+  // During a multi-domain sweep the chips represent the entered domains and the
+  // free-text input stays empty, so only reflect the normalized value in the
+  // box (and the tab title) for ordinary single-domain lookups. Otherwise each
+  // background sweep step would overwrite the box with the domain it checked.
+  if (!options.fromMulti) {
+    input.value = domain;
+    toggleClearBtn();
+    // Reflect the queried domain in the document/tab title so browser
+    // shortcuts/bookmarks created from this page show what was checked.
+    updatePageTitle(domain);
+  }
 
   if (!domain) {
     setStatus(t('promptEnterDomain'));
@@ -22427,6 +22922,17 @@ function lookup(options = {}) {
     return;
   }
 
+  // Multi-domain bookkeeping: a normal single-domain lookup clears any prior
+  // multi-domain sweep (hiding tabs/chips). During a sweep, lookup() is called
+  // with fromMulti so this reset is skipped and the sweep's state is preserved.
+  if (!options.fromMulti) {
+    resetMultiDomainState(domain);
+  }
+  // Only the domain the user is currently viewing repaints #results / the status
+  // line. Background (non-active) domains in a sweep are computed silently so
+  // their result objects (and copy tables) are ready when their tab is opened.
+  const paintThisLookup = !options.fromMulti || (multiDomainState.active === domain);
+
   // Cancel any previous lookup's requests and start a new run
   const runId = ++activeLookup.runId;
   cancelInflightLookup();
@@ -22434,23 +22940,33 @@ function lookup(options = {}) {
   dnsRecordsFilterState.column = 'all';
   selectedDnsRecordKeys.clear();
 
-  beginSectionAnimationCycle({ includeTopIntro: animateTopIntro });
+  if (paintThisLookup) {
+    beginSectionAnimationCycle({ includeTopIntro: animateTopIntro });
+  }
 
-  // Clear previous results while preserving the current top-bar actions
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches && resultsEl) {
+  // Clear previous results while preserving the current top-bar actions.
+  // During a multi-domain sweep only the active tab repaints; a background
+  // domain must not blow away / fade out the results the user is viewing.
+  if (paintThisLookup && window.matchMedia('(prefers-reduced-motion: reduce)').matches && resultsEl) {
     resultsEl.innerHTML = "";
   }
-  setStatus("");
+  if (paintThisLookup) {
+    setStatus("");
+  }
   if (dlBtn) {
     dlBtn.style.display = "";
     dlBtn.disabled = true;
   }
   lookupInProgress = true;
 
-  const url = new URL(window.location.href);
-  url.searchParams.set("domain", domain);
-  url.searchParams.set(LANG_PARAM, currentLanguage);
-  window.history.replaceState({}, "", url);
+  // Skip the URL rewrite for background sweep lookups so the multi-domain URL
+  // (set once by runMultiDomainLookup) is not overwritten with a single domain.
+  if (!options.skipUrlUpdate) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("domain", domain);
+    url.searchParams.set(LANG_PARAM, currentLanguage);
+    window.history.replaceState({}, "", url);
+  }
 
   // Keep Lookup clickable so another click can cancel/restart
   btn.disabled = false;
@@ -22668,6 +23184,9 @@ function hideTopBarItem(element) {
       btn.innerHTML = t('lookup');
       // Lookup finished: hide the progress popover.
       setCheckProgressActive(false);
+      // Refresh the tab bar so this domain's status dot flips from loading to
+      // done (covers the single-domain case, where nothing else re-renders it).
+      updateDomainTabsUI();
     });
 }
 
@@ -25156,6 +25675,7 @@ function renderDnsRecordsTable(records) {
         <span id="dnsRecordsFilterSummary" class="dns-records-filter-summary">${escapeHtml(t('dnsRecordsFilterSummary', { visible: String(rows.length), total: String(rows.length) }))}</span>
         <div id="dnsRecordsFilterChips" class="dns-records-filter-chip-row" style="display:${dnsRecordsFilterState.filters.length ? 'flex' : 'none'};">${(dnsRecordsFilterState.filters || []).map((filter, index) => `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})">&#x2715;</button></span>`).join('')}</div>
       </div>
+      <div class="dns-records-table-wrap">
       <table id="dnsRecordsTable" class="mx-table dns-records-table">
         <thead>
           <tr>
@@ -25168,6 +25688,7 @@ function renderDnsRecordsTable(records) {
         </thead>
         <tbody id="dnsRecordsTableBody">${body}</tbody>
       </table>
+      </div>
       <div id="dnsRecordsNoMatches" class="dns-records-no-matches" style="display:none;">${escapeHtml(t('dnsRecordsNoMatches'))}</div>
     </div>`;
 }
@@ -25175,6 +25696,17 @@ function renderDnsRecordsTable(records) {
 function render(r) {
   const loaded = (r && r._loaded) ? r._loaded : {};
   const errors = (r && r._errors) ? r._errors : {};
+  // Multi-domain: only the active tab paints #results / the status line. Every
+  // domain still runs the full computation so its result object and Email-Quota
+  // copy table (r._quotaCopyBase) are cached and ready when its tab is opened.
+  const multiRender = isMultiDomainActive();
+  const paintResult = !multiRender || (r && r.domain && multiDomainState.active === r.domain);
+  // Cache the result object for the tab bar whenever this domain is part of the
+  // current lookup set (single OR multi) so clicking its tab re-renders the
+  // cached result instead of the "queued" placeholder.
+  if (r && r.domain && multiDomainState.domains.indexOf(r.domain) !== -1) {
+    multiDomainState.results[r.domain] = r;
+  }
   // The TXT recovery helper normalizes the effective TXT/SPF/ACS view so the
   // cards can keep rendering even when the dedicated base TXT lookup timed out
   // but the detailed DNS records payload still contains the queried-domain TXT rows.
@@ -25356,7 +25888,9 @@ function render(r) {
     ? `${statusText}<div style="font-size:12px;color:var(--status);margin-top:2px;">${escapeHtml(t('statusCollectedOn', { value: gatheredAtLocal }))}</div>`
     : statusText;
 
-  setStatus(statusWithTime);
+  if (paintResult) {
+    setStatus(statusWithTime);
+  }
 
   const cards = [];
 
@@ -25860,10 +26394,17 @@ function render(r) {
   // NOT baked in here: render() runs during the domain lookup (before the user
   // clicks "Process Data"), so building the intake portion now would freeze an
   // empty/stale snapshot. buildQuotaCopyPayload() rebuilds it on demand.
-  window.quotaCopyBase = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
-  quotaCopyText = quotaCopyTextPlain;
-  // Expose for inline copy handler with rich + plain variants
-  window.quotaCopyText = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
+  //
+  // The per-domain table is always stored on the result object (r._quotaCopyBase)
+  // so a multi-domain Copy Email Quota can stack every domain's table; the
+  // window.* globals are only refreshed for the domain currently on screen.
+  r._quotaCopyBase = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
+  if (paintResult) {
+    window.quotaCopyBase = r._quotaCopyBase;
+    quotaCopyText = quotaCopyTextPlain;
+    // Expose for inline copy handler with rich + plain variants
+    window.quotaCopyText = { plain: quotaCopyTextPlain, html: quotaCopyTextHtml };
+  }
 
   cards.push(`
   <div class="card" id="card-email-quota">
@@ -27079,6 +27620,10 @@ function render(r) {
   // any returned result card. It is derived from the assembled card markup so it
   // always matches the cards that actually rendered, in their on-page order.
   const cardsMarkup = cards.join("");
+  // Non-active domains in a multi-domain sweep are computed only (their result
+  // object and copy table are now cached above); they must NOT commit to the
+  // shared #results DOM or rebuild the section rail for the visible domain.
+  if (!paintResult) return;
   const sectionNavHtml = buildSectionNavHtml(cardsMarkup);
   renderResultsMarkup(sectionNavHtml + cardsMarkup);
 
@@ -27146,9 +27691,18 @@ function startLoadingDotAnimations() {
 
 document.getElementById("domainInput").addEventListener("keyup", function (e) {
   if (e.key === "Enter") {
-    lookup();
+    runLookupFromInput();
   }
 });
+// Multi-domain address box: commit chips on separators, remove on backspace,
+// split pasted lists, and commit a trailing token when focus leaves the box.
+(function attachDomainInputChipHandlers() {
+  const input = document.getElementById("domainInput");
+  if (!input) return;
+  input.addEventListener("keydown", handleDomainInputKeydown);
+  input.addEventListener("paste", handleDomainInputPaste);
+  input.addEventListener("blur", handleDomainInputBlur);
+})();
 
 // ===== Customer Intake Form (rich-text editor) =====
 // The intake section is a single contenteditable region. We persist both
@@ -28397,38 +28951,70 @@ function getFirstIntakeSendingDomain(rawSendingDomain) {
   return '';
 }
 
+// Extract ALL valid sending domains from the intake answer (customers often
+// list several custom domains: "mail1.example.com, mail2.example.net and
+// example.org"). Returns a normalized, validated, deduped, order-preserving,
+// capped list. Empty when nothing valid is found.
+function getAllIntakeSendingDomains(rawSendingDomain) {
+  const raw = (rawSendingDomain === null || rawSendingDomain === undefined)
+    ? '' : String(rawSendingDomain);
+  if (!raw.trim()) return [];
+  const tokens = raw.split(/(?:\s+|[,;|]+|\/+|\b(?:and|or)\b)+/i);
+  const seen = {};
+  const out = [];
+  for (const token of tokens) {
+    if (!token) continue;
+    const d = normalizeDomain(token);
+    if (d && isValidDomain(d) && !seen[d]) { seen[d] = true; out.push(d); }
+  }
+  // Fast-path: if token splitting found nothing (e.g. one URL/email), try the
+  // whole string as a single value.
+  if (out.length === 0) {
+    const whole = normalizeDomain(raw);
+    if (whole && isValidDomain(whole)) out.push(whole);
+  }
+  return out.slice(0, MAX_LOOKUP_DOMAINS);
+}
+
+// Order-insensitive set comparison for two domain lists.
+function sameDomainSet(a, b) {
+  const aa = Array.isArray(a) ? a.slice().sort() : [];
+  const bb = Array.isArray(b) ? b.slice().sort() : [];
+  if (aa.length !== bb.length) return false;
+  for (let i = 0; i < aa.length; i++) { if (aa[i] !== bb[i]) return false; }
+  return true;
+}
+
 // Compare the intake "Current sending domain" against the domain currently
 // loaded in the checker. When they differ (and the sending domain is valid),
 // load it into the search box and trigger a fresh lookup. When the intake
 // answer lists multiple domains we only ever run the checker on the FIRST
 // valid one (see getFirstIntakeSendingDomain).
 function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
-  const sendingDomain = getFirstIntakeSendingDomain(rawSendingDomain);
-  if (!sendingDomain) return;
+  // Check EVERY valid domain the customer listed (multi-domain aware).
+  const sendingDomains = getAllIntakeSendingDomains(rawSendingDomain);
+  if (sendingDomains.length === 0) return;
 
-  const input = document.getElementById('domainInput');
-  const currentDomain = normalizeDomain(input ? input.value : '');
-  if (sendingDomain === currentDomain) return;
+  // If the checker is already showing exactly this set of domains, do nothing.
+  if (sameDomainSet(getEnteredDomains(), sendingDomains)) return;
 
-  if (input) input.value = sendingDomain;
-  if (typeof toggleClearBtn === 'function') toggleClearBtn();
   // Remember the status text we are about to replace (e.g. the "Detected N of M
   // fields" message) so we can restore it once the re-run completes instead of
-  // leaving the transient "Running checker against ..." text on screen forever.
+  // leaving the transient "Running checker..." text on screen forever.
   const priorStatus = status ? status.textContent : '';
-  const runningText = 'Running checker against ' + sendingDomain + '\u2026';
+  const runningText = sendingDomains.length > 1
+    ? t('checkingMultipleDomains', { count: String(sendingDomains.length) })
+    : 'Running checker against ' + sendingDomains[0] + '\u2026';
   if (status) {
     // Replace the status text (don't append) so repeated edits to the sending
-    // domain don't pile up multiple "Running checker against ..." fragments.
+    // domain don't pile up multiple "Running checker..." fragments.
     status.textContent = runningText;
   }
-  // Pass the sending domain explicitly so the lookup is not affected by any
-  // race with the input value update above.
-  const pending = lookup({ domainOverride: sendingDomain, animateTopIntro: true });
-  // Clear the transient "Running checker against ..." status once the lookup
-  // settles. We only touch the status if it still shows OUR running text, so a
-  // newer message (from another edit/run) is never clobbered. lookup() returns
-  // undefined on its early-return guard paths, so guard for a thenable first.
+  // runMultiDomainLookup handles the single-domain case (no tabs/chips) too.
+  const pending = runMultiDomainLookup(sendingDomains, { animateTopIntro: true });
+  // Clear the transient status once the sweep settles. We only touch the status
+  // if it still shows OUR running text, so a newer message (from another
+  // edit/run) is never clobbered.
   const restore = () => {
     if (!status) return;
     if (status.textContent !== runningText) return;
@@ -28691,7 +29277,29 @@ function buildIntakeRequestTemplate() {
 // block. This is computed on demand so clicking "Process Data" after a lookup
 // is reflected in the copied output without re-running the domain check.
 function buildQuotaCopyPayload() {
-  const base = window.quotaCopyBase || { plain: '', html: '' };
+  // Base = the per-domain Email Quota table(s). For a multi-domain sweep we
+  // stack one table per checked domain (in tab order), each separated by a
+  // divider, mirroring how a single-domain report shows one table. The Customer
+  // Intake block (shared across all domains) is appended once at the very end.
+  let basePlain = '';
+  let baseHtml = '';
+  if (isMultiDomainActive()) {
+    const plainTables = [];
+    const htmlTables = [];
+    for (const d of multiDomainState.domains) {
+      const res = multiDomainState.results[d];
+      const b = res && res._quotaCopyBase ? res._quotaCopyBase : null;
+      if (!b) continue;
+      plainTables.push(b.plain || '');
+      htmlTables.push(b.html || '');
+    }
+    basePlain = plainTables.join('\n\n==================================\n\n');
+    baseHtml = htmlTables.join('<br><br>');
+  } else {
+    const base = window.quotaCopyBase || { plain: '', html: '' };
+    basePlain = base.plain || '';
+    baseHtml = base.html || '';
+  }
   let intakePlain = '';
   let intakeHtml = '';
   try {
@@ -28727,8 +29335,8 @@ function buildQuotaCopyPayload() {
     }
   } catch (_) {}
   const payload = {
-    plain: (base.plain || '') + intakePlain,
-    html: (base.html || '') + intakeHtml
+    plain: (basePlain || '') + intakePlain,
+    html: (baseHtml || '') + intakeHtml
   };
   // Keep the legacy global in sync for any other consumers.
   window.quotaCopyText = payload;
@@ -28773,7 +29381,9 @@ function updateIntakeFormVisibility(isSignedIn) {
 // Theme + query-domain initialization
 function initializePage() {
   const params = new URLSearchParams(window.location.search);
-  const bootstrapDomain = normalizeDomain(params.get("domain") || '');
+  const rawDomainParam = params.get("domain") || '';
+  const bootstrapDomains = parseDomainListParam(rawDomainParam);
+  const bootstrapDomain = bootstrapDomains[0] || '';
   const openCookieSettingsRequested = typeof consumeOpenCookieSettingsRequest === 'function'
     ? consumeOpenCookieSettingsRequest()
     : false;
@@ -28790,7 +29400,9 @@ function initializePage() {
   applyTheme(savedTheme);
   applyLanguage(currentLanguage, false);
   loadHistory();
-  document.getElementById("domainInput").value = bootstrapDomain;
+  // Reflect the bootstrap domain(s) in the address box: a single domain shows
+  // as plain text, several show as chips.
+  applyDomainsToInputBox(bootstrapDomains);
   toggleClearBtn();
   // Set the title up front so a shareable ?domain= URL produces a domain-suffixed
   // tab title even before the asynchronous lookup begins rendering.
@@ -28825,7 +29437,7 @@ function initializePage() {
     updateIntakeFormVisibility(false);
   }
 
-  scheduleInitialLookup(bootstrapDomain);
+  scheduleInitialLookup(rawDomainParam);
 }
 
 let initialLookupHasStarted = false;
@@ -28834,6 +29446,21 @@ let pageInitializationHasStarted = false;
 let initialLookupRetryCount = 0;
 const INITIAL_LOOKUP_MAX_RETRIES = 20;
 const INITIAL_LOOKUP_RETRY_DELAY_MS = 50;
+
+// Parse a ?domain= query value that may contain several space/comma/semicolon-
+// separated domains into a normalized, validated, deduped, capped list.
+function parseDomainListParam(raw) {
+  const s = (raw === null || raw === undefined) ? '' : String(raw);
+  if (!s.trim()) return [];
+  const seen = {};
+  const out = [];
+  for (const tok of s.split(/[\s,;]+/)) {
+    if (!tok) continue;
+    const d = normalizeDomain(tok);
+    if (d && isValidDomain(d) && !seen[d]) { seen[d] = true; out.push(d); }
+  }
+  return out.slice(0, MAX_LOOKUP_DOMAINS);
+}
 
 function startPageInitialization() {
   if (pageInitializationHasStarted) return;
@@ -28859,10 +29486,13 @@ function startPageInitialization() {
 }
 
 function scheduleInitialLookup(domain) {
-  const bootstrapDomain = normalizeDomain(domain || '');
+  // The ?domain= param may carry several space/comma-separated domains for a
+  // shareable multi-domain link; parse them all.
+  const bootstrapDomains = parseDomainListParam(domain || '');
+  const primary = bootstrapDomains[0] || '';
   if (initialLookupHasStarted || initialLookupIsScheduled) return;
 
-  if (!bootstrapDomain) {
+  if (!primary) {
     initialLookupHasStarted = true;
     animateTopSections();
     return;
@@ -28873,12 +29503,13 @@ function scheduleInitialLookup(domain) {
   if (!input || !lookupBtn || typeof lookup !== 'function') {
     if (initialLookupRetryCount < INITIAL_LOOKUP_MAX_RETRIES) {
       initialLookupRetryCount++;
-      window.setTimeout(() => scheduleInitialLookup(bootstrapDomain), INITIAL_LOOKUP_RETRY_DELAY_MS);
+      // Pass the original raw arg so a multi-domain list survives the retry.
+      window.setTimeout(() => scheduleInitialLookup(domain), INITIAL_LOOKUP_RETRY_DELAY_MS);
     }
     return;
   }
 
-  input.value = bootstrapDomain;
+  applyDomainsToInputBox(bootstrapDomains);
   toggleClearBtn();
   initialLookupIsScheduled = true;
 
@@ -28886,7 +29517,11 @@ function scheduleInitialLookup(domain) {
     window.requestAnimationFrame(() => {
       initialLookupIsScheduled = false;
       initialLookupHasStarted = true;
-      lookup({ animateTopIntro: true, domainOverride: bootstrapDomain });
+      if (bootstrapDomains.length > 1) {
+        runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
+      } else {
+        lookup({ animateTopIntro: true, domainOverride: primary });
+      }
     });
   });
 }

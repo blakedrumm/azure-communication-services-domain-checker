@@ -197,13 +197,14 @@ The embedded single-page application includes a rich set of interactive features
 
 | Feature | Description |
 |---------|-------------|
+| 🧩 **Multi-domain lookups** | Enter several domains at once (space/comma-separated). Each becomes a removable chip in the address box, and results appear under a tab per domain. The tab bar sticks to the top of the page while scrolling so the domain you're viewing is always labeled (a single tab is still shown for one domain). Shareable via a space-separated `?domain=` URL. |
 | 🌙 **Dark / Light theme** | Toggle between dark and light mode; preference is saved in `localStorage` |
 | 🕑 **Search history** | Recent domain lookups appear as dismissible chips below the search box |
 | 🔗 **Copy shareable link** | Copies a permalink to the current domain lookup so you can share it with teammates |
 | 📥 **Download JSON report** | Downloads the full aggregated DNS check result as a `.json` file |
 | 📸 **Copy page screenshot** | Captures the results page to the clipboard using `html2canvas` |
 | 🐛 **Report issue button** | Visible after a lookup; opens the configured issue tracker with domain pre-filled |
-| 📋 **Email Quota checklist** | Summary card showing MX, Reputation, Registration, and SPF pass/fail status |
+| 📋 **Email Quota checklist** | Summary card showing MX, Reputation, Registration, SPF, and DMARC pass/warn/fail status. On a multi-domain lookup, **Copy Email Quota** emits one table per domain. |
 | ✅ **Domain Verification checklist** | Shows whether the ACS verification TXT record and ACS readiness criteria are met |
 | 🔑 **Microsoft sign-in** | Optional Entra ID sign-in for employee verification via MSAL |
 | 🌍 **Multi-language UI** | 10 languages with a flag-icon dropdown; preference saved in `localStorage` and shareable via `?lang=` |
@@ -248,7 +249,7 @@ The **Customer Intake Information** form (shown to signed-in users) is language-
 - **Process Data** extraction recognizes the questionnaire in all 10 supported languages, mapping each answer to the canonical English field labels reviewers expect. The extracted-field table and the **Copy Email Quota** payload remain in English (the canonical ACS questionnaire), while the customer's own answer values are preserved verbatim.
 - Numeric answers written in non-Western numerals (Arabic-Indic, Eastern Arabic-Indic/Persian, Devanagari, and full-width digits) are normalized so the throttling-tier inference still works.
 - The extracted **Type of emails sent**, **Current tier level**, and **Expected tier level** rows provide dropdown suggestions when empty while keeping the cell editable for any custom text. Tier rows include an info button that expands a reference table of ACS tier names with per-minute and per-hour limits.
-- When the intake form contains a current sending domain that differs from the active lookup, the checker automatically runs against that domain and clears the temporary "Running checker against ..." status once the lookup completes.
+- When the intake form contains one or more current sending domains that differ from the active lookup, the checker automatically runs against **every** listed domain (multi-domain lookup with a tab per domain) and clears the temporary "Running checker..." status once the sweep completes.
 
 > Machine-translated questionnaire strings (especially for `ar`, `zh-CN`, `hi-IN`, `ja-JP`, `ru-RU`) are best-effort and benefit from native-speaker review. The form does **not** translate the customer's answers between languages; it structures and labels them.
 
