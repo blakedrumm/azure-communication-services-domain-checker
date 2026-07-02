@@ -1158,6 +1158,21 @@ button.primary:disabled {
   color: inherit;
   opacity: 0.95;
 }
+/* Verdict-aware tint for the ACS Outlook SPF requirement note. Overrides the
+   base green so a FAIL/WARN verdict is not shown on a "pass"-colored box.
+   Placed after the base rule so these single-class selectors win by source order. */
+.spf-explained-requirement--pass {
+  background: rgba(46, 204, 113, 0.08);
+  border-color: rgba(46, 204, 113, 0.30);
+}
+.spf-explained-requirement--warn {
+  background: rgba(241, 196, 15, 0.12);
+  border-color: rgba(241, 196, 15, 0.45);
+}
+.spf-explained-requirement--fail {
+  background: rgba(231, 76, 60, 0.12);
+  border-color: rgba(231, 76, 60, 0.45);
+}
 .spf-explained-table {
   table-layout: auto;
   font-family: inherit;
@@ -2218,8 +2233,17 @@ ul.guidance li {
   background: #2f80ed;
   animation: domainTabPulse 1s ease-in-out infinite;
 }
+/* Verdict colors for a finished domain's tab dot: green (pass) / amber (warn) /
+   red (fail). A domain that resolves nothing fails MX + SPF and shows red. */
+.domain-tab-status.pass,
 .domain-tab-status.done {
   background: #2e9e5b;
+}
+.domain-tab-status.warn {
+  background: #c99700;
+}
+.domain-tab-status.fail {
+  background: #d64545;
 }
 @keyframes domainTabPulse {
   0%, 100% { opacity: 1; }

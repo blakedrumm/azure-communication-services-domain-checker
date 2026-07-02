@@ -12370,6 +12370,21 @@ button.primary:disabled {
   color: inherit;
   opacity: 0.95;
 }
+/* Verdict-aware tint for the ACS Outlook SPF requirement note. Overrides the
+   base green so a FAIL/WARN verdict is not shown on a "pass"-colored box.
+   Placed after the base rule so these single-class selectors win by source order. */
+.spf-explained-requirement--pass {
+  background: rgba(46, 204, 113, 0.08);
+  border-color: rgba(46, 204, 113, 0.30);
+}
+.spf-explained-requirement--warn {
+  background: rgba(241, 196, 15, 0.12);
+  border-color: rgba(241, 196, 15, 0.45);
+}
+.spf-explained-requirement--fail {
+  background: rgba(231, 76, 60, 0.12);
+  border-color: rgba(231, 76, 60, 0.45);
+}
 .spf-explained-table {
   table-layout: auto;
   font-family: inherit;
@@ -13430,8 +13445,17 @@ ul.guidance li {
   background: #2f80ed;
   animation: domainTabPulse 1s ease-in-out infinite;
 }
+/* Verdict colors for a finished domain's tab dot: green (pass) / amber (warn) /
+   red (fail). A domain that resolves nothing fails MX + SPF and shows red. */
+.domain-tab-status.pass,
 .domain-tab-status.done {
   background: #2e9e5b;
+}
+.domain-tab-status.warn {
+  background: #c99700;
+}
+.domain-tab-status.fail {
+  background: #d64545;
 }
 @keyframes domainTabPulse {
   0%, 100% { opacity: 1; }
@@ -22795,6 +22819,74 @@ function resetMultiDomainState(domain) {
   updateDomainTabsUI();
 }
 
+// Compute the overall Email Quota verdict for a result object:
+//   'pending' -> checks still loading
+//   'fail'    -> a hard failure (no MX, no/!ACS SPF, expired/very-young domain)
+//   'warn'    -> softer issues (reputation, missing WHOIS/DMARC, an errored check)
+//   'pass'    -> all good
+// This mirrors the aggregation shown in the top status line so the per-domain
+// tab dot always matches it. A domain that resolves nothing (fake/dead) fails
+// MX + SPF, so it correctly reports 'fail' (red) here.
+function getDomainQuotaStatus(r) {
+  if (!r || !r._loaded) return 'pending';
+  const loaded = r._loaded;
+  const errors = r._errors || {};
+  const allLoaded = !!(loaded.base && loaded.mx && loaded.records && loaded.whois
+    && loaded.dmarc && loaded.dkim && loaded.cname && loaded.reputation);
+  if (!allLoaded) return 'pending';
+
+  const txt = r._txtRecovery ? r._txtRecovery : getDnsTxtRecoveryState(r);
+  const effectiveSpfPresent = !!txt.spfPresent;
+  const effectiveSpfHasRequiredInclude = txt.spfHasRequiredInclude;
+  const recoveredFromNameservers = !!txt.recoveredFromNameservers;
+  const anyError = Object.keys(errors).length > 0;
+
+  let quotaFail = false;
+  let quotaWarn = false;
+
+  // MX
+  const hasUsableMx = (r.hasUsableMx === true) || (r.hasUsableMx === undefined && Array.isArray(r.mxRecords) && r.mxRecords.length > 0);
+  if (!hasUsableMx) quotaFail = true;
+
+  // Reputation
+  if (r.reputation) {
+    const repSum = r.reputation.summary || {};
+    const repValid = (repSum.totalQueries || 0) - (repSum.errorCount || 0);
+    const repPercent = (repValid > 0) ? ((repSum.notListedCount || 0) / repValid * 100) : null;
+    if ((repSum.listedCount > 0) || (repPercent !== null && repPercent < 75)) quotaWarn = true;
+  }
+
+  // Registration (WHOIS/RDAP)
+  const whoisErrorText = errors.whois || r.whoisError || '';
+  const whoisHasData = !!(r.whoisSource || r.whoisCreationDateUtc || r.whoisExpiryDateUtc || r.whoisRegistrar || r.whoisRegistrant || r.whoisAgeHuman || r.whoisExpiryHuman);
+  const whoisRegistryWebFormOnly = !!(typeof r.whoisRegistryWebForm === 'string' && r.whoisRegistryWebForm.trim() && !whoisHasData);
+  if (!whoisRegistryWebFormOnly && (whoisErrorText || !whoisHasData)) quotaWarn = true;
+  if (r.whoisIsExpired === true || r.whoisIsVeryYoungDomain === true || r.whoisIsYoungDomain === true) {
+    if (r.whoisIsExpired === true || r.whoisIsVeryYoungDomain === true) quotaFail = true; else quotaWarn = true;
+  }
+
+  // SPF (ACS Outlook include requirement)
+  if (recoveredFromNameservers && effectiveSpfPresent) {
+    quotaWarn = true;
+  } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) {
+    quotaFail = true;
+  }
+  if (doesSpfExceedLookupLimit(r, effectiveSpfPresent)) quotaWarn = true;
+
+  // DMARC (presence + tier-aware p=none), same as the top status line.
+  const dmarcExpectedTierIndex = getExpectedTierIndexFromIntake();
+  const dmarcPolicyToken = getDmarcPolicyToken(r && r.dmarc);
+  const dmarcIsMonitoringOnly = !!(r && r.dmarc) && (dmarcPolicyToken === '' || dmarcPolicyToken === 'none');
+  const dmarcNeedsEnforcementForTier = dmarcIsMonitoringOnly && dmarcExpectedTierIndex > DMARC_ENFORCEMENT_TIER_INDEX;
+  if (loaded.dmarc && !errors.dmarc) {
+    if (!r.dmarc || dmarcNeedsEnforcementForTier) quotaWarn = true;
+  }
+
+  if (quotaFail) return 'fail';
+  if (quotaWarn || anyError) return 'warn';
+  return 'pass';
+}
+
 // Build / refresh the per-domain tab bar. Shown whenever at least one domain
 // has been checked (including a single domain) so the active domain is always
 // clearly labeled; hidden only before the first lookup.
@@ -22807,15 +22899,17 @@ function updateDomainTabsUI() {
   bar.innerHTML = domains.map(d => {
     const isActive = d === multiDomainState.active;
     const res = multiDomainState.results[d];
-    const done = !!(res && res._loaded && res._loaded.base && res._loaded.mx && res._loaded.records
-      && res._loaded.whois && res._loaded.dmarc && res._loaded.dkim && res._loaded.cname && res._loaded.reputation);
-    const statusCls = done ? 'done' : 'loading';
+    // The status dot reflects the domain's overall Email Quota verdict once its
+    // checks finish: green (pass) / amber (warn) / red (fail). While loading it
+    // pulses blue. A domain that resolves nothing fails MX + SPF -> red.
+    const statusCls = getDomainQuotaStatus(res); // 'pending' | 'pass' | 'warn' | 'fail'
+    const dotCls = (statusCls === 'pending') ? 'loading' : statusCls;
     // Domains are validated to [a-z0-9.-] only, so inlining them into the
     // onclick/title attributes is safe from injection.
     return '<button type="button" role="tab" aria-selected="' + (isActive ? 'true' : 'false') + '" '
       + 'class="domain-tab' + (isActive ? ' active' : '') + '" '
       + 'onclick="showDomainTab(\'' + d + '\')" title="' + escapeHtml(d) + '">'
-      + '<span class="domain-tab-status ' + statusCls + '"></span>'
+      + '<span class="domain-tab-status ' + dotCls + '"></span>'
       + '<span class="domain-tab-label">' + escapeHtml(d) + '</span>'
       + '</button>';
   }).join('');
@@ -22854,6 +22948,9 @@ async function runMultiDomainLookup(domains, options = {}) {
   }
 
   applyDomainsToInputBox(domains);
+  // Abort any still-in-flight requests from a prior lookup/sweep before we reset
+  // the results map, so a late-resolving fetch can't write into this new sweep.
+  cancelInflightLookup();
   const token = ++multiRunToken;
   multiDomainState.domains = domains.slice();
   multiDomainState.results = {};
@@ -22876,10 +22973,15 @@ async function runMultiDomainLookup(domains, options = {}) {
     if (token !== multiRunToken) return; // a newer sweep superseded this one
     const d = domains[i];
     // fromMulti prevents lookup() from resetting the multi state; skipUrlUpdate
-    // keeps it from overwriting the multi-domain URL set above.
-    await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: false });
+    // keeps it from overwriting the multi-domain URL set above. lookup() resolves
+    // to the exact result object it populated for this domain.
+    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: false });
     if (token !== multiRunToken) return;
-    multiDomainState.results[d] = lastResult; // snapshot (render() also stores it)
+    // Store the returned object, guarded so a domain's slot only ever holds the
+    // result whose .domain matches its key (prevents any cross-domain aliasing).
+    if (res && res.domain === d) {
+      multiDomainState.results[d] = res;
+    }
     updateDomainTabsUI();
   }
 
@@ -23043,8 +23145,15 @@ function hideTopBarItem(element) {
     guidance: [],
     acsReady: false
   };
-  recomputeDerived(lastResult);
-  render(lastResult);
+  // Capture THIS lookup's result object. Every fetch handler and render below
+  // writes to `resultObj` rather than the shared global `lastResult`, so a
+  // subsequent or overlapping lookup that reassigns `lastResult` to another
+  // domain can never alias this domain's slot or bleed fields (e.g. website)
+  // between domains. The multi-domain sweep stores this exact object, which
+  // guarantees multiDomainState.results[d].domain === d.
+  const resultObj = lastResult;
+  recomputeDerived(resultObj);
+  render(resultObj);
 
   const requests = [
     { key: "base",  path: "/api/base"  },
@@ -23097,44 +23206,43 @@ function hideTopBarItem(element) {
       // Ignore late results from older runs
       if (runId !== activeLookup.runId) return;
 
-      ensureResultObject();
       if (key === 'whois') {
         // Namespace WHOIS fields to avoid collisions with DNS fields.
-        lastResult.whoisLookupDomain = data.lookupDomain;
-        lastResult.whoisSource = data.source;
-        lastResult.whoisCreationDateUtc = data.creationDateUtc;
-        lastResult.whoisExpiryDateUtc = data.expiryDateUtc;
-        lastResult.whoisRegistrar = data.registrar;
-        lastResult.whoisRegistrant = data.registrant;
-        lastResult.whoisAgeDays = data.ageDays;
-        lastResult.whoisAgeHuman = data.ageHuman;
-        lastResult.whoisIsYoungDomain = data.isYoungDomain;
-        lastResult.whoisIsVeryYoungDomain = data.isVeryYoungDomain;
-        lastResult.whoisExpiryDays = data.expiryDays;
-        lastResult.whoisIsExpired = data.isExpired;
-        lastResult.whoisExpiryHuman = data.expiryHuman;
-        lastResult.whoisExpiryUnavailableReason = data.expiryUnavailableReason || null;
-        lastResult.whoisNewDomainThresholdDays = data.newDomainThresholdDays;
-        lastResult.whoisNewDomainWarnThresholdDays = data.newDomainWarnThresholdDays;
-        lastResult.whoisNewDomainErrorThresholdDays = data.newDomainErrorThresholdDays;
-        lastResult.whoisError = data.error;
-        lastResult.whoisRawText = data.rawWhoisText;
-        lastResult.whoisRawRdapText = data.rawRdapText;
-        lastResult.whoisRegistryWebForm = data.registryWebForm || null;
+        resultObj.whoisLookupDomain = data.lookupDomain;
+        resultObj.whoisSource = data.source;
+        resultObj.whoisCreationDateUtc = data.creationDateUtc;
+        resultObj.whoisExpiryDateUtc = data.expiryDateUtc;
+        resultObj.whoisRegistrar = data.registrar;
+        resultObj.whoisRegistrant = data.registrant;
+        resultObj.whoisAgeDays = data.ageDays;
+        resultObj.whoisAgeHuman = data.ageHuman;
+        resultObj.whoisIsYoungDomain = data.isYoungDomain;
+        resultObj.whoisIsVeryYoungDomain = data.isVeryYoungDomain;
+        resultObj.whoisExpiryDays = data.expiryDays;
+        resultObj.whoisIsExpired = data.isExpired;
+        resultObj.whoisExpiryHuman = data.expiryHuman;
+        resultObj.whoisExpiryUnavailableReason = data.expiryUnavailableReason || null;
+        resultObj.whoisNewDomainThresholdDays = data.newDomainThresholdDays;
+        resultObj.whoisNewDomainWarnThresholdDays = data.newDomainWarnThresholdDays;
+        resultObj.whoisNewDomainErrorThresholdDays = data.newDomainErrorThresholdDays;
+        resultObj.whoisError = data.error;
+        resultObj.whoisRawText = data.rawWhoisText;
+        resultObj.whoisRawRdapText = data.rawRdapText;
+        resultObj.whoisRegistryWebForm = data.registryWebForm || null;
       } else if (key === 'reputation') {
-        lastResult.reputation = data;
+        resultObj.reputation = data;
       } else if (key === 'website') {
-        lastResult.website = data;
+        resultObj.website = data;
       } else if (key === 'nameservers') {
-        lastResult.nameservers = data;
+        resultObj.nameservers = data;
       } else if (key === 'records') {
-        lastResult.dnsRecords = Array.isArray(data.records) ? data.records : [];
-        lastResult.dnsRecordsError = data.error || null;
+        resultObj.dnsRecords = Array.isArray(data.records) ? data.records : [];
+        resultObj.dnsRecordsError = data.error || null;
       } else {
-        Object.assign(lastResult, data);
+        Object.assign(resultObj, data);
       }
-      lastResult._loaded[key] = true;
-      delete lastResult._errors[key];
+      resultObj._loaded[key] = true;
+      delete resultObj._errors[key];
       // Mark this task as completed in the live progress popover so the
       // user gets immediate feedback that this specific check is done.
       markCheckProgress(runId, key, 'done');
@@ -23153,26 +23261,27 @@ function hideTopBarItem(element) {
         savedHistory = true;
       }
 
-      recomputeDerived(lastResult);
-      render(lastResult);
+      recomputeDerived(resultObj);
+      render(resultObj);
     } catch (err) {
       if (err && err.name === "AbortError") return;
       if (runId !== activeLookup.runId) return;
 
       const reason = (err && err.message) ? err.message : String(err);
-      ensureResultObject();
-      lastResult._loaded[key] = true;
-      lastResult._errors[key] = reason;
+      resultObj._loaded[key] = true;
+      resultObj._errors[key] = reason;
       // Surface the per-task failure in the popover too so the user knows
       // which check failed without having to scroll through cards.
       markCheckProgress(runId, key, 'error');
-      recomputeDerived(lastResult);
-      render(lastResult);
+      recomputeDerived(resultObj);
+      render(resultObj);
     }
   });
 
   // Return the settle chain so callers (e.g. the intake re-run) can await the
-  // lookup completing and then restore their own status text.
+  // lookup completing and then restore their own status text. The chain
+  // resolves to THIS lookup's result object so the multi-domain sweep stores
+  // the exact object it checked (never a globally-reassigned one).
   return Promise.allSettled(tasks)
     .catch(() => {})
     .finally(() => {
@@ -23187,7 +23296,8 @@ function hideTopBarItem(element) {
       // Refresh the tab bar so this domain's status dot flips from loading to
       // done (covers the single-domain case, where nothing else re-renders it).
       updateDomainTabsUI();
-    });
+    })
+    .then(() => resultObj);
 }
 
 // Parse the assembled results markup into an ordered list of section entries.
@@ -26924,8 +27034,15 @@ function render(r) {
       // is the same string the card body would normally show under the raw
       // record. Empty when no verdict is available (e.g., no SPF at all).
       const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider });
+      // Color the requirement note to match the actual verdict instead of a
+      // fixed green: PASS (include found) => green, indeterminate/macro-delegated
+      // => amber, otherwise (include missing) => red. This stops a FAIL card from
+      // showing "Required Outlook SPF include was not detected" on a green box.
+      const spfRequirementState = (effectiveSpfHasRequiredInclude === true)
+        ? 'pass'
+        : ((effectiveSpfIsMacroDelegated || effectiveSpfHasRequiredInclude === null) ? 'warn' : 'fail');
       const spfRequirementNote = spfRequirementText
-        ? `<div class="spf-explained-requirement">${escapeHtml(spfRequirementText)}</div>`
+        ? `<div class="spf-explained-requirement spf-explained-requirement--${spfRequirementState}">${escapeHtml(spfRequirementText)}</div>`
         : '';
       const spfLookupLimitNote = spfLookupLimitCardDetail
         ? `<div class="spf-explained-requirement" style="border-color:#f59e0b;background:#422006;color:#fde68a;">${escapeHtml(spfLookupLimitCardDetail)}</div>`
