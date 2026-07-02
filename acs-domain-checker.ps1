@@ -1656,7 +1656,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.8.8'
+$script:AppVersion = '2.9.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -25217,6 +25217,20 @@ function render(r) {
   const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
   const mxFallbackUsed = !!(r && r.mxFallbackUsed);
   const mxFallbackChecked = r && r.mxFallbackDomainChecked ? r.mxFallbackDomainChecked : null;
+  // ---- DMARC policy strength (tier-aware) ----
+  // A published DMARC record is downgraded from PASS to WARN when it exists but
+  // is only *monitoring* (p=none / no enforcing policy) AND the reviewer's
+  // detected "Expected tier level" from the Customer Intake table is above the
+  // Earth base tier. At or below that tier -- or whenever the intake form has
+  // not been processed yet (index -1) -- we only require DMARC to exist, so a
+  // p=none policy still passes. No tier names are ever surfaced in the UI copy;
+  // the tier purely gates the verdict. `getExpectedTierIndexFromIntake()` reads
+  // the live intake table, so re-rendering after "Process Data" re-evaluates it.
+  const dmarcExpectedTierIndex = getExpectedTierIndexFromIntake();
+  const dmarcPolicyToken = getDmarcPolicyToken(r && r.dmarc);
+  const dmarcIsMonitoringOnly = !!(r && r.dmarc) && (dmarcPolicyToken === '' || dmarcPolicyToken === 'none');
+  const dmarcNeedsEnforcementForTier = dmarcIsMonitoringOnly
+    && dmarcExpectedTierIndex > DMARC_ENFORCEMENT_TIER_INDEX;
   const allLoaded = !!(loaded.base && loaded.mx && loaded.records && loaded.whois && loaded.dmarc && loaded.dkim && loaded.cname && loaded.reputation);
   const anyError = !!(errors && Object.keys(errors).length > 0);
   let gatheredAtLocal = r.collectedAt ? formatLocalDateTime(r.collectedAt) : null;
@@ -25309,6 +25323,23 @@ function render(r) {
     } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
     if (doesSpfExceedLookupLimit(r, effectiveSpfPresent)) {
       quotaWarn = true;
+    }
+
+    // 5. DMARC
+    // A published DMARC record is treated as part of email readiness. We only
+    // check for its *presence* (any valid policy) here, not how strictly it is
+    // configured, so a completely missing DMARC record downgrades the overall
+    // Email Quota summary to WARN (never a hard FAIL). Additionally, when the
+    // reviewer's detected expected tier is above the Earth base tier, a
+    // monitor-only policy (p=none) is also a WARN because enforcement is
+    // expected at that sending volume. Both cases keep the top status line from
+    // reading PASS when DMARC is not adequate.
+    if (loaded.dmarc && !errors.dmarc) {
+      if (!r.dmarc) {
+        quotaWarn = true;
+      } else if (dmarcNeedsEnforcementForTier) {
+        quotaWarn = true;
+      }
     }
 
     let emailQuotaStatus = `${escapeHtml(t('passing'))} &#x2705;`;
@@ -25625,6 +25656,47 @@ function render(r) {
     quotaLinesHtml.push(`<strong>${escapeHtml(t('spfQueried'))}:</strong> ${escapeHtml(spfStateLabel)}${spfDetail ? ' - ' + escapeHtml(spfDetail).replace(/\r?\n/g, '<br>') : ''}`);
   }
 
+  // 5) DMARC
+  // A published DMARC record is treated as part of email readiness. Only the
+  // *presence* of a valid policy is required here (not how strictly it is
+  // configured), so a missing record is a WARN rather than a hard FAIL. This
+  // row is what explains the WARN that a missing DMARC produces in the top
+  // Email Quota status line. Uses only already-localized keys (dmarc,
+  // loadingValue, guidanceDmarcMissing, effectivePolicyInherited).
+  if (!loaded.dmarc && !errors.dmarc) {
+    quotaItems.push(quotaRow(t('dmarc'), 'pending', t('loadingValue'), null, 'dmarc'));
+    quotaLines.push('**DMARC:** PENDING');
+    quotaLinesHtml.push('<strong>DMARC:</strong> PENDING');
+  } else if (errors.dmarc) {
+    quotaItems.push(quotaRow(t('dmarc'), 'error', errors.dmarc, null, 'dmarc'));
+    quotaLines.push(`**DMARC:** ERROR${errors.dmarc ? ' - ' + errors.dmarc : ''}`);
+    quotaLinesHtml.push(`<strong>DMARC:</strong> ERROR${errors.dmarc ? ' - ' + escapeHtml(errors.dmarc) : ''}`);
+  } else if (r.dmarc) {
+    const dmarcFirstLine = String(r.dmarc).split(/\r?\n/)[0].trim();
+    const inheritedSuffix = (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain)
+      ? `\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`
+      : '';
+    if (dmarcNeedsEnforcementForTier) {
+      // Present but monitor-only (p=none) while the detected expected tier is
+      // above the Earth base tier: WARN with the standard, already-localized
+      // "move to enforcement" guidance (no tier verbiage).
+      const weakDetail = `${dmarcFirstLine}\n\n${t('dmarcMonitorOnly', { domain: r.domain || '' })}${inheritedSuffix}`;
+      quotaItems.push(quotaRow(t('dmarc'), 'warn', weakDetail, null, 'dmarc'));
+      quotaLines.push(`**DMARC:** WARN${weakDetail ? ' - ' + weakDetail.replace(/\r?\n/g, ' | ') : ''}`);
+      quotaLinesHtml.push(`<strong>DMARC:</strong> WARN${weakDetail ? ' - ' + escapeHtml(weakDetail).replace(/\r?\n/g, '<br>') : ''}`);
+    } else {
+      const dmarcDetail = `${dmarcFirstLine}${inheritedSuffix}`;
+      quotaItems.push(quotaRow(t('dmarc'), 'pass', dmarcDetail, null, 'dmarc'));
+      quotaLines.push(`**DMARC:** PASS${dmarcDetail ? ' - ' + dmarcDetail.replace(/\r?\n/g, ' | ') : ''}`);
+      quotaLinesHtml.push(`<strong>DMARC:</strong> PASS${dmarcDetail ? ' - ' + escapeHtml(dmarcDetail).replace(/\r?\n/g, '<br>') : ''}`);
+    }
+  } else {
+    const dmarcMissingDetail = t('guidanceDmarcMissing', { domain: r.domain || '' });
+    quotaItems.push(quotaRow(t('dmarc'), 'warn', dmarcMissingDetail, null, 'dmarc'));
+    quotaLines.push(`**DMARC:** WARN${dmarcMissingDetail ? ' - ' + dmarcMissingDetail : ''}`);
+    quotaLinesHtml.push(`<strong>DMARC:</strong> WARN${dmarcMissingDetail ? ' - ' + escapeHtml(dmarcMissingDetail) : ''}`);
+  }
+
   // Domain age / expiry for copy block
   const ageText = localizedWhoisAgeHuman || t('unknown');
   const expiryText = localizedWhoisExpiryHuman || t('unknown');
@@ -25718,7 +25790,16 @@ function render(r) {
     ? t('pending')
     : (errors.dmarc
       ? t('error')
-      : (r.dmarc ? t('verified') : t('notStarted')));
+      // Missing DMARC is a Warning (with the standard missing-DMARC guidance);
+      // a present-but-monitor-only policy is a Warning only when the detected
+      // expected tier is above the Earth base tier (see dmarcNeedsEnforcementForTier),
+      // otherwise a present record is Verified. This keeps the copied Email
+      // Quota payload aligned with the top status line and the checklist row.
+      : (r.dmarc
+        ? (dmarcNeedsEnforcementForTier
+          ? `${t('warningState')} - ${t('dmarcMonitorOnly', { domain: r.domain || '' })}`
+          : t('verified'))
+        : `${t('warningState')} - ${t('guidanceDmarcMissing', { domain: r.domain || '' })}`));
 
   const plainTable = [];
   const htmlTableRows = [];
@@ -27669,6 +27750,52 @@ const INTAKE_TIERS = (function () {
   return raw.map(t => ({ name: decode(t.n), perMinute: t.perMinute, perHour: t.perHour, perDay: t.perHour * 24 }));
 })();
 
+// The base "Earth" tier is the threshold above which a monitor-only DMARC
+// policy (p=none, no enforcement) is treated as insufficient for email
+// readiness. At or below this tier we only require DMARC to *exist*; above it we
+// also expect an enforcing policy (p=quarantine or p=reject). Derived from the
+// tier model so it tracks INTAKE_TIERS instead of relying on a magic index.
+const DMARC_ENFORCEMENT_TIER_INDEX = (function () {
+  for (let i = 0; i < INTAKE_TIERS.length; i++) {
+    if (String(INTAKE_TIERS[i].name).toLowerCase() === 'earth') return i;
+  }
+  return 5; // Fallback to the known Earth position if the name ever changes.
+})();
+
+// Reads the reviewer's detected/entered "Expected tier level" out of the
+// Customer Intake table and maps it back to an INTAKE_TIERS index. Returns -1
+// when the intake form has not been processed yet (so DMARC policy-strength
+// evaluation stays neutral until a tier is actually known). A longest-name
+// match is used so "EarthStandard" wins over the shorter "Earth" substring.
+function getExpectedTierIndexFromIntake() {
+  try {
+    const map = (typeof getExtractedIntakeMap === 'function') ? getExtractedIntakeMap() : null;
+    const raw = map ? String(map.expectedVolume || '').toLowerCase() : '';
+    if (!raw) return -1;
+    let bestIdx = -1;
+    let bestLen = -1;
+    for (let i = 0; i < INTAKE_TIERS.length; i++) {
+      const name = String(INTAKE_TIERS[i].name || '').toLowerCase();
+      if (name && raw.indexOf(name) !== -1 && name.length > bestLen) {
+        bestIdx = i;
+        bestLen = name.length;
+      }
+    }
+    return bestIdx;
+  } catch (_) {
+    return -1;
+  }
+}
+
+// Extracts the DMARC policy token (the value of the p= tag) from a raw DMARC
+// record string, lowercased. Returns '' when no p= tag is present. Only the
+// first line is inspected so appended notes never confuse the match.
+function getDmarcPolicyToken(dmarcRecord) {
+  const firstLine = String(dmarcRecord || '').split(/\r?\n/)[0] || '';
+  const m = firstLine.match(/(?:^|;)\s*p\s*=\s*([a-zA-Z]+)/);
+  return m ? m[1].toLowerCase() : '';
+}
+
 function parseIntakeNumeric(text) {
   if (text === null || text === undefined) return null;
   // Normalize non-Western numerals to ASCII 0-9 first so localized answers
@@ -28229,6 +28356,16 @@ function processIntakeForm() {
   // checker against the sending domain so the results reflect the customer's
   // actual mail domain rather than whatever was previously typed/loaded.
   maybeRunCheckerForIntakeDomain(merged.currentSendingDomain, status);
+
+  // Re-render the current results so DMARC policy-strength -- which depends on
+  // the just-detected "Expected tier level" -- is re-evaluated for the Email
+  // Quota card, the top status line, and the copy payload. When the intake
+  // named a different sending domain, maybeRunCheckerForIntakeDomain() already
+  // kicks off a fresh lookup that renders on its own, so this same-domain
+  // refresh simply redraws the existing result with the new tier context.
+  if (typeof lastResult !== 'undefined' && lastResult && lastResult.domain) {
+    render(lastResult);
+  }
 }
 
 // Some intake forms list MORE THAN ONE "Current sending domain" in a single
