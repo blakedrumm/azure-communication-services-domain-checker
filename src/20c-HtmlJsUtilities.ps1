@@ -1748,6 +1748,46 @@ document.addEventListener('mouseenter', (e) => {
   }
 }, true);
 
+// Info-dot ("i") tooltip open/close behavior:
+//   - Click the icon to TOGGLE the bubble open/closed.
+//   - Moving the pointer off the icon closes a click-opened bubble (the bubble
+//     itself is pointer-events:none, so leaving the icon = leaving the tooltip).
+//   - Clicking anywhere else, or pressing Escape, closes it.
+// Hover still shows it (CSS :hover) and keyboard focus shows it (CSS
+// :focus-visible) for accessibility. The click handler runs in the CAPTURE
+// phase so clicking an info-dot inside a collapsible card header toggles the
+// tooltip WITHOUT also toggling the card.
+function closeAllInfoDots(except) {
+  document.querySelectorAll('.info-dot.info-open').forEach(d => {
+    if (d === except) return;
+    d.classList.remove('info-open');
+    if (d.matches(':focus')) d.blur();
+  });
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.info-dot') : null;
+  // Any click closes tooltips other than the one being clicked.
+  closeAllInfoDots(btn);
+  if (!btn) return;
+  // Prevent the click from reaching parent handlers (e.g. toggleCard on a header).
+  e.preventDefault();
+  e.stopPropagation();
+  const willOpen = !btn.classList.contains('info-open');
+  btn.classList.toggle('info-open', willOpen);
+  if (!willOpen) btn.blur(); // closing: drop focus so :focus-visible can't keep it open
+}, true);
+
+// Close a click-opened tooltip once the pointer leaves its icon.
+document.addEventListener('mouseout', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.info-dot') : null;
+  if (!btn || !btn.classList.contains('info-open')) return;
+  const to = e.relatedTarget;
+  if (to && btn.contains(to)) return; // still moving within the icon
+  btn.classList.remove('info-open');
+  if (btn.matches(':focus')) btn.blur();
+});
+
 document.addEventListener('click', (e) => {
   const dropdown = document.getElementById('languageDropdown');
   if (!dropdown) return;
@@ -1759,6 +1799,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeLanguageMenu();
+    closeAllInfoDots(null);
   }
 });
 

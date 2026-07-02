@@ -866,14 +866,17 @@ button.primary:disabled {
   font-size: 11px;
   min-width: 180px;
   max-width: 280px;
-  z-index: 10;
+  /* Above the sticky #domainTabs bar (z-index 50) so the tooltip is never
+     clipped behind it. This only works because result cards are not persistent
+     stacking contexts at rest (see .result-card-prep / resultSectionFadeIn),
+     letting this z-index compete at the root level. */
+  z-index: 250;
   opacity: 0;
   visibility: hidden;
   transition: opacity 120ms ease, visibility 120ms ease;
   pointer-events: none;
   white-space: normal;
 }
-.info-dot:focus::after,
 .info-dot:focus-visible::after,
 .info-dot:hover::after,
 .info-dot.info-open::after {
@@ -2680,7 +2683,10 @@ ul.guidance li {
   .cards > .card.result-card-prep {
     opacity: 0;
     transform: translateY(24px);
-    will-change: opacity, transform;
+    /* NOTE: intentionally no `will-change` here. It is only a perf hint and,
+       because it lists transform/opacity, it would make every card a permanent
+       stacking context -- which traps hover tooltips (.info-dot::after) beneath
+       the sticky #domainTabs bar. The reveal animation is smooth without it. */
   }
 
   .cards > .card.result-card-prep.result-card-in {
@@ -2696,7 +2702,9 @@ ul.guidance li {
 
   to {
     opacity: 1;
-    transform: translateY(0);
+    /* `none` (not translateY(0)) so the finished card is not left as a stacking
+       context, which would clip .info-dot tooltips under the sticky tab bar. */
+    transform: none;
   }
 }
 

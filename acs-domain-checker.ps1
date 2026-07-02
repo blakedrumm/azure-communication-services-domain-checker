@@ -12078,14 +12078,17 @@ button.primary:disabled {
   font-size: 11px;
   min-width: 180px;
   max-width: 280px;
-  z-index: 10;
+  /* Above the sticky #domainTabs bar (z-index 50) so the tooltip is never
+     clipped behind it. This only works because result cards are not persistent
+     stacking contexts at rest (see .result-card-prep / resultSectionFadeIn),
+     letting this z-index compete at the root level. */
+  z-index: 250;
   opacity: 0;
   visibility: hidden;
   transition: opacity 120ms ease, visibility 120ms ease;
   pointer-events: none;
   white-space: normal;
 }
-.info-dot:focus::after,
 .info-dot:focus-visible::after,
 .info-dot:hover::after,
 .info-dot.info-open::after {
@@ -13892,7 +13895,10 @@ ul.guidance li {
   .cards > .card.result-card-prep {
     opacity: 0;
     transform: translateY(24px);
-    will-change: opacity, transform;
+    /* NOTE: intentionally no `will-change` here. It is only a perf hint and,
+       because it lists transform/opacity, it would make every card a permanent
+       stacking context -- which traps hover tooltips (.info-dot::after) beneath
+       the sticky #domainTabs bar. The reveal animation is smooth without it. */
   }
 
   .cards > .card.result-card-prep.result-card-in {
@@ -13908,7 +13914,9 @@ ul.guidance li {
 
   to {
     opacity: 1;
-    transform: translateY(0);
+    /* `none` (not translateY(0)) so the finished card is not left as a stacking
+       context, which would clip .info-dot tooltips under the sticky tab bar. */
+    transform: none;
   }
 }
 
@@ -22290,6 +22298,46 @@ document.addEventListener('mouseenter', (e) => {
   }
 }, true);
 
+// Info-dot ("i") tooltip open/close behavior:
+//   - Click the icon to TOGGLE the bubble open/closed.
+//   - Moving the pointer off the icon closes a click-opened bubble (the bubble
+//     itself is pointer-events:none, so leaving the icon = leaving the tooltip).
+//   - Clicking anywhere else, or pressing Escape, closes it.
+// Hover still shows it (CSS :hover) and keyboard focus shows it (CSS
+// :focus-visible) for accessibility. The click handler runs in the CAPTURE
+// phase so clicking an info-dot inside a collapsible card header toggles the
+// tooltip WITHOUT also toggling the card.
+function closeAllInfoDots(except) {
+  document.querySelectorAll('.info-dot.info-open').forEach(d => {
+    if (d === except) return;
+    d.classList.remove('info-open');
+    if (d.matches(':focus')) d.blur();
+  });
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.info-dot') : null;
+  // Any click closes tooltips other than the one being clicked.
+  closeAllInfoDots(btn);
+  if (!btn) return;
+  // Prevent the click from reaching parent handlers (e.g. toggleCard on a header).
+  e.preventDefault();
+  e.stopPropagation();
+  const willOpen = !btn.classList.contains('info-open');
+  btn.classList.toggle('info-open', willOpen);
+  if (!willOpen) btn.blur(); // closing: drop focus so :focus-visible can't keep it open
+}, true);
+
+// Close a click-opened tooltip once the pointer leaves its icon.
+document.addEventListener('mouseout', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('.info-dot') : null;
+  if (!btn || !btn.classList.contains('info-open')) return;
+  const to = e.relatedTarget;
+  if (to && btn.contains(to)) return; // still moving within the icon
+  btn.classList.remove('info-open');
+  if (btn.matches(':focus')) btn.blur();
+});
+
 document.addEventListener('click', (e) => {
   const dropdown = document.getElementById('languageDropdown');
   if (!dropdown) return;
@@ -22301,6 +22349,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeLanguageMenu();
+    closeAllInfoDots(null);
   }
 });
 
@@ -26448,9 +26497,17 @@ function render(r) {
   const plainTable = [];
   const htmlTableRows = [];
   const addRow = (name, value) => { htmlTableRows.push(`<tr><th>${escapeHtml(name)}</th><td>${escapeHtml(value)}</td></tr>`); };
+  // Overall Email Quota verdict (mirrors the top status line) shown at the top of
+  // the copied report, just above Domain Status.
+  const quotaVerdict = getDomainQuotaStatus(r);
+  const quotaVerdictText = quotaVerdict === 'pass' ? t('passing')
+    : quotaVerdict === 'warn' ? t('warningState')
+    : quotaVerdict === 'fail' ? t('failed')
+    : t('pending');
   plainTable.push('| Field | Value |');
   plainTable.push('| --- | --- |');
   plainTable.push(`| ${t('domainNameLabel')} | ${domainForCopy || t('unknown')} |`);
+  plainTable.push(`| ${t('emailQuota')} | ${quotaVerdictText} |`);
   plainTable.push(`| ${t('domainStatusLabel')} | ${domainStatusText} |`);
   plainTable.push(`| ${t('mxRecordsLabel')} | ${mxStatusText || t('unknown')}${mxCopyDetail ? ` - ${mxCopyDetail}` : ''} |`);
   plainTable.push(`| ${t('domainAgeLabel')} | ${ageText} |`);
@@ -26482,6 +26539,7 @@ function render(r) {
   })();
   plainTable.push(`| ${t('pageLinkLabel')} | ${reportLinkUrl} |`);
   addRow(t('domainNameLabel'), domainForCopy || t('unknown'));
+  addRow(t('emailQuota'), quotaVerdictText);
   addRow(t('domainStatusLabel'), domainStatusText);
   addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
   addRow(t('domainAgeLabel'), ageText);

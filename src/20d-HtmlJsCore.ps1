@@ -3866,9 +3866,17 @@ function render(r) {
   const plainTable = [];
   const htmlTableRows = [];
   const addRow = (name, value) => { htmlTableRows.push(`<tr><th>${escapeHtml(name)}</th><td>${escapeHtml(value)}</td></tr>`); };
+  // Overall Email Quota verdict (mirrors the top status line) shown at the top of
+  // the copied report, just above Domain Status.
+  const quotaVerdict = getDomainQuotaStatus(r);
+  const quotaVerdictText = quotaVerdict === 'pass' ? t('passing')
+    : quotaVerdict === 'warn' ? t('warningState')
+    : quotaVerdict === 'fail' ? t('failed')
+    : t('pending');
   plainTable.push('| Field | Value |');
   plainTable.push('| --- | --- |');
   plainTable.push(`| ${t('domainNameLabel')} | ${domainForCopy || t('unknown')} |`);
+  plainTable.push(`| ${t('emailQuota')} | ${quotaVerdictText} |`);
   plainTable.push(`| ${t('domainStatusLabel')} | ${domainStatusText} |`);
   plainTable.push(`| ${t('mxRecordsLabel')} | ${mxStatusText || t('unknown')}${mxCopyDetail ? ` - ${mxCopyDetail}` : ''} |`);
   plainTable.push(`| ${t('domainAgeLabel')} | ${ageText} |`);
@@ -3900,6 +3908,7 @@ function render(r) {
   })();
   plainTable.push(`| ${t('pageLinkLabel')} | ${reportLinkUrl} |`);
   addRow(t('domainNameLabel'), domainForCopy || t('unknown'));
+  addRow(t('emailQuota'), quotaVerdictText);
   addRow(t('domainStatusLabel'), domainStatusText);
   addRow(t('mxRecordsLabel'), `${mxStatusText || t('unknown')}${mxCopyDetail ? ' - ' + mxCopyDetail : ''}`);
   addRow(t('domainAgeLabel'), ageText);
