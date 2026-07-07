@@ -1677,7 +1677,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
 # SECURITY: Uses Local\ scope (session-local) instead of Global\ to prevent cross-user
 # mutex squatting. A malicious low-privilege account cannot pre-create the Global mutex
 # and deny service to the metrics persistence layer.
-function Acquire-MetricsFileMutex {
+function Lock-MetricsFileMutex {
   param([int]$TimeoutMs = 5000)
 
   $names = @(
@@ -1724,7 +1724,7 @@ function Get-HashedDomain {
 }
 
 # Handle an incoming HTTP request to /api/metrics. Returns the current anonymous metrics snapshot.
-function Handle-MetricsRequest {
+function Invoke-MetricsRequest {
   param($Context, [bool]$MetricsEnabled)
 
   $snap = $null
@@ -1930,7 +1930,7 @@ function Write-AcsLogEvent {
 
   try {
 	if (-not (Test-AcsLogLevelEnabled -Level $Level)) { return }
-	$event = @{
+	$logEvent = @{
 	  timestampUtc = [DateTimeOffset]::UtcNow.ToString('o')
 	  level = $Level
 	  app = $script:AcsLogAppName
@@ -1944,14 +1944,14 @@ function Write-AcsLogEvent {
 	  errorCode = $ErrorCode
 	}
 	if ($Fields) {
-	  foreach ($k in $Fields.Keys) { $event[$k] = $Fields[$k] }
+	  foreach ($k in $Fields.Keys) { $logEvent[$k] = $Fields[$k] }
 	}
 	if ($Exception) {
 	  $summary = Get-AcsSafeExceptionSummary -Exception $Exception -ErrorCode $ErrorCode
-	  foreach ($k in $summary.Keys) { $event[$k] = $summary[$k] }
+	  foreach ($k in $summary.Keys) { $logEvent[$k] = $summary[$k] }
 	}
 
-	$safe = ConvertTo-AcsAllowedLogEvent -Fields $event
+	$safe = ConvertTo-AcsAllowedLogEvent -Fields $logEvent
 	$json = $safe | ConvertTo-Json -Compress -Depth 3
 	if ([string]::IsNullOrWhiteSpace($json)) { return }
 
@@ -3408,8 +3408,8 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
     try {
       if ($null -eq $script:ConsoleCancelHandler) {
         $script:ConsoleCancelHandler = [System.ConsoleCancelEventHandler]{
-          param($sender, $eventArgs)
-          $eventArgs.Cancel = $true
+          param($eventSender, $cancelArgs)
+          $cancelArgs.Cancel = $true
           $script:ShutdownRequested = $true
           try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
           try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }
@@ -3596,14 +3596,14 @@ function ConvertTo-Iso8601Utc {
 # Load previously persisted anonymous metrics from the JSON file on disk.
 # Restores lifetime counters, the hash key, and unique domain hash sets so that
 # metrics survive process restarts.
-function Load-AnonymousMetricsPersisted {
+function Import-AnonymousMetricsPersisted {
   $enabled = ($env:ACS_ENABLE_ANON_METRICS -eq '1') -or ($true -eq $AcsAnonMetricsEnabled) -or ($script:EnableAnonymousMetrics -eq $true)
   if (-not $enabled) { return }
 
   $path = Get-AnonymousMetricsPersistPath
   if ([string]::IsNullOrWhiteSpace($path)) { return }
 
-  $mtx = Acquire-MetricsFileMutex
+  $mtx = Lock-MetricsFileMutex
   if (-not $mtx) { return }
 
   $nowUtc = [DateTime]::UtcNow.ToString('o')
@@ -3728,7 +3728,7 @@ function Save-AnonymousMetricsPersisted {
   $path = Get-AnonymousMetricsPersistPath
   if ([string]::IsNullOrWhiteSpace($path)) { return }
 
-  $mtx = Acquire-MetricsFileMutex
+  $mtx = Lock-MetricsFileMutex
   if (-not $mtx) { return }
 
   $now = [DateTime]::UtcNow
@@ -4240,7 +4240,7 @@ function Get-AnonymousMetricsSnapshot {
   try {
     $path = Get-AnonymousMetricsPersistPath
     if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
-      $mtx = Acquire-MetricsFileMutex
+      $mtx = Lock-MetricsFileMutex
       if ($mtx) {
         try {
           $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
@@ -4317,7 +4317,7 @@ function Get-AnonymousMetricsSnapshot {
 # Initialize persisted metrics once at startup (only when enabled).
 if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
   try {
-    Load-AnonymousMetricsPersisted
+    Import-AnonymousMetricsPersisted
 
     if ([string]::IsNullOrWhiteSpace($script:AcsMetrics['lifetimeFirstSeenUtc'])) {
       $script:AcsMetrics['lifetimeFirstSeenUtc'] = ([DateTime]::UtcNow.ToString('o'))
@@ -4989,8 +4989,8 @@ function Get-DohDnssecAnomaly {
         $text = [string]$comment
         if ([string]::IsNullOrWhiteSpace($text)) { continue }
 
-        $matches = [regex]::Matches($text, 'EDE\s*\(?\s*(\d+)\s*\)?\s*:\s*([^\r\n]*)')
-        foreach ($match in $matches) {
+        $edeMatches = [regex]::Matches($text, 'EDE\s*\(?\s*(\d+)\s*\)?\s*:\s*([^\r\n]*)')
+        foreach ($match in $edeMatches) {
           $code = $null
           try { $code = [int]$match.Groups[1].Value } catch { $code = $null }
           $extra = $null
@@ -7060,7 +7060,7 @@ function Get-SpfOutlookRequirementStatus {
     }
   }
 
-  $error = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
+  $requirementError = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
     "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
   } else {
     "SPF for $targetDomain does not include include:spf.protection.outlook.com in the expanded SPF chain. This is required for ACS SPF validation."
@@ -7070,7 +7070,7 @@ function Get-SpfOutlookRequirementStatus {
     isPresent = $false
     matchType = 'not-found'
     detail = 'Did not find include:spf.protection.outlook.com in the expanded SPF chain.'
-    error = $error
+    error = $requirementError
   }
 }
 
@@ -7156,7 +7156,7 @@ function Get-SpfNestedAnalysis {
 
           if ($includeRecord) {
             $includeResult = Get-SpfNestedAnalysis -SpfRecord $includeRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
-            if ($includeResult -and $includeResult.totalLookupTerms -ne $null) {
+            if ($includeResult -and $null -ne $includeResult.totalLookupTerms) {
               $nestedLookupTerms += [int]$includeResult.totalLookupTerms
             }
           }
@@ -7221,7 +7221,7 @@ function Get-SpfNestedAnalysis {
 
           if ($redirectRecord) {
             $redirectAnalysis = Get-SpfNestedAnalysis -SpfRecord $redirectRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
-            if ($redirectAnalysis -and $redirectAnalysis.totalLookupTerms -ne $null) {
+            if ($redirectAnalysis -and $null -ne $redirectAnalysis.totalLookupTerms) {
               $nestedLookupTerms += [int]$redirectAnalysis.totalLookupTerms
             }
           }
@@ -7459,10 +7459,10 @@ function Format-SpfNestedAnalysisText {
   if ($Analysis.record) {
     $lines.Add("${indent}Record: $([string]$Analysis.record)")
   }
-  if ($Analysis.lookupTerms -ne $null) {
+  if ($null -ne $Analysis.lookupTerms) {
     $lines.Add("${indent}Lookup-style terms: $([string]$Analysis.lookupTerms)")
   }
-  if ($Analysis.totalLookupTerms -ne $null -and [int]$Analysis.totalLookupTerms -ne [int]$Analysis.lookupTerms) {
+  if ($null -ne $Analysis.totalLookupTerms -and [int]$Analysis.totalLookupTerms -ne [int]$Analysis.lookupTerms) {
     $lines.Add("${indent}Expanded-chain lookup terms: $([string]$Analysis.totalLookupTerms)")
   }
   foreach ($macro in @($Analysis.macros)) {
@@ -31042,8 +31042,8 @@ $functionNames = @(
   'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Write-AcsLogEvent','Write-AcsLogException',
   'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
-  'Get-HashedDomain','Handle-MetricsRequest','Acquire-MetricsFileMutex',
-  'Get-AnonymousMetricsPersistPath','Load-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions','ConvertTo-Iso8601Utc',
+  'Get-HashedDomain','Invoke-MetricsRequest','Lock-MetricsFileMutex',
+  'Get-AnonymousMetricsPersistPath','Import-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions','ConvertTo-Iso8601Utc',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
@@ -31422,7 +31422,7 @@ if ($metricsEnabled) {
 
   # 1b) Metrics endpoint handled by caller (fast-path in main loop). Keep here as safety net only.
   if ($path -eq "/api/metrics") {
-    Handle-MetricsRequest -Context $ctx -MetricsEnabled $metricsEnabled
+    Invoke-MetricsRequest -Context $ctx -MetricsEnabled $metricsEnabled
     return
   }
 
@@ -32022,7 +32022,7 @@ try {
             continue
           }
           # Respond inline (fast and avoids ThreadPool runspace issues).
-          Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
+          Invoke-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
         }
 
@@ -32095,7 +32095,7 @@ try {
             Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $metricsRate.retryAfterSec } -StatusCode 429
             continue
           }
-          Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
+          Invoke-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
         }
 

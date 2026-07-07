@@ -209,8 +209,8 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
     try {
       if ($null -eq $script:ConsoleCancelHandler) {
         $script:ConsoleCancelHandler = [System.ConsoleCancelEventHandler]{
-          param($sender, $eventArgs)
-          $eventArgs.Cancel = $true
+          param($eventSender, $cancelArgs)
+          $cancelArgs.Cancel = $true
           $script:ShutdownRequested = $true
           try { if ($script:AcsServerHttpListener -and $script:AcsServerHttpListener.IsListening) { $script:AcsServerHttpListener.Stop() } } catch { }
           try { if ($script:AcsServerTcpListener) { $script:AcsServerTcpListener.Stop() } } catch { }

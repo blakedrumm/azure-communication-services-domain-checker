@@ -177,7 +177,7 @@ function Write-AcsLogEvent {
 
   try {
 	if (-not (Test-AcsLogLevelEnabled -Level $Level)) { return }
-	$event = @{
+	$logEvent = @{
 	  timestampUtc = [DateTimeOffset]::UtcNow.ToString('o')
 	  level = $Level
 	  app = $script:AcsLogAppName
@@ -191,14 +191,14 @@ function Write-AcsLogEvent {
 	  errorCode = $ErrorCode
 	}
 	if ($Fields) {
-	  foreach ($k in $Fields.Keys) { $event[$k] = $Fields[$k] }
+	  foreach ($k in $Fields.Keys) { $logEvent[$k] = $Fields[$k] }
 	}
 	if ($Exception) {
 	  $summary = Get-AcsSafeExceptionSummary -Exception $Exception -ErrorCode $ErrorCode
-	  foreach ($k in $summary.Keys) { $event[$k] = $summary[$k] }
+	  foreach ($k in $summary.Keys) { $logEvent[$k] = $summary[$k] }
 	}
 
-	$safe = ConvertTo-AcsAllowedLogEvent -Fields $event
+	$safe = ConvertTo-AcsAllowedLogEvent -Fields $logEvent
 	$json = $safe | ConvertTo-Json -Compress -Depth 3
 	if ([string]::IsNullOrWhiteSpace($json)) { return }
 

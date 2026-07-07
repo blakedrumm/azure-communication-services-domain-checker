@@ -227,8 +227,8 @@ function Get-DohDnssecAnomaly {
         $text = [string]$comment
         if ([string]::IsNullOrWhiteSpace($text)) { continue }
 
-        $matches = [regex]::Matches($text, 'EDE\s*\(?\s*(\d+)\s*\)?\s*:\s*([^\r\n]*)')
-        foreach ($match in $matches) {
+        $edeMatches = [regex]::Matches($text, 'EDE\s*\(?\s*(\d+)\s*\)?\s*:\s*([^\r\n]*)')
+        foreach ($match in $edeMatches) {
           $code = $null
           try { $code = [int]$match.Groups[1].Value } catch { $code = $null }
           $extra = $null

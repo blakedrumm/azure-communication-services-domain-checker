@@ -44,7 +44,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
 # SECURITY: Uses Local\ scope (session-local) instead of Global\ to prevent cross-user
 # mutex squatting. A malicious low-privilege account cannot pre-create the Global mutex
 # and deny service to the metrics persistence layer.
-function Acquire-MetricsFileMutex {
+function Lock-MetricsFileMutex {
   param([int]$TimeoutMs = 5000)
 
   $names = @(
@@ -91,7 +91,7 @@ function Get-HashedDomain {
 }
 
 # Handle an incoming HTTP request to /api/metrics. Returns the current anonymous metrics snapshot.
-function Handle-MetricsRequest {
+function Invoke-MetricsRequest {
   param($Context, [bool]$MetricsEnabled)
 
   $snap = $null

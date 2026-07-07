@@ -145,14 +145,14 @@ function ConvertTo-Iso8601Utc {
 # Load previously persisted anonymous metrics from the JSON file on disk.
 # Restores lifetime counters, the hash key, and unique domain hash sets so that
 # metrics survive process restarts.
-function Load-AnonymousMetricsPersisted {
+function Import-AnonymousMetricsPersisted {
   $enabled = ($env:ACS_ENABLE_ANON_METRICS -eq '1') -or ($true -eq $AcsAnonMetricsEnabled) -or ($script:EnableAnonymousMetrics -eq $true)
   if (-not $enabled) { return }
 
   $path = Get-AnonymousMetricsPersistPath
   if ([string]::IsNullOrWhiteSpace($path)) { return }
 
-  $mtx = Acquire-MetricsFileMutex
+  $mtx = Lock-MetricsFileMutex
   if (-not $mtx) { return }
 
   $nowUtc = [DateTime]::UtcNow.ToString('o')
@@ -277,7 +277,7 @@ function Save-AnonymousMetricsPersisted {
   $path = Get-AnonymousMetricsPersistPath
   if ([string]::IsNullOrWhiteSpace($path)) { return }
 
-  $mtx = Acquire-MetricsFileMutex
+  $mtx = Lock-MetricsFileMutex
   if (-not $mtx) { return }
 
   $now = [DateTime]::UtcNow

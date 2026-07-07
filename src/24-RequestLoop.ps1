@@ -334,7 +334,7 @@ try {
             continue
           }
           # Respond inline (fast and avoids ThreadPool runspace issues).
-          Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
+          Invoke-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
         }
 
@@ -407,7 +407,7 @@ try {
             Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $metricsRate.retryAfterSec } -StatusCode 429
             continue
           }
-          Handle-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
+          Invoke-MetricsRequest -Context $ctx -MetricsEnabled $anonMetricsEnabled
           continue
         }
 

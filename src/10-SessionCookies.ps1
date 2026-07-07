@@ -351,7 +351,7 @@ function Get-AnonymousMetricsSnapshot {
   try {
     $path = Get-AnonymousMetricsPersistPath
     if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
-      $mtx = Acquire-MetricsFileMutex
+      $mtx = Lock-MetricsFileMutex
       if ($mtx) {
         try {
           $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
@@ -428,7 +428,7 @@ function Get-AnonymousMetricsSnapshot {
 # Initialize persisted metrics once at startup (only when enabled).
 if ($env:ACS_ENABLE_ANON_METRICS -eq '1') {
   try {
-    Load-AnonymousMetricsPersisted
+    Import-AnonymousMetricsPersisted
 
     if ([string]::IsNullOrWhiteSpace($script:AcsMetrics['lifetimeFirstSeenUtc'])) {
       $script:AcsMetrics['lifetimeFirstSeenUtc'] = ([DateTime]::UtcNow.ToString('o'))

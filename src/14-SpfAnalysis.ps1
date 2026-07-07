@@ -704,7 +704,7 @@ function Get-SpfOutlookRequirementStatus {
     }
   }
 
-  $error = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
+  $requirementError = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
     "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
   } else {
     "SPF for $targetDomain does not include include:spf.protection.outlook.com in the expanded SPF chain. This is required for ACS SPF validation."
@@ -714,7 +714,7 @@ function Get-SpfOutlookRequirementStatus {
     isPresent = $false
     matchType = 'not-found'
     detail = 'Did not find include:spf.protection.outlook.com in the expanded SPF chain.'
-    error = $error
+    error = $requirementError
   }
 }
 
@@ -800,7 +800,7 @@ function Get-SpfNestedAnalysis {
 
           if ($includeRecord) {
             $includeResult = Get-SpfNestedAnalysis -SpfRecord $includeRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
-            if ($includeResult -and $includeResult.totalLookupTerms -ne $null) {
+            if ($includeResult -and $null -ne $includeResult.totalLookupTerms) {
               $nestedLookupTerms += [int]$includeResult.totalLookupTerms
             }
           }
@@ -865,7 +865,7 @@ function Get-SpfNestedAnalysis {
 
           if ($redirectRecord) {
             $redirectAnalysis = Get-SpfNestedAnalysis -SpfRecord $redirectRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
-            if ($redirectAnalysis -and $redirectAnalysis.totalLookupTerms -ne $null) {
+            if ($redirectAnalysis -and $null -ne $redirectAnalysis.totalLookupTerms) {
               $nestedLookupTerms += [int]$redirectAnalysis.totalLookupTerms
             }
           }
@@ -1103,10 +1103,10 @@ function Format-SpfNestedAnalysisText {
   if ($Analysis.record) {
     $lines.Add("${indent}Record: $([string]$Analysis.record)")
   }
-  if ($Analysis.lookupTerms -ne $null) {
+  if ($null -ne $Analysis.lookupTerms) {
     $lines.Add("${indent}Lookup-style terms: $([string]$Analysis.lookupTerms)")
   }
-  if ($Analysis.totalLookupTerms -ne $null -and [int]$Analysis.totalLookupTerms -ne [int]$Analysis.lookupTerms) {
+  if ($null -ne $Analysis.totalLookupTerms -and [int]$Analysis.totalLookupTerms -ne [int]$Analysis.lookupTerms) {
     $lines.Add("${indent}Expanded-chain lookup terms: $([string]$Analysis.totalLookupTerms)")
   }
   foreach ($macro in @($Analysis.macros)) {

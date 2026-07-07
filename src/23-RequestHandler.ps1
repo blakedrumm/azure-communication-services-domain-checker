@@ -239,7 +239,7 @@ if ($metricsEnabled) {
 
   # 1b) Metrics endpoint handled by caller (fast-path in main loop). Keep here as safety net only.
   if ($path -eq "/api/metrics") {
-    Handle-MetricsRequest -Context $ctx -MetricsEnabled $metricsEnabled
+    Invoke-MetricsRequest -Context $ctx -MetricsEnabled $metricsEnabled
     return
   }
 
