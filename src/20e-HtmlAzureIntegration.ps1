@@ -357,6 +357,9 @@ function updateAuthUI(authData) {
 
 </script>
 
-</body>
-</html>
 '@
+# NOTE: The document-closing </body></html> tags are intentionally NOT emitted
+# here. They are appended by 20g-HtmlAccessibility.ps1 (the last file to touch
+# $htmlPage) so the dedicated accessibility <style>/<script> layer can be
+# injected immediately before </body>. If you add UI markup after this point,
+# it must go in 20g (before the closing tags), not here.

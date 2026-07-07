@@ -458,7 +458,7 @@ Customize the application behavior using these environment variables:
 |----------|---------|-------------|
 | `PORT` | `8080` | Port for the web listener |
 | `ACS_API_KEY` | _(none)_ | API key for securing `/api/*` and `/dns` endpoints |
-| `ACS_RATE_LIMIT_PER_MIN` | `60` | Maximum requests per minute per client IP (set to `0` to disable) |
+| `ACS_RATE_LIMIT_PER_MIN` | `240` | Maximum requests per minute per client IP (set to `0` to disable). Sized for multi-domain sweeps (up to 10 domains × ~10 endpoints ≈ 100 requests) |
 | `ACS_APP_VERSION` | _(from script)_ | Override the displayed application version string |
 
 ### 🔍 DNS Resolution
@@ -556,7 +556,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
 # Windows PowerShell - comprehensive example
 $env:PORT = "9000"
 $env:ACS_API_KEY = "my-secret-key"
-$env:ACS_RATE_LIMIT_PER_MIN = "30"
+$env:ACS_RATE_LIMIT_PER_MIN = "300"
 $env:ACS_ENABLE_ANON_METRICS = "1"
 $env:ACS_DNS_RESOLVER = "DoH"
 $env:ACS_WHOISXML_API_KEY = "your-whoisxml-key"
@@ -568,7 +568,7 @@ $env:ACS_ISSUE_URL = "https://github.com/blakedrumm/azure-communication-services
 # Linux/macOS - comprehensive example
 export PORT=9000
 export ACS_API_KEY=my-secret-key
-export ACS_RATE_LIMIT_PER_MIN=30
+export ACS_RATE_LIMIT_PER_MIN=300
 export ACS_ENABLE_ANON_METRICS=1
 export ACS_DNS_RESOLVER=DoH
 export ACS_WHOISXML_API_KEY=your-whoisxml-key
@@ -686,7 +686,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.10.0`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.10.1`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -709,8 +709,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.10.0
-git push origin v2.10.0
+git tag v2.10.1
+git push origin v2.10.1
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -721,7 +721,7 @@ git push origin v2.10.0
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.10.0`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.10.1`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -738,11 +738,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.10.0
+docker pull limitlessworlds/acs-domain-checker:2.10.1
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.10.0
-docker pull limitlessworlds/acs-domain-checker:windows-2.10.0
+docker pull limitlessworlds/acs-domain-checker:linux-2.10.1
+docker pull limitlessworlds/acs-domain-checker:windows-2.10.1
 ```
 
 ### 🛠️ Manual Build Script
@@ -757,7 +757,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.10.0
+./acs-domain-checker-dockerhub.ps1 -Version 2.10.1
 ```
 
 **📋 Requirements for manual script:**

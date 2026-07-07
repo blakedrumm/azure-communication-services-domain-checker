@@ -203,20 +203,93 @@ function Invoke-OutboundHttp {
   if ($TimeoutSec -le 0) { $TimeoutSec = 15 }
   if ($MaximumRedirection -lt 0) { $MaximumRedirection = 0 }
 
-  $params = @{
-    Uri                 = $Uri
-    Method              = $Method
-    TimeoutSec          = $TimeoutSec
-    MaximumRedirection  = $MaximumRedirection
-    ErrorAction         = 'Stop'
-  }
-  if ($Headers -and $Headers.Count -gt 0) { $params.Headers = $Headers }
+  # SECURITY (redirect SSRF hardening): We never let Invoke-WebRequest /
+  # Invoke-RestMethod auto-follow redirects, because their internal redirect
+  # handling gives us no chance to inspect intermediate hops. A compromised or
+  # malicious upstream (e.g. a registry RDAP server) could answer with a 3xx
+  # that points at an internal service. Instead we follow redirects MANUALLY,
+  # one hop at a time, and re-validate every redirect TARGET with the same
+  # public-IP guard the website probe uses (Test-WebsiteHostIsPublic) before we
+  # connect to it.
+  #
+  # Design notes (kept deliberately behavior-preserving):
+  #  * Only redirect TARGETS are IP-validated. The initial $Uri is the
+  #    operator-configured endpoint (DoH resolver, IANA/RDAP bootstrap, WHOIS
+  #    API); validating it would break legitimate internal / split-horizon
+  #    resolvers, so it is intentionally exempt (it already passed the
+  #    https-only + absolute-URI checks above).
+  #  * Each hop is issued with -MaximumRedirection 0. For a normal (non-redirect)
+  #    2xx response this is IDENTICAL to the previous -MaximumRedirection N call,
+  #    so the common path that every DoH / RDAP / WHOIS lookup takes is
+  #    unchanged: the final response is still fetched and deserialized by
+  #    Invoke-RestMethod (or returned raw by Invoke-WebRequest) exactly as
+  #    before, and non-redirect errors propagate unchanged.
+  #  * A 3xx surfaces as a terminating error (verified on PowerShell 7:
+  #    HttpResponseException with .Response = HttpResponseMessage; on Windows
+  #    PowerShell 5.1: WebException with .Response = HttpWebResponse). We read
+  #    the Location from either shape, validate it, and follow.
+  $currentUri = $Uri
+  $redirectsRemaining = $MaximumRedirection
 
-  if ($ReturnRaw) {
-    $params.UseBasicParsing = $true
-    return Invoke-WebRequest @params
+  while ($true) {
+    $params = @{
+      Uri                = $currentUri
+      Method             = $Method
+      TimeoutSec         = $TimeoutSec
+      MaximumRedirection = 0
+      ErrorAction        = 'Stop'
+    }
+    if ($Headers -and $Headers.Count -gt 0) { $params.Headers = $Headers }
+
+    try {
+      if ($ReturnRaw) {
+        $params.UseBasicParsing = $true
+        return Invoke-WebRequest @params
+      }
+      return Invoke-RestMethod @params
+    }
+    catch {
+      # If we have no redirect budget left, or this was not a redirect, preserve
+      # the ORIGINAL error exactly as callers' existing try/catch flow expects.
+      if ($redirectsRemaining -le 0) { throw }
+
+      $resp = $null
+      try { $resp = $_.Exception.Response } catch { $resp = $null }
+      if ($null -eq $resp) { throw }
+
+      $statusCode = $null
+      try { $statusCode = [int]$resp.StatusCode } catch { $statusCode = $null }
+      if ($null -eq $statusCode -or $statusCode -lt 300 -or $statusCode -ge 400) { throw }
+
+      # Extract the Location header across PowerShell editions:
+      #  - PS 7+  : HttpResponseMessage -> .Headers.Location (a [uri])
+      #  - PS 5.1 : HttpWebResponse     -> .Headers['Location'] (a [string])
+      $location = $null
+      try { if ($resp.Headers -and $resp.Headers.Location) { $location = [string]$resp.Headers.Location } } catch { $location = $null }
+      if ([string]::IsNullOrWhiteSpace($location)) {
+        try { $location = [string]$resp.Headers['Location'] } catch { $location = $null }
+      }
+      # A redirect with no usable Location is not something we can safely follow.
+      if ([string]::IsNullOrWhiteSpace($location)) { throw }
+
+      # Resolve relative -> absolute against the current URL, then enforce the
+      # same https-only + public-target guards on the redirect destination.
+      $target = $null
+      try { $target = [uri]::new([uri]$currentUri, [string]$location) }
+      catch { throw "Invoke-OutboundHttp: malformed redirect target from '$currentUri'." }
+      if ($target.Scheme -ne 'https') {
+        throw "Invoke-OutboundHttp: refused non-https redirect target ('$($target.Scheme)')."
+      }
+      $hostCheck = Test-WebsiteHostIsPublic -HostName $target.Host
+      if (-not $hostCheck.isPublic) {
+        throw "Invoke-OutboundHttp: refused redirect to a non-public target."
+      }
+
+      # Validated: follow this hop.
+      $currentUri = $target.AbsoluteUri
+      $redirectsRemaining--
+    }
   }
-  return Invoke-RestMethod @params
 }
 
 # Serialize an object to JSON and write it as the HTTP response body.

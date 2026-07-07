@@ -59,7 +59,7 @@
   - ACS_ENTRA_TENANT_ID          : Optional tenant ID or domain (e.g., contoso.onmicrosoft.com) for Entra ID authority.
   - ACS_API_KEY                  : Optional API key required for /api/* and /dns endpoints (send via X-Api-Key header).
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
-  - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 60; set to 0 to disable).
+  - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 240; set to 0 to disable).
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
                                    Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
@@ -166,8 +166,17 @@ $script:DnsResolverMode = $DnsResolver
 # Use env vars for settings that must be visible inside request handler runspaces.
 $env:ACS_DNS_RESOLVER = $DnsResolver
 
-# Configure per-client rate limiting (default: 60 requests/minute). A value of 0 disables rate limiting.
-$rateLimitPerMinute = 60
+# Configure per-client rate limiting. A value of 0 disables rate limiting.
+#
+# Default is 240 requests/minute per client IP. This is sized for the SPA's
+# multi-domain lookup feature: a single sweep checks up to MAX_LOOKUP_DOMAINS
+# (10) domains and fans out to ~10 backend endpoints per domain (base, mx,
+# records, whois, dmarc, dkim, cname, reputation, website, nameservers) =
+# ~100 requests. The shared per-IP bucket counts every endpoint call, so the
+# previous cap of 60 throttled a legitimate 10-domain sweep partway through.
+# 240 leaves headroom for metrics/auth calls plus a follow-up sweep while still
+# bounding abusive volumes of expensive WHOIS/DNSBL lookups.
+$rateLimitPerMinute = 240
 if ($env:ACS_RATE_LIMIT_PER_MIN -and $env:ACS_RATE_LIMIT_PER_MIN -match '^\d+$') {
   $rateLimitPerMinute = [int]$env:ACS_RATE_LIMIT_PER_MIN
 }
@@ -1656,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.10.0'
+$script:AppVersion = '2.10.1'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -4526,20 +4535,93 @@ function Invoke-OutboundHttp {
   if ($TimeoutSec -le 0) { $TimeoutSec = 15 }
   if ($MaximumRedirection -lt 0) { $MaximumRedirection = 0 }
 
-  $params = @{
-    Uri                 = $Uri
-    Method              = $Method
-    TimeoutSec          = $TimeoutSec
-    MaximumRedirection  = $MaximumRedirection
-    ErrorAction         = 'Stop'
-  }
-  if ($Headers -and $Headers.Count -gt 0) { $params.Headers = $Headers }
+  # SECURITY (redirect SSRF hardening): We never let Invoke-WebRequest /
+  # Invoke-RestMethod auto-follow redirects, because their internal redirect
+  # handling gives us no chance to inspect intermediate hops. A compromised or
+  # malicious upstream (e.g. a registry RDAP server) could answer with a 3xx
+  # that points at an internal service. Instead we follow redirects MANUALLY,
+  # one hop at a time, and re-validate every redirect TARGET with the same
+  # public-IP guard the website probe uses (Test-WebsiteHostIsPublic) before we
+  # connect to it.
+  #
+  # Design notes (kept deliberately behavior-preserving):
+  #  * Only redirect TARGETS are IP-validated. The initial $Uri is the
+  #    operator-configured endpoint (DoH resolver, IANA/RDAP bootstrap, WHOIS
+  #    API); validating it would break legitimate internal / split-horizon
+  #    resolvers, so it is intentionally exempt (it already passed the
+  #    https-only + absolute-URI checks above).
+  #  * Each hop is issued with -MaximumRedirection 0. For a normal (non-redirect)
+  #    2xx response this is IDENTICAL to the previous -MaximumRedirection N call,
+  #    so the common path that every DoH / RDAP / WHOIS lookup takes is
+  #    unchanged: the final response is still fetched and deserialized by
+  #    Invoke-RestMethod (or returned raw by Invoke-WebRequest) exactly as
+  #    before, and non-redirect errors propagate unchanged.
+  #  * A 3xx surfaces as a terminating error (verified on PowerShell 7:
+  #    HttpResponseException with .Response = HttpResponseMessage; on Windows
+  #    PowerShell 5.1: WebException with .Response = HttpWebResponse). We read
+  #    the Location from either shape, validate it, and follow.
+  $currentUri = $Uri
+  $redirectsRemaining = $MaximumRedirection
 
-  if ($ReturnRaw) {
-    $params.UseBasicParsing = $true
-    return Invoke-WebRequest @params
+  while ($true) {
+    $params = @{
+      Uri                = $currentUri
+      Method             = $Method
+      TimeoutSec         = $TimeoutSec
+      MaximumRedirection = 0
+      ErrorAction        = 'Stop'
+    }
+    if ($Headers -and $Headers.Count -gt 0) { $params.Headers = $Headers }
+
+    try {
+      if ($ReturnRaw) {
+        $params.UseBasicParsing = $true
+        return Invoke-WebRequest @params
+      }
+      return Invoke-RestMethod @params
+    }
+    catch {
+      # If we have no redirect budget left, or this was not a redirect, preserve
+      # the ORIGINAL error exactly as callers' existing try/catch flow expects.
+      if ($redirectsRemaining -le 0) { throw }
+
+      $resp = $null
+      try { $resp = $_.Exception.Response } catch { $resp = $null }
+      if ($null -eq $resp) { throw }
+
+      $statusCode = $null
+      try { $statusCode = [int]$resp.StatusCode } catch { $statusCode = $null }
+      if ($null -eq $statusCode -or $statusCode -lt 300 -or $statusCode -ge 400) { throw }
+
+      # Extract the Location header across PowerShell editions:
+      #  - PS 7+  : HttpResponseMessage -> .Headers.Location (a [uri])
+      #  - PS 5.1 : HttpWebResponse     -> .Headers['Location'] (a [string])
+      $location = $null
+      try { if ($resp.Headers -and $resp.Headers.Location) { $location = [string]$resp.Headers.Location } } catch { $location = $null }
+      if ([string]::IsNullOrWhiteSpace($location)) {
+        try { $location = [string]$resp.Headers['Location'] } catch { $location = $null }
+      }
+      # A redirect with no usable Location is not something we can safely follow.
+      if ([string]::IsNullOrWhiteSpace($location)) { throw }
+
+      # Resolve relative -> absolute against the current URL, then enforce the
+      # same https-only + public-target guards on the redirect destination.
+      $target = $null
+      try { $target = [uri]::new([uri]$currentUri, [string]$location) }
+      catch { throw "Invoke-OutboundHttp: malformed redirect target from '$currentUri'." }
+      if ($target.Scheme -ne 'https') {
+        throw "Invoke-OutboundHttp: refused non-https redirect target ('$($target.Scheme)')."
+      }
+      $hostCheck = Test-WebsiteHostIsPublic -HostName $target.Host
+      if (-not $hostCheck.isPublic) {
+        throw "Invoke-OutboundHttp: refused redirect to a non-public target."
+      }
+
+      # Validated: follow this hop.
+      $currentUri = $target.AbsoluteUri
+      $redirectsRemaining--
+    }
   }
-  return Invoke-RestMethod @params
 }
 
 # Serialize an object to JSON and write it as the HTTP response body.
@@ -23024,7 +23106,14 @@ async function runMultiDomainLookup(domains, options = {}) {
     // fromMulti prevents lookup() from resetting the multi state; skipUrlUpdate
     // keeps it from overwriting the multi-domain URL set above. lookup() resolves
     // to the exact result object it populated for this domain.
-    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: false });
+    //
+    // The FIRST (active) domain carries the top-section intro animation when this
+    // sweep was launched as the page bootstrap (options.animateTopIntro). Without
+    // this, a direct multi-domain URL load never reveals the header/search box
+    // (it stays at opacity 0 under body.section-fade-enabled), leaving a blank
+    // top. Subsequent (background) domains never animate the intro.
+    const introForThis = (i === 0) && !!options.animateTopIntro;
+    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: introForThis });
     if (token !== multiRunToken) return;
     // Store the returned object, guarded so a domain's slot only ever holds the
     // result whose .domain matches its key (prevents any cross-domain aliasing).
@@ -30089,9 +30178,12 @@ function updateAuthUI(authData) {
 
 </script>
 
-</body>
-</html>
 '@
+# NOTE: The document-closing </body></html> tags are intentionally NOT emitted
+# here. They are appended by 20g-HtmlAccessibility.ps1 (the last file to touch
+# $htmlPage) so the dedicated accessibility <style>/<script> layer can be
+# injected immediately before </body>. If you add UI markup after this point,
+# it must go in 20g (before the closing tags), not here.
 # ===== HTML Post-Processing (Template Replacements) =====
 #
 # SECURITY: Every replacement target below lands inside a single-quoted
@@ -30192,6 +30284,146 @@ if (-not [string]::IsNullOrWhiteSpace($msalSriRaw)) {
 $msalSriForJsLiteral = $msalSriJson.Replace('\', '\\').Replace("'", "\'")
 $htmlPage = $htmlPage.Replace('__ACS_MSAL_SRI__', $msalSriForJsLiteral)
 
+# ===== HTML Accessibility Layer (CSS + JS) =====
+#
+# PURPOSE
+#   Central, single-file home for the SPA's accessibility (a11y) code so it
+#   lives in one place instead of being scattered across the other 20-* UI
+#   files. This file appends a dedicated, nonce-bound <style> block and a
+#   <script> helper module to the page, then emits the document-closing
+#   </body></html> tags (relocated here from 20e-HtmlAzureIntegration.ps1) so
+#   this accessibility layer lands immediately before </body> -- the correct
+#   place for shared a11y CSS/JS and ARIA live regions.
+#
+# LOAD ORDER / BUILD NOTES
+#   This is the LAST file that appends to $htmlPage. It runs AFTER
+#   20f-HtmlPostProcess.ps1, which performs the build-time "__TOKEN__ -> value"
+#   replacements. Therefore do NOT use build-time template tokens in this file
+#   (__APP_VERSION__, __ENTRA_CLIENT_ID__, __ENTRA_TENANT_ID__, __ACS_API_KEY__,
+#   __ACS_ISSUE_URL__, __ACS_MSAL_SRI__) -- they will not be substituted here.
+#   The request-time __CSP_NONCE__ token IS fine: it is replaced per request in
+#   11-HttpHelpers.ps1 / 23-RequestHandler.ps1 for EVERY occurrence in the page.
+#
+# WHAT DELIBERATELY STAYS IN OTHER FILES
+#   A few a11y attributes are part of static or dynamically-generated markup and
+#   must remain where that markup is authored:
+#     * <label>/aria-label on the search input, the clear (x) button, landmark
+#       roles, heading levels, and the skip-link anchor -> 20a-HtmlScriptSetup.ps1
+#     * ARIA baked into JS-generated result/card templates -> 20c/20d/20e.
+#   This file provides the shared building blocks those call sites rely on:
+#   CSS utilities (.sr-only, .skip-link, forced-colors focus) and JS helpers
+#   (the live-region announcer, window.acsAnnounce).
+
+$htmlPage += @'
+<!-- ===================== Accessibility layer ===================== -->
+<style nonce="__CSP_NONCE__">
+/* Visually-hidden utility. Content stays in the accessibility tree (announced
+   by screen readers) but is removed from the visual layout. Used for the ARIA
+   live-region containers, off-screen labels, and skip-link text. */
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip-to-content link (WCAG 2.4.1 Bypass Blocks). Off-screen until it receives
+   keyboard focus, then it slides into view as the first focusable element on
+   the page. The matching <a class="skip-link"> anchor and its #mainContent
+   target are authored in 20a-HtmlScriptSetup.ps1. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 2000;
+  padding: 10px 16px;
+  background: var(--button-bg);
+  color: var(--button-fg);
+  border-radius: 0 0 6px 0;
+  text-decoration: none;
+  font-size: 14px;
+}
+.skip-link:focus {
+  left: 0;
+}
+
+/* Windows High Contrast / forced-colors mode: guarantee a visible keyboard
+   focus indicator even when the app's custom colors are replaced by the OS.
+   Scoped to :focus-visible so it only shows during keyboard navigation. */
+@media (forced-colors: active) {
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible,
+  [contenteditable="true"]:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+</style>
+
+<script nonce="__CSP_NONCE__">
+(function () {
+  'use strict';
+  // ---------------------------------------------------------------------------
+  // Shared accessibility helpers for the SPA.
+  //
+  // window.acsAnnounce(message, opts): announce a short message to assistive
+  // technology WITHOUT moving keyboard focus, using an ARIA live region. Call
+  // it after asynchronous UI changes that are otherwise only conveyed visually
+  // (e.g. "Results ready for example.com", "Some checks failed") so
+  // screen-reader users are notified.
+  //
+  //   opts.assertive === true -> uses aria-live="assertive" (interrupts the
+  //   current screen-reader output). Reserve this for errors; the default is
+  //   the less disruptive aria-live="polite".
+  // ---------------------------------------------------------------------------
+  var politeRegion = null;
+  var assertiveRegion = null;
+
+  // Lazily create (once per politeness level) an off-screen live region.
+  function ensureRegion(assertive) {
+    var id = assertive ? 'acsA11yLiveAssertive' : 'acsA11yLivePolite';
+    var existing = document.getElementById(id);
+    if (existing) { return existing; }
+    var region = document.createElement('div');
+    region.id = id;
+    region.className = 'sr-only';
+    region.setAttribute('role', 'status');
+    region.setAttribute('aria-live', assertive ? 'assertive' : 'polite');
+    region.setAttribute('aria-atomic', 'true');
+    (document.body || document.documentElement).appendChild(region);
+    return region;
+  }
+
+  function announce(message, opts) {
+    if (!message) { return; }
+    var assertive = !!(opts && opts.assertive);
+    var region = assertive
+      ? (assertiveRegion = assertiveRegion || ensureRegion(true))
+      : (politeRegion = politeRegion || ensureRegion(false));
+    // Clear first, then set the text on a later tick. This re-announces even
+    // identical consecutive messages and gives the screen reader time to
+    // register the (empty) region before the text is injected into it.
+    region.textContent = '';
+    window.setTimeout(function () { region.textContent = String(message); }, 60);
+  }
+
+  // Single global entry point consumed by the render/lookup code.
+  window.acsAnnounce = announce;
+})();
+</script>
+
+</body>
+</html>
+'@
 # ===== Static Pages (Terms of Service, Privacy) & MSAL Setup =====
 # ------------------- Embedded Terms of Service page -------------------
 $script:TosPageHtml = @'

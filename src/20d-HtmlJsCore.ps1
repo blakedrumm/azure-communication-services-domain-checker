@@ -393,7 +393,14 @@ async function runMultiDomainLookup(domains, options = {}) {
     // fromMulti prevents lookup() from resetting the multi state; skipUrlUpdate
     // keeps it from overwriting the multi-domain URL set above. lookup() resolves
     // to the exact result object it populated for this domain.
-    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: false });
+    //
+    // The FIRST (active) domain carries the top-section intro animation when this
+    // sweep was launched as the page bootstrap (options.animateTopIntro). Without
+    // this, a direct multi-domain URL load never reveals the header/search box
+    // (it stays at opacity 0 under body.section-fade-enabled), leaving a blank
+    // top. Subsequent (background) domains never animate the intro.
+    const introForThis = (i === 0) && !!options.animateTopIntro;
+    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: introForThis });
     if (token !== multiRunToken) return;
     // Store the returned object, guarded so a domain's slot only ever holds the
     // result whose .domain matches its key (prevents any cross-domain aliasing).
