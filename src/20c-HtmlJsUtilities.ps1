@@ -1441,15 +1441,7 @@ function buildGuidance(r) {
     const mxList = r.mxRecords || [];
     const hasMx = Array.isArray(mxList) && mxList.length > 0;
     if (!hasMx) {
-      if (r.mxFallbackDomainChecked && r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-        guidance.push({ type: 'attention', text: t('guidanceMxMissingParentFallback', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }) });
-      } else if (r.mxFallbackDomainChecked && !r.mxFallbackUsed) {
-        guidance.push({ type: 'attention', text: t('guidanceMxMissingCheckedParent', { domain: r.domain || '', parentDomain: r.mxFallbackDomainChecked }) });
-      } else {
-        guidance.push({ type: 'attention', text: t('guidanceMxMissing') });
-      }
-    } else if (r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-      guidance.push({ type: 'info', text: t('guidanceMxParentShown', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }) });
+      guidance.push({ type: 'attention', text: t('guidanceMxMissing') });
     }
     if (r.mxProvider && r.mxProvider !== 'Unknown') {
       guidance.push({ type: 'info', text: t('guidanceMxProviderDetected', { provider: r.mxProvider }) });

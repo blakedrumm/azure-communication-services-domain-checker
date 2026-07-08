@@ -531,7 +531,8 @@ The reputation checker only queries public IPv4 addresses and validates DNSBL zo
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ACS_LOG_LEVEL` | `Information` | Minimum structured log level (`Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical`). Increased verbosity never enables PII, secrets, headers, query strings, request/response bodies, or raw exception messages. |
-| `ACS_LOG_FILE` | _(none)_ | Optional JSONL log file path. Console logging is always structured JSON; file logging is opt-in. Do not place the file path in a user-controlled location. |
+| `ACS_LOG_FILE` | _(none)_ | Optional JSONL log file path. The file sink is always structured JSON; file logging is opt-in. Do not place the file path in a user-controlled location. |
+| `ACS_LOG_CONSOLE` | _(auto)_ | Console output format: `text` for clean, colored, single-line human output, or `json` for raw structured JSON. When unset, `text` is used for interactive terminals and `json` when output is redirected/piped (containers, CI, log collectors). The JSONL file sink is unaffected. |
 | `ACS_LOG_MAX_BYTES` | `5242880` | Maximum JSONL log file size before single-file rotation to `.1` (clamped between 64 KB and 100 MB). |
 
 Structured diagnostics use a secure-by-default allowlist. Approved fields are: UTC timestamp, severity, app name/version, environment category, component, operation, event ID, non-sensitive message, random correlation ID, stable error code, sanitized exception type, generic sanitized exception message, stack-trace hash, inner exception type, duration, dependency name, status code/result category, retry/fallback metadata, listener mode, port, rate-limit counters, and shutdown state.
@@ -686,7 +687,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.10.1`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.10.4`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -709,8 +710,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.10.1
-git push origin v2.10.1
+git tag v2.10.4
+git push origin v2.10.4
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -721,7 +722,7 @@ git push origin v2.10.1
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.10.1`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.10.4`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -738,11 +739,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.10.1
+docker pull limitlessworlds/acs-domain-checker:2.10.4
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.10.1
-docker pull limitlessworlds/acs-domain-checker:windows-2.10.1
+docker pull limitlessworlds/acs-domain-checker:linux-2.10.4
+docker pull limitlessworlds/acs-domain-checker:windows-2.10.4
 ```
 
 ### 🛠️ Manual Build Script
@@ -757,7 +758,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.10.1
+./acs-domain-checker-dockerhub.ps1 -Version 2.10.4
 ```
 
 **📋 Requirements for manual script:**
@@ -823,7 +824,7 @@ Security is a top priority for the ACS Domain Checker:
 ### Formal security review logging deliverables
 
 1. **Current implementation summary:** Runtime diagnostics are emitted through `Write-AcsLogEvent` / `Write-AcsLogException` in `src/03a-SecureLogging.ps1`; legacy request logs now call the centralized logger.
-2. **Destinations and exporters:** Console structured JSON is always enabled. Optional local JSONL file logging is enabled only when `ACS_LOG_FILE` is set. There are no built-in third-party telemetry exporters.
+2. **Destinations and exporters:** The console shows human-readable text by default (or raw structured JSON via `ACS_LOG_CONSOLE=json`, and automatically when output is redirected/piped). The optional local JSONL file sink (`ACS_LOG_FILE`) is always structured JSON and enabled only when set. There are no built-in third-party telemetry exporters.
 3. **Identified gaps addressed:** Raw request-domain logging, raw handler exception messages, local path output, startup diagnostics with secrets-adjacent paths, listener-loop raw exceptions, dead nested-prompt diagnostic logic, async wait-handle leaks, and rate-limit overflow risk were remediated.
 4. **Code changes:** Central logger/sanitizer, random correlation IDs, safe handler/listener/startup/shutdown events, optional capped JSONL sink, and `tools/Test-SecureLogging.ps1` validation.
 5. **Approved fields:** Listed in the Secure Diagnostics & Logging configuration section above and enforced by `Get-AcsApprovedLogFields`.

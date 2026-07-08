@@ -140,21 +140,12 @@ function Get-AcsDnsStatus {
         }
       }
       if (-not $mx.hasUsableMx)    {
-        if ($mx.mxFallbackDomainChecked -and $mx.mxFallbackUsed -and $mx.mxLookupDomain) {
-          $guidance.Add("No MX records found on $Domain; using parent domain $($mx.mxLookupDomain) MX records as a fallback.")
-        }
-        elseif ($mx.nullMx) {
+        if ($mx.nullMx) {
           $guidance.Add("Domain publishes a Null MX record (MX 0 .), which explicitly means it does not accept email. Configure a real MX record before using this domain for mail flow.")
-        }
-        elseif ($mx.mxFallbackDomainChecked -and -not $mx.mxFallbackUsed) {
-          $guidance.Add("No MX records detected for $Domain or its parent $($mx.mxFallbackDomainChecked). Mail flow will not function until MX records are configured.")
         }
         else {
           $guidance.Add("No MX records detected. Mail flow will not function until MX records are configured.")
         }
-      }
-      elseif ($mx.mxFallbackUsed -and $mx.mxLookupDomain -and $mx.mxLookupDomain -ne $Domain) {
-        $guidance.Add("No MX records found on $Domain; results shown are from parent domain $($mx.mxLookupDomain).")
       }
       if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
       elseif ($dmarc.dmarcInherited -and $dmarc.dmarcLookupDomain -and $dmarc.dmarcLookupDomain -ne $Domain) { $guidance.Add("Effective DMARC policy is inherited from parent domain $($dmarc.dmarcLookupDomain).") }
@@ -255,9 +246,6 @@ function Get-AcsDnsStatus {
         nullMx            = $mx.nullMx
         mxProvider        = $mx.mxProvider
         mxProviderHint    = $mx.mxProviderHint
-        mxLookupDomain          = $mx.mxLookupDomain
-        mxFallbackDomainChecked = $mx.mxFallbackDomainChecked
-        mxFallbackUsed          = $mx.mxFallbackUsed
 
         dnsRecords      = $records.records
         dnsRecordsError = $records.error

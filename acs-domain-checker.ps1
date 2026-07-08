@@ -1665,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.10.1'
+$script:AppVersion = '2.10.4'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -1774,13 +1774,23 @@ try {
   }
 } catch { $script:AcsLogMaxBytes = 5242880 }
 
+# Console output format for humans. The file sink (ACS_LOG_FILE) ALWAYS receives
+# compact JSON for machine parsing; this only controls what is shown on the
+# interactive console.
+#   ACS_LOG_CONSOLE = 'text' -> clean, colored, single-line human output
+#   ACS_LOG_CONSOLE = 'json' -> raw compact JSON (legacy behavior)
+# When unset, text is used for interactive terminals and JSON is used when the
+# output is redirected/piped (containers, CI, log collectors).
+$script:AcsLogConsoleMode = if ([string]::IsNullOrWhiteSpace($env:ACS_LOG_CONSOLE)) { $null } else { ([string]$env:ACS_LOG_CONSOLE).Trim().ToLowerInvariant() }
+
 function Get-AcsApprovedLogFields {
   return @(
 	'timestampUtc','level','app','version','environment','component','operation',
 	'eventId','message','correlationId','errorCode','exceptionType',
 	'exceptionMessage','stackTraceHash','innerExceptionType','durationMs',
 	'dependency','statusCode','resultCategory','retryAfterSec','fallback',
-	'listenerMode','port','limit','remaining','shutdownRequested'
+	'listenerMode','port','limit','remaining','shutdownRequested',
+	'method','route'
   )
 }
 
@@ -1806,8 +1816,21 @@ function Test-AcsLogLevelEnabled {
 
 function New-AcsCorrelationId {
   # 128 bits of randomness, base64url encoded. No semantics, no user data.
+  # Uses RandomNumberGenerator.Create().GetBytes(), which exists on BOTH .NET
+  # Framework (Windows PowerShell 5.1) and .NET (PowerShell 7+). The static
+  # RandomNumberGenerator.Fill() is .NET Core 2.1+ only, so on 5.1 it is missing
+  # and previously left the buffer all zeros -> every correlation id rendered as
+  # "AAAAAAAAAAAAAAAAAAAAAA" (16 zero bytes). GetBytes(byte[]) mutates the array
+  # in place, so there is no Span-copy pitfall either.
   $bytes = [byte[]]::new(16)
-  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  try {
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+  } catch {
+    # Last-resort fallback so a correlation id is always unique and non-zero.
+    $guid = [System.Guid]::NewGuid().ToByteArray()
+    [System.Array]::Copy($guid, $bytes, [Math]::Min($guid.Length, $bytes.Length))
+  }
   return ([Convert]::ToBase64String($bytes).TrimEnd('=') -replace '\+','-' -replace '/','_')
 }
 
@@ -1914,6 +1937,125 @@ function ConvertTo-AcsAllowedLogEvent {
   return $out
 }
 
+function Test-AcsConsoleJsonMode {
+  # Decide whether console output should be raw JSON (machine) or human text.
+  # Explicit ACS_LOG_CONSOLE wins; otherwise JSON is used only when the process
+  # output is redirected/piped (containers, CI, log collectors) so structured
+  # logs are preserved for machine consumers.
+  if ($script:AcsLogConsoleMode -eq 'json') { return $true }
+  if ($script:AcsLogConsoleMode -eq 'text') { return $false }
+  try { return [System.Console]::IsOutputRedirected } catch { return $false }
+}
+
+function Write-AcsConsoleEvent {
+  # Render one already-sanitized log event as a clean, colored, single line.
+  # The input MUST be the output of ConvertTo-AcsAllowedLogEvent so it inherits
+  # the allowlist + redaction guarantees; this function never sees raw input.
+  # The whole line is emitted with a single Write-Host so concurrent request
+  # runspaces cannot interleave partial segments.
+  param([AllowNull()]$Event)
+  try {
+    if ($null -eq $Event) { return }
+
+    # Only emit ANSI color when the host can actually render it.
+    $ansi = $false
+    try { $ansi = [bool]$Host.UI.SupportsVirtualTerminal } catch { $ansi = $false }
+    $esc = [char]27
+    $reset   = if ($ansi) { "$esc[0m" }  else { '' }
+    $dim     = if ($ansi) { "$esc[90m" } else { '' }
+    $cyan    = if ($ansi) { "$esc[36m" } else { '' }
+    $green   = if ($ansi) { "$esc[32m" } else { '' }
+    $yellow  = if ($ansi) { "$esc[33m" } else { '' }
+    $red     = if ($ansi) { "$esc[31m" } else { '' }
+    $magenta = if ($ansi) { "$esc[35m" } else { '' }
+
+    # Level -> short fixed-width tag + color.
+    $tag = 'INFO '; $levelColor = $green; $msgColor = ''
+    switch -Regex ([string]$Event['level']) {
+      '^(?i:critical|fatal)$' { $tag = 'CRIT '; $levelColor = $magenta; $msgColor = $magenta; break }
+      '^(?i:error)$'          { $tag = 'ERROR'; $levelColor = $red;     $msgColor = $red;     break }
+      '^(?i:warning|warn)$'   { $tag = 'WARN '; $levelColor = $yellow;  $msgColor = $yellow;  break }
+      '^(?i:debug)$'          { $tag = 'DEBUG'; $levelColor = $dim;     $msgColor = $dim;     break }
+      '^(?i:trace)$'          { $tag = 'TRACE'; $levelColor = $dim;     $msgColor = $dim;     break }
+      default                 { $tag = 'INFO '; $levelColor = $green;   $msgColor = '';       break }
+    }
+
+    # Local HH:mm:ss from the UTC ISO timestamp (humans prefer local time; the
+    # JSON file sink keeps the exact UTC value).
+    $timeText = ''
+    try { $timeText = ([DateTimeOffset]::Parse([string]$Event['timestampUtc'])).LocalDateTime.ToString('HH:mm:ss') }
+    catch { $timeText = (Get-Date).ToString('HH:mm:ss') }
+
+    $component = [string]$Event['component']
+    if ([string]::IsNullOrWhiteSpace($component)) { $component = '-' }
+    if ($component.Length -gt 16) { $component = $component.Substring(0, 16) }
+    $componentPadded = $component.PadRight(16)
+
+    $message = [string]$Event['message']
+
+    # Trailing dim key=value details for the non-structural fields (port,
+    # statusCode, durationMs, errorCode, route, listenerMode, etc.). The
+    # correlationId is hidden for Information-level lines to keep the routine
+    # request flow clean, but kept for Warning/Error/Critical so problems can be
+    # cross-referenced against the JSON file sink; it is always present in JSON.
+    $isProblemLevel = ([string]$Event['level'] -match '^(?i:warning|warn|error|critical|fatal)$')
+    $skip = @('timestampUtc','level','app','version','environment','component','operation','eventId','message','exceptionMessage')
+    if (-not $isProblemLevel) { $skip += 'correlationId' }
+    $extraParts = New-Object System.Collections.Generic.List[string]
+    foreach ($key in @($Event.Keys)) {
+      if ($skip -contains $key) { continue }
+      $val = $Event[$key]
+      if ($null -eq $val) { continue }
+      $sval = [string]$val
+      if ([string]::IsNullOrWhiteSpace($sval)) { continue }
+      $extraParts.Add(("{0}={1}" -f $key, $sval))
+    }
+    $extras = if ($extraParts.Count -gt 0) { ($extraParts -join '  ') } else { '' }
+
+    $line = "$dim$timeText$reset $levelColor$tag$reset  $cyan$componentPadded$reset  "
+    if ($msgColor) { $line += "$msgColor$message$reset" } else { $line += $message }
+    if ($extras) { $line += "  $dim$extras$reset" }
+
+    Write-Host $line
+  } catch {
+    # Never let console rendering break logging; fall back to raw JSON.
+    try { Write-Information -InformationAction Continue -MessageData ($Event | ConvertTo-Json -Compress -Depth 3) } catch { }
+  }
+}
+
+function Write-AcsStartupBanner {
+  # Prominent, human-friendly startup banner with a clickable web URL. Skipped
+  # when the console is in JSON mode so machine log streams stay clean. The URL
+  # is the server's own loopback address (never user data) and the port is an
+  # already-approved log field, so this is safe to print verbatim.
+  param([string]$Url, [int]$Port)
+  try {
+    if (Test-AcsConsoleJsonMode) { return }
+    if ([string]::IsNullOrWhiteSpace($Url)) { $Url = "http://localhost:$Port" }
+
+    $ansi = $false
+    try { $ansi = [bool]$Host.UI.SupportsVirtualTerminal } catch { $ansi = $false }
+    $esc = [char]27
+    $reset = if ($ansi) { "$esc[0m" }  else { '' }
+    $dim   = if ($ansi) { "$esc[90m" } else { '' }
+    $cyan  = if ($ansi) { "$esc[96m" } else { '' }
+    $bold  = if ($ansi) { "$esc[1m" }  else { '' }
+
+    $version = [string]$script:AppVersion
+    $title = if ([string]::IsNullOrWhiteSpace($version)) { [string]$script:AcsLogAppName } else { "$($script:AcsLogAppName) v$version" }
+    $rule = '-' * [Math]::Max(8, $title.Length)
+
+    Write-Host ''
+    Write-Host "  $bold$cyan$title$reset"
+    Write-Host "  $dim$rule$reset"
+    Write-Host "  $($dim)Open the web UI in your browser:$reset"
+    Write-Host "     $bold$cyan$Url$reset"
+    Write-Host ''
+    Write-Host "  $($dim)Press Ctrl+C or Q to stop the server.$reset"
+    Write-Host ''
+  } catch { }
+}
+
 function Write-AcsLogEvent {
   param(
 	[ValidateSet('Trace','Debug','Information','Warning','Error','Critical')]
@@ -1955,7 +2097,14 @@ function Write-AcsLogEvent {
 	$json = $safe | ConvertTo-Json -Compress -Depth 3
 	if ([string]::IsNullOrWhiteSpace($json)) { return }
 
-	Write-Information -InformationAction Continue -MessageData $json
+	# Console: JSON for machine consumers (redirected/piped output or an explicit
+	# ACS_LOG_CONSOLE=json), otherwise a clean, colored, human-readable line built
+	# from the SAME already-sanitized event (never from raw input).
+	if (Test-AcsConsoleJsonMode) {
+		Write-Information -InformationAction Continue -MessageData $json
+	} else {
+		Write-AcsConsoleEvent -Event $safe
+	}
 
 	if (-not [string]::IsNullOrWhiteSpace($script:AcsLogFilePath)) {
 	  try {
@@ -7636,7 +7785,9 @@ function Write-RequestLog {
   )
 
   # Domain, IP, user agent, headers, query strings, and user input are treated as
-  # sensitive. Log only a route/category and a random correlation ID.
+  # sensitive. Log only the HTTP method + route path (fixed application
+  # endpoints; the domain is carried in the query string, which we never read
+  # here) plus a random correlation ID.
   $correlationId = Get-RequestCorrelationId -Context $Context
   $operation = 'request'
   $statusCode = $null
@@ -7645,8 +7796,20 @@ function Write-RequestLog {
   } elseif ($Action -match '^(?i)dns') {
     $operation = 'dns-request'
   }
+
+  # HTTP method and route path are safe, useful context. Both are sanitized again
+  # inside the logger for defense in depth.
+  $method = $null
+  try { $method = [string]$Context.Request.HttpMethod } catch { $method = $null }
+  if ([string]::IsNullOrWhiteSpace($method)) { $method = $null }
+  $route = $null
+  try { if ($Context -and $Context.Request -and $Context.Request.Url) { $route = [string]$Context.Request.Url.AbsolutePath } } catch { $route = $null }
+  if ([string]::IsNullOrWhiteSpace($route)) { $route = $null }
+
   try { $statusCode = [int]$Context.Response.StatusCode } catch { $statusCode = $null }
   Write-AcsLogEvent -Level 'Information' -Component 'Request' -Operation $operation -EventId 'REQ-RECEIVED' -Message 'Request received.' -CorrelationId $correlationId -Fields @{
+    method     = $method
+    route      = $route
     statusCode = $statusCode
   }
 }
@@ -8216,10 +8379,6 @@ function Get-DnsMxStatus {
   # - Resolve MX records.
   # - Guess the mail provider based on the lowest-preference MX host.
   # - Resolve A/AAAA for each MX host to show concrete IP targets.
-
-  $mxLookupDomain = $Domain
-  $mxFallbackDomainChecked = $null
-  $mxFallbackUsed = $false
 
   function Invoke-MxLookupCore {
     param([string]$LookupDomain)
@@ -8949,38 +9108,15 @@ switch -Regex ($mxHost) {
     return $result
   }
 
-  # First, try the exact domain.
+  # Look up MX records for the exact domain being checked. We intentionally do
+  # NOT fall back to the parent/registrable domain here: MX records are not
+  # inherited by subdomains in DNS, so surfacing a parent domain's MX for a
+  # subdomain lookup was misleading. If the queried domain has no MX, that is
+  # reported as-is.
   $mxResult = Invoke-MxLookupCore -LookupDomain $Domain
-
-  # If none found, try the registrable (parent) domain as a fallback.
-  if (($mxResult.mxRecords.Count -eq 0) -and ($mxResult.mxRecordsDetailed.Count -eq 0)) {
-    $parentsChecked = New-Object System.Collections.Generic.List[string]
-    foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
-      if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $Domain) { continue }
-
-      $parent = $parent.Trim().TrimEnd('.')
-      $parentsChecked.Add($parent)
-      $parentResult = Invoke-MxLookupCore -LookupDomain $parent
-      if (($parentResult.mxRecords.Count -gt 0) -or ($parentResult.mxRecordsDetailed.Count -gt 0)) {
-        $mxResult = $parentResult
-        $mxLookupDomain = $parent
-        $mxFallbackUsed = $true
-        break
-      }
-    }
-
-    if ($parentsChecked.Count -gt 0) {
-      $mxFallbackDomainChecked = ($parentsChecked -join ', ')
-    }
-  }
-
-  if ($mxLookupDomain) { $mxLookupDomain = $mxLookupDomain.Trim().TrimEnd('.') }
 
   [pscustomobject]@{
     domain                  = $Domain
-    mxLookupDomain          = $mxLookupDomain
-    mxFallbackDomainChecked = $mxFallbackDomainChecked
-    mxFallbackUsed          = $mxFallbackUsed
     mxRecords               = $mxResult.mxRecords
     mxRecordsDetailed       = $mxResult.mxRecordsDetailed
     hasUsableMx             = $mxResult.hasUsableMx
@@ -11100,21 +11236,12 @@ function Get-AcsDnsStatus {
         }
       }
       if (-not $mx.hasUsableMx)    {
-        if ($mx.mxFallbackDomainChecked -and $mx.mxFallbackUsed -and $mx.mxLookupDomain) {
-          $guidance.Add("No MX records found on $Domain; using parent domain $($mx.mxLookupDomain) MX records as a fallback.")
-        }
-        elseif ($mx.nullMx) {
+        if ($mx.nullMx) {
           $guidance.Add("Domain publishes a Null MX record (MX 0 .), which explicitly means it does not accept email. Configure a real MX record before using this domain for mail flow.")
-        }
-        elseif ($mx.mxFallbackDomainChecked -and -not $mx.mxFallbackUsed) {
-          $guidance.Add("No MX records detected for $Domain or its parent $($mx.mxFallbackDomainChecked). Mail flow will not function until MX records are configured.")
         }
         else {
           $guidance.Add("No MX records detected. Mail flow will not function until MX records are configured.")
         }
-      }
-      elseif ($mx.mxFallbackUsed -and $mx.mxLookupDomain -and $mx.mxLookupDomain -ne $Domain) {
-        $guidance.Add("No MX records found on $Domain; results shown are from parent domain $($mx.mxLookupDomain).")
       }
       if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
       elseif ($dmarc.dmarcInherited -and $dmarc.dmarcLookupDomain -and $dmarc.dmarcLookupDomain -ne $Domain) { $guidance.Add("Effective DMARC policy is inherited from parent domain $($dmarc.dmarcLookupDomain).") }
@@ -11215,9 +11342,6 @@ function Get-AcsDnsStatus {
         nullMx            = $mx.nullMx
         mxProvider        = $mx.mxProvider
         mxProviderHint    = $mx.mxProviderHint
-        mxLookupDomain          = $mx.mxLookupDomain
-        mxFallbackDomainChecked = $mx.mxFallbackDomainChecked
-        mxFallbackUsed          = $mx.mxFallbackUsed
 
         dnsRecords      = $records.records
         dnsRecordsError = $records.error
@@ -22073,15 +22197,7 @@ function buildGuidance(r) {
     const mxList = r.mxRecords || [];
     const hasMx = Array.isArray(mxList) && mxList.length > 0;
     if (!hasMx) {
-      if (r.mxFallbackDomainChecked && r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-        guidance.push({ type: 'attention', text: t('guidanceMxMissingParentFallback', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }) });
-      } else if (r.mxFallbackDomainChecked && !r.mxFallbackUsed) {
-        guidance.push({ type: 'attention', text: t('guidanceMxMissingCheckedParent', { domain: r.domain || '', parentDomain: r.mxFallbackDomainChecked }) });
-      } else {
-        guidance.push({ type: 'attention', text: t('guidanceMxMissing') });
-      }
-    } else if (r.mxFallbackUsed && r.mxLookupDomain && r.mxLookupDomain !== r.domain) {
-      guidance.push({ type: 'info', text: t('guidanceMxParentShown', { domain: r.domain || '', lookupDomain: r.mxLookupDomain }) });
+      guidance.push({ type: 'attention', text: t('guidanceMxMissing') });
     }
     if (r.mxProvider && r.mxProvider !== 'Unknown') {
       guidance.push({ type: 'info', text: t('guidanceMxProviderDetected', { provider: r.mxProvider }) });
@@ -25994,9 +26110,6 @@ function render(r) {
   // card, and the Email-Quota SPF row.
   const txtServfailDetected = !!(r && r.txtResolution && r.txtResolution.isServfail === true
     && !effectiveSpfPresent);
-  const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
-  const mxFallbackUsed = !!(r && r.mxFallbackUsed);
-  const mxFallbackChecked = r && r.mxFallbackDomainChecked ? r.mxFallbackDomainChecked : null;
   // ---- DMARC policy strength (tier-aware) ----
   // A published DMARC record is downgraded from PASS to WARN when it exists but
   // is only *monitoring* (p=none / no enforcing policy) AND the reviewer's
@@ -26202,18 +26315,11 @@ function render(r) {
     const hasMx = (r.hasUsableMx === true) || (r.hasUsableMx === undefined && Array.isArray(r.mxRecords) && r.mxRecords.length > 0);
     const mxRecordsText = (r.mxRecords || []).join(', ');
     if (hasMx) {
-      let note = '';
-      if (mxFallbackUsed && mxLookupDomain && mxLookupDomain !== r.domain) {
-        note = ` ${t('mxUsingParentNote', { lookupDomain: mxLookupDomain })}`;
-      }
-      mxCopyDetail = localizeMxRecordText(mxRecordsText || t('mxRecords')) + note;
+      mxCopyDetail = localizeMxRecordText(mxRecordsText || t('mxRecords'));
     } else {
       mxCopyDetail = r.nullMx === true
         ? 'Domain publishes a Null MX record (MX 0 .), which means it does not accept email.'
         : t('noMxRecordsDetected');
-      if (mxFallbackChecked && mxFallbackChecked !== r.domain) {
-        mxCopyDetail += ` ${t('parentCheckedNoMx', { parentDomain: mxFallbackChecked })}`;
-      }
     }
     const mxState = hasMx ? 'PASS' : 'FAIL';
     quotaItems.push(quotaRow(t('mxRecords'), hasMx ? 'pass' : 'fail', mxCopyDetail, null, 'mx'));
@@ -27012,13 +27118,6 @@ function render(r) {
       false
     ));
   } else {
-    let mxFallbackNote = '';
-    if (mxFallbackUsed && mxLookupDomain && mxLookupDomain !== r.domain) {
-      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('noMxParentShowing', { domain: r.domain || '', lookupDomain: mxLookupDomain }))}</div>`;
-    } else if ((!r.mxRecords || r.mxRecords.length === 0) && mxFallbackChecked && mxFallbackChecked !== r.domain) {
-      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('noMxParentChecked', { domain: r.domain || '', parentDomain: mxFallbackChecked }))}</div>`;
-    }
-
     const ipv4Records = (r.mxRecordsDetailed || []).filter(rec => rec.Type === "IPv4");
     const ipv6Records = (r.mxRecordsDetailed || []).filter(rec => rec.Type === "IPv6");
     const noIpRecords = (r.mxRecordsDetailed || []).filter(rec => rec.Type === "N/A");
@@ -27120,7 +27219,6 @@ function render(r) {
       </button>
     </div>
     <div class="card-content">
-      ${mxFallbackNote}
       ${r.mxProvider ? `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('detectedProvider'))}: ${escapeHtml(r.mxProvider)}${getLocalizedMxProviderHint(r.mxProvider, r.mxProviderHint) ? " \u2014 " + escapeHtml(getLocalizedMxProviderHint(r.mxProvider, r.mxProviderHint)) : ""}</div>` : ""}
       <div id="field-mx" class="code">${escapeHtml((r.mxRecords || []).join("\n") || t('noRecordsAvailable'))}</div>
       <div id="mxDetails" style="margin-top:6px; display:none;">${mxDetailsContent}</div>
@@ -31039,7 +31137,7 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # List all functions that need to be available inside the runspace workers.
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
-  'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Write-AcsLogEvent','Write-AcsLogException',
+  'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Test-AcsConsoleJsonMode','Write-AcsConsoleEvent','Write-AcsLogEvent','Write-AcsLogException',
   'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain','Invoke-MetricsRequest','Lock-MetricsFileMutex',
@@ -31071,6 +31169,7 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('GoDaddyApiSecret', $script:GoDaddyApiSecret, 'GoDaddy API secret'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogAppName', $script:AcsLogAppName, 'Secure logging application name'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMinLevel', $script:AcsLogMinLevel, 'Secure logging minimum level'))
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogConsoleMode', $script:AcsLogConsoleMode, 'Secure logging console output mode'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogFilePath', $script:AcsLogFilePath, 'Secure logging JSONL file path'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMaxBytes', $script:AcsLogMaxBytes, 'Secure logging file size cap'))
 
@@ -31978,6 +32077,12 @@ try {
 
     return [pscustomobject]@{ Method = $method; Target = $target; Headers = $headers; Body = $body }
   }
+
+  # All startup logging has been emitted by now; print the human-friendly banner
+  # with the clickable web URL as the LAST thing before the server blocks on
+  # accepting connections, so the link is the most visible item in the console.
+  # No-op when the console is in JSON mode (redirected/piped output).
+  Write-AcsStartupBanner -Url $displayUrl -Port $Port
 
   if ($serverMode -eq 'HttpListener') {
     # Primary server mode: HttpListener (best supported on Windows).

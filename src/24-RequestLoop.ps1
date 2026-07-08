@@ -291,6 +291,12 @@ try {
     return [pscustomobject]@{ Method = $method; Target = $target; Headers = $headers; Body = $body }
   }
 
+  # All startup logging has been emitted by now; print the human-friendly banner
+  # with the clickable web URL as the LAST thing before the server blocks on
+  # accepting connections, so the link is the most visible item in the console.
+  # No-op when the console is in JSON mode (redirected/piped output).
+  Write-AcsStartupBanner -Url $displayUrl -Port $Port
+
   if ($serverMode -eq 'HttpListener') {
     # Primary server mode: HttpListener (best supported on Windows).
     while ($listener.IsListening) {

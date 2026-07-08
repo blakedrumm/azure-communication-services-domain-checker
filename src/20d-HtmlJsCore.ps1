@@ -3281,9 +3281,6 @@ function render(r) {
   // card, and the Email-Quota SPF row.
   const txtServfailDetected = !!(r && r.txtResolution && r.txtResolution.isServfail === true
     && !effectiveSpfPresent);
-  const mxLookupDomain = r && r.mxLookupDomain ? r.mxLookupDomain : (r ? r.domain : null);
-  const mxFallbackUsed = !!(r && r.mxFallbackUsed);
-  const mxFallbackChecked = r && r.mxFallbackDomainChecked ? r.mxFallbackDomainChecked : null;
   // ---- DMARC policy strength (tier-aware) ----
   // A published DMARC record is downgraded from PASS to WARN when it exists but
   // is only *monitoring* (p=none / no enforcing policy) AND the reviewer's
@@ -3489,18 +3486,11 @@ function render(r) {
     const hasMx = (r.hasUsableMx === true) || (r.hasUsableMx === undefined && Array.isArray(r.mxRecords) && r.mxRecords.length > 0);
     const mxRecordsText = (r.mxRecords || []).join(', ');
     if (hasMx) {
-      let note = '';
-      if (mxFallbackUsed && mxLookupDomain && mxLookupDomain !== r.domain) {
-        note = ` ${t('mxUsingParentNote', { lookupDomain: mxLookupDomain })}`;
-      }
-      mxCopyDetail = localizeMxRecordText(mxRecordsText || t('mxRecords')) + note;
+      mxCopyDetail = localizeMxRecordText(mxRecordsText || t('mxRecords'));
     } else {
       mxCopyDetail = r.nullMx === true
         ? 'Domain publishes a Null MX record (MX 0 .), which means it does not accept email.'
         : t('noMxRecordsDetected');
-      if (mxFallbackChecked && mxFallbackChecked !== r.domain) {
-        mxCopyDetail += ` ${t('parentCheckedNoMx', { parentDomain: mxFallbackChecked })}`;
-      }
     }
     const mxState = hasMx ? 'PASS' : 'FAIL';
     quotaItems.push(quotaRow(t('mxRecords'), hasMx ? 'pass' : 'fail', mxCopyDetail, null, 'mx'));
@@ -4299,13 +4289,6 @@ function render(r) {
       false
     ));
   } else {
-    let mxFallbackNote = '';
-    if (mxFallbackUsed && mxLookupDomain && mxLookupDomain !== r.domain) {
-      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('noMxParentShowing', { domain: r.domain || '', lookupDomain: mxLookupDomain }))}</div>`;
-    } else if ((!r.mxRecords || r.mxRecords.length === 0) && mxFallbackChecked && mxFallbackChecked !== r.domain) {
-      mxFallbackNote = `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('noMxParentChecked', { domain: r.domain || '', parentDomain: mxFallbackChecked }))}</div>`;
-    }
-
     const ipv4Records = (r.mxRecordsDetailed || []).filter(rec => rec.Type === "IPv4");
     const ipv6Records = (r.mxRecordsDetailed || []).filter(rec => rec.Type === "IPv6");
     const noIpRecords = (r.mxRecordsDetailed || []).filter(rec => rec.Type === "N/A");
@@ -4407,7 +4390,6 @@ function render(r) {
       </button>
     </div>
     <div class="card-content">
-      ${mxFallbackNote}
       ${r.mxProvider ? `<div class="code" style="margin-bottom:6px;">${escapeHtml(t('detectedProvider'))}: ${escapeHtml(r.mxProvider)}${getLocalizedMxProviderHint(r.mxProvider, r.mxProviderHint) ? " \u2014 " + escapeHtml(getLocalizedMxProviderHint(r.mxProvider, r.mxProviderHint)) : ""}</div>` : ""}
       <div id="field-mx" class="code">${escapeHtml((r.mxRecords || []).join("\n") || t('noRecordsAvailable'))}</div>
       <div id="mxDetails" style="margin-top:6px; display:none;">${mxDetailsContent}</div>

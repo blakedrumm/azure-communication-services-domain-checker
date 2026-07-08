@@ -18,7 +18,7 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # List all functions that need to be available inside the runspace workers.
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
-  'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Write-AcsLogEvent','Write-AcsLogException',
+  'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Test-AcsConsoleJsonMode','Write-AcsConsoleEvent','Write-AcsLogEvent','Write-AcsLogException',
   'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain','Invoke-MetricsRequest','Lock-MetricsFileMutex',
@@ -50,6 +50,7 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('GoDaddyApiSecret', $script:GoDaddyApiSecret, 'GoDaddy API secret'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogAppName', $script:AcsLogAppName, 'Secure logging application name'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMinLevel', $script:AcsLogMinLevel, 'Secure logging minimum level'))
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogConsoleMode', $script:AcsLogConsoleMode, 'Secure logging console output mode'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogFilePath', $script:AcsLogFilePath, 'Secure logging JSONL file path'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMaxBytes', $script:AcsLogMaxBytes, 'Secure logging file size cap'))
 

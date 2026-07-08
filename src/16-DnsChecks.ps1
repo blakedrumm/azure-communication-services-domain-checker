@@ -219,10 +219,6 @@ function Get-DnsMxStatus {
   # - Guess the mail provider based on the lowest-preference MX host.
   # - Resolve A/AAAA for each MX host to show concrete IP targets.
 
-  $mxLookupDomain = $Domain
-  $mxFallbackDomainChecked = $null
-  $mxFallbackUsed = $false
-
   function Invoke-MxLookupCore {
     param([string]$LookupDomain)
 
@@ -951,38 +947,15 @@ switch -Regex ($mxHost) {
     return $result
   }
 
-  # First, try the exact domain.
+  # Look up MX records for the exact domain being checked. We intentionally do
+  # NOT fall back to the parent/registrable domain here: MX records are not
+  # inherited by subdomains in DNS, so surfacing a parent domain's MX for a
+  # subdomain lookup was misleading. If the queried domain has no MX, that is
+  # reported as-is.
   $mxResult = Invoke-MxLookupCore -LookupDomain $Domain
-
-  # If none found, try the registrable (parent) domain as a fallback.
-  if (($mxResult.mxRecords.Count -eq 0) -and ($mxResult.mxRecordsDetailed.Count -eq 0)) {
-    $parentsChecked = New-Object System.Collections.Generic.List[string]
-    foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
-      if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $Domain) { continue }
-
-      $parent = $parent.Trim().TrimEnd('.')
-      $parentsChecked.Add($parent)
-      $parentResult = Invoke-MxLookupCore -LookupDomain $parent
-      if (($parentResult.mxRecords.Count -gt 0) -or ($parentResult.mxRecordsDetailed.Count -gt 0)) {
-        $mxResult = $parentResult
-        $mxLookupDomain = $parent
-        $mxFallbackUsed = $true
-        break
-      }
-    }
-
-    if ($parentsChecked.Count -gt 0) {
-      $mxFallbackDomainChecked = ($parentsChecked -join ', ')
-    }
-  }
-
-  if ($mxLookupDomain) { $mxLookupDomain = $mxLookupDomain.Trim().TrimEnd('.') }
 
   [pscustomobject]@{
     domain                  = $Domain
-    mxLookupDomain          = $mxLookupDomain
-    mxFallbackDomainChecked = $mxFallbackDomainChecked
-    mxFallbackUsed          = $mxFallbackUsed
     mxRecords               = $mxResult.mxRecords
     mxRecordsDetailed       = $mxResult.mxRecordsDetailed
     hasUsableMx             = $mxResult.hasUsableMx

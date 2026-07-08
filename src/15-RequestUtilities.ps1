@@ -7,7 +7,9 @@ function Write-RequestLog {
   )
 
   # Domain, IP, user agent, headers, query strings, and user input are treated as
-  # sensitive. Log only a route/category and a random correlation ID.
+  # sensitive. Log only the HTTP method + route path (fixed application
+  # endpoints; the domain is carried in the query string, which we never read
+  # here) plus a random correlation ID.
   $correlationId = Get-RequestCorrelationId -Context $Context
   $operation = 'request'
   $statusCode = $null
@@ -16,8 +18,20 @@ function Write-RequestLog {
   } elseif ($Action -match '^(?i)dns') {
     $operation = 'dns-request'
   }
+
+  # HTTP method and route path are safe, useful context. Both are sanitized again
+  # inside the logger for defense in depth.
+  $method = $null
+  try { $method = [string]$Context.Request.HttpMethod } catch { $method = $null }
+  if ([string]::IsNullOrWhiteSpace($method)) { $method = $null }
+  $route = $null
+  try { if ($Context -and $Context.Request -and $Context.Request.Url) { $route = [string]$Context.Request.Url.AbsolutePath } } catch { $route = $null }
+  if ([string]::IsNullOrWhiteSpace($route)) { $route = $null }
+
   try { $statusCode = [int]$Context.Response.StatusCode } catch { $statusCode = $null }
   Write-AcsLogEvent -Level 'Information' -Component 'Request' -Operation $operation -EventId 'REQ-RECEIVED' -Message 'Request received.' -CorrelationId $correlationId -Fields @{
+    method     = $method
+    route      = $route
     statusCode = $statusCode
   }
 }
