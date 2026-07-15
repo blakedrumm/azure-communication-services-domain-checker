@@ -1441,7 +1441,14 @@ function buildGuidance(r) {
     const mxList = r.mxRecords || [];
     const hasMx = Array.isArray(mxList) && mxList.length > 0;
     if (!hasMx) {
-      guidance.push({ type: 'attention', text: t('guidanceMxMissing') });
+      // ACS is send-only and does not need MX for routing, but modern email
+      // security/reputation systems still expect a present MX record. Offer a
+      // ready-to-paste Exchange Online Protection placeholder derived from the
+      // queried domain (dots -> dashes), mirroring how Microsoft maps
+      // contoso.com -> contoso-com.mail.protection.outlook.com.
+      const mxHost = (r.domain || '').trim().toLowerCase().replace(/\./g, '-');
+      const suggestion = mxHost ? mxHost + '.mail.protection.outlook.com' : 'contoso-com.mail.protection.outlook.com';
+      guidance.push({ type: 'attention', text: t('guidanceMxMissing', { suggestion }) });
     }
     if (r.mxProvider && r.mxProvider !== 'Unknown') {
       guidance.push({ type: 'info', text: t('guidanceMxProviderDetected', { provider: r.mxProvider }) });

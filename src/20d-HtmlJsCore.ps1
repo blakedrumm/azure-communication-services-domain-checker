@@ -1843,7 +1843,7 @@ function buildSpfExplainedHtml(spfRecord) {
   // canonical record while letting us wrap each token in an addressable span.
   // `data-spf-type` / `data-spf-value` are mirrored onto the span so the
   // outer SPF Expansion Records table can also highlight tokens by
-  // type+value (e.g., include:spf.crsend.com).
+  // type+value (e.g., include:spf.example.com).
   const tokenSpans = mechs.map((m, idx) =>
     `<span class="spf-record-token" data-token-idx="${idx}" data-spf-type="${escapeHtml(m.type)}" data-spf-value="${escapeHtml(m.value)}">${escapeHtml(m.raw)}</span>`
   ).join(' ');
@@ -2188,7 +2188,7 @@ function setSpfTokenHighlight(rowEl, isOn) {
 // Hover handler for rows inside the SPF Expansion Records table. Highlights
 // every `.spf-record-token` (across any open Explained panel on the page)
 // whose data-spf-type+value matches this expansion row's mechanism/target
-// (e.g., include:spf.crsend.com). This lets users hover an entry in the
+// (e.g., include:spf.example.com). This lets users hover an entry in the
 // expansion table and immediately see where it appears inside the queried-
 // domain SPF Explained record box. Tokens are matched globally rather than
 // scoped to a single block because the expansion row references targets

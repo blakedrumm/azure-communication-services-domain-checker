@@ -150,7 +150,7 @@ function Get-DnsBaseStatus {
   # read the actual DoH status code. We trigger on SPF absence rather than a
   # completely empty TXT set because a broken zone can SERVFAIL while STILL
   # returning a partial TXT answer that happens to exclude the SPF record (the
-  # zenithbank.com case: SERVFAIL with one non-SPF TXT row, no v=spf1). A
+  # real-world case: SERVFAIL with one non-SPF TXT row, no v=spf1). A
   # SERVFAIL here lets the UI explain *why* SPF is missing instead of asserting
   # the record does not exist when it may exist on a subset of nameservers.
   # The probe is skipped when an SPF record was found or the base lookup already
@@ -182,7 +182,7 @@ function Get-DnsBaseStatus {
     # serialize as a bare JSON string. The SPA's getDnsTxtRecoveryState then did
     # `Array.isArray(r.ipv4Addresses) ? ... : []`, so a string failed the check
     # and the Domain card rendered "None" while still showing the "using parent
-    # domain IP" note -- a visible contradiction (ms2.sportslottery.com.tw).
+    # domain IP" note -- a visible contradiction (observed with a real-world domain).
     ipv4Addresses = @($ipv4Addrs)
     ipv6Addresses = @($ipv6Addrs)
 

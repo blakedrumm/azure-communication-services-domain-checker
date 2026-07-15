@@ -1665,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.10.4'
+$script:AppVersion = '2.10.6'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -5242,7 +5242,7 @@ function Get-DohDnssecAnomaly {
 # legitimate "no records" reply. That collapse is what caused otherwise-healthy
 # domains to display "No SPF record detected" / "No Records Available" when, in
 # reality, the domain's authoritative nameservers were answering inconsistently
-# (a propagation / misconfiguration issue -- observed for zenithbank.com whose
+# (a propagation / misconfiguration issue -- observed for a real-world domain whose
 # TXT lookup SERVFAILs across public resolvers while its A/MX records resolve
 # fine, and which still resolves in tools that happen to hit a healthy
 # authoritative server).
@@ -6307,6 +6307,53 @@ function Get-DnsRecordsStatus {
   }
   catch {
     $errors.Add($_.Exception.Message)
+  }
+
+  # NS supplement: when the queried name is a host *inside* a zone (e.g.
+  # "relay.example.com") rather than a delegated zone of its own, no NS records
+  # are published at that exact name -- the authoritative NS records live at the
+  # parent apex ("example.com"). A direct NS query at the host name therefore
+  # returns an empty answer, so the records grid shows no NS rows even though the
+  # Nameserver TXT Consistency card (which walks up parents via
+  # Get-AuthoritativeNameserverHosts) does surface them. When no NS record was
+  # found at the queried domain, walk up the parent domains and the registrable
+  # apex and add the first zone's NS records so the grid reflects the domain's
+  # actual delegation. The rows keep the zone name they were found at, which is
+  # the accurate owner of those NS records.
+  $hasNsRecord = @($records.ToArray() | Where-Object { $_ -and ([string]$_.type -eq 'NS') }).Count -gt 0
+  if (-not $hasNsRecord) {
+    $queriedClean = ([string]$Domain).Trim().TrimEnd('.')
+    $nsZoneCandidates = New-Object System.Collections.Generic.List[string]
+    foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
+      if (-not [string]::IsNullOrWhiteSpace($parent) -and -not $nsZoneCandidates.Contains($parent)) {
+        $nsZoneCandidates.Add($parent)
+      }
+    }
+    try {
+      $registrableZone = Get-RegistrableDomain -Domain $Domain
+      if (-not [string]::IsNullOrWhiteSpace($registrableZone) -and -not $nsZoneCandidates.Contains($registrableZone)) {
+        $nsZoneCandidates.Add($registrableZone)
+      }
+    }
+    catch { }
+
+    foreach ($nsZone in $nsZoneCandidates) {
+      if ([string]::Equals($nsZone, $queriedClean, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+
+      $nsRows = @()
+      try {
+        $nsRows = @(Resolve-DnsRecordsDetailed -Name $nsZone -Types @('NS') | Where-Object { $_ -and ([string]$_.type -eq 'NS') })
+      }
+      catch {
+        $errors.Add($_.Exception.Message)
+        continue
+      }
+
+      if ($nsRows.Count -gt 0) {
+        foreach ($row in $nsRows) { $records.Add($row) }
+        break
+      }
+    }
   }
 
   $ipAddresses = @($records | Where-Object { $_.type -in @('A', 'AAAA') } | ForEach-Object { [string]$_.data } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
@@ -8311,7 +8358,7 @@ function Get-DnsBaseStatus {
   # read the actual DoH status code. We trigger on SPF absence rather than a
   # completely empty TXT set because a broken zone can SERVFAIL while STILL
   # returning a partial TXT answer that happens to exclude the SPF record (the
-  # zenithbank.com case: SERVFAIL with one non-SPF TXT row, no v=spf1). A
+  # real-world case: SERVFAIL with one non-SPF TXT row, no v=spf1). A
   # SERVFAIL here lets the UI explain *why* SPF is missing instead of asserting
   # the record does not exist when it may exist on a subset of nameservers.
   # The probe is skipped when an SPF record was found or the base lookup already
@@ -8343,7 +8390,7 @@ function Get-DnsBaseStatus {
     # serialize as a bare JSON string. The SPA's getDnsTxtRecoveryState then did
     # `Array.isArray(r.ipv4Addresses) ? ... : []`, so a string failed the check
     # and the Domain card rendered "None" while still showing the "using parent
-    # domain IP" note -- a visible contradiction (ms2.sportslottery.com.tw).
+    # domain IP" note -- a visible contradiction (observed with a real-world domain).
     ipv4Addresses = @($ipv4Addrs)
     ipv6Addresses = @($ipv6Addrs)
 
@@ -10536,7 +10583,7 @@ function Get-NameserverTxtStatus {
 	$ips = @(Resolve-NameserverPublicIps -NameserverHost $nsHost)
 	if ($ips.Count -eq 0) {
 	  # The nameserver hostname itself doesn't resolve to a public IP (this is
-	  # exactly the zenithbank.com sv001dns06 "No such host is known" case).
+	  # exactly the "No such host is known" case for a non-resolving nameserver hostname).
 	  $perServer.Add([pscustomobject]@{
 		host       = $nsHost
 		ip         = $null
@@ -11240,7 +11287,14 @@ function Get-AcsDnsStatus {
           $guidance.Add("Domain publishes a Null MX record (MX 0 .), which explicitly means it does not accept email. Configure a real MX record before using this domain for mail flow.")
         }
         else {
-          $guidance.Add("No MX records detected. Mail flow will not function until MX records are configured.")
+          # ACS is send-only and does not need MX for mail routing, but a
+          # present MX record is still expected by modern email security and
+          # reputation systems as a signal of domain legitimacy. Offer a
+          # ready-to-use Exchange Online Protection placeholder derived from
+          # the queried domain (dots -> dashes), mirroring how Microsoft maps
+          # contoso.com -> contoso-com.mail.protection.outlook.com.
+          $mxSuggestion = ($Domain -replace '\.', '-') + '.mail.protection.outlook.com'
+          $guidance.Add("No MX record detected. Azure Communication Services does not use MX records to send email, but publishing one is still recommended: modern email security and reputation systems treat the presence of an MX record as a signal of domain legitimacy and expect it as part of current anti-abuse and trust practices. If you do not run a mail server yet, you can point MX at Exchange Online Protection as a temporary placeholder, for example $mxSuggestion (the same pattern Microsoft uses, where contoso.com becomes contoso-com.mail.protection.outlook.com).")
         }
       }
       if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
@@ -15327,8 +15381,8 @@ const TRANSLATIONS = {
     guidanceAcsMissingParent: 'ACS ms-domain-verification TXT is missing on {domain}. Parent domain {lookupDomain} has an ACS TXT record, but it does not verify the queried subdomain.',
     guidanceAcsMissing: 'ACS ms-domain-verification TXT is missing. Add the value from the Azure portal.',
     guidanceMxMissingParentFallback: 'No MX records found on {domain}; using parent domain {lookupDomain} MX records as a fallback.',
-    guidanceMxMissingCheckedParent: 'No MX records detected for {domain} or its parent {parentDomain}. Mail flow will not function until MX records are configured.',
-    guidanceMxMissing: 'No MX records detected. Mail flow will not function until MX records are configured.',
+    guidanceMxMissingCheckedParent: 'No MX record detected for {domain} or its parent {parentDomain}. Azure Communication Services does not use MX records to send email, but publishing one is still recommended: modern email security and reputation systems treat the presence of an MX record as a signal of domain legitimacy and expect it as part of current anti-abuse and trust practices. If you do not run a mail server yet, you can point MX at Exchange Online Protection as a temporary placeholder, using the same pattern Microsoft uses (contoso.com becomes contoso-com.mail.protection.outlook.com).',
+    guidanceMxMissing: 'No MX record detected. Azure Communication Services does not use MX records to send email, but publishing one is still recommended: modern email security and reputation systems treat the presence of an MX record as a signal of domain legitimacy and expect it as part of current anti-abuse and trust practices. If you do not run a mail server yet, you can point MX at Exchange Online Protection as a temporary placeholder \u2014 for example {suggestion} (the same pattern Microsoft uses, where contoso.com becomes contoso-com.mail.protection.outlook.com).',
     guidanceMxParentShown: 'No MX records found on {domain}; results shown are from parent domain {lookupDomain}.',
     guidanceDmarcMissing: 'DMARC is missing. Add a _dmarc.{domain} TXT record to reduce spoofing risk.',
     guidanceDmarcInherited: 'Effective DMARC policy is inherited from parent domain {lookupDomain}.',
@@ -15620,8 +15674,8 @@ const TRANSLATIONS = {
     guidanceAcsMissingParent: 'Falta el TXT ACS ms-domain-verification en {domain}. El dominio primario {lookupDomain} tiene un TXT ACS, pero no verifica el subdominio consultado.',
     guidanceAcsMissing: 'Falta el TXT ACS ms-domain-verification. Agregue el valor desde Azure Portal.',
     guidanceMxMissingParentFallback: 'No se encontraron registros MX en {domain}; se usar\u00E1n los MX del dominio primario {lookupDomain} como alternativa.',
-    guidanceMxMissingCheckedParent: 'No se detectaron registros MX para {domain} ni para su dominio primario {parentDomain}. El flujo de correo no funcionar\u00E1 hasta configurar MX.',
-    guidanceMxMissing: 'No se detectaron registros MX. El flujo de correo no funcionar\u00E1 hasta configurar MX.',
+    guidanceMxMissingCheckedParent: 'No se detect\u00F3 ning\u00FAn registro MX para {domain} ni para su dominio primario {parentDomain}. Azure Communication Services no utiliza registros MX para enviar correo, pero a\u00FAn as\u00ED se recomienda publicar uno: los sistemas modernos de seguridad y reputaci\u00F3n de correo interpretan la presencia de un registro MX como una se\u00F1al de legitimidad del dominio y la esperan como parte de las pr\u00E1cticas actuales contra el abuso y de confianza. Si a\u00FAn no dispone de un servidor de correo, puede apuntar el MX a Exchange Online Protection como marcador temporal, con el mismo patr\u00F3n que usa Microsoft (contoso.com se convierte en contoso-com.mail.protection.outlook.com).',
+    guidanceMxMissing: 'No se detect\u00F3 ning\u00FAn registro MX. Azure Communication Services no utiliza registros MX para enviar correo, pero a\u00FAn as\u00ED se recomienda publicar uno: los sistemas modernos de seguridad y reputaci\u00F3n de correo interpretan la presencia de un registro MX como una se\u00F1al de legitimidad del dominio y la esperan como parte de las pr\u00E1cticas actuales contra el abuso y de confianza. Si a\u00FAn no dispone de un servidor de correo, puede apuntar el MX a Exchange Online Protection como marcador temporal \u2014 por ejemplo {suggestion} (el mismo patr\u00F3n que usa Microsoft, donde contoso.com se convierte en contoso-com.mail.protection.outlook.com).',
     guidanceMxParentShown: 'No se encontraron registros MX en {domain}; los resultados mostrados son del dominio primario {lookupDomain}.',
     guidanceDmarcMissing: 'Falta DMARC. Agregue un registro TXT _dmarc.{domain} para reducir el riesgo de suplantaci\u00F3n.',
     guidanceDmarcInherited: 'La directiva DMARC efectiva se hereda del dominio primario {lookupDomain}.',
@@ -17624,8 +17678,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     guidanceDomainYoung: 'Le domaine a \u00E9t\u00E9 enregistr\u00E9 r\u00E9cemment (dans les {days} derniers jours). Demandez au client d\u2019attendre davantage ; Microsoft utilise ce signal pour aider \u00E0 emp\u00EAcher les spammeurs de cr\u00E9er de nouvelles adresses web.',
     guidanceMxGoogleSpf: 'Votre MX indique Google Workspace, mais SPF n\u2019inclut pas _spf.google.com. V\u00E9rifiez que votre SPF inclut bien l\u2019include correct du fournisseur.',
     guidanceMxMicrosoftSpf: 'Votre MX indique Microsoft 365, mais SPF n\u2019inclut pas spf.protection.outlook.com. V\u00E9rifiez que votre SPF inclut bien l\u2019include correct du fournisseur.',
-    guidanceMxMissing: 'Aucun enregistrement MX d\u00E9tect\u00E9. Le flux de messagerie ne fonctionnera pas tant que les enregistrements MX ne seront pas configur\u00E9s.',
-    guidanceMxMissingCheckedParent: 'Aucun enregistrement MX d\u00E9tect\u00E9 pour {domain} ni pour son domaine parent {parentDomain}. Le flux de messagerie ne fonctionnera pas tant que les enregistrements MX ne seront pas configur\u00E9s.',
+    guidanceMxMissing: 'Aucun enregistrement MX d\u00E9tect\u00E9. Azure Communication Services n\u2019utilise pas les enregistrements MX pour envoyer des e-mails, mais il est tout de m\u00EAme recommand\u00E9 d\u2019en publier un : les syst\u00E8mes modernes de s\u00E9curit\u00E9 et de r\u00E9putation des e-mails consid\u00E8rent la pr\u00E9sence d\u2019un enregistrement MX comme un signe de l\u00E9gitimit\u00E9 du domaine et l\u2019attendent dans le cadre des pratiques actuelles de lutte contre les abus et de confiance. Si vous ne disposez pas encore de serveur de messagerie, vous pouvez faire pointer le MX vers Exchange Online Protection comme espace r\u00E9serv\u00E9 temporaire \u2014 par exemple {suggestion} (le m\u00EAme mod\u00E8le que celui utilis\u00E9 par Microsoft, o\u00F9 contoso.com devient contoso-com.mail.protection.outlook.com).',
+    guidanceMxMissingCheckedParent: 'Aucun enregistrement MX d\u00E9tect\u00E9 pour {domain} ni pour son domaine parent {parentDomain}. Azure Communication Services n\u2019utilise pas les enregistrements MX pour envoyer des e-mails, mais il est tout de m\u00EAme recommand\u00E9 d\u2019en publier un : les syst\u00E8mes modernes de s\u00E9curit\u00E9 et de r\u00E9putation des e-mails consid\u00E8rent la pr\u00E9sence d\u2019un enregistrement MX comme un signe de l\u00E9gitimit\u00E9 du domaine et l\u2019attendent dans le cadre des pratiques actuelles de lutte contre les abus et de confiance. Si vous ne disposez pas encore de serveur de messagerie, vous pouvez faire pointer le MX vers Exchange Online Protection comme espace r\u00E9serv\u00E9 temporaire, en suivant le m\u00EAme mod\u00E8le que Microsoft (contoso.com devient contoso-com.mail.protection.outlook.com).',
     guidanceMxMissingParentFallback: 'Aucun enregistrement MX trouv\u00E9 sur {domain} ; utilisation des MX du domaine parent {lookupDomain} en secours.',
     guidanceMxParentShown: 'Aucun enregistrement MX trouv\u00E9 sur {domain} ; les r\u00E9sultats affich\u00E9s proviennent du domaine parent {lookupDomain}.',
     guidanceMxProviderDetected: 'Fournisseur MX d\u00E9tect\u00E9 : {provider}',
@@ -17699,8 +17753,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     guidanceDomainYoung: 'Die Domain wurde vor Kurzem registriert (innerhalb von {days} Tagen). Bitten Sie den Kunden, noch etwas l\u00E4nger zu warten; Microsoft nutzt dieses Signal, um Spammer am Einrichten neuer Webadressen zu hindern.',
     guidanceMxGoogleSpf: 'Ihr MX weist auf Google Workspace hin, aber SPF enth\u00E4lt nicht _spf.google.com. Pr\u00FCfen Sie, ob SPF den korrekten Provider-Include enth\u00E4lt.',
     guidanceMxMicrosoftSpf: 'Ihr MX weist auf Microsoft 365 hin, aber SPF enth\u00E4lt nicht spf.protection.outlook.com. Pr\u00FCfen Sie, ob SPF den korrekten Provider-Include enth\u00E4lt.',
-    guidanceMxMissing: 'Es wurden keine MX-Eintr\u00E4ge erkannt. Der E-Mail-Fluss funktioniert erst, wenn MX-Eintr\u00E4ge konfiguriert sind.',
-    guidanceMxMissingCheckedParent: 'Es wurden keine MX-Eintr\u00E4ge f\u00FCr {domain} oder die \u00FCbergeordnete Domain {parentDomain} erkannt. Der E-Mail-Fluss funktioniert erst, wenn MX-Eintr\u00E4ge konfiguriert sind.',
+    guidanceMxMissing: 'Kein MX-Eintrag erkannt. Azure Communication Services verwendet keine MX-Eintr\u00E4ge zum Senden von E-Mails, dennoch wird empfohlen, einen zu ver\u00F6ffentlichen: Moderne E-Mail-Sicherheits- und Reputationssysteme werten das Vorhandensein eines MX-Eintrags als Zeichen der Legitimit\u00E4t der Domain und setzen ihn im Rahmen aktueller Ma\u00DFnahmen gegen Missbrauch und f\u00FCr Vertrauensw\u00FCrdigkeit voraus. Wenn Sie noch keinen Mailserver betreiben, k\u00F6nnen Sie den MX als vor\u00FCbergehenden Platzhalter auf Exchange Online Protection verweisen lassen \u2014 zum Beispiel {suggestion} (nach demselben Muster wie bei Microsoft, wobei aus contoso.com contoso-com.mail.protection.outlook.com wird).',
+    guidanceMxMissingCheckedParent: 'Es wurden keine MX-Eintr\u00E4ge f\u00FCr {domain} oder die \u00FCbergeordnete Domain {parentDomain} erkannt. Azure Communication Services verwendet keine MX-Eintr\u00E4ge zum Senden von E-Mails, dennoch wird empfohlen, einen zu ver\u00F6ffentlichen: Moderne E-Mail-Sicherheits- und Reputationssysteme werten das Vorhandensein eines MX-Eintrags als Zeichen der Legitimit\u00E4t der Domain und setzen ihn im Rahmen aktueller Ma\u00DFnahmen gegen Missbrauch und f\u00FCr Vertrauensw\u00FCrdigkeit voraus. Wenn Sie noch keinen Mailserver betreiben, k\u00F6nnen Sie den MX als vor\u00FCbergehenden Platzhalter auf Exchange Online Protection verweisen lassen, nach demselben Muster wie bei Microsoft (aus contoso.com wird contoso-com.mail.protection.outlook.com).',
     guidanceMxMissingParentFallback: 'Keine MX-Eintr\u00E4ge auf {domain} gefunden; MX-Eintr\u00E4ge der \u00FCbergeordneten Domain {lookupDomain} werden als Fallback verwendet.',
     guidanceMxParentShown: 'Keine MX-Eintr\u00E4ge auf {domain} gefunden; die angezeigten Ergebnisse stammen von der \u00FCbergeordneten Domain {lookupDomain}.',
     guidanceMxProviderDetected: 'Erkannter MX-Anbieter: {provider}',
@@ -17782,8 +17836,8 @@ const RUNTIME_TRANSLATION_OVERRIDES = {
     guidanceDomainYoung: 'O dom\u00EDnio foi registrado recentemente (dentro de {days} dias). Pe\u00E7a ao cliente para aguardar mais tempo; a Microsoft usa esse sinal para ajudar a impedir que remetentes mal-intencionados configurem novos endere\u00E7os da web.',
     guidanceMxGoogleSpf: 'Seu MX indica Google Workspace, mas o SPF n\u00E3o inclui _spf.google.com. Verifique se o SPF inclui o include correto do provedor.',
     guidanceMxMicrosoftSpf: 'Seu MX indica Microsoft 365, mas o SPF n\u00E3o inclui spf.protection.outlook.com. Verifique se o SPF inclui o include correto do provedor.',
-    guidanceMxMissing: 'Nenhum registro MX detectado. O fluxo de e-mail n\u00E3o funcionar\u00E1 at\u00E9 que os registros MX sejam configurados.',
-    guidanceMxMissingCheckedParent: 'Nenhum registro MX detectado para {domain} nem para o dom\u00EDnio pai {parentDomain}. O fluxo de e-mail n\u00E3o funcionar\u00E1 at\u00E9 que os registros MX sejam configurados.',
+    guidanceMxMissing: 'Nenhum registro MX detectado. O Azure Communication Services n\u00E3o usa registros MX para enviar e-mail, mas ainda assim \u00E9 recomend\u00E1vel publicar um: os sistemas modernos de seguran\u00E7a e reputa\u00E7\u00E3o de e-mail tratam a presen\u00E7a de um registro MX como um sinal de legitimidade do dom\u00EDnio e a esperam como parte das pr\u00E1ticas atuais contra abuso e de confian\u00E7a. Se voc\u00EA ainda n\u00E3o tem um servidor de e-mail, pode apontar o MX para o Exchange Online Protection como espa\u00E7o reservado tempor\u00E1rio \u2014 por exemplo {suggestion} (o mesmo padr\u00E3o que a Microsoft usa, em que contoso.com se torna contoso-com.mail.protection.outlook.com).',
+    guidanceMxMissingCheckedParent: 'Nenhum registro MX detectado para {domain} nem para o dom\u00EDnio pai {parentDomain}. O Azure Communication Services n\u00E3o usa registros MX para enviar e-mail, mas ainda assim \u00E9 recomend\u00E1vel publicar um: os sistemas modernos de seguran\u00E7a e reputa\u00E7\u00E3o de e-mail tratam a presen\u00E7a de um registro MX como um sinal de legitimidade do dom\u00EDnio e a esperam como parte das pr\u00E1ticas atuais contra abuso e de confian\u00E7a. Se voc\u00EA ainda n\u00E3o tem um servidor de e-mail, pode apontar o MX para o Exchange Online Protection como espa\u00E7o reservado tempor\u00E1rio, usando o mesmo padr\u00E3o que a Microsoft usa (contoso.com se torna contoso-com.mail.protection.outlook.com).',
     guidanceMxMissingParentFallback: 'Nenhum registro MX encontrado em {domain}; usando os registros MX do dom\u00EDnio pai {lookupDomain} como alternativa.',
     guidanceMxParentShown: 'Nenhum registro MX encontrado em {domain}; os resultados exibidos s\u00E3o do dom\u00EDnio pai {lookupDomain}.',
     guidanceMxProviderDetected: 'Provedor MX detectado: {provider}',
@@ -22197,7 +22251,14 @@ function buildGuidance(r) {
     const mxList = r.mxRecords || [];
     const hasMx = Array.isArray(mxList) && mxList.length > 0;
     if (!hasMx) {
-      guidance.push({ type: 'attention', text: t('guidanceMxMissing') });
+      // ACS is send-only and does not need MX for routing, but modern email
+      // security/reputation systems still expect a present MX record. Offer a
+      // ready-to-paste Exchange Online Protection placeholder derived from the
+      // queried domain (dots -> dashes), mirroring how Microsoft maps
+      // contoso.com -> contoso-com.mail.protection.outlook.com.
+      const mxHost = (r.domain || '').trim().toLowerCase().replace(/\./g, '-');
+      const suggestion = mxHost ? mxHost + '.mail.protection.outlook.com' : 'contoso-com.mail.protection.outlook.com';
+      guidance.push({ type: 'attention', text: t('guidanceMxMissing', { suggestion }) });
     }
     if (r.mxProvider && r.mxProvider !== 'Unknown') {
       guidance.push({ type: 'info', text: t('guidanceMxProviderDetected', { provider: r.mxProvider }) });
@@ -24672,7 +24733,7 @@ function buildSpfExplainedHtml(spfRecord) {
   // canonical record while letting us wrap each token in an addressable span.
   // `data-spf-type` / `data-spf-value` are mirrored onto the span so the
   // outer SPF Expansion Records table can also highlight tokens by
-  // type+value (e.g., include:spf.crsend.com).
+  // type+value (e.g., include:spf.example.com).
   const tokenSpans = mechs.map((m, idx) =>
     `<span class="spf-record-token" data-token-idx="${idx}" data-spf-type="${escapeHtml(m.type)}" data-spf-value="${escapeHtml(m.value)}">${escapeHtml(m.raw)}</span>`
   ).join(' ');
@@ -25017,7 +25078,7 @@ function setSpfTokenHighlight(rowEl, isOn) {
 // Hover handler for rows inside the SPF Expansion Records table. Highlights
 // every `.spf-record-token` (across any open Explained panel on the page)
 // whose data-spf-type+value matches this expansion row's mechanism/target
-// (e.g., include:spf.crsend.com). This lets users hover an entry in the
+// (e.g., include:spf.example.com). This lets users hover an entry in the
 // expansion table and immediately see where it appears inside the queried-
 // domain SPF Explained record box. Tokens are matched globally rather than
 // scoped to a single block because the expansion row references targets

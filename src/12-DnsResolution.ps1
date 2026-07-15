@@ -331,7 +331,7 @@ function Get-DohDnssecAnomaly {
 # legitimate "no records" reply. That collapse is what caused otherwise-healthy
 # domains to display "No SPF record detected" / "No Records Available" when, in
 # reality, the domain's authoritative nameservers were answering inconsistently
-# (a propagation / misconfiguration issue -- observed for zenithbank.com whose
+# (a propagation / misconfiguration issue -- observed for a real-world domain whose
 # TXT lookup SERVFAILs across public resolvers while its A/MX records resolve
 # fine, and which still resolves in tools that happen to hit a healthy
 # authoritative server).
@@ -1396,6 +1396,53 @@ function Get-DnsRecordsStatus {
   }
   catch {
     $errors.Add($_.Exception.Message)
+  }
+
+  # NS supplement: when the queried name is a host *inside* a zone (e.g.
+  # "relay.example.com") rather than a delegated zone of its own, no NS records
+  # are published at that exact name -- the authoritative NS records live at the
+  # parent apex ("example.com"). A direct NS query at the host name therefore
+  # returns an empty answer, so the records grid shows no NS rows even though the
+  # Nameserver TXT Consistency card (which walks up parents via
+  # Get-AuthoritativeNameserverHosts) does surface them. When no NS record was
+  # found at the queried domain, walk up the parent domains and the registrable
+  # apex and add the first zone's NS records so the grid reflects the domain's
+  # actual delegation. The rows keep the zone name they were found at, which is
+  # the accurate owner of those NS records.
+  $hasNsRecord = @($records.ToArray() | Where-Object { $_ -and ([string]$_.type -eq 'NS') }).Count -gt 0
+  if (-not $hasNsRecord) {
+    $queriedClean = ([string]$Domain).Trim().TrimEnd('.')
+    $nsZoneCandidates = New-Object System.Collections.Generic.List[string]
+    foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
+      if (-not [string]::IsNullOrWhiteSpace($parent) -and -not $nsZoneCandidates.Contains($parent)) {
+        $nsZoneCandidates.Add($parent)
+      }
+    }
+    try {
+      $registrableZone = Get-RegistrableDomain -Domain $Domain
+      if (-not [string]::IsNullOrWhiteSpace($registrableZone) -and -not $nsZoneCandidates.Contains($registrableZone)) {
+        $nsZoneCandidates.Add($registrableZone)
+      }
+    }
+    catch { }
+
+    foreach ($nsZone in $nsZoneCandidates) {
+      if ([string]::Equals($nsZone, $queriedClean, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+
+      $nsRows = @()
+      try {
+        $nsRows = @(Resolve-DnsRecordsDetailed -Name $nsZone -Types @('NS') | Where-Object { $_ -and ([string]$_.type -eq 'NS') })
+      }
+      catch {
+        $errors.Add($_.Exception.Message)
+        continue
+      }
+
+      if ($nsRows.Count -gt 0) {
+        foreach ($row in $nsRows) { $records.Add($row) }
+        break
+      }
+    }
   }
 
   $ipAddresses = @($records | Where-Object { $_.type -in @('A', 'AAAA') } | ForEach-Object { [string]$_.data } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)

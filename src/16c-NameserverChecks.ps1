@@ -517,7 +517,7 @@ function Get-NameserverTxtStatus {
 	$ips = @(Resolve-NameserverPublicIps -NameserverHost $nsHost)
 	if ($ips.Count -eq 0) {
 	  # The nameserver hostname itself doesn't resolve to a public IP (this is
-	  # exactly the zenithbank.com sv001dns06 "No such host is known" case).
+	  # exactly the "No such host is known" case for a non-resolving nameserver hostname).
 	  $perServer.Add([pscustomobject]@{
 		host       = $nsHost
 		ip         = $null

@@ -144,7 +144,14 @@ function Get-AcsDnsStatus {
           $guidance.Add("Domain publishes a Null MX record (MX 0 .), which explicitly means it does not accept email. Configure a real MX record before using this domain for mail flow.")
         }
         else {
-          $guidance.Add("No MX records detected. Mail flow will not function until MX records are configured.")
+          # ACS is send-only and does not need MX for mail routing, but a
+          # present MX record is still expected by modern email security and
+          # reputation systems as a signal of domain legitimacy. Offer a
+          # ready-to-use Exchange Online Protection placeholder derived from
+          # the queried domain (dots -> dashes), mirroring how Microsoft maps
+          # contoso.com -> contoso-com.mail.protection.outlook.com.
+          $mxSuggestion = ($Domain -replace '\.', '-') + '.mail.protection.outlook.com'
+          $guidance.Add("No MX record detected. Azure Communication Services does not use MX records to send email, but publishing one is still recommended: modern email security and reputation systems treat the presence of an MX record as a signal of domain legitimacy and expect it as part of current anti-abuse and trust practices. If you do not run a mail server yet, you can point MX at Exchange Online Protection as a temporary placeholder, for example $mxSuggestion (the same pattern Microsoft uses, where contoso.com becomes contoso-com.mail.protection.outlook.com).")
         }
       }
       if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
