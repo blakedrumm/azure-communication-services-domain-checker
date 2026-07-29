@@ -370,6 +370,67 @@ The SPF, ACS Domain Verification, and TXT Records cards are driven by a single p
 | `ACS_NAMESERVER_PROBE_MAX` | `12` | Maximum number of authoritative nameservers to query (max 25) |
 | `ACS_NAMESERVER_PROBE_TIMEOUT_MS` | `4000` | Per-nameserver query timeout in milliseconds (500–15000) |
 
+## 🌐 DNS Propagation Check
+
+The Nameserver TXT Consistency check asks *"do my authoritative servers agree?"*. The `/api/propagation` endpoint asks the complementary question: **"can the rest of the world actually see the record yet?"**
+
+It queries a curated, geographically spread set of well-known public DNS resolvers **in parallel** and compares their answers. Because Azure Communication Services verifies domains through public DNS, a record that is visible from only some vantage points verifies intermittently — which is the single most common reason domain verification appears to fail at random.
+
+The **DNS Propagation** card shows:
+
+- A verdict derived from **consensus** rather than a value you have to type in — the most common non-empty answer set becomes the reference and every other resolver is measured against it
+- Metric chips for **responding / agreeing / differing / reporting no record**
+- A **propagation coverage** bar (share of responding resolvers that agree)
+- A dependency-free **mini world map** of resolver locations, colour-coded by result, with a loading overlay while a re-check is in flight
+- An **additional details** panel listing exactly what each responding resolver returned, sorted so the resolvers needing attention appear first
+- A **⚙ settings** button on the card header for tuning the check without re-running the other nine lookups
+
+Only resolvers that returned a **usable** answer (NOERROR or NXDOMAIN) appear in the chips, the map, and the details list. Resolvers that timed out, were firewalled, answered SERVFAIL/REFUSED, or returned an answer too large to read are already excluded from the verdict, so showing them would only compete for attention with the resolvers that matter. A single footnote reports how many were dropped, and the full set is always available in the `/api/propagation` `results[]` payload.
+
+### Verdicts
+
+| State | Badge | Meaning |
+|-------|-------|---------|
+| `propagated` | **PASS** | Every responding resolver returned the same answer |
+| `partial` | **FAIL** | Present at some vantage points, missing at others — the classic "still propagating" signature that breaks ACS verification |
+| `mismatch` | **WARN** | All responders have a record, but not the same one (stale cache, geo-DNS, or an edit still rolling out) |
+| `norecord` | **WARN** | No resolver found a record of this type |
+| `unknown` | **WARN** | Nothing answered — usually outbound UDP/53 blocked on the network running the tool, not a domain problem |
+
+Resolvers that do not respond, that fail with a resolver-side rcode, and answers too large to read over UDP that could not be recovered over TCP, are reported but **excluded from the verdict** so a flaky public resolver can never turn a healthy domain into a failure.
+
+### Card settings
+
+The gear button opens a per-card settings panel (persisted in browser storage under the *Preferences* cookie category):
+
+- **Record type** — `TXT` (default), `A`, `AAAA`, `CNAME`, `MX`, `NS`, `SOA`, `CAA`
+- **Resolver locations** — global anycast, North America, South America, Europe, Asia, Oceania (the list is built from the server's live resolver catalog)
+- **Max resolvers** — 4 up to the size of the resolver catalog (the built-in catalog holds 30; the server accepts up to 100, which you reach by extending the catalog with `ACS_PROPAGATION_RESOLVERS`)
+- **Timeout** — 1000–15000 ms
+- **Expected value contains** — optional substring to assert instead of comparing resolvers against each other
+
+Applying settings re-runs only the propagation check. While it is in flight every value derived from the previous answer (chips, coverage bar, consensus answer, summary, per-resolver rows) is removed rather than left looking current; the map stays in place, dimmed under a spinner, so the card does not collapse.
+
+### How the queries run
+
+All resolvers are queried concurrently from a **single thread**: one non-blocking UDP socket per resolver, every query sent up front, then all sockets awaited together with `Socket.Select`. Total wall time is roughly one timeout window regardless of resolver count, and no PowerShell state is ever touched from more than one thread. Queries advertise an EDNS0 4096-byte UDP payload; truncated answers get a concurrent TCP recovery pass using the same pattern.
+
+### Security guards (SSRF protection)
+
+- The resolver list is **operator-controlled** and never derived from the queried domain
+- Every resolver address must parse as a **public, routable IPv4** literal (reusing the website probe's guard); private/loopback/link-local/CGNAT targets are refused
+- Fan-out size, socket timeouts, and receive buffers are all bounded
+- All query parameters (`type`, `regions`, `max`, `timeout`, `expected`) are allowlisted and clamped server-side
+
+### Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ACS_DISABLE_PROPAGATION_PROBE` | _(unset)_ | Set to `1` to disable the probe entirely (the card renders a neutral "disabled" note) |
+| `ACS_PROPAGATION_MAX_RESOLVERS` | `25` | Default number of resolvers to query (max 100) |
+| `ACS_PROPAGATION_TIMEOUT_MS` | `4000` | Per-resolver query timeout in milliseconds (500–15000) |
+| `ACS_PROPAGATION_RESOLVERS` | _(unset)_ | Replace the built-in resolver catalog. Semicolon-separated entries of `ip\|provider\|countryCode\|city\|lat\|lon\|region\|anycast(0\|1)`. Invalid entries are skipped; if nothing valid parses the built-in catalog is used. |
+
 ## 🌍 WHOIS / RDAP Diagnostics
 
 The tool enriches results with domain registration metadata (creation date, expiry, registrar, domain age) using a priority-ordered chain of fallback providers:
@@ -409,6 +470,7 @@ The application exposes the following RESTful API endpoints:
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
 | `/api/website` | Website reachability snapshot | Performs a security-guarded HTTP(S) probe (apex + www, HTTPS first) and returns a neutral, factual snapshot: reachability, HTTP status, redirect chain, page title/description, a short text excerpt, and recognized placeholder/parked-page markers |
 | `/api/nameservers` | Per-nameserver TXT consistency | Queries each authoritative nameserver directly (raw UDP/TCP DNS) for the domain's TXT records and compares them, so you can see whether every nameserver serves the same SPF / verification records or whether divergence is making them resolve only intermittently |
+| `/api/propagation` | Global DNS propagation | Queries a geographically spread set of public DNS resolvers in parallel and compares their answers, so you can see whether a recent DNS change is visible everywhere yet. Accepts optional `type`, `regions`, `max`, `timeout`, and `expected` query parameters (all allowlisted and clamped server-side) |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
 | `/api/auth/event` | Anonymous Microsoft Entra ID sign-in ping | Header-only, consent-gated. SPA POSTs an opaque SHA-256 account hash and a Microsoft-employee boolean after client-side MSAL/Graph verification; the server never sees access tokens, UPN, oid, or tenant id. |
 | `/terms` | Terms of Service | Embedded, localized Terms of Service page |
@@ -687,7 +749,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.10.6`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.11.0`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -710,8 +772,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.10.6
-git push origin v2.10.6
+git tag v2.11.0
+git push origin v2.11.0
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -722,7 +784,7 @@ git push origin v2.10.6
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.10.6`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.11.0`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -739,11 +801,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.10.6
+docker pull limitlessworlds/acs-domain-checker:2.11.0
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.10.6
-docker pull limitlessworlds/acs-domain-checker:windows-2.10.6
+docker pull limitlessworlds/acs-domain-checker:linux-2.11.0
+docker pull limitlessworlds/acs-domain-checker:windows-2.11.0
 ```
 
 ### 🛠️ Manual Build Script
@@ -758,7 +820,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.10.6
+./acs-domain-checker-dockerhub.ps1 -Version 2.11.0
 ```
 
 **📋 Requirements for manual script:**

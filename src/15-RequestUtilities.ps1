@@ -1,4 +1,35 @@
 # ===== Request Handling Utilities =====
+
+# Is this exception just the client hanging up mid-request?
+#
+# The SPA aborts in-flight fetches on every new lookup (activeLookup.controllers)
+# and browsers drop connections whenever the user navigates away or reloads, so
+# a half-written response is routine rather than a server fault. Once we hold a
+# context and are writing to it, an HttpListenerException / SocketException means
+# the socket is gone -- listener-level failures are handled separately in
+# 24-RequestLoop.ps1. Treating these as 500-level errors filled the log with
+# ERROR lines for entirely normal browser behavior.
+#
+# IOException only counts when it wraps a socket failure; a bare IOException can
+# be a genuine disk/stream problem worth surfacing.
+function Test-AcsClientDisconnect {
+  param($Exception)
+
+  $ex = $Exception
+  if ($ex -is [System.Management.Automation.ErrorRecord]) { $ex = $ex.Exception }
+
+  # Walk the inner-exception chain: PowerShell wraps .NET method failures in
+  # MethodInvocationException, so the interesting type is rarely the outermost.
+  for ($depth = 0; $depth -lt 6 -and $null -ne $ex; $depth++) {
+    if ($ex -is [System.Net.HttpListenerException]) { return $true }
+    if ($ex -is [System.Net.Sockets.SocketException]) { return $true }
+    if ($ex -is [System.IO.IOException] -and $ex.InnerException -is [System.Net.Sockets.SocketException]) { return $true }
+    $ex = $ex.InnerException
+  }
+
+  return $false
+}
+
 function Write-RequestLog {
   param(
     $Context,

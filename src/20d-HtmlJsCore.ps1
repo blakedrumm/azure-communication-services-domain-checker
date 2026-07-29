@@ -38,7 +38,9 @@ const CHECK_PROGRESS_LABELS = {
   dkim:       null,
   cname:      'cname',
   reputation: 'reputationDnsbl',
-  nameservers: 'nameserverCheck'
+  website:    'websiteCheck',
+  nameservers: 'nameserverCheck',
+  propagation: 'dnsPropagation'
 };
 
 function getCheckProgressLabel(key) {
@@ -506,7 +508,7 @@ function lookup(options = {}) {
     return `HTTP ${r.status}${r.statusText ? " " + r.statusText : ""}${details ? ": " + details : ""}`;
   }
 
-  async function fetchJson(path) {
+  async function fetchJson(path, extraQuery) {
     const controller = new AbortController();
     activeLookup.controllers.push(controller);
     try {
@@ -521,7 +523,10 @@ function lookup(options = {}) {
       headers['Cache-Control'] = 'no-cache';
       headers['Pragma'] = 'no-cache';
       const cacheBuster = "_=" + Date.now();
-      const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster;
+      // extraQuery carries endpoint-specific options (currently only the DNS
+      // propagation settings); it is already URL-encoded by its builder.
+      const extra = extraQuery ? ("&" + extraQuery) : "";
+      const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster + extra;
       const r = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
       if (!r.ok) {
         let body = "";
@@ -590,7 +595,8 @@ function hideTopBarItem(element) {
     { key: "cname", path: "/api/cname" },
     { key: "reputation", path: "/api/reputation" },
     { key: "website", path: "/api/website" },
-    { key: "nameservers", path: "/api/nameservers" }
+    { key: "nameservers", path: "/api/nameservers" },
+    { key: "propagation", path: "/api/propagation", query: buildPropagationQuery }
   ];
 
   // ---- Live check-progress popover state ----
@@ -624,9 +630,9 @@ function hideTopBarItem(element) {
   let savedHistory = false;
   let downloadShown = false;
 
-  const tasks = requests.map(async ({ key, path }) => {
+  const tasks = requests.map(async ({ key, path, query }) => {
     try {
-      const data = await fetchJson(path);
+      const data = await fetchJson(path, typeof query === 'function' ? query() : query);
 
       // Ignore late results from older runs
       if (runId !== activeLookup.runId) return;
@@ -660,6 +666,8 @@ function hideTopBarItem(element) {
         resultObj.website = data;
       } else if (key === 'nameservers') {
         resultObj.nameservers = data;
+      } else if (key === 'propagation') {
+        resultObj.propagation = data;
       } else if (key === 'records') {
         resultObj.dnsRecords = Array.isArray(data.records) ? data.records : [];
         resultObj.dnsRecordsError = data.error || null;
@@ -2270,6 +2278,179 @@ function toggleNameserverDetails(element) {
     ? (element.dataset.closeLabel || `${t('nameserverDetailsButton')} \u2212`)
     : (element.dataset.openLabel || `${t('nameserverDetailsButton')} +`);
   el.style.display = isOpen ? "block" : "none";
+}
+
+// ---- DNS Propagation card: settings panel + per-resolver details ----
+//
+// render() rebuilds the whole results list on every partial result, so the
+// open/closed state of these two panels lives here (module scope) rather than in
+// the DOM. Without that the settings panel would slam shut mid-edit whenever a
+// slower check (WHOIS/DNSBL) finished and triggered a re-render.
+let propagationSettingsOpen = false;
+let propagationDetailsOpen = false;
+
+// Build the per-card settings form. `prop` is the last propagation payload (may
+// be null): its availableRegions list is what populates the location checkboxes,
+// so the picker always reflects the server's actual resolver catalog rather than
+// a hard-coded client list.
+function buildPropagationSettingsHtml(prop) {
+  const s = propagationSettings || PROPAGATION_DEFAULTS;
+  const available = (prop && Array.isArray(prop.availableRegions) && prop.availableRegions.length > 0)
+    ? prop.availableRegions.map(x => String(x && x.region || '')).filter(Boolean)
+    : PROPAGATION_REGIONS.slice();
+
+  // No explicit selection means "all locations", so show every box ticked.
+  const selected = (Array.isArray(s.regions) && s.regions.length > 0) ? s.regions : available;
+
+  // Cap the input at how many resolvers the server catalog actually holds so a
+  // value above that cannot silently do nothing. The server allows up to 100,
+  // which an operator reaches by extending the catalog via ACS_PROPAGATION_RESOLVERS.
+  const catalogTotal = (prop && Array.isArray(prop.availableRegions))
+    ? prop.availableRegions.reduce((sum, x) => sum + (Number(x && x.resolverCount) || 0), 0)
+    : 0;
+  const maxAllowed = catalogTotal > 0 ? Math.min(100, catalogTotal) : 100;
+
+  const typeOptions = PROPAGATION_RECORD_TYPES.map(type =>
+    `<option value="${escapeHtml(type)}"${type === s.recordType ? ' selected' : ''}>${escapeHtml(type)}</option>`
+  ).join('');
+
+  const regionOptions = available.map(region => {
+    const labelKey = PROPAGATION_REGION_LABEL_KEYS[region];
+    const label = labelKey ? t(labelKey) : region;
+    const checked = selected.indexOf(region) !== -1 ? ' checked' : '';
+    return `<label class="prop-region-option"><input type="checkbox" class="prop-region-check" value="${escapeHtml(region)}"${checked}>${escapeHtml(label)}</label>`;
+  }).join('');
+
+  return `<div id="propagationSettingsPanel" class="prop-settings-panel hide-on-screenshot" style="display:${propagationSettingsOpen ? 'grid' : 'none'};">
+    <div class="prop-settings-title">${escapeHtml(t('propagationSettingsTitle'))}</div>
+    <div class="prop-settings-grid">
+      <div class="prop-settings-row">
+        <label for="propSettingType">${escapeHtml(t('propagationSettingRecordType'))}</label>
+        <select id="propSettingType">${typeOptions}</select>
+      </div>
+      <div class="prop-settings-row">
+        <label for="propSettingMax">${escapeHtml(t('propagationSettingMaxResolvers'))}</label>
+        <input type="number" id="propSettingMax" min="4" max="${maxAllowed}" step="1" value="${escapeHtml(String(Math.min(s.maxResolvers, maxAllowed)))}">
+      </div>
+      <div class="prop-settings-row">
+        <label for="propSettingTimeout">${escapeHtml(t('propagationSettingTimeout'))}</label>
+        <input type="number" id="propSettingTimeout" min="1000" max="15000" step="500" value="${escapeHtml(String(s.timeoutMs))}">
+      </div>
+    </div>
+    <div class="prop-settings-row">
+      <span class="prop-settings-legend">${escapeHtml(t('propagationSettingRegions'))}</span>
+      <div class="prop-region-list">${regionOptions}</div>
+    </div>
+    <div class="prop-settings-row">
+      <label for="propSettingExpected">${escapeHtml(t('propagationSettingExpected'))}</label>
+      <input type="text" id="propSettingExpected" maxlength="255" value="${escapeHtml(String(s.expected || ''))}" placeholder="${escapeHtml(t('propagationSettingExpectedHint'))}">
+    </div>
+    <div class="prop-settings-actions">
+      <button type="button" class="copy-btn" onclick="event.stopPropagation(); applyPropagationSettings()">${escapeHtml(t('propagationApply'))}</button>
+      <button type="button" class="copy-btn" onclick="event.stopPropagation(); resetPropagationSettings()">${escapeHtml(t('propagationResetDefaults'))}</button>
+      <span id="propagationRerunStatus" class="prop-note" style="margin:0;align-self:center;"></span>
+    </div>
+  </div>`;
+}
+
+function togglePropagationSettings() {
+  propagationSettingsOpen = !propagationSettingsOpen;
+  const panel = document.getElementById('propagationSettingsPanel');
+  if (panel) panel.style.display = propagationSettingsOpen ? 'grid' : 'none';
+  const btn = document.querySelector('#card-propagation .prop-settings-btn');
+  if (btn) btn.setAttribute('aria-expanded', propagationSettingsOpen ? 'true' : 'false');
+}
+
+function togglePropagationDetails(element) {
+  const el = document.getElementById('propagationDetails');
+  if (!el || !element) return;
+  propagationDetailsOpen = !propagationDetailsOpen;
+  element.textContent = propagationDetailsOpen
+    ? (element.dataset.closeLabel || `${t('propagationDetailsButton')} \u2212`)
+    : (element.dataset.openLabel || `${t('propagationDetailsButton')} +`);
+  el.style.display = propagationDetailsOpen ? 'grid' : 'none';
+}
+
+// Read the settings form, persist it, then re-run only the propagation check.
+function applyPropagationSettings() {
+  const typeEl = document.getElementById('propSettingType');
+  const maxEl = document.getElementById('propSettingMax');
+  const timeoutEl = document.getElementById('propSettingTimeout');
+  const expectedEl = document.getElementById('propSettingExpected');
+  const regionEls = Array.from(document.querySelectorAll('.prop-region-check'));
+  const checkedRegions = regionEls.filter(el => el.checked).map(el => String(el.value || ''));
+
+  propagationSettings = normalizePropagationSettings({
+    recordType: typeEl ? typeEl.value : PROPAGATION_DEFAULTS.recordType,
+    // All boxes ticked (or none) means "no restriction", which we store as an
+    // empty list so the server keeps using its full catalog.
+    regions: (checkedRegions.length === 0 || checkedRegions.length === regionEls.length) ? [] : checkedRegions,
+    maxResolvers: maxEl ? maxEl.value : PROPAGATION_DEFAULTS.maxResolvers,
+    timeoutMs: timeoutEl ? timeoutEl.value : PROPAGATION_DEFAULTS.timeoutMs,
+    expected: expectedEl ? expectedEl.value : ''
+  });
+  savePropagationSettings();
+  rerunPropagationCheck();
+}
+
+function resetPropagationSettings() {
+  propagationSettings = normalizePropagationSettings(PROPAGATION_DEFAULTS);
+  savePropagationSettings();
+  rerunPropagationCheck();
+}
+
+// The result object currently painted into #results. In a multi-domain sweep the
+// visible domain is multiDomainState.active, so re-running propagation must
+// update THAT domain's cached result rather than whichever lookup ran last.
+function getActivePropagationResult() {
+  const active = (typeof multiDomainState !== 'undefined' && multiDomainState) ? multiDomainState.active : null;
+  if (active && multiDomainState.results && multiDomainState.results[active]) return multiDomainState.results[active];
+  return lastResult;
+}
+
+// Re-run just /api/propagation for the visible domain and repaint. Deliberately
+// standalone (not part of lookup()) so changing a propagation setting does not
+// re-issue the other nine backend calls.
+async function rerunPropagationCheck() {
+  const target = getActivePropagationResult();
+  if (!target || !target.domain || propagationRerunInFlight) return;
+
+  propagationRerunInFlight = true;
+  const statusEl = document.getElementById('propagationRerunStatus');
+  if (statusEl) statusEl.textContent = t('propagationRechecking');
+  setPropagationBusy(true);
+
+  if (!target._loaded) target._loaded = {};
+  if (!target._errors) target._errors = {};
+
+  try {
+    let headers = {};
+    const apiKey = (acsApiKey || '').trim();
+    if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
+    headers = buildConsentRequestHeaders(headers);
+    headers['Cache-Control'] = 'no-cache';
+    headers['Pragma'] = 'no-cache';
+
+    const url = '/api/propagation?domain=' + encodeURIComponent(target.domain)
+      + '&_=' + Date.now() + '&' + buildPropagationQuery();
+    const resp = await fetch(url, { headers: headers, cache: 'no-store' });
+    if (!resp.ok) {
+      let body = '';
+      try { body = await resp.text(); } catch {}
+      throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+    }
+    const raw = await resp.arrayBuffer();
+    target.propagation = repairObjectStrings(JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(raw)));
+    target._loaded.propagation = true;
+    delete target._errors.propagation;
+  } catch (err) {
+    target._loaded.propagation = true;
+    target._errors.propagation = (err && err.message) ? err.message : String(err);
+  } finally {
+    propagationRerunInFlight = false;
+    recomputeDerived(target);
+    render(target);
+  }
 }
 
 // Convert RDAP JSON into small grouped sections first so the registration card
@@ -5042,6 +5223,206 @@ function render(r) {
     }
   }
 
+  // DNS propagation across public resolvers worldwide.
+  // The nameserver card above asks "do my authoritative servers agree?"; this
+  // card asks the complementary question -- "can the rest of the world actually
+  // see the record yet?" -- by querying a geographically spread set of public
+  // resolvers in parallel and comparing their answers. A record that resolves
+  // from some vantage points but not others is the usual reason ACS domain
+  // verification appears to fail at random.
+  const propagationInfo = t('propagationInfo');
+  const propagationSuffix = `<button type="button" class="info-dot" aria-label="${escapeHtml(propagationInfo)}" data-info="${escapeHtml(propagationInfo)}">i</button>`
+    + `<button type="button" class="prop-settings-btn hide-on-screenshot" aria-label="${escapeHtml(t('propagationSettingsLabel'))}" title="${escapeHtml(t('propagationSettingsLabel'))}" aria-expanded="${propagationSettingsOpen ? 'true' : 'false'}" onclick="event.stopPropagation(); togglePropagationSettings()">\u2699</button>`;
+
+  if (!loaded.propagation && !errors.propagation) {
+    cards.push(card(t('dnsPropagation'), t('loadingValue'), "LOADING", "tag-info", "propagation", false, propagationSuffix));
+  } else if (errors.propagation) {
+    cards.push(card(t('dnsPropagation'), errors.propagation, "ERROR", "tag-fail", "propagation", false, propagationSuffix, buildPropagationSettingsHtml(null)));
+  } else {
+    const prop = r.propagation || {};
+    const propState = String(prop.state || 'unknown');
+
+    if (prop.checked === false) {
+      // Server-side opt-out (ACS_DISABLE_PROPAGATION_PROBE) or a rejected input.
+      cards.push(card(
+        t('dnsPropagation'),
+        prop.disabledReason || prop.error || t('propagationDisabledText'),
+        "INFO", "tag-info", "propagation", false, propagationSuffix
+      ));
+    } else if ((prop.resolverCount || 0) === 0) {
+      cards.push(card(
+        t('dnsPropagation'),
+        prop.error || t('propagationNoResolvers'),
+        "WARN", "tag-warn", "propagation", false, propagationSuffix,
+        buildPropagationSettingsHtml(prop)
+      ));
+    } else {
+      // Badge mapping:
+      //   propagated -> PASS (every responding resolver returned the same answer)
+      //   partial    -> FAIL (present at some vantage points, missing at others)
+      //   mismatch   -> WARN (all have a record, but not the same one)
+      //   norecord   -> WARN (nobody has it; may simply not be published yet)
+      //   unknown    -> WARN (nothing answered, usually blocked outbound UDP/53)
+      let propBadge = "WARN";
+      let propBadgeClass = "tag-warn";
+      let propStateLabel = t('propagationStateUnknown');
+      let propExplain = t('propagationUnknownExplain');
+      if (propState === 'propagated') {
+        propBadge = "PASS"; propBadgeClass = "tag-pass";
+        propStateLabel = t('propagationStateFully'); propExplain = '';
+      } else if (propState === 'partial') {
+        propBadge = "FAIL"; propBadgeClass = "tag-fail";
+        propStateLabel = t('propagationStatePartial'); propExplain = t('propagationPartialExplain');
+      } else if (propState === 'mismatch') {
+        propStateLabel = t('propagationStateMismatch'); propExplain = t('propagationMismatchExplain');
+      } else if (propState === 'norecord') {
+        propStateLabel = t('propagationStateNoRecord'); propExplain = t('propagationNoRecordExplain');
+      }
+
+      const propResults = Array.isArray(prop.results) ? prop.results : [];
+      const propRecordType = String(prop.recordType || 'TXT');
+
+      // Only resolvers that actually returned a usable answer are shown. A
+      // resolver that timed out, was firewalled, or answered SERVFAIL tells us
+      // nothing about the domain -- it is already excluded from the verdict, and
+      // showing it as a row and a grey pin just competed for attention with the
+      // resolvers that matter. The count of what was dropped is still surfaced
+      // as a one-line footnote so the numbers reconcile with "Max resolvers".
+      const respondingResults = propResults.filter(x => x && ['propagated', 'mismatch', 'norecord'].indexOf(String(x.status)) !== -1);
+      const respondedCount = respondingResults.length;
+      const agreeingCount = respondingResults.filter(x => x.status === 'propagated').length;
+      const differingCount = respondingResults.filter(x => x.status === 'mismatch').length;
+      const noRecordCount = respondingResults.filter(x => x.status === 'norecord').length;
+      const excludedCount = propResults.length - respondedCount;
+      const propPercent = respondedCount > 0 ? Math.round(100 * agreeingCount / respondedCount) : 0;
+
+      // Plain-text body (this is what the Copy button puts on the clipboard).
+      const propLines = [];
+      propLines.push(`${t('propagationOutcome')}: ${propStateLabel}`);
+      propLines.push(`${t('propagationRecordTypeLabel')}: ${propRecordType}`);
+      propLines.push(`${t('propagationResponding')}: ${respondedCount}`);
+      propLines.push(`${t('propagationAgreeing')}: ${agreeingCount}`);
+      if (differingCount > 0) propLines.push(`${t('propagationDiffering')}: ${differingCount}`);
+      if (noRecordCount > 0) propLines.push(`${t('propagationMissingLabel')}: ${noRecordCount}`);
+      propLines.push(`${t('propagationCoverage')}: ${propPercent}%`);
+      if (propExplain) propLines.push(`\n${propExplain}`);
+
+      // Metric chips.
+      const propStat = (value, labelKey, tone) =>
+        `<div class="prop-stat ${tone}"><span class="prop-stat-value">${escapeHtml(String(value))}</span><span class="prop-stat-label">${escapeHtml(t(labelKey))}</span></div>`;
+      const statsHtml = '<div class="prop-stat-grid">'
+        + propStat(respondedCount, 'propagationResponding', 'idle')
+        + propStat(agreeingCount, 'propagationAgreeing', agreeingCount > 0 ? 'ok' : 'idle')
+        + (differingCount > 0 ? propStat(differingCount, 'propagationDiffering', 'warn') : '')
+        + (noRecordCount > 0 ? propStat(noRecordCount, 'propagationMissingLabel', 'bad') : '')
+        + '</div>';
+
+      const coverageTone = propPercent >= 100 ? '' : (propPercent >= 50 ? 'warn' : 'bad');
+      const coverageHtml = '<div class="prop-coverage">'
+        + `<div class="prop-coverage-head"><span>${escapeHtml(t('propagationCoverage'))} \u00B7 ${escapeHtml(propRecordType)}</span><span>${propPercent}%</span></div>`
+        + `<div class="prop-coverage-track"><div class="prop-coverage-fill ${coverageTone}" style="width:${propPercent}%"></div></div>`
+        + '</div>';
+
+      // Render every answer inside a scrollable box rather than truncating: a
+      // busy domain can publish dozens of TXT records and the operator usually
+      // needs to read the specific one they just added.
+      const consensus = Array.isArray(prop.consensusAnswers) ? prop.consensusAnswers : [];
+      const consensusLabel = t('propagationConsensusAnswer')
+        + (consensus.length > 1 ? ` \u00B7 ${t('propagationConsensusLines', { count: String(consensus.length) })}` : '');
+      const consensusHtml = consensus.length > 0
+        ? '<div class="prop-consensus">'
+          + `<span class="prop-consensus-label">${escapeHtml(consensusLabel)}</span>`
+          + `<div class="prop-consensus-list" tabindex="0" role="group" aria-label="${escapeHtml(t('propagationConsensusAnswer'))}">`
+          + consensus.map(a => `<div class="prop-consensus-item">${escapeHtml(String(a))}</div>`).join('')
+          + '</div></div>'
+        : '';
+
+      const mapHtml = buildPropagationMapSvg(prop.locations);
+      const noteParts = [];
+      if (respondingResults.some(x => x && x.anycast)) noteParts.push(t('propagationAnycastNote'));
+      if (excludedCount > 0) noteParts.push(t('propagationExcludedNote', { excluded: String(excludedCount), total: String(propResults.length) }));
+      const anycastNoteHtml = noteParts.length > 0
+        ? `<div class="prop-note">${noteParts.map(x => escapeHtml(x)).join('<br>')}</div>`
+        : '';
+
+      // Per-resolver detail rows, ordered so the resolvers that need attention
+      // (differing answers, then missing records) appear first.
+      const statusRank = { mismatch: 0, norecord: 1, propagated: 2 };
+      const orderedResults = respondingResults.slice().sort((a, b) => {
+        const ra = statusRank[String(a && a.status)] ?? 9;
+        const rb = statusRank[String(b && b.status)] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return String(a && a.provider || '').localeCompare(String(b && b.provider || ''));
+      });
+
+      const detailRows = orderedResults.map(item => {
+        const status = String(item.status || 'norecord');
+        const place = [item.city, item.countryCode].filter(Boolean).join(', ');
+        const statusLabelKey = status === 'propagated' ? 'propagationLegendPropagated'
+          : status === 'mismatch' ? 'propagationLegendMismatch'
+          : 'propagationLegendMissing';
+        const pillClass = status === 'propagated' ? 'ns-pill-ok' : (status === 'norecord' ? 'ns-pill-bad' : 'ns-pill-warn');
+        const pills = [`<span class="ns-pill ${pillClass}">${escapeHtml(t(statusLabelKey))}</span>`];
+        if (item.rcodeLabel) pills.push(`<span class="ns-pill">${escapeHtml(String(item.rcodeLabel))}</span>`);
+        if (item.anycast) pills.push(`<span class="ns-pill">${escapeHtml(t('propagationAnycastBadge'))}</span>`);
+        if (item.responseMs !== null && typeof item.responseMs !== 'undefined') pills.push(`<span class="ns-pill">${escapeHtml(String(item.responseMs))} ms</span>`);
+
+        const answers = Array.isArray(item.answers) ? item.answers : [];
+        let answerBlock;
+        if (answers.length > 0) {
+          answerBlock = `<ul class="prop-answer-list">${answers.slice(0, 8).map(a => `<li>${escapeHtml(String(a))}</li>`).join('')}${answers.length > 8 ? '<li>\u2026</li>' : ''}</ul>`;
+        } else if (item.error) {
+          answerBlock = `<div class="prop-answer-empty">${escapeHtml(String(item.error))}</div>`;
+        } else {
+          answerBlock = `<div class="prop-answer-empty">${escapeHtml(t('propagationNoAnswerText'))}</div>`;
+        }
+
+        return `<div class="prop-detail-row ${escapeHtml(status)}">
+          <div class="prop-detail-head">
+            <span class="prop-detail-provider">${escapeHtml(String(item.provider || item.ip || ''))}</span>
+            <span class="prop-detail-meta">${escapeHtml(String(item.ip || ''))}${place ? ' \u00B7 ' + escapeHtml(place) : ''}</span>
+            <span class="prop-detail-pills">${pills.join('')}</span>
+          </div>
+          ${answerBlock}
+        </div>`;
+      }).join('');
+
+      const propOpenLabel = `${t('propagationDetailsButton')} +`;
+      const propCloseLabel = `${t('propagationDetailsButton')} \u2212`;
+      const detailsHtml = detailRows
+        ? `<div class="prop-details-block${propagationRerunInFlight ? ' is-busy' : ''}"><button type="button" class="copy-btn hide-on-screenshot" style="margin-top:10px;"
+            data-open-label="${escapeHtml(propOpenLabel)}" data-close-label="${escapeHtml(propCloseLabel)}"
+            onclick="event.stopPropagation(); togglePropagationDetails(this)">${escapeHtml(propagationDetailsOpen ? propCloseLabel : propOpenLabel)}</button>
+          <div id="propagationDetails" class="prop-detail-panel" style="margin-top:10px; display:${propagationDetailsOpen ? 'grid' : 'none'};">${detailRows}</div></div>`
+        : '';
+
+      // Everything derived from the previous answer is hidden while a re-check
+      // runs (see .prop-shell.is-busy) so stale numbers are never presented as
+      // current. The map stays put under its spinner to keep the user oriented.
+      const propBody = `<div class="prop-shell${propagationRerunInFlight ? ' is-busy' : ''}">`
+        + statsHtml
+        + coverageHtml
+        + consensusHtml
+        + mapHtml
+        + (mapHtml ? buildPropagationLegendHtml() : '')
+        + anycastNoteHtml
+        + `<div class="prop-summary-text">${escapeHtml(propLines.join("\n"))}</div>`
+        + '</div>';
+
+      cards.push(card(
+        t('dnsPropagation'),
+        propLines.join("\n"),
+        propBadge,
+        propBadgeClass,
+        "propagation",
+        false,
+        propagationSuffix,
+        buildPropagationSettingsHtml(prop) + detailsHtml,
+        propBody
+      ));
+    }
+  }
+
   cards.push(card(
     t('cname'),
     loaded.cname ? (r.cname ? (r.cnameUsedWwwFallback && r.cnameLookupDomain && r.cnameLookupDomain !== r.domain ? (`${r.cname}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.cnameLookupDomain })}`) : r.cname) : null) : (errors.cname ? errors.cname : t('loadingValue')),
@@ -6933,6 +7314,9 @@ function initializePage() {
   applyTheme(savedTheme);
   applyLanguage(currentLanguage, false);
   loadHistory();
+  // Restore the user's saved DNS propagation settings before the first lookup so
+  // the bootstrap ?domain= run already uses them.
+  loadPropagationSettings();
   // Reflect the bootstrap domain(s) in the address box: a single domain shows
   // as plain text, several show as chips.
   applyDomainsToInputBox(bootstrapDomains);

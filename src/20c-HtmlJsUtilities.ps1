@@ -1344,6 +1344,262 @@ function getDnsTxtRecoveryState(r) {
   };
 }
 
+// ===================== DNS Propagation helpers =====================
+//
+// These back the DNS Propagation card: the per-card settings the user can tune
+// (record type, resolver locations, fan-out size, timeout, optional expected
+// value), the query-string those settings produce for /api/propagation, and the
+// self-contained mini world map.
+//
+// The map is deliberately dependency-free: no Leaflet, no tile server, no CDN.
+// It is a stylised equirectangular world drawn from the coarse landmass outlines
+// in PROP_WORLD_SHAPES, which keeps the app a single file, keeps the CSP strict,
+// and means the map still renders on an air-gapped network.
+
+const PROPAGATION_SETTINGS_KEY = 'acsPropagationSettings';
+const PROPAGATION_RECORD_TYPES = ['TXT', 'A', 'AAAA', 'CNAME', 'MX', 'NS', 'SOA', 'CAA'];
+const PROPAGATION_REGIONS = ['global', 'namer', 'samer', 'europe', 'asia', 'oceania'];
+const PROPAGATION_REGION_LABEL_KEYS = {
+  global: 'propagationRegionGlobal',
+  namer: 'propagationRegionNamer',
+  samer: 'propagationRegionSamer',
+  europe: 'propagationRegionEurope',
+  asia: 'propagationRegionAsia',
+  oceania: 'propagationRegionOceania'
+};
+// An empty `regions` array means "every location the server catalog offers".
+const PROPAGATION_DEFAULTS = { recordType: 'TXT', regions: [], maxResolvers: 25, timeoutMs: 4000, expected: '' };
+
+let propagationSettings = Object.assign({}, PROPAGATION_DEFAULTS);
+let propagationRerunInFlight = false;
+
+// Normalize anything read from storage (or a hand-edited value) back into the
+// allowed ranges. The server clamps these again; this just keeps the UI honest.
+function normalizePropagationSettings(raw) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const type = String(src.recordType || '').toUpperCase();
+  const regions = Array.isArray(src.regions)
+    ? src.regions.map(x => String(x || '').toLowerCase()).filter(x => PROPAGATION_REGIONS.indexOf(x) !== -1)
+    : [];
+  const max = Number(src.maxResolvers);
+  const timeout = Number(src.timeoutMs);
+  return {
+    recordType: PROPAGATION_RECORD_TYPES.indexOf(type) !== -1 ? type : PROPAGATION_DEFAULTS.recordType,
+    regions: regions,
+    maxResolvers: Number.isFinite(max) ? Math.min(100, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
+    timeoutMs: Number.isFinite(timeout) ? Math.min(15000, Math.max(1000, Math.round(timeout))) : PROPAGATION_DEFAULTS.timeoutMs,
+    expected: String(src.expected || '').slice(0, 255)
+  };
+}
+
+// Settings are a user preference, so they are stored under the 'functional'
+// consent category and simply fall back to defaults when consent is withheld.
+function loadPropagationSettings() {
+  let stored = null;
+  try {
+    const raw = consentAwareGetItem(PROPAGATION_SETTINGS_KEY, 'functional');
+    if (raw) stored = JSON.parse(raw);
+  } catch {}
+  propagationSettings = normalizePropagationSettings(stored);
+  return propagationSettings;
+}
+
+function savePropagationSettings() {
+  try {
+    consentAwareSetItem(PROPAGATION_SETTINGS_KEY, JSON.stringify(propagationSettings), 'functional');
+  } catch {}
+}
+
+// Extra query string appended to /api/propagation by both the initial lookup and
+// the per-card re-check. Only non-default values are sent so the server keeps
+// applying its own defaults (and operators can retune them without a UI change).
+function buildPropagationQuery() {
+  const s = propagationSettings || PROPAGATION_DEFAULTS;
+  const parts = [];
+  parts.push('type=' + encodeURIComponent(s.recordType || 'TXT'));
+  if (Array.isArray(s.regions) && s.regions.length > 0 && s.regions.length < PROPAGATION_REGIONS.length) {
+    parts.push('regions=' + encodeURIComponent(s.regions.join(',')));
+  }
+  parts.push('max=' + encodeURIComponent(String(s.maxResolvers || PROPAGATION_DEFAULTS.maxResolvers)));
+  parts.push('timeout=' + encodeURIComponent(String(s.timeoutMs || PROPAGATION_DEFAULTS.timeoutMs)));
+  if (s.expected) parts.push('expected=' + encodeURIComponent(s.expected));
+  return parts.join('&');
+}
+
+// ---- Mini world map ----
+//
+// Equirectangular projection. Latitude is clipped to [-58, 84] because nothing
+// we plot lives outside it and the clip keeps the map wide rather than leaving a
+// tall empty band of ocean and Antarctica.
+const PROP_MAP_W = 1000;
+const PROP_MAP_LAT_TOP = 84;
+const PROP_MAP_LAT_BOTTOM = -58;
+const PROP_MAP_H = Math.round((PROP_MAP_LAT_TOP - PROP_MAP_LAT_BOTTOM) * PROP_MAP_W / 360);
+
+function propMapX(lon) {
+  const v = Math.max(-180, Math.min(180, Number(lon) || 0));
+  return (v + 180) * PROP_MAP_W / 360;
+}
+
+function propMapY(lat) {
+  const v = Math.max(PROP_MAP_LAT_BOTTOM, Math.min(PROP_MAP_LAT_TOP, Number(lat) || 0));
+  return (PROP_MAP_LAT_TOP - v) * PROP_MAP_H / (PROP_MAP_LAT_TOP - PROP_MAP_LAT_BOTTOM);
+}
+
+// Coarse landmass outlines as [longitude, latitude] rings. This is a stylised
+// backdrop for ~20 markers, not a cartographic reference, so the resolution is
+// intentionally low: it keeps the payload small and renders cleanly at the few
+// hundred pixels the card actually gives it.
+const PROP_WORLD_SHAPES = [
+  // North America
+  [[-168,66],[-160,71],[-150,70],[-141,70],[-130,70],[-120,70],[-110,69],[-100,69],[-95,68],[-85,70],[-80,73],[-72,68],[-65,60],[-56,51],[-64,46],[-70,43],[-74,40],[-76,35],[-81,31],[-80,26],[-82,25],[-84,30],[-89,29],[-94,29],[-97,26],[-97,21],[-95,18],[-92,18],[-90,21],[-87,21],[-88,17],[-84,10],[-79,9],[-83,13],[-88,14],[-92,15],[-96,16],[-101,17],[-105,20],[-106,23],[-110,24],[-113,29],[-117,32],[-121,35],[-124,40],[-124,46],[-128,51],[-133,55],[-137,59],[-146,60],[-152,58],[-158,56],[-162,60],[-166,62]],
+  // Greenland
+  [[-45,60],[-42,62],[-38,65],[-30,68],[-24,71],[-21,75],[-25,78],[-32,81],[-42,83],[-54,83],[-64,81],[-70,79],[-73,78],[-66,76],[-60,74],[-55,70],[-53,66],[-50,62]],
+  // South America
+  [[-81,-5],[-80,-2],[-78,1],[-77,6],[-72,11],[-65,11],[-60,8],[-56,6],[-51,4],[-50,0],[-44,-2],[-38,-5],[-35,-8],[-38,-13],[-39,-18],[-42,-23],[-48,-26],[-53,-34],[-57,-38],[-62,-40],[-63,-44],[-66,-49],[-69,-52],[-72,-54],[-75,-50],[-74,-45],[-73,-40],[-72,-35],[-71,-30],[-70,-24],[-70,-18],[-75,-15],[-78,-9]],
+  // Africa
+  [[-17,15],[-16,20],[-13,25],[-10,29],[-6,34],[0,36],[10,34],[20,33],[25,32],[32,31],[35,28],[37,22],[39,15],[43,12],[48,11],[51,10],[48,5],[43,0],[40,-4],[40,-10],[35,-17],[35,-22],[32,-26],[28,-32],[22,-34],[18,-34],[15,-27],[13,-20],[12,-15],[13,-6],[9,0],[5,4],[0,5],[-5,5],[-8,4],[-13,8],[-16,12]],
+  // Eurasia
+  [[-9,39],[-9,43],[-2,43],[-1,46],[-4,48],[2,51],[7,53],[9,55],[8,57],[11,58],[5,59],[5,62],[12,65],[16,68],[21,70],[28,71],[33,70],[40,68],[50,69],[60,71],[70,73],[78,73],[85,74],[95,76],[105,77],[113,74],[120,73],[130,73],[140,72],[150,70],[160,69],[170,68],[180,65],[175,62],[163,58],[160,55],[155,52],[150,47],[143,43],[140,45],[135,44],[131,43],[128,40],[125,36],[122,31],[121,25],[117,22],[110,20],[107,11],[104,9],[100,6],[98,9],[99,13],[95,16],[94,20],[90,22],[87,21],[81,16],[78,9],[73,16],[70,22],[67,24],[61,25],[57,23],[52,17],[45,13],[43,17],[39,22],[35,28],[34,31],[36,36],[30,37],[26,38],[23,37],[24,40],[20,40],[16,43],[13,45],[12,44],[14,42],[17,41],[16,38],[12,38],[11,43],[8,44],[3,43],[0,40],[-6,36]],
+  // Great Britain
+  [[-5,50],[-6,52],[-3,54],[-5,57],[-3,58],[-2,56],[0,53],[1,52],[-3,51]],
+  // Ireland
+  [[-10,52],[-10,54],[-7,55],[-6,53],[-8,52]],
+  // Iceland
+  [[-24,65],[-22,66],[-18,66],[-14,65],[-17,64],[-22,64]],
+  // Japan
+  [[130,31],[131,34],[135,34],[137,37],[141,41],[145,44],[142,45],[140,42],[139,38],[136,36],[133,34],[130,33]],
+  // Taiwan
+  [[121,25],[122,24],[121,22],[120,23]],
+  // Sri Lanka
+  [[80,9],[82,8],[81,6],[80,7]],
+  // Sumatra
+  [[95,5],[98,2],[103,-2],[106,-6],[104,-6],[100,-1],[96,4]],
+  // Borneo
+  [[109,2],[114,4],[118,5],[119,1],[117,-3],[114,-4],[110,-3]],
+  // Java
+  [[105,-6],[110,-7],[114,-8],[112,-9],[107,-8]],
+  // Philippines
+  [[120,18],[123,17],[124,13],[126,9],[126,6],[122,6],[120,10],[119,14]],
+  // New Guinea
+  [[131,-1],[137,-2],[141,-3],[146,-6],[150,-9],[147,-9],[143,-8],[138,-8],[133,-4]],
+  // Australia
+  [[114,-22],[114,-26],[116,-32],[119,-34],[125,-33],[131,-32],[135,-35],[138,-35],[141,-38],[146,-39],[150,-37],[153,-32],[153,-27],[149,-21],[146,-19],[143,-14],[142,-11],[138,-12],[136,-12],[132,-11],[130,-12],[127,-14],[124,-16],[122,-18]],
+  // New Zealand
+  [[173,-41],[175,-37],[178,-38],[177,-40],[174,-41],[171,-44],[167,-46],[166,-45],[170,-43]],
+  // Madagascar
+  [[44,-16],[47,-15],[50,-16],[50,-24],[47,-25],[44,-22]],
+  // Cuba / Hispaniola
+  [[-85,22],[-80,23],[-75,20],[-78,20],[-83,21]]
+];
+
+let propWorldPathCache = null;
+
+function buildPropagationWorldPath() {
+  if (propWorldPathCache) return propWorldPathCache;
+  propWorldPathCache = PROP_WORLD_SHAPES.map(shape =>
+    'M' + shape.map(pt => propMapX(pt[0]).toFixed(1) + ' ' + propMapY(pt[1]).toFixed(1)).join('L') + 'Z'
+  ).join(' ');
+  return propWorldPathCache;
+}
+
+// Nudge markers that land on (nearly) the same pixel so a city hosting several
+// resolvers still shows every one of them instead of a single stacked dot.
+function declutterPropagationMarkers(points) {
+  const buckets = {};
+  points.forEach(pt => {
+    const key = Math.round(pt.x / 14) + ':' + Math.round(pt.y / 14);
+    if (!buckets[key]) buckets[key] = [];
+    buckets[key].push(pt);
+  });
+  Object.keys(buckets).forEach(key => {
+    const group = buckets[key];
+    if (group.length < 2) return;
+    const radius = 7 + group.length;
+    group.forEach((pt, i) => {
+      const angle = (2 * Math.PI * i) / group.length;
+      pt.x += Math.cos(angle) * radius;
+      pt.y += Math.sin(angle) * radius;
+    });
+  });
+  return points;
+}
+
+// Render the mini map as inline SVG. Colors come from CSS classes (not inline
+// fills) so the map follows the light/dark theme like the rest of the UI.
+function buildPropagationMapSvg(locations) {
+  const list = Array.isArray(locations) ? locations.filter(Boolean) : [];
+  if (list.length === 0) return '';
+
+  const points = declutterPropagationMarkers(list.map(loc => ({
+    x: propMapX(loc.longitude),
+    y: propMapY(loc.latitude),
+    loc: loc
+  })));
+
+  // Light graticule for orientation: equator, the tropics, and meridians every 30 degrees.
+  const gridParts = [];
+  [60, 30, 0, -30].forEach(lat => {
+    const y = propMapY(lat).toFixed(1);
+    gridParts.push('M0 ' + y + 'H' + PROP_MAP_W);
+  });
+  for (let lon = -150; lon <= 150; lon += 30) {
+    const x = propMapX(lon).toFixed(1);
+    gridParts.push('M' + x + ' 0V' + PROP_MAP_H);
+  }
+
+  const markers = points.map(pt => {
+    const loc = pt.loc;
+    const status = String(loc.status || 'unavailable');
+    const providers = Array.isArray(loc.providers) ? loc.providers.filter(Boolean).join(', ') : '';
+    const tooltip = [
+      String(loc.name || loc.countryCode || ''),
+      providers,
+      loc.anycast ? t('propagationAnycastBadge') : ''
+    ].filter(Boolean).join(' \u2014 ');
+    const cls = loc.anycast ? ('prop-marker-anycast ' + status) : ('prop-marker ' + status);
+    const radius = loc.total > 1 ? 7 : 5.5;
+    return '<circle class="' + escapeHtml(cls) + '" cx="' + pt.x.toFixed(1) + '" cy="' + pt.y.toFixed(1) + '" r="' + radius + '">'
+      + '<title>' + escapeHtml(tooltip) + '</title></circle>';
+  }).join('');
+
+  return '<div class="prop-map-wrap' + (propagationRerunInFlight ? ' is-busy' : '') + '">'
+    + '<svg class="prop-map" viewBox="0 0 ' + PROP_MAP_W + ' ' + PROP_MAP_H + '" role="img" '
+    + 'aria-label="' + escapeHtml(t('dnsPropagation')) + '" preserveAspectRatio="xMidYMid meet">'
+    + '<path class="prop-map-grid" d="' + gridParts.join(' ') + '"></path>'
+    + '<path class="prop-map-land" d="' + buildPropagationWorldPath() + '"></path>'
+    + markers
+    + '</svg>'
+    + '<div class="prop-map-busy"><span class="spinner"></span>' + escapeHtml(t('propagationRechecking')) + '</div>'
+    + '</div>';
+}
+
+// Toggle the card's pending state without a full re-render, so it applies the
+// instant a re-check starts rather than only after it finishes. The markup
+// builders re-apply `is-busy` from propagationRerunInFlight, so an unrelated
+// re-render mid-flight cannot clear it.
+function setPropagationBusy(busy) {
+  const card = document.getElementById('card-propagation');
+  if (!card) return;
+  ['.prop-shell', '.prop-map-wrap', '.prop-details-block'].forEach(selector => {
+    const el = card.querySelector(selector);
+    if (el) el.classList.toggle('is-busy', !!busy);
+  });
+}
+
+function buildPropagationLegendHtml() {
+  const items = [
+    ['propagated', 'propagationLegendPropagated'],
+    ['mismatch', 'propagationLegendMismatch'],
+    ['norecord', 'propagationLegendMissing']
+  ];
+  return '<div class="prop-legend">'
+    + items.map(([cls, key]) =>
+        '<span class="prop-legend-item"><span class="prop-legend-dot ' + cls + '"></span>' + escapeHtml(t(key)) + '</span>'
+      ).join('')
+    + '</div>';
+}
+
 function buildGuidance(r) {
   const guidance = [];
   const loaded = r && r._loaded ? r._loaded : {};
@@ -1533,6 +1789,33 @@ function buildGuidance(r) {
 
   if (loaded.base && r.acsReady) {
     guidance.push({ type: 'success', text: t('acsReadyMessage') });
+  }
+
+  // DNS propagation. A record that only some public resolvers can see is the
+  // single most common reason ACS domain verification "randomly" fails, so this
+  // gets its own guidance entry rather than being buried in the card.
+  // 'partial' (present here, missing there) is the actionable failure; a pure
+  // answer mismatch is softer because geo-balanced records legitimately differ.
+  if (loaded.propagation && r.propagation && r.propagation.checked !== false) {
+    const prop = r.propagation;
+    const propState = String(prop.state || '');
+    const propType = String(prop.recordType || 'TXT');
+    if (propState === 'partial') {
+      const missing = Math.max(0, Number(prop.respondedCount || 0) - Number(prop.matchingCount || 0));
+      guidance.push({
+        type: 'attention',
+        text: t('guidancePropagationPartial', {
+          domain: r.domain || '',
+          missing: String(missing),
+          responding: String(prop.respondedCount || 0),
+          type: propType
+        })
+      });
+    } else if (propState === 'mismatch') {
+      guidance.push({ type: 'attention', text: t('guidancePropagationMismatch', { domain: r.domain || '', type: propType }) });
+    } else if (propState === 'unknown') {
+      guidance.push({ type: 'info', text: t('guidancePropagationUnknown') });
+    }
   }
 
   return guidance;

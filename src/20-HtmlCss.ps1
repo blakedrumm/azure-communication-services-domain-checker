@@ -1562,6 +1562,456 @@ input.dns-records-search-input {
 .dark .ns-pill-warn { color: #fcd34d; }
 .dark .ns-pill-bad { color: #fca5a5; }
 
+/* ===================== DNS Propagation card ===================== */
+/* Status colors are declared once here and reused by the summary chips, the
+   mini-map markers and the per-resolver detail rows so a "green" resolver in
+   the table is unmistakably the same green dot on the map. */
+.prop-shell {
+  --prop-ok: #10b981;
+  --prop-warn: #f59e0b;
+  --prop-bad: #ef4444;
+  --prop-idle: #94a3b8;
+  margin-top: 10px;
+}
+
+/* Compact metric chips (queried / responding / agreeing / ...). */
+.prop-stat-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.prop-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+}
+
+.prop-stat-value {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--fg);
+}
+
+.prop-stat-label {
+  font-size: 11px;
+  color: var(--status);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.prop-stat.ok .prop-stat-value { color: var(--prop-ok); }
+.prop-stat.warn .prop-stat-value { color: var(--prop-warn); }
+.prop-stat.bad .prop-stat-value { color: var(--prop-bad); }
+.prop-stat.idle .prop-stat-value { color: var(--prop-idle); }
+
+/* Coverage bar: share of responding resolvers that agree with the consensus. */
+.prop-coverage {
+  margin-bottom: 12px;
+}
+
+.prop-coverage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--status);
+  margin-bottom: 5px;
+}
+
+.prop-coverage-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.prop-coverage-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--prop-ok);
+  transition: width 0.35s ease;
+}
+
+.prop-coverage-fill.warn { background: var(--prop-warn); }
+.prop-coverage-fill.bad { background: var(--prop-bad); }
+
+/* ---- Mini map ---- */
+.prop-map-wrap {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--code-bg);
+  padding: 6px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+/* Cap the drawn width rather than the height so the map keeps its 2.5:1
+   aspect ratio and stays a compact inset instead of dominating the card. */
+.prop-map {
+  display: block;
+  width: 100%;
+  max-width: 820px;
+  height: auto;
+  margin: 0 auto;
+  transition: opacity 0.2s ease;
+}
+
+/* Shown while a re-check is in flight so the stale markers underneath are
+   clearly marked as pending rather than current. The scrim is dark in both
+   themes because --code-bg (the map backdrop) is dark in both. */
+.prop-map-busy {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.66);
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  padding: 0 12px;
+  z-index: 2;
+}
+
+.prop-map-wrap.is-busy .prop-map-busy { display: flex; }
+.prop-map-wrap.is-busy .prop-map { opacity: 0.28; }
+
+.prop-map-busy .spinner {
+  width: 18px;
+  height: 18px;
+  border-width: 3px;
+  margin-left: 0;
+}
+
+/* While a re-check is in flight every value derived from the previous answer is
+   removed rather than left looking current. The map is the exception: it keeps
+   its place under the spinner overlay so the card does not collapse. */
+.prop-shell.is-busy .prop-stat-grid,
+.prop-shell.is-busy .prop-coverage,
+.prop-shell.is-busy .prop-consensus,
+.prop-shell.is-busy .prop-note,
+.prop-shell.is-busy .prop-summary-text,
+.prop-details-block.is-busy {
+  display: none;
+}
+
+.prop-map-land {
+  fill: var(--border);
+  stroke: var(--input-border);
+  stroke-width: 0.6;
+  stroke-linejoin: round;
+}
+
+.prop-map-grid {
+  stroke: var(--border);
+  stroke-width: 0.5;
+  opacity: 0.55;
+  fill: none;
+}
+
+.prop-marker {
+  stroke: var(--card-bg);
+  stroke-width: 1.6;
+}
+
+.prop-marker.propagated { fill: var(--prop-ok); }
+.prop-marker.mismatch,
+.prop-marker.error { fill: var(--prop-warn); }
+.prop-marker.norecord { fill: var(--prop-bad); }
+.prop-marker.unavailable { fill: var(--prop-idle); opacity: 0.7; }
+
+/* Anycast operators answer from the POP nearest this server, so the plotted
+   coordinate is the operator's primary location rather than where the query was
+   actually served. A hollow ring marks that distinction on the map. */
+.prop-marker-anycast {
+  fill: none;
+  stroke-width: 1.4;
+  stroke-dasharray: 3 2.5;
+  opacity: 0.85;
+}
+
+.prop-marker-anycast.propagated { stroke: var(--prop-ok); }
+.prop-marker-anycast.mismatch,
+.prop-marker-anycast.error { stroke: var(--prop-warn); }
+.prop-marker-anycast.norecord { stroke: var(--prop-bad); }
+.prop-marker-anycast.unavailable { stroke: var(--prop-idle); }
+
+.prop-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  font-size: 11px;
+  color: var(--status);
+  margin-bottom: 10px;
+}
+
+.prop-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.prop-legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.prop-legend-dot.propagated { background: var(--prop-ok); }
+.prop-legend-dot.mismatch { background: var(--prop-warn); }
+.prop-legend-dot.norecord { background: var(--prop-bad); }
+.prop-legend-dot.unavailable { background: var(--prop-idle); }
+
+.prop-note {
+  font-size: 11px;
+  color: var(--status);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+/* ---- Settings panel (gear button on the card header) ---- */
+.prop-settings-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  padding: 12px 14px;
+  margin: 10px 0;
+  display: grid;
+  gap: 12px;
+}
+
+.prop-settings-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.prop-settings-row {
+  display: grid;
+  gap: 5px;
+}
+
+.prop-settings-row > label,
+.prop-settings-legend {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--status);
+}
+
+.prop-settings-row select,
+.prop-settings-row input[type="number"],
+.prop-settings-row input[type="text"] {
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--fg);
+  font-size: 13px;
+  max-width: 320px;
+}
+
+/* The native option popup is drawn by the OS, not by our theme, so it ignores
+   the control's own colors and renders light-on-white in dark mode. Pin
+   color-scheme plus explicit option colors (same approach as the DNS records
+   filter selects) so the open list stays readable in both themes. */
+.prop-settings-row select {
+  color-scheme: light;
+}
+
+.prop-settings-row select option {
+  background: #ffffff;
+  color: #111827;
+}
+
+html.dark .prop-settings-row select {
+  color-scheme: dark;
+}
+
+html.dark .prop-settings-row select option {
+  background: #111827;
+  color: #f9fafb;
+}
+
+.prop-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.prop-region-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.prop-region-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.prop-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Gear button sitting next to the card title. */
+.prop-settings-btn {
+  border: 1px solid var(--button-border-secondary);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.prop-settings-btn:hover {
+  background: var(--border);
+}
+
+/* ---- Per-resolver detail rows ---- */
+.prop-detail-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.prop-detail-row {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--card-bg);
+}
+
+.prop-detail-row.propagated { border-left-color: var(--prop-ok); }
+.prop-detail-row.mismatch,
+.prop-detail-row.error,
+.prop-detail-row.truncated { border-left-color: var(--prop-warn); }
+.prop-detail-row.norecord { border-left-color: var(--prop-bad); }
+.prop-detail-row.unavailable { border-left-color: var(--prop-idle); }
+
+.prop-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.prop-detail-provider {
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.prop-detail-meta {
+  font-size: 12px;
+  color: var(--status);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.prop-detail-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.prop-answer-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.prop-answer-empty {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--status);
+  font-style: italic;
+}
+
+.prop-consensus {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 8px 11px;
+  margin-bottom: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.prop-consensus-label {
+  display: block;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--status);
+  margin-bottom: 4px;
+}
+
+/* Scrolls instead of truncating: domains routinely publish dozens of TXT
+   records and the operator needs to find the specific one they just added.
+   tabindex is set on the element so the region is keyboard-scrollable. */
+.prop-consensus-list {
+  max-height: 168px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 3px;
+  padding-right: 4px;
+}
+
+.prop-consensus-list:focus-visible {
+  outline: 2px solid var(--button-bg);
+  outline-offset: 2px;
+}
+
+.prop-consensus-item {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The card body is rich HTML, so the plain-text summary needs its own
+   newline-preserving block (the surrounding .code rule applies to the whole
+   card body, including the map and chips above). */
+.prop-summary-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+
 .ns-txt-list {
   list-style: none;
   margin: 0;

@@ -1665,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.10.6'
+$script:AppVersion = '2.11.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -7824,6 +7824,37 @@ function Get-SpfGuidance {
 # ------------------- REQUEST HANDLING UTILITIES -------------------
 # Log a request to the console. Intentionally omits IP addresses and user agents (PII).
 # ===== Request Handling Utilities =====
+
+# Is this exception just the client hanging up mid-request?
+#
+# The SPA aborts in-flight fetches on every new lookup (activeLookup.controllers)
+# and browsers drop connections whenever the user navigates away or reloads, so
+# a half-written response is routine rather than a server fault. Once we hold a
+# context and are writing to it, an HttpListenerException / SocketException means
+# the socket is gone -- listener-level failures are handled separately in
+# 24-RequestLoop.ps1. Treating these as 500-level errors filled the log with
+# ERROR lines for entirely normal browser behavior.
+#
+# IOException only counts when it wraps a socket failure; a bare IOException can
+# be a genuine disk/stream problem worth surfacing.
+function Test-AcsClientDisconnect {
+  param($Exception)
+
+  $ex = $Exception
+  if ($ex -is [System.Management.Automation.ErrorRecord]) { $ex = $ex.Exception }
+
+  # Walk the inner-exception chain: PowerShell wraps .NET method failures in
+  # MethodInvocationException, so the interesting type is rarely the outermost.
+  for ($depth = 0; $depth -lt 6 -and $null -ne $ex; $depth++) {
+    if ($ex -is [System.Net.HttpListenerException]) { return $true }
+    if ($ex -is [System.Net.Sockets.SocketException]) { return $true }
+    if ($ex -is [System.IO.IOException] -and $ex.InnerException -is [System.Net.Sockets.SocketException]) { return $true }
+    $ex = $ex.InnerException
+  }
+
+  return $false
+}
+
 function Write-RequestLog {
   param(
     $Context,
@@ -10678,6 +10709,1114 @@ function Get-NameserverTxtStatus {
   return $status
 }
 
+# ===== Global DNS Propagation Check =====
+# ------------------- DNS PROPAGATION PROBE -------------------
+# This check answers the other question operators hit constantly: "I added the
+# record -- has it actually propagated everywhere yet?"
+#
+# A single recursive resolver (the one this server uses) can only ever tell you
+# what THAT resolver currently has cached. When a zone was just edited, when the
+# authoritative nameservers are out of sync, or when a stale delegation is still
+# being served, different public resolvers around the world return DIFFERENT
+# answers for the same name. Azure Communication Services verifies domains
+# through public DNS, so a record that is only visible from some vantage points
+# will verify intermittently (or not at all).
+#
+# We therefore query a curated catalog of well-known public DNS resolvers spread
+# across regions and compare their answers:
+#   * every responder returns the same non-empty answer  -> fully propagated
+#   * some responders have the record, others do not     -> still propagating
+#   * responders return DIFFERENT non-empty answers      -> inconsistent answers
+#
+# DESIGN NOTES
+#
+# 1) NO bulk resolver dataset. The standalone propagation tool ships a 60k-row
+#    public-dns.info CSV plus a processed cache. That is far too heavy for this
+#    single-file app, so we embed a small, curated, geographically spread
+#    catalog instead. Operators can override it entirely with
+#    ACS_PROPAGATION_RESOLVERS (see Get-DnsPropagationResolverCatalog).
+#
+# 2) SINGLE-THREADED PARALLEL I/O. We deliberately do NOT use
+#    [Parallel]::ForEach here. That helper invokes PowerShell functions on .NET
+#    worker threads that share ONE runspace, which is not thread-safe. Instead
+#    we open one UDP socket per resolver, send every query up front, and then
+#    wait on all sockets at once with [Socket]::Select. That is genuinely
+#    concurrent at the network level, completes in roughly one timeout window
+#    regardless of resolver count, and touches no PowerShell state concurrently.
+#
+# 3) EDNS0. Each query advertises a 4096-byte UDP payload size (RFC 6891) so
+#    large TXT/DKIM answers come back in one datagram. Truncated answers still
+#    get a bounded, sequential TCP retry pass.
+#
+# SECURITY: the resolver list is operator-controlled (never derived from the
+# queried domain), every entry is validated as a public IP literal via
+# Test-IsPublicIpAddress (16b-WebsiteProbe.ps1) before a socket is opened, the
+# fan-out size is capped, and both the socket timeout and the receive buffer are
+# bounded so a hostile resolver cannot pin a worker or exhaust memory.
+
+# Map a user-facing record type to its DNS QTYPE code. Returns 0 for anything we
+# do not support, which the caller treats as a validation failure.
+function Get-DnsPropagationTypeCode {
+  param([string]$RecordType)
+
+  switch (([string]$RecordType).Trim().ToUpperInvariant()) {
+    'A'     { return 1 }
+    'NS'    { return 2 }
+    'CNAME' { return 5 }
+    'SOA'   { return 6 }
+    'MX'    { return 15 }
+    'TXT'   { return 16 }
+    'AAAA'  { return 28 }
+    'CAA'   { return 257 }
+    default { return 0 }
+  }
+}
+
+# The curated public-resolver catalog.
+#
+# Each entry carries the geography we render on the mini map. `anycast` marks
+# operators that announce the same address from many points of presence: those
+# resolvers answer from the POP nearest to THIS server, so the coordinates are
+# the operator's primary location rather than where the query was actually
+# served. The UI renders them with a distinct marker and says so.
+#
+# Regions: global (large anycast networks), namer, samer, europe, asia, oceania.
+#
+# Operators can replace the whole catalog with ACS_PROPAGATION_RESOLVERS using a
+# simple pipe-delimited, semicolon-separated format:
+#   ip|provider|countryCode|city|lat|lon|region|anycast(0|1); ip|...
+# Malformed entries are skipped; if nothing valid parses we fall back to the
+# built-in catalog so the check never silently degrades to zero resolvers.
+function Get-DnsPropagationResolverCatalog {
+  $builtIn = @(
+    # ---- Large anycast networks (global reach, answered from the nearest POP) ----
+    [pscustomobject]@{ ip = '1.1.1.1';         provider = 'Cloudflare';            countryCode = 'US'; city = 'San Francisco'; latitude = 37.77;  longitude = -122.42; region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '8.8.8.8';         provider = 'Google Public DNS';     countryCode = 'US'; city = 'Mountain View'; latitude = 37.42;  longitude = -122.08; region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '9.9.9.9';         provider = 'Quad9';                 countryCode = 'CH'; city = 'Zurich';        latitude = 47.37;  longitude = 8.54;    region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '208.67.222.222';  provider = 'OpenDNS (Cisco)';       countryCode = 'US'; city = 'San Jose';      latitude = 37.33;  longitude = -121.89; region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '94.140.14.14';    provider = 'AdGuard DNS';           countryCode = 'CY'; city = 'Limassol';      latitude = 34.71;  longitude = 33.02;   region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '45.90.28.0';      provider = 'NextDNS';               countryCode = 'FR'; city = 'Paris';         latitude = 48.86;  longitude = 2.35;    region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '193.110.81.0';    provider = 'dns0.eu';               countryCode = 'DE'; city = 'Berlin';        latitude = 52.52;  longitude = 13.40;   region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '76.76.2.0';       provider = 'Control D';             countryCode = 'CA'; city = 'Toronto';       latitude = 43.65;  longitude = -79.38;  region = 'global'; anycast = $true }
+    [pscustomobject]@{ ip = '185.228.168.9';   provider = 'CleanBrowsing';         countryCode = 'US'; city = 'Washington';    latitude = 38.90;  longitude = -77.04;  region = 'global'; anycast = $true }
+
+    # ---- North America ----
+    [pscustomobject]@{ ip = '4.2.2.1';         provider = 'Lumen (Level 3)';       countryCode = 'US'; city = 'Broomfield';    latitude = 39.92;  longitude = -105.09; region = 'namer';  anycast = $true }
+    [pscustomobject]@{ ip = '74.82.42.42';     provider = 'Hurricane Electric';    countryCode = 'US'; city = 'Fremont';       latitude = 37.55;  longitude = -121.99; region = 'namer';  anycast = $false }
+    [pscustomobject]@{ ip = '149.112.121.10';  provider = 'CIRA Canadian Shield';  countryCode = 'CA'; city = 'Toronto';       latitude = 43.65;  longitude = -79.38;  region = 'namer';  anycast = $true }
+    [pscustomobject]@{ ip = '156.154.70.1';    provider = 'Vercara UltraDNS';      countryCode = 'US'; city = 'Sterling';      latitude = 39.01;  longitude = -77.42;  region = 'namer';  anycast = $true }
+
+    # ---- South America ----
+    [pscustomobject]@{ ip = '200.221.11.100';  provider = 'UOL DNS';               countryCode = 'BR'; city = 'Sao Paulo';     latitude = -23.55; longitude = -46.63;  region = 'samer';  anycast = $false }
+
+    # ---- Europe ----
+    [pscustomobject]@{ ip = '84.200.69.80';    provider = 'DNS.WATCH';             countryCode = 'DE'; city = 'Frankfurt';     latitude = 50.11;  longitude = 8.68;    region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '91.239.100.100';  provider = 'UncensoredDNS';         countryCode = 'DK'; city = 'Copenhagen';    latitude = 55.68;  longitude = 12.57;   region = 'europe'; anycast = $true }
+    [pscustomobject]@{ ip = '89.233.43.71';    provider = 'UncensoredDNS (unicast)'; countryCode = 'DK'; city = 'Copenhagen';  latitude = 55.68;  longitude = 12.57;   region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.67.169.12';    provider = 'FDN';                   countryCode = 'FR'; city = 'Paris';         latitude = 48.86;  longitude = 2.35;    region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '46.182.19.48';    provider = 'Digitale Gesellschaft'; countryCode = 'CH'; city = 'Zurich';        latitude = 47.37;  longitude = 8.54;    region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.88.8.8';       provider = 'Yandex DNS';            countryCode = 'RU'; city = 'Moscow';        latitude = 55.76;  longitude = 37.62;   region = 'europe'; anycast = $true }
+    [pscustomobject]@{ ip = '194.150.168.168'; provider = 'AS250.net';             countryCode = 'DE'; city = 'Berlin';        latitude = 52.52;  longitude = 13.40;   region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.80.80.80';     provider = 'Freenom World';         countryCode = 'NL'; city = 'Amsterdam';     latitude = 52.37;  longitude = 4.90;    region = 'europe'; anycast = $true }
+
+    # ---- Asia ----
+    [pscustomobject]@{ ip = '223.5.5.5';       provider = 'AliDNS';                countryCode = 'CN'; city = 'Hangzhou';      latitude = 30.27;  longitude = 120.16;  region = 'asia';   anycast = $true }
+    [pscustomobject]@{ ip = '119.29.29.29';    provider = 'DNSPod (Tencent)';      countryCode = 'CN'; city = 'Shenzhen';      latitude = 22.54;  longitude = 114.06;  region = 'asia';   anycast = $true }
+    [pscustomobject]@{ ip = '114.114.114.114'; provider = '114DNS';                countryCode = 'CN'; city = 'Nanjing';       latitude = 32.06;  longitude = 118.80;  region = 'asia';   anycast = $true }
+    [pscustomobject]@{ ip = '180.76.76.76';    provider = 'Baidu DNS';             countryCode = 'CN'; city = 'Beijing';       latitude = 39.90;  longitude = 116.41;  region = 'asia';   anycast = $true }
+    [pscustomobject]@{ ip = '168.126.63.1';    provider = 'KT (Korea Telecom)';    countryCode = 'KR'; city = 'Seoul';         latitude = 37.57;  longitude = 126.98;  region = 'asia';   anycast = $false }
+    [pscustomobject]@{ ip = '203.248.252.2';   provider = 'LG U+';                 countryCode = 'KR'; city = 'Seoul';         latitude = 37.57;  longitude = 126.98;  region = 'asia';   anycast = $false }
+    [pscustomobject]@{ ip = '129.250.35.250';  provider = 'NTT';                   countryCode = 'JP'; city = 'Tokyo';         latitude = 35.68;  longitude = 139.69;  region = 'asia';   anycast = $true }
+
+    # ---- Oceania ----
+    [pscustomobject]@{ ip = '139.130.4.5';     provider = 'Telstra';               countryCode = 'AU'; city = 'Sydney';        latitude = -33.87; longitude = 151.21;  region = 'oceania'; anycast = $false }
+  )
+
+  $override = [string]$env:ACS_PROPAGATION_RESOLVERS
+  if ([string]::IsNullOrWhiteSpace($override)) { return $builtIn }
+
+  # NOTE: use ::new() rather than `New-Object ...List[object]` throughout this
+  # file. On PowerShell 7.6 / .NET 10 a List[object] built with New-Object throws
+  # "Argument types do not match" the moment it is wrapped in @( ... ).
+  $custom = [System.Collections.Generic.List[object]]::new()
+  foreach ($entry in ($override -split ';')) {
+    $parts = ($entry -split '\|')
+    if ($parts.Count -lt 1) { continue }
+    $ip = ([string]$parts[0]).Trim()
+    if ([string]::IsNullOrWhiteSpace($ip)) { continue }
+
+    $lat = 0.0
+    $lon = 0.0
+    if ($parts.Count -gt 4) { [void][double]::TryParse(([string]$parts[4]).Trim(), [ref]$lat) }
+    if ($parts.Count -gt 5) { [void][double]::TryParse(([string]$parts[5]).Trim(), [ref]$lon) }
+
+    $custom.Add([pscustomobject]@{
+      ip          = $ip
+      provider    = if ($parts.Count -gt 1 -and -not [string]::IsNullOrWhiteSpace($parts[1])) { ([string]$parts[1]).Trim() } else { $ip }
+      countryCode = if ($parts.Count -gt 2) { ([string]$parts[2]).Trim().ToUpperInvariant() } else { '' }
+      city        = if ($parts.Count -gt 3) { ([string]$parts[3]).Trim() } else { '' }
+      latitude    = $lat
+      longitude   = $lon
+      region      = if ($parts.Count -gt 6 -and -not [string]::IsNullOrWhiteSpace($parts[6])) { ([string]$parts[6]).Trim().ToLowerInvariant() } else { 'global' }
+      anycast     = ($parts.Count -gt 7 -and ([string]$parts[7]).Trim() -eq '1')
+    })
+  }
+
+  if ($custom.Count -eq 0) { return $builtIn }
+  return @($custom)
+}
+
+# Pick the resolvers to query for one propagation run.
+#
+# The selection is deliberately *balanced*: we round-robin across the requested
+# regions so a small MaxResolvers budget still produces a geographically spread
+# sample instead of, say, five Chinese resolvers. Within a region the catalog
+# order is preserved so results are stable and reproducible across runs (the
+# card would otherwise flicker between lookups for no reason).
+function Select-DnsPropagationResolvers {
+  param(
+    [string[]]$Regions = @(),
+    [int]$MaxResolvers = 25
+  )
+
+  $catalog = @(Get-DnsPropagationResolverCatalog)
+
+  # Only keep entries whose IP literal is public and parseable. This is the SSRF
+  # guard for the operator-supplied ACS_PROPAGATION_RESOLVERS override.
+  $usable = [System.Collections.Generic.List[object]]::new()
+  foreach ($item in $catalog) {
+    if ($null -eq $item) { continue }
+    $ip = ([string]$item.ip).Trim()
+    $parsedIp = $null
+    if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsedIp)) { continue }
+    # IPv4 only: many hosts (and most containers) have no working IPv6 path, and
+    # a v6-only resolver would show up as a false "unavailable" data point.
+    if ($parsedIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { continue }
+    if (-not (Test-IsPublicIpAddress -IpAddress $ip)) { continue }
+    $usable.Add($item)
+  }
+
+  $wanted = @($Regions | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() })
+  if ($wanted.Count -gt 0) {
+    $filtered = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $usable) {
+      if ($wanted -contains ([string]$item.region).ToLowerInvariant()) { $filtered.Add($item) }
+    }
+    $usable = $filtered
+  }
+
+  if ($usable.Count -eq 0) { return @() }
+  if ($MaxResolvers -le 0 -or $MaxResolvers -ge $usable.Count) { return $usable.ToArray() }
+
+  # Group by region (preserving catalog order inside each group), then take one
+  # from each group in turn until the budget is spent.
+  $groups = [ordered]@{}
+  foreach ($item in $usable) {
+    $key = ([string]$item.region).ToLowerInvariant()
+    if (-not $groups.Contains($key)) { $groups[$key] = [System.Collections.Generic.List[object]]::new() }
+    $groups[$key].Add($item)
+  }
+
+  $selected = [System.Collections.Generic.List[object]]::new()
+  $index = 0
+  while ($selected.Count -lt $MaxResolvers) {
+    $addedThisPass = $false
+    foreach ($key in @($groups.Keys)) {
+      if ($selected.Count -ge $MaxResolvers) { break }
+      $bucket = $groups[$key]
+      if ($index -lt $bucket.Count) {
+        $selected.Add($bucket[$index])
+        $addedThisPass = $true
+      }
+    }
+    if (-not $addedThisPass) { break }
+    $index++
+  }
+
+  return $selected.ToArray()
+}
+
+# Read a (possibly compressed) DNS name starting at $Offset.
+#
+# Returns a hashtable @{ name = 'label.label'; next = <offset after the name> }.
+# `next` is the offset immediately after the name AS ENCODED AT $Offset, so a
+# compression pointer consumes exactly 2 bytes even though the name continues
+# elsewhere in the message. A hop budget defends against pointer loops in a
+# malformed/hostile response.
+function Read-DnsNameFromBuffer {
+  param([byte[]]$Buffer, [int]$Offset)
+
+  $labels = New-Object System.Collections.Generic.List[string]
+  $pos = $Offset
+  $next = -1
+  $hops = 0
+
+  while ($true) {
+    if ($pos -lt 0 -or $pos -ge $Buffer.Length) { break }
+    $len = [int]$Buffer[$pos]
+
+    if ($len -eq 0) {
+      if ($next -lt 0) { $next = $pos + 1 }
+      break
+    }
+
+    if (($len -band 0xC0) -eq 0xC0) {
+      if (($pos + 1) -ge $Buffer.Length) { break }
+      if ($next -lt 0) { $next = $pos + 2 }
+      $hops++
+      if ($hops -gt 24) { break }
+      $pos = ((($len -band 0x3F) -shl 8) -bor [int]$Buffer[$pos + 1])
+      continue
+    }
+
+    if ($len -gt 63) { break }
+    $start = $pos + 1
+    if (($start + $len) -gt $Buffer.Length) { break }
+    $labels.Add([System.Text.Encoding]::ASCII.GetString($Buffer, $start, $len))
+    $pos = $start + $len
+  }
+
+  if ($next -lt 0) { $next = $pos }
+  return @{ name = ($labels -join '.'); next = $next }
+}
+
+# Convert one resource record's RDATA into the display string we compare across
+# resolvers. Unsupported types fall back to lowercase hex so a mismatch is still
+# detectable even when we cannot pretty-print the payload.
+function ConvertFrom-DnsPropagationRdata {
+  param(
+    [byte[]]$Buffer,
+    [int]$Type,
+    [int]$RdataOffset,
+    [int]$RdLength
+  )
+
+  if ($RdLength -le 0 -or ($RdataOffset + $RdLength) -gt $Buffer.Length) { return $null }
+  $end = $RdataOffset + $RdLength
+
+  switch ($Type) {
+    1 {
+      # A
+      if ($RdLength -ne 4) { return $null }
+      return ('{0}.{1}.{2}.{3}' -f $Buffer[$RdataOffset], $Buffer[$RdataOffset + 1], $Buffer[$RdataOffset + 2], $Buffer[$RdataOffset + 3])
+    }
+    28 {
+      # AAAA -- let IPAddress do the canonical (compressed) formatting.
+      if ($RdLength -ne 16) { return $null }
+      $raw = New-Object byte[] 16
+      [Array]::Copy($Buffer, $RdataOffset, $raw, 0, 16)
+      try { return ([System.Net.IPAddress]::new($raw)).ToString() } catch { return $null }
+    }
+    16 {
+      # TXT: one or more <character-string>s, concatenated with no separator
+      # (RFC 7208) so a split long record reassembles into the original value.
+      $sb = New-Object System.Text.StringBuilder
+      $p = $RdataOffset
+      while ($p -lt $end) {
+        $clen = [int]$Buffer[$p]; $p++
+        if (($p + $clen) -gt $end) { break }
+        if ($clen -gt 0) {
+          [void]$sb.Append([System.Text.Encoding]::UTF8.GetString($Buffer, $p, $clen))
+          $p += $clen
+        }
+      }
+      $value = $sb.ToString().Trim()
+      if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+      return $value
+    }
+    15 {
+      # MX: 16-bit preference followed by the exchange name.
+      if ($RdLength -lt 3) { return $null }
+      $pref = (([int]$Buffer[$RdataOffset]) -shl 8) -bor [int]$Buffer[$RdataOffset + 1]
+      $parsed = Read-DnsNameFromBuffer -Buffer $Buffer -Offset ($RdataOffset + 2)
+      if ([string]::IsNullOrWhiteSpace($parsed.name)) { return $null }
+      return ('{0} {1}' -f $pref, $parsed.name.ToLowerInvariant())
+    }
+    257 {
+      # CAA: flags(1) tag-length(1) tag value
+      if ($RdLength -lt 3) { return $null }
+      $flags = [int]$Buffer[$RdataOffset]
+      $tagLen = [int]$Buffer[$RdataOffset + 1]
+      $tagStart = $RdataOffset + 2
+      if (($tagStart + $tagLen) -gt $end) { return $null }
+      $tag = [System.Text.Encoding]::ASCII.GetString($Buffer, $tagStart, $tagLen)
+      $valStart = $tagStart + $tagLen
+      $val = ''
+      if ($valStart -lt $end) { $val = [System.Text.Encoding]::UTF8.GetString($Buffer, $valStart, ($end - $valStart)) }
+      return ('{0} {1} "{2}"' -f $flags, $tag, $val)
+    }
+    6 {
+      # SOA: mname rname serial refresh retry expire minimum. Only the primary
+      # nameserver and serial are worth comparing across resolvers -- a serial
+      # difference is the clearest signal that a zone transfer is still in flight.
+      $mname = Read-DnsNameFromBuffer -Buffer $Buffer -Offset $RdataOffset
+      $rname = Read-DnsNameFromBuffer -Buffer $Buffer -Offset $mname.next
+      $p = $rname.next
+      if (($p + 4) -gt $end) { return $null }
+      $serial = ((([long]$Buffer[$p]) -shl 24) -bor (([long]$Buffer[$p + 1]) -shl 16) -bor (([long]$Buffer[$p + 2]) -shl 8) -bor ([long]$Buffer[$p + 3]))
+      return ('{0} {1} {2}' -f $mname.name.ToLowerInvariant(), $rname.name.ToLowerInvariant(), $serial)
+    }
+    default {
+      # NS (2), CNAME (5), PTR (12) and anything else name-shaped.
+      if ($Type -eq 2 -or $Type -eq 5 -or $Type -eq 12) {
+        $parsed = Read-DnsNameFromBuffer -Buffer $Buffer -Offset $RdataOffset
+        if ([string]::IsNullOrWhiteSpace($parsed.name)) { return $null }
+        return $parsed.name.ToLowerInvariant()
+      }
+      $hex = New-Object System.Text.StringBuilder
+      for ($i = $RdataOffset; $i -lt $end; $i++) { [void]$hex.Append($Buffer[$i].ToString('x2')) }
+      return $hex.ToString()
+    }
+  }
+}
+
+# Build a recursive DNS query packet for $Name / $TypeCode.
+#
+# RD (recursion desired) is 1 here -- unlike the authoritative probe in
+# 16c-NameserverChecks.ps1 we WANT each public resolver's own recursive view,
+# cache and all, because that is exactly what a real client (and Azure) sees.
+# An EDNS0 OPT record advertises a 4096-byte UDP payload so large TXT sets are
+# not truncated.
+function New-DnsPropagationQueryPacket {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][int]$TypeCode,
+    [Parameter(Mandatory = $true)][int]$TransactionId
+  )
+
+  $packet = New-Object System.Collections.Generic.List[byte]
+
+  # ---- Header (12 bytes) ----
+  $packet.Add([byte](($TransactionId -shr 8) -band 0xFF))
+  $packet.Add([byte]($TransactionId -band 0xFF))
+  $packet.Add([byte]0x01)                            # QR=0 Opcode=0 AA=0 TC=0 RD=1
+  $packet.Add([byte]0x00)                            # RA=0 Z=0 RCODE=0
+  $packet.Add([byte]0x00); $packet.Add([byte]0x01)   # QDCOUNT = 1
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)   # ANCOUNT = 0
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)   # NSCOUNT = 0
+  $packet.Add([byte]0x00); $packet.Add([byte]0x01)   # ARCOUNT = 1 (the OPT record)
+
+  # ---- Question ----
+  foreach ($label in ($Name -split '\.')) {
+    if ([string]::IsNullOrEmpty($label)) { continue }
+    $labelBytes = [System.Text.Encoding]::ASCII.GetBytes($label)
+    if ($labelBytes.Length -gt 63) { throw 'DNS label exceeds 63 octets.' }
+    $packet.Add([byte]$labelBytes.Length)
+    $packet.AddRange($labelBytes)
+  }
+  $packet.Add([byte]0)                                                   # root label
+  $packet.Add([byte](($TypeCode -shr 8) -band 0xFF))
+  $packet.Add([byte]($TypeCode -band 0xFF))                              # QTYPE
+  $packet.Add([byte]0x00); $packet.Add([byte]0x01)                       # QCLASS = IN
+
+  # ---- Additional: EDNS0 OPT (RFC 6891) ----
+  $packet.Add([byte]0x00)                            # NAME = root
+  $packet.Add([byte]0x00); $packet.Add([byte]0x29)   # TYPE = 41 (OPT)
+  $packet.Add([byte]0x10); $packet.Add([byte]0x00)   # CLASS = 4096 UDP payload size
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)   # extended RCODE + version
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)   # flags (DO=0)
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)   # RDLENGTH = 0
+
+  return , ($packet.ToArray())
+}
+
+# Parse a DNS response into @{ rcode; rcodeLabel; truncated; answers[] }.
+# Answers are filtered to the requested QTYPE so a CNAME chain returned
+# alongside an A lookup does not pollute the comparison, EXCEPT when the caller
+# asked for CNAME itself.
+function Read-DnsPropagationResponse {
+  param(
+    [byte[]]$Buffer,
+    [int]$TransactionId,
+    [int]$TypeCode
+  )
+
+  $parsed = @{ rcode = $null; rcodeLabel = $null; truncated = $false; answers = @(); error = $null }
+
+  if ($null -eq $Buffer -or $Buffer.Length -lt 12) {
+    $parsed.error = 'Short DNS response.'
+    return $parsed
+  }
+
+  # Cast to [int] BEFORE shifting: PowerShell's -shl on a [byte] truncates back
+  # to 8 bits, silently zeroing the high half of every 16-bit field.
+  $respId = ([int]$Buffer[0] -shl 8) -bor [int]$Buffer[1]
+  if ($respId -ne $TransactionId) {
+    $parsed.error = 'DNS transaction ID mismatch.'
+    return $parsed
+  }
+
+  $parsed.truncated = (($Buffer[2] -band 0x02) -ne 0)
+  $rcode = ($Buffer[3] -band 0x0F)
+  $parsed.rcode = $rcode
+  $parsed.rcodeLabel = switch ($rcode) {
+    0 { 'NOERROR' }
+    1 { 'FORMERR' }
+    2 { 'SERVFAIL' }
+    3 { 'NXDOMAIN' }
+    4 { 'NOTIMP' }
+    5 { 'REFUSED' }
+    default { "RCODE $rcode" }
+  }
+
+  $qdCount = ([int]$Buffer[4] -shl 8) -bor [int]$Buffer[5]
+  $anCount = ([int]$Buffer[6] -shl 8) -bor [int]$Buffer[7]
+
+  # Skip the question section.
+  $offset = 12
+  for ($q = 0; $q -lt $qdCount; $q++) {
+    $name = Read-DnsNameFromBuffer -Buffer $Buffer -Offset $offset
+    $offset = $name.next + 4   # QTYPE + QCLASS
+  }
+
+  $answers = New-Object System.Collections.Generic.List[string]
+  for ($a = 0; $a -lt $anCount; $a++) {
+    if ($offset -ge $Buffer.Length) { break }
+    $owner = Read-DnsNameFromBuffer -Buffer $Buffer -Offset $offset
+    $offset = $owner.next
+    if (($offset + 10) -gt $Buffer.Length) { break }
+
+    $type = ([int]$Buffer[$offset] -shl 8) -bor [int]$Buffer[$offset + 1]
+    $offset += 8   # TYPE (2) + CLASS (2) + TTL (4)
+    $rdLength = ([int]$Buffer[$offset] -shl 8) -bor [int]$Buffer[$offset + 1]
+    $offset += 2
+    if (($offset + $rdLength) -gt $Buffer.Length) { break }
+
+    if ($type -eq $TypeCode) {
+      $value = ConvertFrom-DnsPropagationRdata -Buffer $Buffer -Type $type -RdataOffset $offset -RdLength $rdLength
+      if (-not [string]::IsNullOrWhiteSpace($value)) { $answers.Add($value) }
+    }
+
+    $offset += $rdLength
+  }
+
+  # Sorted so two resolvers returning the same record set in a different order
+  # (round-robin rotation is standard) still produce an identical signature.
+  $parsed.answers = @($answers | Sort-Object)
+  return $parsed
+}
+
+# Recover truncated (TC=1) answers by re-asking the affected resolvers over TCP,
+# concurrently.
+#
+# EDNS0 keeps truncation rare, but domains with very large TXT sets (dozens of
+# verification tokens) still overflow a 4096-byte UDP datagram. Retrying those
+# sequentially would add one full timeout PER resolver to the request, so this
+# uses the same non-blocking + [Socket]::Select pattern as the UDP fan-out:
+# every connection is opened and driven forward in one loop, so the whole
+# recovery pass costs about one timeout window no matter how many resolvers
+# need it.
+#
+# TCP DNS frames the message with a 2-byte big-endian length prefix in both
+# directions (RFC 1035 4.2.2), and TCP is a stream, so each socket accumulates
+# bytes until the declared length has arrived.
+#
+# $Queries maps resolver IP -> query packet. Returns resolver IP -> response bytes
+# for the resolvers that answered.
+function Invoke-DnsPropagationTcpFanout {
+  param(
+    [Parameter(Mandatory = $true)][hashtable]$Queries,
+    [int]$TimeoutMs = 4000
+  )
+
+  $responses = @{}
+  if ($Queries.Count -eq 0) { return $responses }
+
+  $states = @{}       # socket -> per-connection state
+  $sockets = [System.Collections.Generic.List[System.Net.Sockets.Socket]]::new()
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+  try {
+    foreach ($ip in @($Queries.Keys)) {
+      $parsedIp = $null
+      if (-not [System.Net.IPAddress]::TryParse(([string]$ip).Trim(), [ref]$parsedIp)) { continue }
+
+      $sock = $null
+      try {
+        $sock = New-Object System.Net.Sockets.Socket($parsedIp.AddressFamily, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::Tcp)
+        $sock.Blocking = $false
+        try {
+          $sock.Connect((New-Object System.Net.IPEndPoint($parsedIp, 53)))
+        } catch [System.Net.Sockets.SocketException] {
+          # WouldBlock is the expected result of a non-blocking connect; the
+          # socket becoming writable is what tells us the handshake finished.
+          if ($_.Exception.SocketErrorCode -ne [System.Net.Sockets.SocketError]::WouldBlock) { throw }
+        }
+        # Re-assert non-blocking and add socket-level timeouts: every Send/Receive
+        # below happens only after Select reports the socket ready, but these are
+        # a hard backstop against a blocking call pinning the request thread.
+        $sock.Blocking = $false
+        $sock.ReceiveTimeout = $TimeoutMs
+        $sock.SendTimeout = $TimeoutMs
+        $sockets.Add($sock)
+        $states[$sock] = @{
+          ip        = [string]$ip
+          query     = $Queries[$ip]
+          connected = $false
+          buffer    = [System.Collections.Generic.List[byte]]::new()
+          expected  = -1
+        }
+      } catch {
+        if ($sock) { try { $sock.Dispose() } catch { } }
+      }
+    }
+
+    $chunk = New-Object byte[] 8192
+    while ($states.Count -gt 0) {
+      $remainingMs = $TimeoutMs - $stopwatch.ElapsedMilliseconds
+      if ($remainingMs -le 0) { break }
+
+      # Select() empties the lists it is handed, so rebuild them every pass.
+      # Sockets still handshaking are watched for writability; connected ones
+      # for readability.
+      $writeList = New-Object System.Collections.ArrayList
+      $readList = New-Object System.Collections.ArrayList
+      $errorList = New-Object System.Collections.ArrayList
+      foreach ($sock in $states.Keys) {
+        if ($states[$sock].connected) { [void]$readList.Add($sock) } else { [void]$writeList.Add($sock) }
+        [void]$errorList.Add($sock)
+      }
+
+      $waitMicroseconds = [int]([Math]::Min(500000, [Math]::Max(1000, $remainingMs * 1000)))
+      # Pass the ArrayLists through plain variables. A $( if (...) { $list } )
+      # subexpression would ENUMERATE the list and hand Select a fixed-size
+      # object[] copy instead, so Select could not strip the not-ready sockets
+      # and we would go on to Receive() from sockets with nothing to read.
+      $readArg = $null
+      if ($readList.Count -gt 0) { $readArg = $readList }
+      $writeArg = $null
+      if ($writeList.Count -gt 0) { $writeArg = $writeList }
+      try {
+        [System.Net.Sockets.Socket]::Select($readArg, $writeArg, $errorList, $waitMicroseconds)
+      } catch {
+        break
+      }
+
+      foreach ($sock in @($errorList)) {
+        [void]$states.Remove($sock)
+      }
+
+      # Newly connected sockets: send the framed query.
+      foreach ($sock in @($writeList)) {
+        $state = $states[$sock]
+        if ($null -eq $state -or $state.connected) { continue }
+        try {
+          $query = $state.query
+          $framed = New-Object byte[] (2 + $query.Length)
+          $framed[0] = [byte](($query.Length -shr 8) -band 0xFF)
+          $framed[1] = [byte]($query.Length -band 0xFF)
+          [Array]::Copy($query, 0, $framed, 2, $query.Length)
+          [void]$sock.Send($framed)
+          $state.connected = $true
+        } catch {
+          [void]$states.Remove($sock)
+        }
+      }
+
+      # Readable sockets: accumulate until the declared message length arrives.
+      foreach ($sock in @($readList)) {
+        $state = $states[$sock]
+        if ($null -eq $state) { continue }
+        try {
+          $received = $sock.Receive($chunk)
+          if ($received -le 0) { [void]$states.Remove($sock); continue }
+          for ($i = 0; $i -lt $received; $i++) { $state.buffer.Add($chunk[$i]) }
+
+          if ($state.expected -lt 0 -and $state.buffer.Count -ge 2) {
+            $state.expected = ([int]$state.buffer[0] -shl 8) -bor [int]$state.buffer[1]
+            if ($state.expected -le 0 -or $state.expected -gt 65535) { [void]$states.Remove($sock); continue }
+          }
+          if ($state.expected -ge 0 -and $state.buffer.Count -ge ($state.expected + 2)) {
+            $message = New-Object byte[] $state.expected
+            $state.buffer.CopyTo(2, $message, 0, $state.expected)
+            $responses[$state.ip] = $message
+            [void]$states.Remove($sock)
+          }
+        } catch {
+          [void]$states.Remove($sock)
+        }
+      }
+    }
+  } finally {
+    foreach ($sock in $sockets) { try { $sock.Dispose() } catch { } }
+    $stopwatch.Stop()
+  }
+
+  return $responses
+}
+
+
+# Query every resolver in $Resolvers concurrently and return the raw outcome for
+# each one, keyed by resolver IP.
+#
+# HOW THE CONCURRENCY WORKS: we open one connected UDP socket per resolver and
+# send every query before waiting for anything. Then we block in
+# [Socket]::Select on the whole set, draining whichever sockets became readable,
+# until either all resolvers answered or the deadline expires. The total wall
+# time is therefore ~one timeout window no matter how many resolvers we query,
+# and -- crucially -- no PowerShell code ever runs on more than one thread, so
+# this is safe inside the shared request runspace pool.
+#
+# Returns a hashtable: ip -> @{ answers[]; rcode; rcodeLabel; transport; responseMs; error; truncated }
+function Invoke-DnsPropagationFanout {
+  param(
+    [Parameter(Mandatory = $true)][object[]]$Resolvers,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][int]$TypeCode,
+    [int]$TimeoutMs = 4000
+  )
+
+  $outcomes = @{}
+  if ($Resolvers.Count -eq 0) { return $outcomes }
+
+  $pending = @{}          # socket -> state
+  $sockets = [System.Collections.Generic.List[System.Net.Sockets.Socket]]::new()
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+  try {
+    foreach ($resolver in $Resolvers) {
+      $ip = ([string]$resolver.ip).Trim()
+      $outcomes[$ip] = @{ answers = @(); rcode = $null; rcodeLabel = $null; transport = $null; responseMs = $null; error = 'No response from resolver (UDP timeout).'; truncated = $false; query = $null; txid = 0 }
+
+      $parsedIp = $null
+      if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsedIp)) {
+        $outcomes[$ip].error = 'Invalid resolver IP.'
+        continue
+      }
+
+      $txid = Get-Random -Minimum 1 -Maximum 65535
+      $query = $null
+      try {
+        $query = New-DnsPropagationQueryPacket -Name $Name -TypeCode $TypeCode -TransactionId $txid
+      } catch {
+        $outcomes[$ip].error = 'Failed to build DNS query.'
+        continue
+      }
+      $outcomes[$ip].query = $query
+      $outcomes[$ip].txid = $txid
+
+      $sock = $null
+      try {
+        $sock = New-Object System.Net.Sockets.Socket($parsedIp.AddressFamily, [System.Net.Sockets.SocketType]::Dgram, [System.Net.Sockets.ProtocolType]::Udp)
+        $sock.Blocking = $false
+        $sock.Connect((New-Object System.Net.IPEndPoint($parsedIp, 53)))
+        [void]$sock.Send($query)
+        $sockets.Add($sock)
+        $pending[$sock] = @{ ip = $ip; txid = $txid; sentAtMs = $stopwatch.ElapsedMilliseconds }
+      } catch {
+        $outcomes[$ip].error = 'Could not send query to resolver.'
+        if ($sock) { try { $sock.Dispose() } catch { } }
+      }
+    }
+
+    # ---- Wait for answers on all sockets at once ----
+    $deadlineMs = $TimeoutMs
+    $buffer = New-Object byte[] 4096
+    while ($pending.Count -gt 0) {
+      $remainingMs = $deadlineMs - $stopwatch.ElapsedMilliseconds
+      if ($remainingMs -le 0) { break }
+
+      # Select() mutates the list it is given (leaving only ready sockets), so
+      # rebuild it from the still-pending set on every iteration.
+      $readList = New-Object System.Collections.ArrayList
+      foreach ($sock in $pending.Keys) { [void]$readList.Add($sock) }
+
+      # Cap the per-iteration wait so we re-evaluate the deadline regularly.
+      $waitMicroseconds = [int]([Math]::Min(500000, [Math]::Max(1000, $remainingMs * 1000)))
+      try {
+        [System.Net.Sockets.Socket]::Select($readList, $null, $null, $waitMicroseconds)
+      } catch {
+        break
+      }
+      if ($readList.Count -eq 0) { continue }
+
+      foreach ($sock in @($readList)) {
+        $state = $pending[$sock]
+        if ($null -eq $state) { continue }
+        $ip = $state.ip
+        try {
+          $received = $sock.Receive($buffer)
+          if ($received -gt 0) {
+            $exact = New-Object byte[] $received
+            [Array]::Copy($buffer, 0, $exact, 0, $received)
+            $parsed = Read-DnsPropagationResponse -Buffer $exact -TransactionId $state.txid -TypeCode $TypeCode
+            if ($parsed.error) {
+              # A stray/mismatched datagram: keep waiting on this socket rather
+              # than accepting an answer we cannot attribute to our query.
+              continue
+            }
+            $outcomes[$ip].answers = @($parsed.answers)
+            $outcomes[$ip].rcode = $parsed.rcode
+            $outcomes[$ip].rcodeLabel = $parsed.rcodeLabel
+            $outcomes[$ip].truncated = $parsed.truncated
+            $outcomes[$ip].transport = 'udp'
+            $outcomes[$ip].responseMs = [int]($stopwatch.ElapsedMilliseconds - $state.sentAtMs)
+            $outcomes[$ip].error = $null
+          }
+        } catch {
+          $outcomes[$ip].error = 'Resolver connection error.'
+        }
+        [void]$pending.Remove($sock)
+      }
+    }
+  } finally {
+    foreach ($sock in $sockets) { try { $sock.Dispose() } catch { } }
+    $stopwatch.Stop()
+  }
+
+  # ---- Concurrent TCP recovery pass for truncated answers ----
+  # A TC=1 answer is NOT "no record" -- it means the answer did not fit in the
+  # UDP datagram. Re-ask over TCP (all affected resolvers at once) so a domain
+  # with a very large TXT set is still measured accurately. Anything still
+  # truncated afterwards is reported as such and excluded from the verdict
+  # rather than being silently misread as a missing record.
+  $tcpQueries = @{}
+  foreach ($ip in @($outcomes.Keys)) {
+    $outcome = $outcomes[$ip]
+    if ($outcome.truncated -and $null -ne $outcome.query) { $tcpQueries[$ip] = $outcome.query }
+  }
+  if ($tcpQueries.Count -gt 0) {
+    $tcpResponses = Invoke-DnsPropagationTcpFanout -Queries $tcpQueries -TimeoutMs $TimeoutMs
+    foreach ($ip in @($tcpResponses.Keys)) {
+      $outcome = $outcomes[$ip]
+      if ($null -eq $outcome) { continue }
+      $parsed = Read-DnsPropagationResponse -Buffer $tcpResponses[$ip] -TransactionId $outcome.txid -TypeCode $TypeCode
+      if ($parsed.error) { continue }
+      $outcome.answers = @($parsed.answers)
+      $outcome.rcode = $parsed.rcode
+      $outcome.rcodeLabel = $parsed.rcodeLabel
+      $outcome.truncated = $parsed.truncated
+      $outcome.transport = 'tcp'
+      $outcome.error = $null
+    }
+  }
+
+  # Drop the internal fields the caller does not need (and must not serialize).
+  foreach ($ip in @($outcomes.Keys)) {
+    $outcomes[$ip].Remove('query')
+    $outcomes[$ip].Remove('txid')
+  }
+
+  return $outcomes
+}
+
+# Orchestrate the propagation check for $Domain.
+#
+# The verdict is CONSENSUS-based rather than expectation-based: we take the most
+# common non-empty answer set across resolvers that actually responded and
+# measure everyone else against it. That answers "has my change propagated?"
+# without the user having to type in what they expect to see, while an optional
+# -ExpectedValue substring lets them assert a specific record when they want to.
+#
+# Resolvers that did not respond at all are reported but deliberately EXCLUDED
+# from the verdict. Public resolvers are frequently rate-limited or firewalled
+# from a given network, and a flaky resolver must never turn a healthy domain
+# into a FAIL.
+#
+# Returned payload (stable contract for the SPA):
+#   domain, generatedAtUtc, checked, disabledReason, recordType, queryName
+#   resolverCount / respondedCount / unavailableCount / answeredCount /
+#   emptyCount / matchingCount / mismatchCount / errorCount
+#   consensusAnswers[], distinctAnswerSets, propagationPercent
+#   state    : 'propagated' | 'partial' | 'mismatch' | 'norecord' | 'unknown'
+#   summary  : short server-side fallback sentence key
+#   regions[], availableRegions[], results[], locations[]
+function Get-DnsPropagationStatus {
+  param(
+    [Parameter(Mandatory = $true)][string]$Domain,
+    [string]$RecordType = 'TXT',
+    [string[]]$Regions = @(),
+    [int]$MaxResolvers = 0,
+    [int]$TimeoutMs = 0,
+    [string]$ExpectedValue = ''
+  )
+
+  $d = ([string]$Domain).Trim().TrimEnd('.')
+  $normalizedType = ([string]$RecordType).Trim().ToUpperInvariant()
+  if ([string]::IsNullOrWhiteSpace($normalizedType)) { $normalizedType = 'TXT' }
+
+  $status = [pscustomobject]@{
+    domain             = $d
+    generatedAtUtc     = ([DateTime]::UtcNow.ToString('o'))
+    checked            = $true
+    disabledReason     = $null
+    recordType         = $normalizedType
+    queryName          = $d
+    expectedValue      = ([string]$ExpectedValue).Trim()
+    expectedProvided   = (-not [string]::IsNullOrWhiteSpace($ExpectedValue))
+    timeoutMs          = 0
+    resolverCount      = 0
+    respondedCount     = 0
+    unavailableCount   = 0
+    truncatedCount     = 0
+    answeredCount      = 0
+    emptyCount         = 0
+    matchingCount      = 0
+    mismatchCount      = 0
+    errorCount         = 0
+    consensusAnswers   = @()
+    distinctAnswerSets = 0
+    propagationPercent = 0
+    state              = 'unknown'
+    summary            = 'Unknown'
+    error              = $null
+    regions            = @()
+    availableRegions   = @()
+    results            = @()
+    locations          = @()
+  }
+
+  if ([string]::IsNullOrWhiteSpace($d)) {
+    $status.checked = $false
+    $status.error = 'Missing domain.'
+    return $status
+  }
+
+  # Operator opt-out for networks where outbound UDP/53 is undesirable or blocked.
+  if (([string]$env:ACS_DISABLE_PROPAGATION_PROBE).Trim() -eq '1') {
+    $status.checked = $false
+    $status.summary = 'Disabled'
+    $status.disabledReason = 'DNS propagation probe disabled by server configuration.'
+    return $status
+  }
+
+  $typeCode = Get-DnsPropagationTypeCode -RecordType $normalizedType
+  if ($typeCode -eq 0) {
+    $status.checked = $false
+    $status.error = 'Unsupported record type.'
+    return $status
+  }
+
+  # ---- Bounded, tunable knobs (mirrors the website / nameserver / RBL checks) ----
+  $defaultMax = 25
+  $parsed = 0
+  if ([int]::TryParse([string]$env:ACS_PROPAGATION_MAX_RESOLVERS, [ref]$parsed) -and $parsed -gt 0) {
+    $defaultMax = [Math]::Min(100, $parsed)
+  }
+  $effectiveMax = if ($MaxResolvers -gt 0) { [Math]::Min(100, $MaxResolvers) } else { $defaultMax }
+
+  $defaultTimeout = 4000
+  $parsed = 0
+  if ([int]::TryParse([string]$env:ACS_PROPAGATION_TIMEOUT_MS, [ref]$parsed) -and $parsed -gt 0) {
+    $defaultTimeout = [Math]::Min(15000, [Math]::Max(500, $parsed))
+  }
+  $effectiveTimeout = if ($TimeoutMs -gt 0) { [Math]::Min(15000, [Math]::Max(500, $TimeoutMs)) } else { $defaultTimeout }
+  $status.timeoutMs = $effectiveTimeout
+
+  # Advertise the regions the catalog can serve so the SPA settings panel can
+  # build its region picker from live server data instead of a hard-coded list.
+  $catalog = @(Get-DnsPropagationResolverCatalog)
+  $regionCounts = [ordered]@{}
+  foreach ($item in $catalog) {
+    $key = ([string]$item.region).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($key)) { $key = 'global' }
+    if (-not $regionCounts.Contains($key)) { $regionCounts[$key] = 0 }
+    $regionCounts[$key]++
+  }
+  $status.availableRegions = @($regionCounts.Keys | ForEach-Object {
+    [pscustomobject]@{ region = $_; resolverCount = $regionCounts[$_] }
+  })
+
+  $selected = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $effectiveMax)
+  if ($selected.Count -eq 0) {
+    $status.error = 'No public resolvers available for the selected regions.'
+    $status.summary = 'NoResolvers'
+    return $status
+  }
+  $status.resolverCount = $selected.Count
+  $status.regions = @($selected | ForEach-Object { ([string]$_.region).ToLowerInvariant() } | Sort-Object -Unique)
+
+  $outcomes = Invoke-DnsPropagationFanout -Resolvers $selected -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+
+  # ---- Build per-resolver rows ----
+  $rows = [System.Collections.Generic.List[object]]::new()
+  foreach ($resolver in $selected) {
+    $ip = ([string]$resolver.ip).Trim()
+    $outcome = $outcomes[$ip]
+    if ($null -eq $outcome) { $outcome = @{ answers = @(); rcode = $null; rcodeLabel = $null; transport = $null; responseMs = $null; error = 'No response.' } }
+
+    $answers = @($outcome.answers)
+    # "Responding" means the resolver gave us a usable view of the zone: NOERROR
+    # (here is the record / here is nothing) or NXDOMAIN (the name does not
+    # exist). A still-truncated answer is unreadable, and SERVFAIL / REFUSED is
+    # the resolver failing rather than the domain, so neither is a vantage point
+    # we can measure propagation from. Both are reported but kept out of the
+    # verdict, the counts, and the map.
+    $stillTruncated = [bool]$outcome.truncated
+    $responded = (-not $stillTruncated) -and ($outcome.rcode -eq 0 -or $outcome.rcode -eq 3)
+
+    $rows.Add([pscustomobject]@{
+      ip          = $ip
+      provider    = [string]$resolver.provider
+      countryCode = [string]$resolver.countryCode
+      city        = [string]$resolver.city
+      latitude    = [double]$resolver.latitude
+      longitude   = [double]$resolver.longitude
+      region      = ([string]$resolver.region).ToLowerInvariant()
+      anycast     = [bool]$resolver.anycast
+      responded   = $responded
+      truncated   = $stillTruncated
+      rcode       = $outcome.rcode
+      rcodeLabel  = $outcome.rcodeLabel
+      transport   = $outcome.transport
+      responseMs  = $outcome.responseMs
+      answers     = $answers
+      # Signature used for cross-resolver comparison. The parser already sorts
+      # each set, so a plain join is a stable, order-independent fingerprint.
+      signature   = ($answers -join "`n")
+      error       = $outcome.error
+      status      = 'unavailable'   # refined below
+    })
+  }
+
+  $responders = @($rows | Where-Object { $_.responded -eq $true })
+  $status.respondedCount = $responders.Count
+  $status.truncatedCount = @($rows | Where-Object { $_.truncated -eq $true }).Count
+  # Answered, but with a resolver-side failure rcode (SERVFAIL/REFUSED/...).
+  $status.errorCount = @($rows | Where-Object { $_.responded -ne $true -and $_.truncated -ne $true -and $null -ne $_.rcode }).Count
+  $status.unavailableCount = $rows.Count - $status.respondedCount - $status.truncatedCount - $status.errorCount
+
+  if ($responders.Count -eq 0) {
+    # Nothing answered: almost always outbound UDP/53 being blocked, not a
+    # domain problem, so we report it as indeterminate rather than a failure.
+    $status.results = $rows.ToArray()
+    $status.state = 'unknown'
+    $status.summary = 'NoResponders'
+    $status.locations = @()
+    return $status
+  }
+
+  $withAnswers = @($responders | Where-Object { $_.answers.Count -gt 0 })
+  $status.answeredCount = $withAnswers.Count
+  $status.emptyCount = $responders.Count - $withAnswers.Count
+
+  # ---- Consensus = the most common NON-EMPTY answer set ----
+  # Computing consensus over non-empty sets only is what makes the "some
+  # resolvers have the record, some do not" case read correctly: the resolvers
+  # still missing it are clearly 'norecord' instead of silently becoming the
+  # majority and inverting the verdict.
+  $signatureCounts = @{}
+  foreach ($row in $withAnswers) {
+    if (-not $signatureCounts.ContainsKey($row.signature)) { $signatureCounts[$row.signature] = 0 }
+    $signatureCounts[$row.signature]++
+  }
+  $status.distinctAnswerSets = $signatureCounts.Keys.Count
+
+  $consensusSignature = $null
+  $consensusCount = 0
+  foreach ($key in $signatureCounts.Keys) {
+    if ($signatureCounts[$key] -gt $consensusCount) {
+      $consensusCount = $signatureCounts[$key]
+      $consensusSignature = $key
+    }
+  }
+  if ($null -ne $consensusSignature) {
+    $consensusRow = @($withAnswers | Where-Object { $_.signature -eq $consensusSignature })[0]
+    $status.consensusAnswers = @($consensusRow.answers)
+  }
+
+  # ---- Classify each resolver ----
+  $expected = ([string]$ExpectedValue).Trim()
+  $useExpected = -not [string]::IsNullOrWhiteSpace($expected)
+  foreach ($row in $rows) {
+    if ($row.truncated -eq $true) { $row.status = 'truncated'; continue }
+    if ($row.responded -ne $true) {
+      $row.status = if ($null -ne $row.rcode) { 'error' } else { 'unavailable' }
+      continue
+    }
+    if ($row.answers.Count -eq 0) {
+      # NOERROR-with-no-answers and NXDOMAIN both mean "this resolver has no
+      # such record" -- the signal that a change has not propagated here yet.
+      $row.status = 'norecord'
+      continue
+    }
+    if ($useExpected) {
+      $matched = $false
+      foreach ($answer in $row.answers) {
+        if (([string]$answer).IndexOf($expected, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $matched = $true; break }
+      }
+      $row.status = if ($matched) { 'propagated' } else { 'mismatch' }
+      continue
+    }
+    $row.status = if ($row.signature -eq $consensusSignature) { 'propagated' } else { 'mismatch' }
+  }
+
+  $status.matchingCount = @($rows | Where-Object { $_.status -eq 'propagated' }).Count
+  $status.mismatchCount = @($rows | Where-Object { $_.status -eq 'mismatch' }).Count
+  $noRecordCount = @($rows | Where-Object { $_.status -eq 'norecord' }).Count
+  $status.propagationPercent = if ($responders.Count -gt 0) { [int][Math]::Round(100.0 * $status.matchingCount / $responders.Count) } else { 0 }
+
+  # ---- Overall state ----
+  if ($status.matchingCount -eq 0 -and $status.mismatchCount -eq 0) {
+    # Every responder agrees the record does not exist.
+    $status.state = 'norecord'
+    $status.summary = 'NoRecordAnywhere'
+  } elseif ($noRecordCount -gt 0 -and $status.matchingCount -gt 0) {
+    # The classic "still propagating" signature: present at some vantage points,
+    # absent at others. This is the case that breaks ACS domain verification.
+    $status.state = 'partial'
+    $status.summary = 'PartiallyPropagated'
+  } elseif ($status.mismatchCount -gt 0) {
+    # Everyone has *a* record, but not the same one (stale cache, split-horizon,
+    # geo-DNS, or an edit that is still rolling out).
+    $status.state = 'mismatch'
+    $status.summary = 'InconsistentAnswers'
+  } else {
+    $status.state = 'propagated'
+    $status.summary = 'FullyPropagated'
+  }
+
+  $status.results = $rows.ToArray()
+
+  # ---- Roll up to map markers ----
+  # Several resolvers share a city (two in Seoul, two in Copenhagen, ...), so we
+  # group by rounded coordinates and emit one marker per location. A location is
+  # only green when every resolver there agrees.
+  #
+  # Only resolvers that actually returned a usable answer are rolled up: a pin
+  # for a resolver that never replied says nothing about the domain and only
+  # adds noise to the map. Non-responding resolvers remain in `results` for
+  # callers that want the full picture.
+  $locationMap = [ordered]@{}
+  foreach ($row in ($rows | Where-Object { $_.responded -eq $true })) {
+    $key = '{0:N2}|{1:N2}' -f $row.latitude, $row.longitude
+    if (-not $locationMap.Contains($key)) {
+      $locationMap[$key] = [pscustomobject]@{
+        key         = $key
+        name        = if ([string]::IsNullOrWhiteSpace($row.city)) { $row.countryCode } else { $row.city }
+        countryCode = $row.countryCode
+        latitude    = $row.latitude
+        longitude   = $row.longitude
+        anycast     = $row.anycast
+        total       = 0
+        propagated  = 0
+        mismatch    = 0
+        norecord    = 0
+        providers   = @()
+        status      = 'unknown'
+      }
+    }
+    $entry = $locationMap[$key]
+    $entry.total++
+    $entry.providers = @($entry.providers + $row.provider)
+    if (-not $row.anycast) { $entry.anycast = $false }
+    switch ($row.status) {
+      'propagated'  { $entry.propagated++ }
+      'mismatch'    { $entry.mismatch++ }
+      'norecord'    { $entry.norecord++ }
+    }
+  }
+  foreach ($key in $locationMap.Keys) {
+    $entry = $locationMap[$key]
+    # Worst-first: one disagreeing or missing resolver colors the whole marker.
+    $entry.status = if ($entry.mismatch -gt 0) { 'mismatch' }
+      elseif ($entry.norecord -gt 0) { 'norecord' }
+      else { 'propagated' }
+  }
+  $status.locations = @($locationMap.Values)
+
+  return $status
+}
 # ===== DNSBL / Reputation Checking =====
 function ConvertTo-ReversedIpv4 {
   param(
@@ -13033,6 +14172,456 @@ input.dns-records-search-input {
 .dark .ns-pill-ok { color: #6ee7b7; }
 .dark .ns-pill-warn { color: #fcd34d; }
 .dark .ns-pill-bad { color: #fca5a5; }
+
+/* ===================== DNS Propagation card ===================== */
+/* Status colors are declared once here and reused by the summary chips, the
+   mini-map markers and the per-resolver detail rows so a "green" resolver in
+   the table is unmistakably the same green dot on the map. */
+.prop-shell {
+  --prop-ok: #10b981;
+  --prop-warn: #f59e0b;
+  --prop-bad: #ef4444;
+  --prop-idle: #94a3b8;
+  margin-top: 10px;
+}
+
+/* Compact metric chips (queried / responding / agreeing / ...). */
+.prop-stat-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.prop-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+}
+
+.prop-stat-value {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--fg);
+}
+
+.prop-stat-label {
+  font-size: 11px;
+  color: var(--status);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.prop-stat.ok .prop-stat-value { color: var(--prop-ok); }
+.prop-stat.warn .prop-stat-value { color: var(--prop-warn); }
+.prop-stat.bad .prop-stat-value { color: var(--prop-bad); }
+.prop-stat.idle .prop-stat-value { color: var(--prop-idle); }
+
+/* Coverage bar: share of responding resolvers that agree with the consensus. */
+.prop-coverage {
+  margin-bottom: 12px;
+}
+
+.prop-coverage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--status);
+  margin-bottom: 5px;
+}
+
+.prop-coverage-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.prop-coverage-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--prop-ok);
+  transition: width 0.35s ease;
+}
+
+.prop-coverage-fill.warn { background: var(--prop-warn); }
+.prop-coverage-fill.bad { background: var(--prop-bad); }
+
+/* ---- Mini map ---- */
+.prop-map-wrap {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--code-bg);
+  padding: 6px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+/* Cap the drawn width rather than the height so the map keeps its 2.5:1
+   aspect ratio and stays a compact inset instead of dominating the card. */
+.prop-map {
+  display: block;
+  width: 100%;
+  max-width: 820px;
+  height: auto;
+  margin: 0 auto;
+  transition: opacity 0.2s ease;
+}
+
+/* Shown while a re-check is in flight so the stale markers underneath are
+   clearly marked as pending rather than current. The scrim is dark in both
+   themes because --code-bg (the map backdrop) is dark in both. */
+.prop-map-busy {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.66);
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  padding: 0 12px;
+  z-index: 2;
+}
+
+.prop-map-wrap.is-busy .prop-map-busy { display: flex; }
+.prop-map-wrap.is-busy .prop-map { opacity: 0.28; }
+
+.prop-map-busy .spinner {
+  width: 18px;
+  height: 18px;
+  border-width: 3px;
+  margin-left: 0;
+}
+
+/* While a re-check is in flight every value derived from the previous answer is
+   removed rather than left looking current. The map is the exception: it keeps
+   its place under the spinner overlay so the card does not collapse. */
+.prop-shell.is-busy .prop-stat-grid,
+.prop-shell.is-busy .prop-coverage,
+.prop-shell.is-busy .prop-consensus,
+.prop-shell.is-busy .prop-note,
+.prop-shell.is-busy .prop-summary-text,
+.prop-details-block.is-busy {
+  display: none;
+}
+
+.prop-map-land {
+  fill: var(--border);
+  stroke: var(--input-border);
+  stroke-width: 0.6;
+  stroke-linejoin: round;
+}
+
+.prop-map-grid {
+  stroke: var(--border);
+  stroke-width: 0.5;
+  opacity: 0.55;
+  fill: none;
+}
+
+.prop-marker {
+  stroke: var(--card-bg);
+  stroke-width: 1.6;
+}
+
+.prop-marker.propagated { fill: var(--prop-ok); }
+.prop-marker.mismatch,
+.prop-marker.error { fill: var(--prop-warn); }
+.prop-marker.norecord { fill: var(--prop-bad); }
+.prop-marker.unavailable { fill: var(--prop-idle); opacity: 0.7; }
+
+/* Anycast operators answer from the POP nearest this server, so the plotted
+   coordinate is the operator's primary location rather than where the query was
+   actually served. A hollow ring marks that distinction on the map. */
+.prop-marker-anycast {
+  fill: none;
+  stroke-width: 1.4;
+  stroke-dasharray: 3 2.5;
+  opacity: 0.85;
+}
+
+.prop-marker-anycast.propagated { stroke: var(--prop-ok); }
+.prop-marker-anycast.mismatch,
+.prop-marker-anycast.error { stroke: var(--prop-warn); }
+.prop-marker-anycast.norecord { stroke: var(--prop-bad); }
+.prop-marker-anycast.unavailable { stroke: var(--prop-idle); }
+
+.prop-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  font-size: 11px;
+  color: var(--status);
+  margin-bottom: 10px;
+}
+
+.prop-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.prop-legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.prop-legend-dot.propagated { background: var(--prop-ok); }
+.prop-legend-dot.mismatch { background: var(--prop-warn); }
+.prop-legend-dot.norecord { background: var(--prop-bad); }
+.prop-legend-dot.unavailable { background: var(--prop-idle); }
+
+.prop-note {
+  font-size: 11px;
+  color: var(--status);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+/* ---- Settings panel (gear button on the card header) ---- */
+.prop-settings-panel {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  padding: 12px 14px;
+  margin: 10px 0;
+  display: grid;
+  gap: 12px;
+}
+
+.prop-settings-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.prop-settings-row {
+  display: grid;
+  gap: 5px;
+}
+
+.prop-settings-row > label,
+.prop-settings-legend {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--status);
+}
+
+.prop-settings-row select,
+.prop-settings-row input[type="number"],
+.prop-settings-row input[type="text"] {
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--fg);
+  font-size: 13px;
+  max-width: 320px;
+}
+
+/* The native option popup is drawn by the OS, not by our theme, so it ignores
+   the control's own colors and renders light-on-white in dark mode. Pin
+   color-scheme plus explicit option colors (same approach as the DNS records
+   filter selects) so the open list stays readable in both themes. */
+.prop-settings-row select {
+  color-scheme: light;
+}
+
+.prop-settings-row select option {
+  background: #ffffff;
+  color: #111827;
+}
+
+html.dark .prop-settings-row select {
+  color-scheme: dark;
+}
+
+html.dark .prop-settings-row select option {
+  background: #111827;
+  color: #f9fafb;
+}
+
+.prop-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.prop-region-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.prop-region-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.prop-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Gear button sitting next to the card title. */
+.prop-settings-btn {
+  border: 1px solid var(--button-border-secondary);
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.prop-settings-btn:hover {
+  background: var(--border);
+}
+
+/* ---- Per-resolver detail rows ---- */
+.prop-detail-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.prop-detail-row {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--card-bg);
+}
+
+.prop-detail-row.propagated { border-left-color: var(--prop-ok); }
+.prop-detail-row.mismatch,
+.prop-detail-row.error,
+.prop-detail-row.truncated { border-left-color: var(--prop-warn); }
+.prop-detail-row.norecord { border-left-color: var(--prop-bad); }
+.prop-detail-row.unavailable { border-left-color: var(--prop-idle); }
+
+.prop-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.prop-detail-provider {
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.prop-detail-meta {
+  font-size: 12px;
+  color: var(--status);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.prop-detail-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.prop-answer-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.prop-answer-empty {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--status);
+  font-style: italic;
+}
+
+.prop-consensus {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 8px 11px;
+  margin-bottom: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.prop-consensus-label {
+  display: block;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--status);
+  margin-bottom: 4px;
+}
+
+/* Scrolls instead of truncating: domains routinely publish dozens of TXT
+   records and the operator needs to find the specific one they just added.
+   tabindex is set on the element so the region is keyboard-scrollable. */
+.prop-consensus-list {
+  max-height: 168px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 3px;
+  padding-right: 4px;
+}
+
+.prop-consensus-list:focus-visible {
+  outline: 2px solid var(--button-bg);
+  outline-offset: 2px;
+}
+
+.prop-consensus-item {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The card body is rich HTML, so the plain-text summary needs its own
+   newline-preserving block (the surrounding .code rule applies to the whole
+   card body, including the map and chips above). */
+.prop-summary-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 
 .ns-txt-list {
   list-style: none;
@@ -18851,6 +20440,495 @@ Object.keys(MULTI_DOMAIN_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, MULTI_DOMAIN_TRANSLATION_OVERRIDES[code]);
 });
 
+// DNS Propagation card strings (card body, mini map, per-card settings panel and
+// the propagation guidance sentences). Applied as an override layer so the base
+// 'en' keys always exist for the t() English fallback.
+//
+// Per repo convention the Latin-script locales carry the full set; the
+// non-Latin-script locales carry the short, user-visible UI labels and let the
+// longer explanatory sentences fall back to English through t().
+const PROPAGATION_TRANSLATION_OVERRIDES = {
+  en: {
+    dnsPropagation: 'DNS Propagation',
+    propagationInfo: 'Queries a geographically spread set of well-known public DNS resolvers in parallel and compares their answers. Resolvers that disagree \u2014 or that still see no record \u2014 show where a recent DNS change has not finished propagating. Azure verifies domains through public DNS, so a record that is only visible from some vantage points verifies intermittently.',
+    propagationOutcome: 'Result',
+    propagationStateFully: 'Every responding public resolver returned the same answer',
+    propagationStatePartial: 'Some public resolvers still have no record',
+    propagationStateMismatch: 'Public resolvers returned different answers',
+    propagationStateNoRecord: 'No public resolver found a record of this type',
+    propagationStateUnknown: 'No public resolver returned a usable answer',
+    propagationRecordTypeLabel: 'Record type',
+    propagationQueried: 'Queried',
+    propagationResponding: 'Responding',
+    propagationAgreeing: 'Agreeing',
+    propagationDiffering: 'Differing',
+    propagationMissingLabel: 'No record',
+    propagationUnavailableLabel: 'No response',
+    propagationTruncatedLabel: 'Unverifiable',
+    propagationCoverage: 'Propagation coverage',
+    propagationConsensusAnswer: 'Most common answer',
+    propagationConsensusLines: '{count} lines returned',
+    propagationPartialExplain: 'The record exists at some vantage points but not others, which is the classic signature of a DNS change that is still rolling out. Wait for the record TTL to expire and re-check; if it persists, confirm every authoritative nameserver serves the same zone.',
+    propagationMismatchExplain: 'Resolvers returned different answers for the same name. That is expected for geo-balanced or round-robin records, but for verification, SPF or DKIM records it usually means a stale cached copy or an edit that has not reached every resolver yet.',
+    propagationNoRecordExplain: 'No public resolver returned a record of this type. If you just published it, allow time for propagation; otherwise confirm the record exists at your DNS provider.',
+    propagationUnknownExplain: 'No public resolver answered, so propagation could not be measured. This usually means outbound UDP port 53 is blocked on the network running this tool rather than a problem with the domain.',
+    propagationTruncatedExplain: 'Some resolvers returned an answer too large to read over UDP and did not support the TCP retry, so they were excluded from the verdict.',
+    propagationDisabledText: 'DNS propagation probe disabled by server configuration.',
+    propagationNoResolvers: 'No public resolvers are available for the selected locations.',
+    propagationDetailsButton: 'Show what each resolver returned',
+    propagationAnycastNote: 'Dashed markers are anycast operators: they answer from the point of presence nearest this server, so the pin shows the operator\u2019s primary location rather than where the query was actually served.',
+    propagationExcludedNote: '{excluded} of {total} resolvers did not return a usable answer (no response, or a resolver-side failure) and were excluded.',
+    propagationLegendPropagated: 'Matches consensus',
+    propagationLegendMismatch: 'Different answer',
+    propagationLegendMissing: 'No record',
+    propagationLegendUnavailable: 'No response',
+    propagationSettingsLabel: 'Propagation settings',
+    propagationSettingsTitle: 'DNS propagation settings',
+    propagationSettingRecordType: 'Record type',
+    propagationSettingRegions: 'Resolver locations',
+    propagationSettingMaxResolvers: 'Max resolvers',
+    propagationSettingTimeout: 'Timeout (ms)',
+    propagationSettingExpected: 'Expected value contains (optional)',
+    propagationSettingExpectedHint: 'Leave blank to compare resolvers against each other instead of a fixed value.',
+    propagationApply: 'Apply and re-check',
+    propagationResetDefaults: 'Reset to defaults',
+    propagationRechecking: 'Re-checking propagation\u2026',
+    propagationRegionGlobal: 'Global anycast',
+    propagationRegionNamer: 'North America',
+    propagationRegionSamer: 'South America',
+    propagationRegionEurope: 'Europe',
+    propagationRegionAsia: 'Asia',
+    propagationRegionOceania: 'Oceania',
+    propagationAnycastBadge: 'Anycast',
+    propagationNoAnswerText: 'This resolver returned no records.',
+    guidancePropagationPartial: 'DNS propagation is incomplete for {domain}: {missing} of {responding} responding public resolvers still return no {type} record. Azure verifies domains through public DNS, so verification can fail intermittently until every resolver agrees. Wait for the record TTL to expire, then re-check.',
+    guidancePropagationMismatch: 'Public DNS resolvers disagree about the {type} record for {domain}. Some are still serving a previous answer, which can make verification, SPF or DKIM checks pass from one location and fail from another.',
+    guidancePropagationUnknown: 'DNS propagation could not be measured: no public resolver answered. This is usually caused by outbound UDP port 53 being blocked on the network running this tool.'
+  },
+  es: {
+    dnsPropagation: 'Propagaci\u00F3n de DNS',
+    propagationInfo: 'Consulta en paralelo un conjunto geogr\u00E1ficamente distribuido de resolutores DNS p\u00FAblicos conocidos y compara sus respuestas. Los resolutores que discrepan \u2014 o que a\u00FAn no ven el registro \u2014 muestran d\u00F3nde no ha terminado de propagarse un cambio de DNS reciente. Azure verifica los dominios a trav\u00E9s del DNS p\u00FAblico, por lo que un registro visible solo desde algunos puntos se verifica de forma intermitente.',
+    propagationOutcome: 'Resultado',
+    propagationStateFully: 'Todos los resolutores que respondieron devolvieron la misma respuesta',
+    propagationStatePartial: 'Algunos resolutores p\u00FAblicos a\u00FAn no tienen el registro',
+    propagationStateMismatch: 'Los resolutores p\u00FAblicos devolvieron respuestas distintas',
+    propagationStateNoRecord: 'Ning\u00FAn resolutor p\u00FAblico encontr\u00F3 un registro de este tipo',
+    propagationStateUnknown: 'Ning\u00FAn resolutor p\u00FAblico devolvi\u00F3 una respuesta utilizable',
+    propagationRecordTypeLabel: 'Tipo de registro',
+    propagationQueried: 'Consultados',
+    propagationResponding: 'Responden',
+    propagationAgreeing: 'Coinciden',
+    propagationDiffering: 'Difieren',
+    propagationMissingLabel: 'Sin registro',
+    propagationUnavailableLabel: 'Sin respuesta',
+    propagationTruncatedLabel: 'No verificable',
+    propagationCoverage: 'Cobertura de propagaci\u00F3n',
+    propagationConsensusAnswer: 'Respuesta m\u00E1s com\u00FAn',
+    propagationConsensusLines: '{count} l\u00EDneas devueltas',
+    propagationPartialExplain: 'El registro existe en algunos puntos de observaci\u00F3n pero no en otros, la se\u00F1al cl\u00E1sica de un cambio de DNS que a\u00FAn se est\u00E1 propagando. Espere a que expire el TTL del registro y vuelva a comprobarlo; si persiste, confirme que todos los servidores de nombres autoritativos sirven la misma zona.',
+    propagationMismatchExplain: 'Los resolutores devolvieron respuestas distintas para el mismo nombre. Es normal en registros con balanceo geogr\u00E1fico o round-robin, pero en registros de verificaci\u00F3n, SPF o DKIM suele indicar una copia en cach\u00E9 obsoleta o una edici\u00F3n que a\u00FAn no ha llegado a todos los resolutores.',
+    propagationNoRecordExplain: 'Ning\u00FAn resolutor p\u00FAblico devolvi\u00F3 un registro de este tipo. Si acaba de publicarlo, d\u00E9 tiempo a la propagaci\u00F3n; si no, confirme que el registro existe en su proveedor de DNS.',
+    propagationUnknownExplain: 'Ning\u00FAn resolutor p\u00FAblico respondi\u00F3, por lo que no se pudo medir la propagaci\u00F3n. Normalmente significa que el puerto UDP 53 saliente est\u00E1 bloqueado en la red donde se ejecuta esta herramienta, no un problema del dominio.',
+    propagationTruncatedExplain: 'Algunos resolutores devolvieron una respuesta demasiado grande para UDP y no admitieron el reintento por TCP, por lo que se excluyeron del veredicto.',
+    propagationDisabledText: 'Sonda de propagaci\u00F3n DNS deshabilitada por la configuraci\u00F3n del servidor.',
+    propagationNoResolvers: 'No hay resolutores p\u00FAblicos disponibles para las ubicaciones seleccionadas.',
+    propagationDetailsButton: 'Ver lo que devolvi\u00F3 cada resolutor',
+    propagationAnycastNote: 'Los marcadores discontinuos son operadores anycast: responden desde el punto de presencia m\u00E1s cercano a este servidor, por lo que el pin muestra la ubicaci\u00F3n principal del operador y no d\u00F3nde se atendi\u00F3 realmente la consulta.',
+    propagationExcludedNote: '{excluded} de {total} resolutores no devolvieron una respuesta utilizable (sin respuesta o un fallo del propio resolutor) y se excluyeron.',
+    propagationLegendPropagated: 'Coincide con el consenso',
+    propagationLegendMismatch: 'Respuesta distinta',
+    propagationLegendMissing: 'Sin registro',
+    propagationLegendUnavailable: 'Sin respuesta',
+    propagationSettingsLabel: 'Configuraci\u00F3n de propagaci\u00F3n',
+    propagationSettingsTitle: 'Configuraci\u00F3n de propagaci\u00F3n de DNS',
+    propagationSettingRecordType: 'Tipo de registro',
+    propagationSettingRegions: 'Ubicaciones de resolutores',
+    propagationSettingMaxResolvers: 'M\u00E1x. resolutores',
+    propagationSettingTimeout: 'Tiempo de espera (ms)',
+    propagationSettingExpected: 'El valor esperado contiene (opcional)',
+    propagationSettingExpectedHint: 'D\u00E9jelo en blanco para comparar los resolutores entre s\u00ED en lugar de con un valor fijo.',
+    propagationApply: 'Aplicar y volver a comprobar',
+    propagationResetDefaults: 'Restablecer valores predeterminados',
+    propagationRechecking: 'Volviendo a comprobar la propagaci\u00F3n\u2026',
+    propagationRegionGlobal: 'Anycast global',
+    propagationRegionNamer: 'Am\u00E9rica del Norte',
+    propagationRegionSamer: 'Am\u00E9rica del Sur',
+    propagationRegionEurope: 'Europa',
+    propagationRegionAsia: 'Asia',
+    propagationRegionOceania: 'Ocean\u00EDa',
+    propagationAnycastBadge: 'Anycast',
+    propagationNoAnswerText: 'Este resolutor no devolvi\u00F3 ning\u00FAn registro.',
+    guidancePropagationPartial: 'La propagaci\u00F3n de DNS est\u00E1 incompleta para {domain}: {missing} de {responding} resolutores p\u00FAblicos que respondieron a\u00FAn no devuelven un registro {type}. Azure verifica los dominios mediante DNS p\u00FAblico, por lo que la verificaci\u00F3n puede fallar de forma intermitente hasta que todos coincidan. Espere a que expire el TTL y vuelva a comprobarlo.',
+    guidancePropagationMismatch: 'Los resolutores de DNS p\u00FAblicos discrepan sobre el registro {type} de {domain}. Algunos siguen sirviendo una respuesta anterior, lo que puede hacer que la verificaci\u00F3n, SPF o DKIM funcionen desde una ubicaci\u00F3n y fallen desde otra.',
+    guidancePropagationUnknown: 'No se pudo medir la propagaci\u00F3n de DNS: ning\u00FAn resolutor p\u00FAblico respondi\u00F3. Suele deberse a que el puerto UDP 53 saliente est\u00E1 bloqueado en la red donde se ejecuta esta herramienta.'
+  },
+  'fr': {
+    dnsPropagation: 'Propagation DNS',
+    propagationInfo: 'Interroge en parall\u00E8le un ensemble g\u00E9ographiquement r\u00E9parti de r\u00E9solveurs DNS publics connus et compare leurs r\u00E9ponses. Les r\u00E9solveurs qui divergent \u2014 ou qui ne voient toujours aucun enregistrement \u2014 montrent o\u00F9 une modification DNS r\u00E9cente n\u2019a pas fini de se propager. Azure v\u00E9rifie les domaines via le DNS public : un enregistrement visible depuis quelques points seulement se v\u00E9rifie de fa\u00E7on intermittente.',
+    propagationOutcome: 'R\u00E9sultat',
+    propagationStateFully: 'Tous les r\u00E9solveurs ayant r\u00E9pondu ont renvoy\u00E9 la m\u00EAme r\u00E9ponse',
+    propagationStatePartial: 'Certains r\u00E9solveurs publics n\u2019ont pas encore l\u2019enregistrement',
+    propagationStateMismatch: 'Les r\u00E9solveurs publics ont renvoy\u00E9 des r\u00E9ponses diff\u00E9rentes',
+    propagationStateNoRecord: 'Aucun r\u00E9solveur public n\u2019a trouv\u00E9 d\u2019enregistrement de ce type',
+    propagationStateUnknown: 'Aucun r\u00E9solveur public n\u2019a renvoy\u00E9 de r\u00E9ponse exploitable',
+    propagationRecordTypeLabel: 'Type d\u2019enregistrement',
+    propagationQueried: 'Interrog\u00E9s',
+    propagationResponding: 'R\u00E9pondent',
+    propagationAgreeing: 'Concordent',
+    propagationDiffering: 'Divergent',
+    propagationMissingLabel: 'Aucun enregistrement',
+    propagationUnavailableLabel: 'Aucune r\u00E9ponse',
+    propagationTruncatedLabel: 'Non v\u00E9rifiable',
+    propagationCoverage: 'Couverture de propagation',
+    propagationConsensusAnswer: 'R\u00E9ponse la plus fr\u00E9quente',
+    propagationConsensusLines: '{count} lignes renvoy\u00E9es',
+    propagationPartialExplain: 'L\u2019enregistrement existe \u00E0 certains points d\u2019observation mais pas \u00E0 d\u2019autres : la signature classique d\u2019une modification DNS encore en cours de d\u00E9ploiement. Attendez l\u2019expiration du TTL puis rev\u00E9rifiez ; si cela persiste, v\u00E9rifiez que tous les serveurs de noms faisant autorit\u00E9 servent la m\u00EAme zone.',
+    propagationMismatchExplain: 'Les r\u00E9solveurs ont renvoy\u00E9 des r\u00E9ponses diff\u00E9rentes pour le m\u00EAme nom. C\u2019est normal pour des enregistrements g\u00E9o-\u00E9quilibr\u00E9s ou en round-robin, mais pour des enregistrements de v\u00E9rification, SPF ou DKIM cela indique g\u00E9n\u00E9ralement une copie en cache p\u00E9rim\u00E9e ou une modification qui n\u2019a pas encore atteint tous les r\u00E9solveurs.',
+    propagationNoRecordExplain: 'Aucun r\u00E9solveur public n\u2019a renvoy\u00E9 d\u2019enregistrement de ce type. Si vous venez de le publier, laissez le temps \u00E0 la propagation ; sinon, v\u00E9rifiez que l\u2019enregistrement existe chez votre fournisseur DNS.',
+    propagationUnknownExplain: 'Aucun r\u00E9solveur public n\u2019a r\u00E9pondu, la propagation n\u2019a donc pas pu \u00EAtre mesur\u00E9e. Cela signifie g\u00E9n\u00E9ralement que le port UDP 53 sortant est bloqu\u00E9 sur le r\u00E9seau ex\u00E9cutant cet outil, et non un probl\u00E8me de domaine.',
+    propagationTruncatedExplain: 'Certains r\u00E9solveurs ont renvoy\u00E9 une r\u00E9ponse trop volumineuse pour UDP sans prendre en charge la reprise TCP ; ils ont donc \u00E9t\u00E9 exclus du verdict.',
+    propagationDisabledText: 'Sonde de propagation DNS d\u00E9sactiv\u00E9e par la configuration du serveur.',
+    propagationNoResolvers: 'Aucun r\u00E9solveur public disponible pour les emplacements s\u00E9lectionn\u00E9s.',
+    propagationDetailsButton: 'Afficher ce que chaque r\u00E9solveur a renvoy\u00E9',
+    propagationAnycastNote: 'Les marqueurs en pointill\u00E9s sont des op\u00E9rateurs anycast : ils r\u00E9pondent depuis le point de pr\u00E9sence le plus proche de ce serveur, le rep\u00E8re indique donc l\u2019emplacement principal de l\u2019op\u00E9rateur et non l\u2019endroit r\u00E9el de la r\u00E9ponse.',
+    propagationExcludedNote: '{excluded} r\u00E9solveurs sur {total} n\u2019ont pas renvoy\u00E9 de r\u00E9ponse exploitable (aucune r\u00E9ponse ou \u00E9chec c\u00F4t\u00E9 r\u00E9solveur) et ont \u00E9t\u00E9 exclus.',
+    propagationLegendPropagated: 'Conforme au consensus',
+    propagationLegendMismatch: 'R\u00E9ponse diff\u00E9rente',
+    propagationLegendMissing: 'Aucun enregistrement',
+    propagationLegendUnavailable: 'Aucune r\u00E9ponse',
+    propagationSettingsLabel: 'Param\u00E8tres de propagation',
+    propagationSettingsTitle: 'Param\u00E8tres de propagation DNS',
+    propagationSettingRecordType: 'Type d\u2019enregistrement',
+    propagationSettingRegions: 'Emplacements des r\u00E9solveurs',
+    propagationSettingMaxResolvers: 'R\u00E9solveurs max.',
+    propagationSettingTimeout: 'D\u00E9lai (ms)',
+    propagationSettingExpected: 'La valeur attendue contient (facultatif)',
+    propagationSettingExpectedHint: 'Laissez vide pour comparer les r\u00E9solveurs entre eux plut\u00F4t qu\u2019\u00E0 une valeur fixe.',
+    propagationApply: 'Appliquer et rev\u00E9rifier',
+    propagationResetDefaults: 'R\u00E9initialiser',
+    propagationRechecking: 'Nouvelle v\u00E9rification de la propagation\u2026',
+    propagationRegionGlobal: 'Anycast mondial',
+    propagationRegionNamer: 'Am\u00E9rique du Nord',
+    propagationRegionSamer: 'Am\u00E9rique du Sud',
+    propagationRegionEurope: 'Europe',
+    propagationRegionAsia: 'Asie',
+    propagationRegionOceania: 'Oc\u00E9anie',
+    propagationAnycastBadge: 'Anycast',
+    propagationNoAnswerText: 'Ce r\u00E9solveur n\u2019a renvoy\u00E9 aucun enregistrement.',
+    guidancePropagationPartial: 'La propagation DNS est incompl\u00E8te pour {domain} : {missing} des {responding} r\u00E9solveurs publics ayant r\u00E9pondu ne renvoient toujours aucun enregistrement {type}. Azure v\u00E9rifie les domaines via le DNS public, la v\u00E9rification peut donc \u00E9chouer par intermittence tant que tous ne concordent pas. Attendez l\u2019expiration du TTL puis rev\u00E9rifiez.',
+    guidancePropagationMismatch: 'Les r\u00E9solveurs DNS publics divergent sur l\u2019enregistrement {type} de {domain}. Certains servent encore une r\u00E9ponse pr\u00E9c\u00E9dente, ce qui peut faire r\u00E9ussir la v\u00E9rification, SPF ou DKIM depuis un emplacement et \u00E9chouer depuis un autre.',
+    guidancePropagationUnknown: 'La propagation DNS n\u2019a pas pu \u00EAtre mesur\u00E9e : aucun r\u00E9solveur public n\u2019a r\u00E9pondu. Cela vient g\u00E9n\u00E9ralement du blocage du port UDP 53 sortant sur le r\u00E9seau ex\u00E9cutant cet outil.'
+  },
+  'de': {
+    dnsPropagation: 'DNS-Verbreitung',
+    propagationInfo: 'Fragt parallel eine geografisch verteilte Auswahl bekannter \u00F6ffentlicher DNS-Resolver ab und vergleicht deren Antworten. Resolver, die abweichen \u2014 oder noch keinen Eintrag sehen \u2014 zeigen, wo eine k\u00FCrzliche DNS-\u00C4nderung noch nicht vollst\u00E4ndig verbreitet ist. Azure pr\u00FCft Dom\u00E4nen \u00FCber \u00F6ffentliches DNS, daher wird ein nur teilweise sichtbarer Eintrag nur zeitweise best\u00E4tigt.',
+    propagationOutcome: 'Ergebnis',
+    propagationStateFully: 'Alle antwortenden \u00F6ffentlichen Resolver lieferten dieselbe Antwort',
+    propagationStatePartial: 'Einige \u00F6ffentliche Resolver haben den Eintrag noch nicht',
+    propagationStateMismatch: '\u00D6ffentliche Resolver lieferten unterschiedliche Antworten',
+    propagationStateNoRecord: 'Kein \u00F6ffentlicher Resolver fand einen Eintrag dieses Typs',
+    propagationStateUnknown: 'Kein \u00F6ffentlicher Resolver lieferte eine verwertbare Antwort',
+    propagationRecordTypeLabel: 'Eintragstyp',
+    propagationQueried: 'Abgefragt',
+    propagationResponding: 'Antworten',
+    propagationAgreeing: '\u00DCbereinstimmend',
+    propagationDiffering: 'Abweichend',
+    propagationMissingLabel: 'Kein Eintrag',
+    propagationUnavailableLabel: 'Keine Antwort',
+    propagationTruncatedLabel: 'Nicht pr\u00FCfbar',
+    propagationCoverage: 'Verbreitungsgrad',
+    propagationConsensusAnswer: 'H\u00E4ufigste Antwort',
+    propagationConsensusLines: '{count} Zeilen zur\u00FCckgegeben',
+    propagationPartialExplain: 'Der Eintrag existiert an einigen Messpunkten, an anderen nicht \u2014 das klassische Zeichen einer DNS-\u00C4nderung, die noch ausgerollt wird. Warten Sie den Ablauf der TTL ab und pr\u00FCfen Sie erneut; bleibt es bestehen, stellen Sie sicher, dass alle autoritativen Nameserver dieselbe Zone ausliefern.',
+    propagationMismatchExplain: 'Die Resolver lieferten unterschiedliche Antworten f\u00FCr denselben Namen. Bei geobalancierten oder Round-Robin-Eintr\u00E4gen ist das normal; bei Verifizierungs-, SPF- oder DKIM-Eintr\u00E4gen deutet es meist auf eine veraltete Cache-Kopie oder eine noch nicht \u00FCberall angekommene \u00C4nderung hin.',
+    propagationNoRecordExplain: 'Kein \u00F6ffentlicher Resolver lieferte einen Eintrag dieses Typs. Wenn Sie ihn gerade erst ver\u00F6ffentlicht haben, geben Sie der Verbreitung Zeit; andernfalls pr\u00FCfen Sie, ob der Eintrag bei Ihrem DNS-Anbieter vorhanden ist.',
+    propagationUnknownExplain: 'Kein \u00F6ffentlicher Resolver hat geantwortet, daher konnte die Verbreitung nicht gemessen werden. Meist ist ausgehender UDP-Port 53 im Netzwerk dieses Tools blockiert \u2014 kein Problem der Dom\u00E4ne.',
+    propagationTruncatedExplain: 'Einige Resolver lieferten eine f\u00FCr UDP zu gro\u00DFe Antwort und unterst\u00FCtzten den TCP-Wiederholungsversuch nicht; sie wurden daher aus der Bewertung ausgeschlossen.',
+    propagationDisabledText: 'DNS-Verbreitungspr\u00FCfung durch Serverkonfiguration deaktiviert.',
+    propagationNoResolvers: 'F\u00FCr die ausgew\u00E4hlten Standorte sind keine \u00F6ffentlichen Resolver verf\u00FCgbar.',
+    propagationDetailsButton: 'Anzeigen, was jeder Resolver zur\u00FCckgab',
+    propagationAnycastNote: 'Gestrichelte Markierungen sind Anycast-Betreiber: Sie antworten vom Standort, der diesem Server am n\u00E4chsten liegt. Die Markierung zeigt daher den Hauptstandort des Betreibers, nicht den Ort der tats\u00E4chlichen Antwort.',
+    propagationExcludedNote: '{excluded} von {total} Resolvern lieferten keine verwertbare Antwort (keine Antwort oder ein Fehler auf Resolver-Seite) und wurden ausgeschlossen.',
+    propagationLegendPropagated: 'Stimmt mit Konsens \u00FCberein',
+    propagationLegendMismatch: 'Abweichende Antwort',
+    propagationLegendMissing: 'Kein Eintrag',
+    propagationLegendUnavailable: 'Keine Antwort',
+    propagationSettingsLabel: 'Verbreitungseinstellungen',
+    propagationSettingsTitle: 'Einstellungen zur DNS-Verbreitung',
+    propagationSettingRecordType: 'Eintragstyp',
+    propagationSettingRegions: 'Resolver-Standorte',
+    propagationSettingMaxResolvers: 'Max. Resolver',
+    propagationSettingTimeout: 'Zeitlimit (ms)',
+    propagationSettingExpected: 'Erwarteter Wert enth\u00E4lt (optional)',
+    propagationSettingExpectedHint: 'Leer lassen, um die Resolver untereinander statt mit einem festen Wert zu vergleichen.',
+    propagationApply: 'Anwenden und erneut pr\u00FCfen',
+    propagationResetDefaults: 'Auf Standard zur\u00FCcksetzen',
+    propagationRechecking: 'Verbreitung wird erneut gepr\u00FCft\u2026',
+    propagationRegionGlobal: 'Globales Anycast',
+    propagationRegionNamer: 'Nordamerika',
+    propagationRegionSamer: 'S\u00FCdamerika',
+    propagationRegionEurope: 'Europa',
+    propagationRegionAsia: 'Asien',
+    propagationRegionOceania: 'Ozeanien',
+    propagationAnycastBadge: 'Anycast',
+    propagationNoAnswerText: 'Dieser Resolver lieferte keine Eintr\u00E4ge.',
+    guidancePropagationPartial: 'Die DNS-Verbreitung f\u00FCr {domain} ist unvollst\u00E4ndig: {missing} von {responding} antwortenden \u00F6ffentlichen Resolvern liefern weiterhin keinen {type}-Eintrag. Azure pr\u00FCft Dom\u00E4nen \u00FCber \u00F6ffentliches DNS, daher kann die Verifizierung zeitweise fehlschlagen, bis alle \u00FCbereinstimmen. Warten Sie den Ablauf der TTL ab und pr\u00FCfen Sie erneut.',
+    guidancePropagationMismatch: '\u00D6ffentliche DNS-Resolver sind sich beim {type}-Eintrag von {domain} uneinig. Einige liefern noch eine fr\u00FChere Antwort, wodurch Verifizierung, SPF oder DKIM von einem Standort aus funktionieren und von einem anderen fehlschlagen k\u00F6nnen.',
+    guidancePropagationUnknown: 'Die DNS-Verbreitung konnte nicht gemessen werden: Kein \u00F6ffentlicher Resolver hat geantwortet. Ursache ist meist ein blockierter ausgehender UDP-Port 53 im Netzwerk dieses Tools.'
+  },
+  'pt-BR': {
+    dnsPropagation: 'Propaga\u00E7\u00E3o de DNS',
+    propagationInfo: 'Consulta em paralelo um conjunto geograficamente distribu\u00EDdo de resolvedores DNS p\u00FAblicos conhecidos e compara suas respostas. Resolvedores que divergem \u2014 ou que ainda n\u00E3o veem o registro \u2014 mostram onde uma altera\u00E7\u00E3o de DNS recente ainda n\u00E3o terminou de se propagar. O Azure verifica dom\u00EDnios pelo DNS p\u00FAblico, portanto um registro vis\u00EDvel apenas de alguns pontos \u00E9 verificado de forma intermitente.',
+    propagationOutcome: 'Resultado',
+    propagationStateFully: 'Todos os resolvedores que responderam retornaram a mesma resposta',
+    propagationStatePartial: 'Alguns resolvedores p\u00FAblicos ainda n\u00E3o t\u00EAm o registro',
+    propagationStateMismatch: 'Resolvedores p\u00FAblicos retornaram respostas diferentes',
+    propagationStateNoRecord: 'Nenhum resolvedor p\u00FAblico encontrou um registro deste tipo',
+    propagationStateUnknown: 'Nenhum resolvedor p\u00FAblico retornou uma resposta utiliz\u00E1vel',
+    propagationRecordTypeLabel: 'Tipo de registro',
+    propagationQueried: 'Consultados',
+    propagationResponding: 'Respondendo',
+    propagationAgreeing: 'Concordam',
+    propagationDiffering: 'Divergem',
+    propagationMissingLabel: 'Sem registro',
+    propagationUnavailableLabel: 'Sem resposta',
+    propagationTruncatedLabel: 'N\u00E3o verific\u00E1vel',
+    propagationCoverage: 'Cobertura de propaga\u00E7\u00E3o',
+    propagationConsensusAnswer: 'Resposta mais comum',
+    propagationConsensusLines: '{count} linhas retornadas',
+    propagationPartialExplain: 'O registro existe em alguns pontos de observa\u00E7\u00E3o, mas n\u00E3o em outros \u2014 a assinatura cl\u00E1ssica de uma altera\u00E7\u00E3o de DNS ainda em propaga\u00E7\u00E3o. Aguarde o TTL expirar e verifique novamente; se persistir, confirme que todos os servidores de nomes autoritativos servem a mesma zona.',
+    propagationMismatchExplain: 'Os resolvedores retornaram respostas diferentes para o mesmo nome. Isso \u00E9 esperado em registros com balanceamento geogr\u00E1fico ou round-robin, mas em registros de verifica\u00E7\u00E3o, SPF ou DKIM normalmente indica cache desatualizado ou uma edi\u00E7\u00E3o que ainda n\u00E3o alcan\u00E7ou todos.',
+    propagationNoRecordExplain: 'Nenhum resolvedor p\u00FAblico retornou um registro deste tipo. Se voc\u00EA acabou de public\u00E1-lo, aguarde a propaga\u00E7\u00E3o; caso contr\u00E1rio, confirme se o registro existe no seu provedor de DNS.',
+    propagationUnknownExplain: 'Nenhum resolvedor p\u00FAblico respondeu, portanto a propaga\u00E7\u00E3o n\u00E3o p\u00F4de ser medida. Normalmente isso significa que a porta UDP 53 de sa\u00EDda est\u00E1 bloqueada na rede que executa esta ferramenta, e n\u00E3o um problema do dom\u00EDnio.',
+    propagationTruncatedExplain: 'Alguns resolvedores retornaram uma resposta grande demais para UDP e n\u00E3o suportaram a nova tentativa por TCP, portanto foram exclu\u00EDdos do veredicto.',
+    propagationDisabledText: 'Sonda de propaga\u00E7\u00E3o de DNS desativada pela configura\u00E7\u00E3o do servidor.',
+    propagationNoResolvers: 'Nenhum resolvedor p\u00FAblico dispon\u00EDvel para os locais selecionados.',
+    propagationDetailsButton: 'Mostrar o que cada resolvedor retornou',
+    propagationAnycastNote: 'Marcadores tracejados s\u00E3o operadores anycast: respondem do ponto de presen\u00E7a mais pr\u00F3ximo deste servidor, portanto o pino mostra o local principal do operador e n\u00E3o onde a consulta foi realmente atendida.',
+    propagationExcludedNote: '{excluded} de {total} resolvedores n\u00E3o retornaram uma resposta utiliz\u00E1vel (sem resposta ou falha do pr\u00F3prio resolvedor) e foram exclu\u00EDdos.',
+    propagationLegendPropagated: 'Corresponde ao consenso',
+    propagationLegendMismatch: 'Resposta diferente',
+    propagationLegendMissing: 'Sem registro',
+    propagationLegendUnavailable: 'Sem resposta',
+    propagationSettingsLabel: 'Configura\u00E7\u00F5es de propaga\u00E7\u00E3o',
+    propagationSettingsTitle: 'Configura\u00E7\u00F5es de propaga\u00E7\u00E3o de DNS',
+    propagationSettingRecordType: 'Tipo de registro',
+    propagationSettingRegions: 'Locais dos resolvedores',
+    propagationSettingMaxResolvers: 'M\u00E1x. de resolvedores',
+    propagationSettingTimeout: 'Tempo limite (ms)',
+    propagationSettingExpected: 'O valor esperado cont\u00E9m (opcional)',
+    propagationSettingExpectedHint: 'Deixe em branco para comparar os resolvedores entre si em vez de um valor fixo.',
+    propagationApply: 'Aplicar e verificar novamente',
+    propagationResetDefaults: 'Restaurar padr\u00F5es',
+    propagationRechecking: 'Verificando a propaga\u00E7\u00E3o novamente\u2026',
+    propagationRegionGlobal: 'Anycast global',
+    propagationRegionNamer: 'Am\u00E9rica do Norte',
+    propagationRegionSamer: 'Am\u00E9rica do Sul',
+    propagationRegionEurope: 'Europa',
+    propagationRegionAsia: '\u00C1sia',
+    propagationRegionOceania: 'Oceania',
+    propagationAnycastBadge: 'Anycast',
+    propagationNoAnswerText: 'Este resolvedor n\u00E3o retornou nenhum registro.',
+    guidancePropagationPartial: 'A propaga\u00E7\u00E3o de DNS est\u00E1 incompleta para {domain}: {missing} de {responding} resolvedores p\u00FAblicos que responderam ainda n\u00E3o retornam um registro {type}. O Azure verifica dom\u00EDnios pelo DNS p\u00FAblico, portanto a verifica\u00E7\u00E3o pode falhar de forma intermitente at\u00E9 que todos concordem. Aguarde o TTL expirar e verifique novamente.',
+    guidancePropagationMismatch: 'Os resolvedores de DNS p\u00FAblicos discordam sobre o registro {type} de {domain}. Alguns ainda servem uma resposta anterior, o que pode fazer a verifica\u00E7\u00E3o, SPF ou DKIM funcionar de um local e falhar de outro.',
+    guidancePropagationUnknown: 'N\u00E3o foi poss\u00EDvel medir a propaga\u00E7\u00E3o de DNS: nenhum resolvedor p\u00FAblico respondeu. Normalmente isso ocorre porque a porta UDP 53 de sa\u00EDda est\u00E1 bloqueada na rede que executa esta ferramenta.'
+  },
+  'ar': {
+    dnsPropagation: '\u0627\u0646\u062A\u0634\u0627\u0631 DNS',
+    propagationOutcome: '\u0627\u0644\u0646\u062A\u064A\u062C\u0629',
+    propagationRecordTypeLabel: '\u0646\u0648\u0639 \u0627\u0644\u0633\u062C\u0644',
+    propagationQueried: '\u062A\u0645 \u0627\u0644\u0627\u0633\u062A\u0639\u0644\u0627\u0645',
+    propagationResponding: '\u062A\u0633\u062A\u062C\u064A\u0628',
+    propagationAgreeing: '\u0645\u062A\u0637\u0627\u0628\u0642\u0629',
+    propagationDiffering: '\u0645\u062E\u062A\u0644\u0641\u0629',
+    propagationMissingLabel: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0633\u062C\u0644',
+    propagationUnavailableLabel: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0631\u062F',
+    propagationTruncatedLabel: '\u063A\u064A\u0631 \u0642\u0627\u0628\u0644 \u0644\u0644\u062A\u062D\u0642\u0642',
+    propagationCoverage: '\u062A\u063A\u0637\u064A\u0629 \u0627\u0644\u0627\u0646\u062A\u0634\u0627\u0631',
+    propagationConsensusAnswer: '\u0627\u0644\u0625\u062C\u0627\u0628\u0629 \u0627\u0644\u0623\u0643\u062B\u0631 \u0634\u064A\u0648\u0639\u064B\u0627',
+    propagationConsensusLines: '\u062A\u0645 \u0625\u0631\u062C\u0627\u0639 {count} \u0623\u0633\u0637\u0631',
+    propagationDetailsButton: '\u0639\u0631\u0636 \u0645\u0627 \u0623\u0639\u0627\u062F\u0647 \u0643\u0644 \u0645\u062D\u0644\u0644',
+    propagationExcludedNote: '\u062A\u0645 \u0627\u0633\u062A\u0628\u0639\u0627\u062F {excluded} \u0645\u0646 \u0623\u0635\u0644 {total} \u0645\u062D\u0644\u0644 \u0644\u0639\u062F\u0645 \u0625\u0631\u062C\u0627\u0639 \u0625\u062C\u0627\u0628\u0629 \u0642\u0627\u0628\u0644\u0629 \u0644\u0644\u0627\u0633\u062A\u062E\u062F\u0627\u0645.',
+    propagationLegendPropagated: '\u064A\u0637\u0627\u0628\u0642 \u0627\u0644\u0625\u062C\u0645\u0627\u0639',
+    propagationLegendMismatch: '\u0625\u062C\u0627\u0628\u0629 \u0645\u062E\u062A\u0644\u0641\u0629',
+    propagationLegendMissing: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0633\u062C\u0644',
+    propagationLegendUnavailable: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0631\u062F',
+    propagationSettingsLabel: '\u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0644\u0627\u0646\u062A\u0634\u0627\u0631',
+    propagationSettingsTitle: '\u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0646\u062A\u0634\u0627\u0631 DNS',
+    propagationSettingRecordType: '\u0646\u0648\u0639 \u0627\u0644\u0633\u062C\u0644',
+    propagationSettingRegions: '\u0645\u0648\u0627\u0642\u0639 \u0627\u0644\u0645\u062D\u0644\u0644\u0627\u062A',
+    propagationSettingMaxResolvers: '\u0627\u0644\u062D\u062F \u0627\u0644\u0623\u0642\u0635\u0649 \u0644\u0644\u0645\u062D\u0644\u0644\u0627\u062A',
+    propagationSettingTimeout: '\u0627\u0644\u0645\u0647\u0644\u0629 (\u0645\u0644\u0644\u064A \u062B\u0627\u0646\u064A\u0629)',
+    propagationSettingExpected: '\u0627\u0644\u0642\u064A\u0645\u0629 \u0627\u0644\u0645\u062A\u0648\u0642\u0639\u0629 \u062A\u062D\u062A\u0648\u064A \u0639\u0644\u0649 (\u0627\u062E\u062A\u064A\u0627\u0631\u064A)',
+    propagationApply: '\u062A\u0637\u0628\u064A\u0642 \u0648\u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0641\u062D\u0635',
+    propagationResetDefaults: '\u0625\u0639\u0627\u062F\u0629 \u062A\u0639\u064A\u064A\u0646 \u0627\u0644\u0627\u0641\u062A\u0631\u0627\u0636\u064A\u0627\u062A',
+    propagationRechecking: '\u062C\u0627\u0631\u064D \u0625\u0639\u0627\u062F\u0629 \u0641\u062D\u0635 \u0627\u0644\u0627\u0646\u062A\u0634\u0627\u0631\u2026',
+    propagationRegionGlobal: 'Anycast \u0639\u0627\u0644\u0645\u064A',
+    propagationRegionNamer: '\u0623\u0645\u0631\u064A\u0643\u0627 \u0627\u0644\u0634\u0645\u0627\u0644\u064A\u0629',
+    propagationRegionSamer: '\u0623\u0645\u0631\u064A\u0643\u0627 \u0627\u0644\u062C\u0646\u0648\u0628\u064A\u0629',
+    propagationRegionEurope: '\u0623\u0648\u0631\u0648\u0628\u0627',
+    propagationRegionAsia: '\u0622\u0633\u064A\u0627',
+    propagationRegionOceania: '\u0623\u0648\u0642\u064A\u0627\u0646\u0648\u0633\u064A\u0627',
+    propagationAnycastBadge: 'Anycast'
+  },
+  'zh-CN': {
+    dnsPropagation: 'DNS \u4F20\u64AD',
+    propagationOutcome: '\u7ED3\u679C',
+    propagationRecordTypeLabel: '\u8BB0\u5F55\u7C7B\u578B',
+    propagationQueried: '\u5DF2\u67E5\u8BE2',
+    propagationResponding: '\u5DF2\u54CD\u5E94',
+    propagationAgreeing: '\u4E00\u81F4',
+    propagationDiffering: '\u4E0D\u4E00\u81F4',
+    propagationMissingLabel: '\u65E0\u8BB0\u5F55',
+    propagationUnavailableLabel: '\u65E0\u54CD\u5E94',
+    propagationTruncatedLabel: '\u65E0\u6CD5\u9A8C\u8BC1',
+    propagationCoverage: '\u4F20\u64AD\u8986\u76D6\u7387',
+    propagationConsensusAnswer: '\u6700\u5E38\u89C1\u7684\u7B54\u6848',
+    propagationConsensusLines: '\u8FD4\u56DE {count} \u884C',
+    propagationDetailsButton: '\u663E\u793A\u6BCF\u4E2A\u89E3\u6790\u5668\u7684\u8FD4\u56DE\u7ED3\u679C',
+    propagationExcludedNote: '{total} \u4E2A\u89E3\u6790\u5668\u4E2D\u6709 {excluded} \u4E2A\u672A\u8FD4\u56DE\u53EF\u7528\u7B54\u6848\uFF0C\u5DF2\u6392\u9664\u3002',
+    propagationLegendPropagated: '\u4E0E\u5171\u8BC6\u4E00\u81F4',
+    propagationLegendMismatch: '\u7B54\u6848\u4E0D\u540C',
+    propagationLegendMissing: '\u65E0\u8BB0\u5F55',
+    propagationLegendUnavailable: '\u65E0\u54CD\u5E94',
+    propagationSettingsLabel: '\u4F20\u64AD\u8BBE\u7F6E',
+    propagationSettingsTitle: 'DNS \u4F20\u64AD\u8BBE\u7F6E',
+    propagationSettingRecordType: '\u8BB0\u5F55\u7C7B\u578B',
+    propagationSettingRegions: '\u89E3\u6790\u5668\u4F4D\u7F6E',
+    propagationSettingMaxResolvers: '\u6700\u5927\u89E3\u6790\u5668\u6570',
+    propagationSettingTimeout: '\u8D85\u65F6\uFF08\u6BEB\u79D2\uFF09',
+    propagationSettingExpected: '\u9884\u671F\u503C\u5305\u542B\uFF08\u53EF\u9009\uFF09',
+    propagationApply: '\u5E94\u7528\u5E76\u91CD\u65B0\u68C0\u67E5',
+    propagationResetDefaults: '\u6062\u590D\u9ED8\u8BA4\u503C',
+    propagationRechecking: '\u6B63\u5728\u91CD\u65B0\u68C0\u67E5\u4F20\u64AD\u2026',
+    propagationRegionGlobal: '\u5168\u7403 Anycast',
+    propagationRegionNamer: '\u5317\u7F8E',
+    propagationRegionSamer: '\u5357\u7F8E',
+    propagationRegionEurope: '\u6B27\u6D32',
+    propagationRegionAsia: '\u4E9A\u6D32',
+    propagationRegionOceania: '\u5927\u6D0B\u6D32',
+    propagationAnycastBadge: 'Anycast'
+  },
+  'hi-IN': {
+    dnsPropagation: 'DNS \u092A\u094D\u0930\u0938\u093E\u0930',
+    propagationOutcome: '\u092A\u0930\u093F\u0923\u093E\u092E',
+    propagationRecordTypeLabel: '\u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u092A\u094D\u0930\u0915\u093E\u0930',
+    propagationQueried: '\u092A\u0942\u091B\u0947 \u0917\u090F',
+    propagationResponding: '\u0909\u0924\u094D\u0924\u0930 \u0926\u0947 \u0930\u0939\u0947',
+    propagationAgreeing: '\u0938\u0939\u092E\u0924',
+    propagationDiffering: '\u092D\u093F\u0928\u094D\u0928',
+    propagationMissingLabel: '\u0915\u094B\u0908 \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0928\u0939\u0940\u0902',
+    propagationUnavailableLabel: '\u0915\u094B\u0908 \u0909\u0924\u094D\u0924\u0930 \u0928\u0939\u0940\u0902',
+    propagationTruncatedLabel: '\u0938\u0924\u094D\u092F\u093E\u092A\u0928 \u0905\u0938\u092E\u094D\u092D\u0935',
+    propagationCoverage: '\u092A\u094D\u0930\u0938\u093E\u0930 \u0915\u0935\u0930\u0947\u091C',
+    propagationConsensusAnswer: '\u0938\u092C\u0938\u0947 \u0938\u093E\u092E\u093E\u0928\u094D\u092F \u0909\u0924\u094D\u0924\u0930',
+    propagationConsensusLines: '{count} \u092A\u0902\u0915\u094D\u0924\u093F\u092F\u093E\u0901 \u0932\u094C\u091F\u093E\u0908 \u0917\u0908\u0902',
+    propagationDetailsButton: '\u092A\u094D\u0930\u0924\u094D\u092F\u0947\u0915 \u0930\u093F\u091C\u093C\u0949\u0932\u094D\u0935\u0930 \u0915\u093E \u0909\u0924\u094D\u0924\u0930 \u0926\u093F\u0916\u093E\u090F\u0901',
+    propagationExcludedNote: '{total} \u092E\u0947\u0902 \u0938\u0947 {excluded} \u0930\u093F\u091C\u093C\u0949\u0932\u094D\u0935\u0930 \u0928\u0947 \u0909\u092A\u092F\u094B\u0917\u0940 \u0909\u0924\u094D\u0924\u0930 \u0928\u0939\u0940\u0902 \u0926\u093F\u092F\u093E \u0914\u0930 \u0909\u0928\u094D\u0939\u0947\u0902 \u092C\u093E\u0939\u0930 \u0930\u0916\u093E \u0917\u092F\u093E\u0964',
+    propagationLegendPropagated: '\u0938\u0939\u092E\u0924\u093F \u0938\u0947 \u092E\u0947\u0932 \u0916\u093E\u0924\u093E \u0939\u0948',
+    propagationLegendMismatch: '\u092D\u093F\u0928\u094D\u0928 \u0909\u0924\u094D\u0924\u0930',
+    propagationLegendMissing: '\u0915\u094B\u0908 \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0928\u0939\u0940\u0902',
+    propagationLegendUnavailable: '\u0915\u094B\u0908 \u0909\u0924\u094D\u0924\u0930 \u0928\u0939\u0940\u0902',
+    propagationSettingsLabel: '\u092A\u094D\u0930\u0938\u093E\u0930 \u0938\u0947\u091F\u093F\u0902\u0917\u094D\u0938',
+    propagationSettingsTitle: 'DNS \u092A\u094D\u0930\u0938\u093E\u0930 \u0938\u0947\u091F\u093F\u0902\u0917\u094D\u0938',
+    propagationSettingRecordType: '\u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u092A\u094D\u0930\u0915\u093E\u0930',
+    propagationSettingRegions: '\u0930\u093F\u091C\u093C\u0949\u0932\u094D\u0935\u0930 \u0938\u094D\u0925\u093E\u0928',
+    propagationSettingMaxResolvers: '\u0905\u0927\u093F\u0915\u0924\u092E \u0930\u093F\u091C\u093C\u0949\u0932\u094D\u0935\u0930',
+    propagationSettingTimeout: '\u091F\u093E\u0907\u092E\u0906\u0909\u091F (ms)',
+    propagationSettingExpected: '\u0905\u092A\u0947\u0915\u094D\u0937\u093F\u0924 \u092E\u093E\u0928 \u092E\u0947\u0902 \u0936\u093E\u092E\u093F\u0932 \u0939\u0948 (\u0935\u0948\u0915\u0932\u094D\u092A\u093F\u0915)',
+    propagationApply: '\u0932\u093E\u0917\u0942 \u0915\u0930\u0947\u0902 \u0914\u0930 \u092A\u0941\u0928\u0903 \u091C\u093E\u0901\u091A\u0947\u0902',
+    propagationResetDefaults: '\u0921\u093F\u092B\u093C\u0949\u0932\u094D\u091F \u092A\u0930 \u0930\u0940\u0938\u0947\u091F \u0915\u0930\u0947\u0902',
+    propagationRechecking: '\u092A\u094D\u0930\u0938\u093E\u0930 \u0915\u0940 \u092A\u0941\u0928\u0903 \u091C\u093E\u0901\u091A\u2026',
+    propagationRegionGlobal: '\u0917\u094D\u0932\u094B\u092C\u0932 Anycast',
+    propagationRegionNamer: '\u0909\u0924\u094D\u0924\u0930\u0940 \u0905\u092E\u0947\u0930\u093F\u0915\u093E',
+    propagationRegionSamer: '\u0926\u0915\u094D\u0937\u093F\u0923 \u0905\u092E\u0947\u0930\u093F\u0915\u093E',
+    propagationRegionEurope: '\u092F\u0942\u0930\u094B\u092A',
+    propagationRegionAsia: '\u090F\u0936\u093F\u092F\u093E',
+    propagationRegionOceania: '\u0913\u0936\u093F\u092F\u093E\u0928\u093F\u092F\u093E',
+    propagationAnycastBadge: 'Anycast'
+  },
+  'ja-JP': {
+    dnsPropagation: 'DNS \u4F1D\u64AD',
+    propagationOutcome: '\u7D50\u679C',
+    propagationRecordTypeLabel: '\u30EC\u30B3\u30FC\u30C9\u7A2E\u5225',
+    propagationQueried: '\u7167\u4F1A\u6E08\u307F',
+    propagationResponding: '\u5FDC\u7B54\u3042\u308A',
+    propagationAgreeing: '\u4E00\u81F4',
+    propagationDiffering: '\u4E0D\u4E00\u81F4',
+    propagationMissingLabel: '\u30EC\u30B3\u30FC\u30C9\u306A\u3057',
+    propagationUnavailableLabel: '\u5FDC\u7B54\u306A\u3057',
+    propagationTruncatedLabel: '\u691C\u8A3C\u4E0D\u53EF',
+    propagationCoverage: '\u4F1D\u64AD\u30AB\u30D0\u30EC\u30C3\u30B8',
+    propagationConsensusAnswer: '\u6700\u3082\u4E00\u822C\u7684\u306A\u5FDC\u7B54',
+    propagationConsensusLines: '{count} \u884C\u3092\u8FD4\u3057\u307E\u3057\u305F',
+    propagationDetailsButton: '\u5404\u30EA\u30BE\u30EB\u30D0\u30FC\u306E\u5FDC\u7B54\u3092\u8868\u793A',
+    propagationExcludedNote: '{total} \u4EF6\u4E2D {excluded} \u4EF6\u306E\u30EA\u30BE\u30EB\u30D0\u30FC\u306F\u5229\u7528\u53EF\u80FD\u306A\u5FDC\u7B54\u3092\u8FD4\u3055\u306A\u304B\u3063\u305F\u305F\u3081\u9664\u5916\u3055\u308C\u307E\u3057\u305F\u3002',
+    propagationLegendPropagated: '\u5408\u610F\u3068\u4E00\u81F4',
+    propagationLegendMismatch: '\u7570\u306A\u308B\u5FDC\u7B54',
+    propagationLegendMissing: '\u30EC\u30B3\u30FC\u30C9\u306A\u3057',
+    propagationLegendUnavailable: '\u5FDC\u7B54\u306A\u3057',
+    propagationSettingsLabel: '\u4F1D\u64AD\u8A2D\u5B9A',
+    propagationSettingsTitle: 'DNS \u4F1D\u64AD\u8A2D\u5B9A',
+    propagationSettingRecordType: '\u30EC\u30B3\u30FC\u30C9\u7A2E\u5225',
+    propagationSettingRegions: '\u30EA\u30BE\u30EB\u30D0\u30FC\u306E\u5834\u6240',
+    propagationSettingMaxResolvers: '\u6700\u5927\u30EA\u30BE\u30EB\u30D0\u30FC\u6570',
+    propagationSettingTimeout: '\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8 (ms)',
+    propagationSettingExpected: '\u671F\u5F85\u3059\u308B\u5024\u3092\u542B\u3080\uFF08\u4EFB\u610F\uFF09',
+    propagationApply: '\u9069\u7528\u3057\u3066\u518D\u30C1\u30A7\u30C3\u30AF',
+    propagationResetDefaults: '\u65E2\u5B9A\u5024\u306B\u30EA\u30BB\u30C3\u30C8',
+    propagationRechecking: '\u4F1D\u64AD\u3092\u518D\u78BA\u8A8D\u3057\u3066\u3044\u307E\u3059\u2026',
+    propagationRegionGlobal: '\u30B0\u30ED\u30FC\u30D0\u30EB Anycast',
+    propagationRegionNamer: '\u5317\u7C73',
+    propagationRegionSamer: '\u5357\u7C73',
+    propagationRegionEurope: '\u30E8\u30FC\u30ED\u30C3\u30D1',
+    propagationRegionAsia: '\u30A2\u30B8\u30A2',
+    propagationRegionOceania: '\u30AA\u30BB\u30A2\u30CB\u30A2',
+    propagationAnycastBadge: 'Anycast'
+  },
+  'ru-RU': {
+    dnsPropagation: '\u0420\u0430\u0441\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u0435 DNS',
+    propagationOutcome: '\u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442',
+    propagationRecordTypeLabel: '\u0422\u0438\u043F \u0437\u0430\u043F\u0438\u0441\u0438',
+    propagationQueried: '\u041E\u043F\u0440\u043E\u0448\u0435\u043D\u043E',
+    propagationResponding: '\u041E\u0442\u0432\u0435\u0442\u0438\u043B\u0438',
+    propagationAgreeing: '\u0421\u043E\u0432\u043F\u0430\u0434\u0430\u044E\u0442',
+    propagationDiffering: '\u0420\u0430\u0437\u043B\u0438\u0447\u0430\u044E\u0442\u0441\u044F',
+    propagationMissingLabel: '\u041D\u0435\u0442 \u0437\u0430\u043F\u0438\u0441\u0438',
+    propagationUnavailableLabel: '\u041D\u0435\u0442 \u043E\u0442\u0432\u0435\u0442\u0430',
+    propagationTruncatedLabel: '\u041D\u0435\u0432\u043E\u0437\u043C\u043E\u0436\u043D\u043E \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C',
+    propagationCoverage: '\u041E\u0445\u0432\u0430\u0442 \u0440\u0430\u0441\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u044F',
+    propagationConsensusAnswer: '\u041D\u0430\u0438\u0431\u043E\u043B\u0435\u0435 \u0447\u0430\u0441\u0442\u044B\u0439 \u043E\u0442\u0432\u0435\u0442',
+    propagationConsensusLines: '\u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0435\u043D\u043E {count} \u0441\u0442\u0440\u043E\u043A',
+    propagationDetailsButton: '\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u043E\u0442\u0432\u0435\u0442 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u0430',
+    propagationExcludedNote: '{excluded} \u0438\u0437 {total} \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u043E\u0432 \u043D\u0435 \u0432\u0435\u0440\u043D\u0443\u043B\u0438 \u043F\u0440\u0438\u0433\u043E\u0434\u043D\u044B\u0439 \u043E\u0442\u0432\u0435\u0442 \u0438 \u0431\u044B\u043B\u0438 \u0438\u0441\u043A\u043B\u044E\u0447\u0435\u043D\u044B.',
+    propagationLegendPropagated: '\u0421\u043E\u0432\u043F\u0430\u0434\u0430\u0435\u0442 \u0441 \u043A\u043E\u043D\u0441\u0435\u043D\u0441\u0443\u0441\u043E\u043C',
+    propagationLegendMismatch: '\u0414\u0440\u0443\u0433\u043E\u0439 \u043E\u0442\u0432\u0435\u0442',
+    propagationLegendMissing: '\u041D\u0435\u0442 \u0437\u0430\u043F\u0438\u0441\u0438',
+    propagationLegendUnavailable: '\u041D\u0435\u0442 \u043E\u0442\u0432\u0435\u0442\u0430',
+    propagationSettingsLabel: '\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0440\u0430\u0441\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u044F',
+    propagationSettingsTitle: '\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0440\u0430\u0441\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u044F DNS',
+    propagationSettingRecordType: '\u0422\u0438\u043F \u0437\u0430\u043F\u0438\u0441\u0438',
+    propagationSettingRegions: '\u0420\u0430\u0441\u043F\u043E\u043B\u043E\u0436\u0435\u043D\u0438\u0435 \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u043E\u0432',
+    propagationSettingMaxResolvers: '\u041C\u0430\u043A\u0441. \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u043E\u0432',
+    propagationSettingTimeout: '\u0422\u0430\u0439\u043C-\u0430\u0443\u0442 (\u043C\u0441)',
+    propagationSettingExpected: '\u041E\u0436\u0438\u0434\u0430\u0435\u043C\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u0442 (\u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E)',
+    propagationApply: '\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u0441\u043D\u043E\u0432\u0430',
+    propagationResetDefaults: '\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E',
+    propagationRechecking: '\u041F\u043E\u0432\u0442\u043E\u0440\u043D\u0430\u044F \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u0440\u0430\u0441\u043F\u0440\u043E\u0441\u0442\u0440\u0430\u043D\u0435\u043D\u0438\u044F\u2026',
+    propagationRegionGlobal: '\u0413\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u044B\u0439 Anycast',
+    propagationRegionNamer: '\u0421\u0435\u0432\u0435\u0440\u043D\u0430\u044F \u0410\u043C\u0435\u0440\u0438\u043A\u0430',
+    propagationRegionSamer: '\u042E\u0436\u043D\u0430\u044F \u0410\u043C\u0435\u0440\u0438\u043A\u0430',
+    propagationRegionEurope: '\u0415\u0432\u0440\u043E\u043F\u0430',
+    propagationRegionAsia: '\u0410\u0437\u0438\u044F',
+    propagationRegionOceania: '\u041E\u043A\u0435\u0430\u043D\u0438\u044F',
+    propagationAnycastBadge: 'Anycast'
+  }
+};
+
+Object.keys(PROPAGATION_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, PROPAGATION_TRANSLATION_OVERRIDES[code]);
+});
+
 const DNS_RECORD_TRANSLATION_OVERRIDES = {
   en: {
     dnsRecords: 'DNS records',
@@ -22154,6 +24232,262 @@ function getDnsTxtRecoveryState(r) {
   };
 }
 
+// ===================== DNS Propagation helpers =====================
+//
+// These back the DNS Propagation card: the per-card settings the user can tune
+// (record type, resolver locations, fan-out size, timeout, optional expected
+// value), the query-string those settings produce for /api/propagation, and the
+// self-contained mini world map.
+//
+// The map is deliberately dependency-free: no Leaflet, no tile server, no CDN.
+// It is a stylised equirectangular world drawn from the coarse landmass outlines
+// in PROP_WORLD_SHAPES, which keeps the app a single file, keeps the CSP strict,
+// and means the map still renders on an air-gapped network.
+
+const PROPAGATION_SETTINGS_KEY = 'acsPropagationSettings';
+const PROPAGATION_RECORD_TYPES = ['TXT', 'A', 'AAAA', 'CNAME', 'MX', 'NS', 'SOA', 'CAA'];
+const PROPAGATION_REGIONS = ['global', 'namer', 'samer', 'europe', 'asia', 'oceania'];
+const PROPAGATION_REGION_LABEL_KEYS = {
+  global: 'propagationRegionGlobal',
+  namer: 'propagationRegionNamer',
+  samer: 'propagationRegionSamer',
+  europe: 'propagationRegionEurope',
+  asia: 'propagationRegionAsia',
+  oceania: 'propagationRegionOceania'
+};
+// An empty `regions` array means "every location the server catalog offers".
+const PROPAGATION_DEFAULTS = { recordType: 'TXT', regions: [], maxResolvers: 25, timeoutMs: 4000, expected: '' };
+
+let propagationSettings = Object.assign({}, PROPAGATION_DEFAULTS);
+let propagationRerunInFlight = false;
+
+// Normalize anything read from storage (or a hand-edited value) back into the
+// allowed ranges. The server clamps these again; this just keeps the UI honest.
+function normalizePropagationSettings(raw) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const type = String(src.recordType || '').toUpperCase();
+  const regions = Array.isArray(src.regions)
+    ? src.regions.map(x => String(x || '').toLowerCase()).filter(x => PROPAGATION_REGIONS.indexOf(x) !== -1)
+    : [];
+  const max = Number(src.maxResolvers);
+  const timeout = Number(src.timeoutMs);
+  return {
+    recordType: PROPAGATION_RECORD_TYPES.indexOf(type) !== -1 ? type : PROPAGATION_DEFAULTS.recordType,
+    regions: regions,
+    maxResolvers: Number.isFinite(max) ? Math.min(100, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
+    timeoutMs: Number.isFinite(timeout) ? Math.min(15000, Math.max(1000, Math.round(timeout))) : PROPAGATION_DEFAULTS.timeoutMs,
+    expected: String(src.expected || '').slice(0, 255)
+  };
+}
+
+// Settings are a user preference, so they are stored under the 'functional'
+// consent category and simply fall back to defaults when consent is withheld.
+function loadPropagationSettings() {
+  let stored = null;
+  try {
+    const raw = consentAwareGetItem(PROPAGATION_SETTINGS_KEY, 'functional');
+    if (raw) stored = JSON.parse(raw);
+  } catch {}
+  propagationSettings = normalizePropagationSettings(stored);
+  return propagationSettings;
+}
+
+function savePropagationSettings() {
+  try {
+    consentAwareSetItem(PROPAGATION_SETTINGS_KEY, JSON.stringify(propagationSettings), 'functional');
+  } catch {}
+}
+
+// Extra query string appended to /api/propagation by both the initial lookup and
+// the per-card re-check. Only non-default values are sent so the server keeps
+// applying its own defaults (and operators can retune them without a UI change).
+function buildPropagationQuery() {
+  const s = propagationSettings || PROPAGATION_DEFAULTS;
+  const parts = [];
+  parts.push('type=' + encodeURIComponent(s.recordType || 'TXT'));
+  if (Array.isArray(s.regions) && s.regions.length > 0 && s.regions.length < PROPAGATION_REGIONS.length) {
+    parts.push('regions=' + encodeURIComponent(s.regions.join(',')));
+  }
+  parts.push('max=' + encodeURIComponent(String(s.maxResolvers || PROPAGATION_DEFAULTS.maxResolvers)));
+  parts.push('timeout=' + encodeURIComponent(String(s.timeoutMs || PROPAGATION_DEFAULTS.timeoutMs)));
+  if (s.expected) parts.push('expected=' + encodeURIComponent(s.expected));
+  return parts.join('&');
+}
+
+// ---- Mini world map ----
+//
+// Equirectangular projection. Latitude is clipped to [-58, 84] because nothing
+// we plot lives outside it and the clip keeps the map wide rather than leaving a
+// tall empty band of ocean and Antarctica.
+const PROP_MAP_W = 1000;
+const PROP_MAP_LAT_TOP = 84;
+const PROP_MAP_LAT_BOTTOM = -58;
+const PROP_MAP_H = Math.round((PROP_MAP_LAT_TOP - PROP_MAP_LAT_BOTTOM) * PROP_MAP_W / 360);
+
+function propMapX(lon) {
+  const v = Math.max(-180, Math.min(180, Number(lon) || 0));
+  return (v + 180) * PROP_MAP_W / 360;
+}
+
+function propMapY(lat) {
+  const v = Math.max(PROP_MAP_LAT_BOTTOM, Math.min(PROP_MAP_LAT_TOP, Number(lat) || 0));
+  return (PROP_MAP_LAT_TOP - v) * PROP_MAP_H / (PROP_MAP_LAT_TOP - PROP_MAP_LAT_BOTTOM);
+}
+
+// Coarse landmass outlines as [longitude, latitude] rings. This is a stylised
+// backdrop for ~20 markers, not a cartographic reference, so the resolution is
+// intentionally low: it keeps the payload small and renders cleanly at the few
+// hundred pixels the card actually gives it.
+const PROP_WORLD_SHAPES = [
+  // North America
+  [[-168,66],[-160,71],[-150,70],[-141,70],[-130,70],[-120,70],[-110,69],[-100,69],[-95,68],[-85,70],[-80,73],[-72,68],[-65,60],[-56,51],[-64,46],[-70,43],[-74,40],[-76,35],[-81,31],[-80,26],[-82,25],[-84,30],[-89,29],[-94,29],[-97,26],[-97,21],[-95,18],[-92,18],[-90,21],[-87,21],[-88,17],[-84,10],[-79,9],[-83,13],[-88,14],[-92,15],[-96,16],[-101,17],[-105,20],[-106,23],[-110,24],[-113,29],[-117,32],[-121,35],[-124,40],[-124,46],[-128,51],[-133,55],[-137,59],[-146,60],[-152,58],[-158,56],[-162,60],[-166,62]],
+  // Greenland
+  [[-45,60],[-42,62],[-38,65],[-30,68],[-24,71],[-21,75],[-25,78],[-32,81],[-42,83],[-54,83],[-64,81],[-70,79],[-73,78],[-66,76],[-60,74],[-55,70],[-53,66],[-50,62]],
+  // South America
+  [[-81,-5],[-80,-2],[-78,1],[-77,6],[-72,11],[-65,11],[-60,8],[-56,6],[-51,4],[-50,0],[-44,-2],[-38,-5],[-35,-8],[-38,-13],[-39,-18],[-42,-23],[-48,-26],[-53,-34],[-57,-38],[-62,-40],[-63,-44],[-66,-49],[-69,-52],[-72,-54],[-75,-50],[-74,-45],[-73,-40],[-72,-35],[-71,-30],[-70,-24],[-70,-18],[-75,-15],[-78,-9]],
+  // Africa
+  [[-17,15],[-16,20],[-13,25],[-10,29],[-6,34],[0,36],[10,34],[20,33],[25,32],[32,31],[35,28],[37,22],[39,15],[43,12],[48,11],[51,10],[48,5],[43,0],[40,-4],[40,-10],[35,-17],[35,-22],[32,-26],[28,-32],[22,-34],[18,-34],[15,-27],[13,-20],[12,-15],[13,-6],[9,0],[5,4],[0,5],[-5,5],[-8,4],[-13,8],[-16,12]],
+  // Eurasia
+  [[-9,39],[-9,43],[-2,43],[-1,46],[-4,48],[2,51],[7,53],[9,55],[8,57],[11,58],[5,59],[5,62],[12,65],[16,68],[21,70],[28,71],[33,70],[40,68],[50,69],[60,71],[70,73],[78,73],[85,74],[95,76],[105,77],[113,74],[120,73],[130,73],[140,72],[150,70],[160,69],[170,68],[180,65],[175,62],[163,58],[160,55],[155,52],[150,47],[143,43],[140,45],[135,44],[131,43],[128,40],[125,36],[122,31],[121,25],[117,22],[110,20],[107,11],[104,9],[100,6],[98,9],[99,13],[95,16],[94,20],[90,22],[87,21],[81,16],[78,9],[73,16],[70,22],[67,24],[61,25],[57,23],[52,17],[45,13],[43,17],[39,22],[35,28],[34,31],[36,36],[30,37],[26,38],[23,37],[24,40],[20,40],[16,43],[13,45],[12,44],[14,42],[17,41],[16,38],[12,38],[11,43],[8,44],[3,43],[0,40],[-6,36]],
+  // Great Britain
+  [[-5,50],[-6,52],[-3,54],[-5,57],[-3,58],[-2,56],[0,53],[1,52],[-3,51]],
+  // Ireland
+  [[-10,52],[-10,54],[-7,55],[-6,53],[-8,52]],
+  // Iceland
+  [[-24,65],[-22,66],[-18,66],[-14,65],[-17,64],[-22,64]],
+  // Japan
+  [[130,31],[131,34],[135,34],[137,37],[141,41],[145,44],[142,45],[140,42],[139,38],[136,36],[133,34],[130,33]],
+  // Taiwan
+  [[121,25],[122,24],[121,22],[120,23]],
+  // Sri Lanka
+  [[80,9],[82,8],[81,6],[80,7]],
+  // Sumatra
+  [[95,5],[98,2],[103,-2],[106,-6],[104,-6],[100,-1],[96,4]],
+  // Borneo
+  [[109,2],[114,4],[118,5],[119,1],[117,-3],[114,-4],[110,-3]],
+  // Java
+  [[105,-6],[110,-7],[114,-8],[112,-9],[107,-8]],
+  // Philippines
+  [[120,18],[123,17],[124,13],[126,9],[126,6],[122,6],[120,10],[119,14]],
+  // New Guinea
+  [[131,-1],[137,-2],[141,-3],[146,-6],[150,-9],[147,-9],[143,-8],[138,-8],[133,-4]],
+  // Australia
+  [[114,-22],[114,-26],[116,-32],[119,-34],[125,-33],[131,-32],[135,-35],[138,-35],[141,-38],[146,-39],[150,-37],[153,-32],[153,-27],[149,-21],[146,-19],[143,-14],[142,-11],[138,-12],[136,-12],[132,-11],[130,-12],[127,-14],[124,-16],[122,-18]],
+  // New Zealand
+  [[173,-41],[175,-37],[178,-38],[177,-40],[174,-41],[171,-44],[167,-46],[166,-45],[170,-43]],
+  // Madagascar
+  [[44,-16],[47,-15],[50,-16],[50,-24],[47,-25],[44,-22]],
+  // Cuba / Hispaniola
+  [[-85,22],[-80,23],[-75,20],[-78,20],[-83,21]]
+];
+
+let propWorldPathCache = null;
+
+function buildPropagationWorldPath() {
+  if (propWorldPathCache) return propWorldPathCache;
+  propWorldPathCache = PROP_WORLD_SHAPES.map(shape =>
+    'M' + shape.map(pt => propMapX(pt[0]).toFixed(1) + ' ' + propMapY(pt[1]).toFixed(1)).join('L') + 'Z'
+  ).join(' ');
+  return propWorldPathCache;
+}
+
+// Nudge markers that land on (nearly) the same pixel so a city hosting several
+// resolvers still shows every one of them instead of a single stacked dot.
+function declutterPropagationMarkers(points) {
+  const buckets = {};
+  points.forEach(pt => {
+    const key = Math.round(pt.x / 14) + ':' + Math.round(pt.y / 14);
+    if (!buckets[key]) buckets[key] = [];
+    buckets[key].push(pt);
+  });
+  Object.keys(buckets).forEach(key => {
+    const group = buckets[key];
+    if (group.length < 2) return;
+    const radius = 7 + group.length;
+    group.forEach((pt, i) => {
+      const angle = (2 * Math.PI * i) / group.length;
+      pt.x += Math.cos(angle) * radius;
+      pt.y += Math.sin(angle) * radius;
+    });
+  });
+  return points;
+}
+
+// Render the mini map as inline SVG. Colors come from CSS classes (not inline
+// fills) so the map follows the light/dark theme like the rest of the UI.
+function buildPropagationMapSvg(locations) {
+  const list = Array.isArray(locations) ? locations.filter(Boolean) : [];
+  if (list.length === 0) return '';
+
+  const points = declutterPropagationMarkers(list.map(loc => ({
+    x: propMapX(loc.longitude),
+    y: propMapY(loc.latitude),
+    loc: loc
+  })));
+
+  // Light graticule for orientation: equator, the tropics, and meridians every 30 degrees.
+  const gridParts = [];
+  [60, 30, 0, -30].forEach(lat => {
+    const y = propMapY(lat).toFixed(1);
+    gridParts.push('M0 ' + y + 'H' + PROP_MAP_W);
+  });
+  for (let lon = -150; lon <= 150; lon += 30) {
+    const x = propMapX(lon).toFixed(1);
+    gridParts.push('M' + x + ' 0V' + PROP_MAP_H);
+  }
+
+  const markers = points.map(pt => {
+    const loc = pt.loc;
+    const status = String(loc.status || 'unavailable');
+    const providers = Array.isArray(loc.providers) ? loc.providers.filter(Boolean).join(', ') : '';
+    const tooltip = [
+      String(loc.name || loc.countryCode || ''),
+      providers,
+      loc.anycast ? t('propagationAnycastBadge') : ''
+    ].filter(Boolean).join(' \u2014 ');
+    const cls = loc.anycast ? ('prop-marker-anycast ' + status) : ('prop-marker ' + status);
+    const radius = loc.total > 1 ? 7 : 5.5;
+    return '<circle class="' + escapeHtml(cls) + '" cx="' + pt.x.toFixed(1) + '" cy="' + pt.y.toFixed(1) + '" r="' + radius + '">'
+      + '<title>' + escapeHtml(tooltip) + '</title></circle>';
+  }).join('');
+
+  return '<div class="prop-map-wrap' + (propagationRerunInFlight ? ' is-busy' : '') + '">'
+    + '<svg class="prop-map" viewBox="0 0 ' + PROP_MAP_W + ' ' + PROP_MAP_H + '" role="img" '
+    + 'aria-label="' + escapeHtml(t('dnsPropagation')) + '" preserveAspectRatio="xMidYMid meet">'
+    + '<path class="prop-map-grid" d="' + gridParts.join(' ') + '"></path>'
+    + '<path class="prop-map-land" d="' + buildPropagationWorldPath() + '"></path>'
+    + markers
+    + '</svg>'
+    + '<div class="prop-map-busy"><span class="spinner"></span>' + escapeHtml(t('propagationRechecking')) + '</div>'
+    + '</div>';
+}
+
+// Toggle the card's pending state without a full re-render, so it applies the
+// instant a re-check starts rather than only after it finishes. The markup
+// builders re-apply `is-busy` from propagationRerunInFlight, so an unrelated
+// re-render mid-flight cannot clear it.
+function setPropagationBusy(busy) {
+  const card = document.getElementById('card-propagation');
+  if (!card) return;
+  ['.prop-shell', '.prop-map-wrap', '.prop-details-block'].forEach(selector => {
+    const el = card.querySelector(selector);
+    if (el) el.classList.toggle('is-busy', !!busy);
+  });
+}
+
+function buildPropagationLegendHtml() {
+  const items = [
+    ['propagated', 'propagationLegendPropagated'],
+    ['mismatch', 'propagationLegendMismatch'],
+    ['norecord', 'propagationLegendMissing']
+  ];
+  return '<div class="prop-legend">'
+    + items.map(([cls, key]) =>
+        '<span class="prop-legend-item"><span class="prop-legend-dot ' + cls + '"></span>' + escapeHtml(t(key)) + '</span>'
+      ).join('')
+    + '</div>';
+}
+
 function buildGuidance(r) {
   const guidance = [];
   const loaded = r && r._loaded ? r._loaded : {};
@@ -22343,6 +24677,33 @@ function buildGuidance(r) {
 
   if (loaded.base && r.acsReady) {
     guidance.push({ type: 'success', text: t('acsReadyMessage') });
+  }
+
+  // DNS propagation. A record that only some public resolvers can see is the
+  // single most common reason ACS domain verification "randomly" fails, so this
+  // gets its own guidance entry rather than being buried in the card.
+  // 'partial' (present here, missing there) is the actionable failure; a pure
+  // answer mismatch is softer because geo-balanced records legitimately differ.
+  if (loaded.propagation && r.propagation && r.propagation.checked !== false) {
+    const prop = r.propagation;
+    const propState = String(prop.state || '');
+    const propType = String(prop.recordType || 'TXT');
+    if (propState === 'partial') {
+      const missing = Math.max(0, Number(prop.respondedCount || 0) - Number(prop.matchingCount || 0));
+      guidance.push({
+        type: 'attention',
+        text: t('guidancePropagationPartial', {
+          domain: r.domain || '',
+          missing: String(missing),
+          responding: String(prop.respondedCount || 0),
+          type: propType
+        })
+      });
+    } else if (propState === 'mismatch') {
+      guidance.push({ type: 'attention', text: t('guidancePropagationMismatch', { domain: r.domain || '', type: propType }) });
+    } else if (propState === 'unknown') {
+      guidance.push({ type: 'info', text: t('guidancePropagationUnknown') });
+    }
   }
 
   return guidance;
@@ -22928,7 +25289,9 @@ const CHECK_PROGRESS_LABELS = {
   dkim:       null,
   cname:      'cname',
   reputation: 'reputationDnsbl',
-  nameservers: 'nameserverCheck'
+  website:    'websiteCheck',
+  nameservers: 'nameserverCheck',
+  propagation: 'dnsPropagation'
 };
 
 function getCheckProgressLabel(key) {
@@ -23396,7 +25759,7 @@ function lookup(options = {}) {
     return `HTTP ${r.status}${r.statusText ? " " + r.statusText : ""}${details ? ": " + details : ""}`;
   }
 
-  async function fetchJson(path) {
+  async function fetchJson(path, extraQuery) {
     const controller = new AbortController();
     activeLookup.controllers.push(controller);
     try {
@@ -23411,7 +25774,10 @@ function lookup(options = {}) {
       headers['Cache-Control'] = 'no-cache';
       headers['Pragma'] = 'no-cache';
       const cacheBuster = "_=" + Date.now();
-      const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster;
+      // extraQuery carries endpoint-specific options (currently only the DNS
+      // propagation settings); it is already URL-encoded by its builder.
+      const extra = extraQuery ? ("&" + extraQuery) : "";
+      const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster + extra;
       const r = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
       if (!r.ok) {
         let body = "";
@@ -23480,7 +25846,8 @@ function hideTopBarItem(element) {
     { key: "cname", path: "/api/cname" },
     { key: "reputation", path: "/api/reputation" },
     { key: "website", path: "/api/website" },
-    { key: "nameservers", path: "/api/nameservers" }
+    { key: "nameservers", path: "/api/nameservers" },
+    { key: "propagation", path: "/api/propagation", query: buildPropagationQuery }
   ];
 
   // ---- Live check-progress popover state ----
@@ -23514,9 +25881,9 @@ function hideTopBarItem(element) {
   let savedHistory = false;
   let downloadShown = false;
 
-  const tasks = requests.map(async ({ key, path }) => {
+  const tasks = requests.map(async ({ key, path, query }) => {
     try {
-      const data = await fetchJson(path);
+      const data = await fetchJson(path, typeof query === 'function' ? query() : query);
 
       // Ignore late results from older runs
       if (runId !== activeLookup.runId) return;
@@ -23550,6 +25917,8 @@ function hideTopBarItem(element) {
         resultObj.website = data;
       } else if (key === 'nameservers') {
         resultObj.nameservers = data;
+      } else if (key === 'propagation') {
+        resultObj.propagation = data;
       } else if (key === 'records') {
         resultObj.dnsRecords = Array.isArray(data.records) ? data.records : [];
         resultObj.dnsRecordsError = data.error || null;
@@ -25160,6 +27529,179 @@ function toggleNameserverDetails(element) {
     ? (element.dataset.closeLabel || `${t('nameserverDetailsButton')} \u2212`)
     : (element.dataset.openLabel || `${t('nameserverDetailsButton')} +`);
   el.style.display = isOpen ? "block" : "none";
+}
+
+// ---- DNS Propagation card: settings panel + per-resolver details ----
+//
+// render() rebuilds the whole results list on every partial result, so the
+// open/closed state of these two panels lives here (module scope) rather than in
+// the DOM. Without that the settings panel would slam shut mid-edit whenever a
+// slower check (WHOIS/DNSBL) finished and triggered a re-render.
+let propagationSettingsOpen = false;
+let propagationDetailsOpen = false;
+
+// Build the per-card settings form. `prop` is the last propagation payload (may
+// be null): its availableRegions list is what populates the location checkboxes,
+// so the picker always reflects the server's actual resolver catalog rather than
+// a hard-coded client list.
+function buildPropagationSettingsHtml(prop) {
+  const s = propagationSettings || PROPAGATION_DEFAULTS;
+  const available = (prop && Array.isArray(prop.availableRegions) && prop.availableRegions.length > 0)
+    ? prop.availableRegions.map(x => String(x && x.region || '')).filter(Boolean)
+    : PROPAGATION_REGIONS.slice();
+
+  // No explicit selection means "all locations", so show every box ticked.
+  const selected = (Array.isArray(s.regions) && s.regions.length > 0) ? s.regions : available;
+
+  // Cap the input at how many resolvers the server catalog actually holds so a
+  // value above that cannot silently do nothing. The server allows up to 100,
+  // which an operator reaches by extending the catalog via ACS_PROPAGATION_RESOLVERS.
+  const catalogTotal = (prop && Array.isArray(prop.availableRegions))
+    ? prop.availableRegions.reduce((sum, x) => sum + (Number(x && x.resolverCount) || 0), 0)
+    : 0;
+  const maxAllowed = catalogTotal > 0 ? Math.min(100, catalogTotal) : 100;
+
+  const typeOptions = PROPAGATION_RECORD_TYPES.map(type =>
+    `<option value="${escapeHtml(type)}"${type === s.recordType ? ' selected' : ''}>${escapeHtml(type)}</option>`
+  ).join('');
+
+  const regionOptions = available.map(region => {
+    const labelKey = PROPAGATION_REGION_LABEL_KEYS[region];
+    const label = labelKey ? t(labelKey) : region;
+    const checked = selected.indexOf(region) !== -1 ? ' checked' : '';
+    return `<label class="prop-region-option"><input type="checkbox" class="prop-region-check" value="${escapeHtml(region)}"${checked}>${escapeHtml(label)}</label>`;
+  }).join('');
+
+  return `<div id="propagationSettingsPanel" class="prop-settings-panel hide-on-screenshot" style="display:${propagationSettingsOpen ? 'grid' : 'none'};">
+    <div class="prop-settings-title">${escapeHtml(t('propagationSettingsTitle'))}</div>
+    <div class="prop-settings-grid">
+      <div class="prop-settings-row">
+        <label for="propSettingType">${escapeHtml(t('propagationSettingRecordType'))}</label>
+        <select id="propSettingType">${typeOptions}</select>
+      </div>
+      <div class="prop-settings-row">
+        <label for="propSettingMax">${escapeHtml(t('propagationSettingMaxResolvers'))}</label>
+        <input type="number" id="propSettingMax" min="4" max="${maxAllowed}" step="1" value="${escapeHtml(String(Math.min(s.maxResolvers, maxAllowed)))}">
+      </div>
+      <div class="prop-settings-row">
+        <label for="propSettingTimeout">${escapeHtml(t('propagationSettingTimeout'))}</label>
+        <input type="number" id="propSettingTimeout" min="1000" max="15000" step="500" value="${escapeHtml(String(s.timeoutMs))}">
+      </div>
+    </div>
+    <div class="prop-settings-row">
+      <span class="prop-settings-legend">${escapeHtml(t('propagationSettingRegions'))}</span>
+      <div class="prop-region-list">${regionOptions}</div>
+    </div>
+    <div class="prop-settings-row">
+      <label for="propSettingExpected">${escapeHtml(t('propagationSettingExpected'))}</label>
+      <input type="text" id="propSettingExpected" maxlength="255" value="${escapeHtml(String(s.expected || ''))}" placeholder="${escapeHtml(t('propagationSettingExpectedHint'))}">
+    </div>
+    <div class="prop-settings-actions">
+      <button type="button" class="copy-btn" onclick="event.stopPropagation(); applyPropagationSettings()">${escapeHtml(t('propagationApply'))}</button>
+      <button type="button" class="copy-btn" onclick="event.stopPropagation(); resetPropagationSettings()">${escapeHtml(t('propagationResetDefaults'))}</button>
+      <span id="propagationRerunStatus" class="prop-note" style="margin:0;align-self:center;"></span>
+    </div>
+  </div>`;
+}
+
+function togglePropagationSettings() {
+  propagationSettingsOpen = !propagationSettingsOpen;
+  const panel = document.getElementById('propagationSettingsPanel');
+  if (panel) panel.style.display = propagationSettingsOpen ? 'grid' : 'none';
+  const btn = document.querySelector('#card-propagation .prop-settings-btn');
+  if (btn) btn.setAttribute('aria-expanded', propagationSettingsOpen ? 'true' : 'false');
+}
+
+function togglePropagationDetails(element) {
+  const el = document.getElementById('propagationDetails');
+  if (!el || !element) return;
+  propagationDetailsOpen = !propagationDetailsOpen;
+  element.textContent = propagationDetailsOpen
+    ? (element.dataset.closeLabel || `${t('propagationDetailsButton')} \u2212`)
+    : (element.dataset.openLabel || `${t('propagationDetailsButton')} +`);
+  el.style.display = propagationDetailsOpen ? 'grid' : 'none';
+}
+
+// Read the settings form, persist it, then re-run only the propagation check.
+function applyPropagationSettings() {
+  const typeEl = document.getElementById('propSettingType');
+  const maxEl = document.getElementById('propSettingMax');
+  const timeoutEl = document.getElementById('propSettingTimeout');
+  const expectedEl = document.getElementById('propSettingExpected');
+  const regionEls = Array.from(document.querySelectorAll('.prop-region-check'));
+  const checkedRegions = regionEls.filter(el => el.checked).map(el => String(el.value || ''));
+
+  propagationSettings = normalizePropagationSettings({
+    recordType: typeEl ? typeEl.value : PROPAGATION_DEFAULTS.recordType,
+    // All boxes ticked (or none) means "no restriction", which we store as an
+    // empty list so the server keeps using its full catalog.
+    regions: (checkedRegions.length === 0 || checkedRegions.length === regionEls.length) ? [] : checkedRegions,
+    maxResolvers: maxEl ? maxEl.value : PROPAGATION_DEFAULTS.maxResolvers,
+    timeoutMs: timeoutEl ? timeoutEl.value : PROPAGATION_DEFAULTS.timeoutMs,
+    expected: expectedEl ? expectedEl.value : ''
+  });
+  savePropagationSettings();
+  rerunPropagationCheck();
+}
+
+function resetPropagationSettings() {
+  propagationSettings = normalizePropagationSettings(PROPAGATION_DEFAULTS);
+  savePropagationSettings();
+  rerunPropagationCheck();
+}
+
+// The result object currently painted into #results. In a multi-domain sweep the
+// visible domain is multiDomainState.active, so re-running propagation must
+// update THAT domain's cached result rather than whichever lookup ran last.
+function getActivePropagationResult() {
+  const active = (typeof multiDomainState !== 'undefined' && multiDomainState) ? multiDomainState.active : null;
+  if (active && multiDomainState.results && multiDomainState.results[active]) return multiDomainState.results[active];
+  return lastResult;
+}
+
+// Re-run just /api/propagation for the visible domain and repaint. Deliberately
+// standalone (not part of lookup()) so changing a propagation setting does not
+// re-issue the other nine backend calls.
+async function rerunPropagationCheck() {
+  const target = getActivePropagationResult();
+  if (!target || !target.domain || propagationRerunInFlight) return;
+
+  propagationRerunInFlight = true;
+  const statusEl = document.getElementById('propagationRerunStatus');
+  if (statusEl) statusEl.textContent = t('propagationRechecking');
+  setPropagationBusy(true);
+
+  if (!target._loaded) target._loaded = {};
+  if (!target._errors) target._errors = {};
+
+  try {
+    let headers = {};
+    const apiKey = (acsApiKey || '').trim();
+    if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
+    headers = buildConsentRequestHeaders(headers);
+    headers['Cache-Control'] = 'no-cache';
+    headers['Pragma'] = 'no-cache';
+
+    const url = '/api/propagation?domain=' + encodeURIComponent(target.domain)
+      + '&_=' + Date.now() + '&' + buildPropagationQuery();
+    const resp = await fetch(url, { headers: headers, cache: 'no-store' });
+    if (!resp.ok) {
+      let body = '';
+      try { body = await resp.text(); } catch {}
+      throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+    }
+    const raw = await resp.arrayBuffer();
+    target.propagation = repairObjectStrings(JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(raw)));
+    target._loaded.propagation = true;
+    delete target._errors.propagation;
+  } catch (err) {
+    target._loaded.propagation = true;
+    target._errors.propagation = (err && err.message) ? err.message : String(err);
+  } finally {
+    propagationRerunInFlight = false;
+    recomputeDerived(target);
+    render(target);
+  }
 }
 
 // Convert RDAP JSON into small grouped sections first so the registration card
@@ -27932,6 +30474,206 @@ function render(r) {
     }
   }
 
+  // DNS propagation across public resolvers worldwide.
+  // The nameserver card above asks "do my authoritative servers agree?"; this
+  // card asks the complementary question -- "can the rest of the world actually
+  // see the record yet?" -- by querying a geographically spread set of public
+  // resolvers in parallel and comparing their answers. A record that resolves
+  // from some vantage points but not others is the usual reason ACS domain
+  // verification appears to fail at random.
+  const propagationInfo = t('propagationInfo');
+  const propagationSuffix = `<button type="button" class="info-dot" aria-label="${escapeHtml(propagationInfo)}" data-info="${escapeHtml(propagationInfo)}">i</button>`
+    + `<button type="button" class="prop-settings-btn hide-on-screenshot" aria-label="${escapeHtml(t('propagationSettingsLabel'))}" title="${escapeHtml(t('propagationSettingsLabel'))}" aria-expanded="${propagationSettingsOpen ? 'true' : 'false'}" onclick="event.stopPropagation(); togglePropagationSettings()">\u2699</button>`;
+
+  if (!loaded.propagation && !errors.propagation) {
+    cards.push(card(t('dnsPropagation'), t('loadingValue'), "LOADING", "tag-info", "propagation", false, propagationSuffix));
+  } else if (errors.propagation) {
+    cards.push(card(t('dnsPropagation'), errors.propagation, "ERROR", "tag-fail", "propagation", false, propagationSuffix, buildPropagationSettingsHtml(null)));
+  } else {
+    const prop = r.propagation || {};
+    const propState = String(prop.state || 'unknown');
+
+    if (prop.checked === false) {
+      // Server-side opt-out (ACS_DISABLE_PROPAGATION_PROBE) or a rejected input.
+      cards.push(card(
+        t('dnsPropagation'),
+        prop.disabledReason || prop.error || t('propagationDisabledText'),
+        "INFO", "tag-info", "propagation", false, propagationSuffix
+      ));
+    } else if ((prop.resolverCount || 0) === 0) {
+      cards.push(card(
+        t('dnsPropagation'),
+        prop.error || t('propagationNoResolvers'),
+        "WARN", "tag-warn", "propagation", false, propagationSuffix,
+        buildPropagationSettingsHtml(prop)
+      ));
+    } else {
+      // Badge mapping:
+      //   propagated -> PASS (every responding resolver returned the same answer)
+      //   partial    -> FAIL (present at some vantage points, missing at others)
+      //   mismatch   -> WARN (all have a record, but not the same one)
+      //   norecord   -> WARN (nobody has it; may simply not be published yet)
+      //   unknown    -> WARN (nothing answered, usually blocked outbound UDP/53)
+      let propBadge = "WARN";
+      let propBadgeClass = "tag-warn";
+      let propStateLabel = t('propagationStateUnknown');
+      let propExplain = t('propagationUnknownExplain');
+      if (propState === 'propagated') {
+        propBadge = "PASS"; propBadgeClass = "tag-pass";
+        propStateLabel = t('propagationStateFully'); propExplain = '';
+      } else if (propState === 'partial') {
+        propBadge = "FAIL"; propBadgeClass = "tag-fail";
+        propStateLabel = t('propagationStatePartial'); propExplain = t('propagationPartialExplain');
+      } else if (propState === 'mismatch') {
+        propStateLabel = t('propagationStateMismatch'); propExplain = t('propagationMismatchExplain');
+      } else if (propState === 'norecord') {
+        propStateLabel = t('propagationStateNoRecord'); propExplain = t('propagationNoRecordExplain');
+      }
+
+      const propResults = Array.isArray(prop.results) ? prop.results : [];
+      const propRecordType = String(prop.recordType || 'TXT');
+
+      // Only resolvers that actually returned a usable answer are shown. A
+      // resolver that timed out, was firewalled, or answered SERVFAIL tells us
+      // nothing about the domain -- it is already excluded from the verdict, and
+      // showing it as a row and a grey pin just competed for attention with the
+      // resolvers that matter. The count of what was dropped is still surfaced
+      // as a one-line footnote so the numbers reconcile with "Max resolvers".
+      const respondingResults = propResults.filter(x => x && ['propagated', 'mismatch', 'norecord'].indexOf(String(x.status)) !== -1);
+      const respondedCount = respondingResults.length;
+      const agreeingCount = respondingResults.filter(x => x.status === 'propagated').length;
+      const differingCount = respondingResults.filter(x => x.status === 'mismatch').length;
+      const noRecordCount = respondingResults.filter(x => x.status === 'norecord').length;
+      const excludedCount = propResults.length - respondedCount;
+      const propPercent = respondedCount > 0 ? Math.round(100 * agreeingCount / respondedCount) : 0;
+
+      // Plain-text body (this is what the Copy button puts on the clipboard).
+      const propLines = [];
+      propLines.push(`${t('propagationOutcome')}: ${propStateLabel}`);
+      propLines.push(`${t('propagationRecordTypeLabel')}: ${propRecordType}`);
+      propLines.push(`${t('propagationResponding')}: ${respondedCount}`);
+      propLines.push(`${t('propagationAgreeing')}: ${agreeingCount}`);
+      if (differingCount > 0) propLines.push(`${t('propagationDiffering')}: ${differingCount}`);
+      if (noRecordCount > 0) propLines.push(`${t('propagationMissingLabel')}: ${noRecordCount}`);
+      propLines.push(`${t('propagationCoverage')}: ${propPercent}%`);
+      if (propExplain) propLines.push(`\n${propExplain}`);
+
+      // Metric chips.
+      const propStat = (value, labelKey, tone) =>
+        `<div class="prop-stat ${tone}"><span class="prop-stat-value">${escapeHtml(String(value))}</span><span class="prop-stat-label">${escapeHtml(t(labelKey))}</span></div>`;
+      const statsHtml = '<div class="prop-stat-grid">'
+        + propStat(respondedCount, 'propagationResponding', 'idle')
+        + propStat(agreeingCount, 'propagationAgreeing', agreeingCount > 0 ? 'ok' : 'idle')
+        + (differingCount > 0 ? propStat(differingCount, 'propagationDiffering', 'warn') : '')
+        + (noRecordCount > 0 ? propStat(noRecordCount, 'propagationMissingLabel', 'bad') : '')
+        + '</div>';
+
+      const coverageTone = propPercent >= 100 ? '' : (propPercent >= 50 ? 'warn' : 'bad');
+      const coverageHtml = '<div class="prop-coverage">'
+        + `<div class="prop-coverage-head"><span>${escapeHtml(t('propagationCoverage'))} \u00B7 ${escapeHtml(propRecordType)}</span><span>${propPercent}%</span></div>`
+        + `<div class="prop-coverage-track"><div class="prop-coverage-fill ${coverageTone}" style="width:${propPercent}%"></div></div>`
+        + '</div>';
+
+      // Render every answer inside a scrollable box rather than truncating: a
+      // busy domain can publish dozens of TXT records and the operator usually
+      // needs to read the specific one they just added.
+      const consensus = Array.isArray(prop.consensusAnswers) ? prop.consensusAnswers : [];
+      const consensusLabel = t('propagationConsensusAnswer')
+        + (consensus.length > 1 ? ` \u00B7 ${t('propagationConsensusLines', { count: String(consensus.length) })}` : '');
+      const consensusHtml = consensus.length > 0
+        ? '<div class="prop-consensus">'
+          + `<span class="prop-consensus-label">${escapeHtml(consensusLabel)}</span>`
+          + `<div class="prop-consensus-list" tabindex="0" role="group" aria-label="${escapeHtml(t('propagationConsensusAnswer'))}">`
+          + consensus.map(a => `<div class="prop-consensus-item">${escapeHtml(String(a))}</div>`).join('')
+          + '</div></div>'
+        : '';
+
+      const mapHtml = buildPropagationMapSvg(prop.locations);
+      const noteParts = [];
+      if (respondingResults.some(x => x && x.anycast)) noteParts.push(t('propagationAnycastNote'));
+      if (excludedCount > 0) noteParts.push(t('propagationExcludedNote', { excluded: String(excludedCount), total: String(propResults.length) }));
+      const anycastNoteHtml = noteParts.length > 0
+        ? `<div class="prop-note">${noteParts.map(x => escapeHtml(x)).join('<br>')}</div>`
+        : '';
+
+      // Per-resolver detail rows, ordered so the resolvers that need attention
+      // (differing answers, then missing records) appear first.
+      const statusRank = { mismatch: 0, norecord: 1, propagated: 2 };
+      const orderedResults = respondingResults.slice().sort((a, b) => {
+        const ra = statusRank[String(a && a.status)] ?? 9;
+        const rb = statusRank[String(b && b.status)] ?? 9;
+        if (ra !== rb) return ra - rb;
+        return String(a && a.provider || '').localeCompare(String(b && b.provider || ''));
+      });
+
+      const detailRows = orderedResults.map(item => {
+        const status = String(item.status || 'norecord');
+        const place = [item.city, item.countryCode].filter(Boolean).join(', ');
+        const statusLabelKey = status === 'propagated' ? 'propagationLegendPropagated'
+          : status === 'mismatch' ? 'propagationLegendMismatch'
+          : 'propagationLegendMissing';
+        const pillClass = status === 'propagated' ? 'ns-pill-ok' : (status === 'norecord' ? 'ns-pill-bad' : 'ns-pill-warn');
+        const pills = [`<span class="ns-pill ${pillClass}">${escapeHtml(t(statusLabelKey))}</span>`];
+        if (item.rcodeLabel) pills.push(`<span class="ns-pill">${escapeHtml(String(item.rcodeLabel))}</span>`);
+        if (item.anycast) pills.push(`<span class="ns-pill">${escapeHtml(t('propagationAnycastBadge'))}</span>`);
+        if (item.responseMs !== null && typeof item.responseMs !== 'undefined') pills.push(`<span class="ns-pill">${escapeHtml(String(item.responseMs))} ms</span>`);
+
+        const answers = Array.isArray(item.answers) ? item.answers : [];
+        let answerBlock;
+        if (answers.length > 0) {
+          answerBlock = `<ul class="prop-answer-list">${answers.slice(0, 8).map(a => `<li>${escapeHtml(String(a))}</li>`).join('')}${answers.length > 8 ? '<li>\u2026</li>' : ''}</ul>`;
+        } else if (item.error) {
+          answerBlock = `<div class="prop-answer-empty">${escapeHtml(String(item.error))}</div>`;
+        } else {
+          answerBlock = `<div class="prop-answer-empty">${escapeHtml(t('propagationNoAnswerText'))}</div>`;
+        }
+
+        return `<div class="prop-detail-row ${escapeHtml(status)}">
+          <div class="prop-detail-head">
+            <span class="prop-detail-provider">${escapeHtml(String(item.provider || item.ip || ''))}</span>
+            <span class="prop-detail-meta">${escapeHtml(String(item.ip || ''))}${place ? ' \u00B7 ' + escapeHtml(place) : ''}</span>
+            <span class="prop-detail-pills">${pills.join('')}</span>
+          </div>
+          ${answerBlock}
+        </div>`;
+      }).join('');
+
+      const propOpenLabel = `${t('propagationDetailsButton')} +`;
+      const propCloseLabel = `${t('propagationDetailsButton')} \u2212`;
+      const detailsHtml = detailRows
+        ? `<div class="prop-details-block${propagationRerunInFlight ? ' is-busy' : ''}"><button type="button" class="copy-btn hide-on-screenshot" style="margin-top:10px;"
+            data-open-label="${escapeHtml(propOpenLabel)}" data-close-label="${escapeHtml(propCloseLabel)}"
+            onclick="event.stopPropagation(); togglePropagationDetails(this)">${escapeHtml(propagationDetailsOpen ? propCloseLabel : propOpenLabel)}</button>
+          <div id="propagationDetails" class="prop-detail-panel" style="margin-top:10px; display:${propagationDetailsOpen ? 'grid' : 'none'};">${detailRows}</div></div>`
+        : '';
+
+      // Everything derived from the previous answer is hidden while a re-check
+      // runs (see .prop-shell.is-busy) so stale numbers are never presented as
+      // current. The map stays put under its spinner to keep the user oriented.
+      const propBody = `<div class="prop-shell${propagationRerunInFlight ? ' is-busy' : ''}">`
+        + statsHtml
+        + coverageHtml
+        + consensusHtml
+        + mapHtml
+        + (mapHtml ? buildPropagationLegendHtml() : '')
+        + anycastNoteHtml
+        + `<div class="prop-summary-text">${escapeHtml(propLines.join("\n"))}</div>`
+        + '</div>';
+
+      cards.push(card(
+        t('dnsPropagation'),
+        propLines.join("\n"),
+        propBadge,
+        propBadgeClass,
+        "propagation",
+        false,
+        propagationSuffix,
+        buildPropagationSettingsHtml(prop) + detailsHtml,
+        propBody
+      ));
+    }
+  }
+
   cards.push(card(
     t('cname'),
     loaded.cname ? (r.cname ? (r.cnameUsedWwwFallback && r.cnameLookupDomain && r.cnameLookupDomain !== r.domain ? (`${r.cname}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.cnameLookupDomain })}`) : r.cname) : null) : (errors.cname ? errors.cname : t('loadingValue')),
@@ -29823,6 +32565,9 @@ function initializePage() {
   applyTheme(savedTheme);
   applyLanguage(currentLanguage, false);
   loadHistory();
+  // Restore the user's saved DNS propagation settings before the first lookup so
+  // the bootstrap ?domain= run already uses them.
+  loadPropagationSettings();
   // Reflect the bootstrap domain(s) in the address box: a single domain shows
   // as plain text, several show as chips.
   applyDomainsToInputBox(bootstrapDomains);
@@ -31208,11 +33953,12 @@ $functionNames = @(
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
   'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
-  'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader',
+  'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
   'Invoke-RawDnsTxtQuery','Get-AuthoritativeNameserverHosts','Resolve-NameserverPublicIps','Get-NameserverTxtStatus',
+  'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
   'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-FirstNonEmptyPropertyValue','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Test-WhoisDomainNameSafe','Initialize-WhoisFieldRegexes','Get-WhoisParsedRegistrationData','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Invoke-WhoisProcess','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
@@ -31614,7 +34360,7 @@ if ($metricsEnabled) {
   }
 
   # 2) Serve individual API endpoints (/api/*)
-  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers")) {
+  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers","/api/propagation")) {
     if (-not (Test-ApiKey -Context $ctx)) {
       Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-auth' -EventId 'REQ-AUTH-FAILED' -Message 'Request rejected by API key validation.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-401' -Fields @{ statusCode = 401 }
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
@@ -31648,6 +34394,45 @@ if ($metricsEnabled) {
       return
     }
 
+    # /api/propagation is the only endpoint that takes tuning parameters beyond
+    # the domain (the SPA's per-card settings panel sends them). Everything is
+    # read here, validated against a strict allowlist, and clamped, so the
+    # handler below can pass the values straight through.
+    $propType = 'TXT'
+    $propRegions = @()
+    $propMax = 0
+    $propTimeout = 0
+    $propExpected = ''
+    if ($path -eq '/api/propagation') {
+      try {
+        $qs = $ctx.Request.QueryString
+
+        # Record type: allowlisted, never passed through as free text.
+        $rawType = ([string]$qs['type']).Trim().ToUpperInvariant()
+        if ($rawType -in @('A','AAAA','CNAME','MX','NS','TXT','SOA','CAA')) { $propType = $rawType }
+
+        # Regions: allowlisted tokens only; anything unknown is dropped.
+        $rawRegions = [string]$qs['regions']
+        if (-not [string]::IsNullOrWhiteSpace($rawRegions)) {
+          $propRegions = @($rawRegions -split ',' |
+            ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
+            Where-Object { $_ -in @('global','namer','samer','europe','asia','oceania') })
+        }
+
+        # Numeric knobs: clamped here AND again inside Get-DnsPropagationStatus.
+        $parsedInt = 0
+        if ([int]::TryParse([string]$qs['max'], [ref]$parsedInt)) { $propMax = [Math]::Min(100, [Math]::Max(0, $parsedInt)) }
+        $parsedInt = 0
+        if ([int]::TryParse([string]$qs['timeout'], [ref]$parsedInt)) { $propTimeout = [Math]::Min(15000, [Math]::Max(0, $parsedInt)) }
+
+        # Optional expected-value substring. Length-capped so an oversized query
+        # string cannot be used to bloat the response payload.
+        $rawExpected = ([string]$qs['expected']).Trim()
+        if ($rawExpected.Length -gt 255) { $rawExpected = $rawExpected.Substring(0, 255) }
+        $propExpected = $rawExpected
+      } catch { }
+    }
+
     # Serialize duplicate work for this domain + endpoint, but allow other endpoints
     # for the same domain to execute in parallel.
     $sem = Get-DomainSemaphore -domain $domain -scope $path
@@ -31671,6 +34456,7 @@ if ($metricsEnabled) {
         "/api/reputation" { Write-Json -Context $ctx -Object (Get-DnsReputationStatus -Domain $domain) }
         "/api/website" { Write-Json -Context $ctx -Object (Get-WebsiteProbeStatus -Domain $domain) }
         "/api/nameservers" { Write-Json -Context $ctx -Object (Get-NameserverTxtStatus -Domain $domain) }
+        "/api/propagation" { Write-Json -Context $ctx -Object (Get-DnsPropagationStatus -Domain $domain -RecordType $propType -Regions $propRegions -MaxResolvers $propMax -TimeoutMs $propTimeout -ExpectedValue $propExpected) }
         default       { Write-Json -Context $ctx -Object @{ error = "Unknown endpoint." } -StatusCode 404 }
       }
     }
@@ -31840,6 +34626,22 @@ catch {
   try {
     $cid = $correlationId
     if ([string]::IsNullOrWhiteSpace($cid)) { $cid = Get-RequestCorrelationId -Context $ctx }
+
+    if (Test-AcsClientDisconnect -Exception $_) {
+      # The caller went away (page reload, navigation, or the SPA aborting an
+      # in-flight fetch when a new lookup starts). Nothing failed server-side and
+      # there is no socket left to answer on, so record it at Debug and stop.
+      Write-AcsLogEvent -Level 'Debug' -Component 'RequestHandler' -Operation 'handle-request' -EventId 'REQ-CLIENT-DISCONNECTED' -Message 'Client closed the connection before the response was sent.' -CorrelationId $cid
+      try {
+        if ($ctx -and $ctx.Response) {
+          # Abort() discards the dead connection without trying to flush; the
+          # TcpListener fallback shim only offers Close().
+          if ($ctx.Response -is [System.Net.HttpListenerResponse]) { $ctx.Response.Abort() } else { $ctx.Response.Close() }
+        }
+      } catch { }
+      return
+    }
+
     Write-AcsLogException -Level 'Error' -Component 'RequestHandler' -Operation 'handle-request' -EventId 'REQ-HANDLER-ERROR' -ErrorCode 'ACS-REQ-500' -Exception $_ -CorrelationId $cid -Fields @{ statusCode = 500 }
   } catch { }
   try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.'; correlationId = $correlationId } -StatusCode 500 } catch {}

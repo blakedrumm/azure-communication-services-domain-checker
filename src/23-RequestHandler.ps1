@@ -271,7 +271,7 @@ if ($metricsEnabled) {
   }
 
   # 2) Serve individual API endpoints (/api/*)
-  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers")) {
+  if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers","/api/propagation")) {
     if (-not (Test-ApiKey -Context $ctx)) {
       Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-auth' -EventId 'REQ-AUTH-FAILED' -Message 'Request rejected by API key validation.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-401' -Fields @{ statusCode = 401 }
       Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
@@ -305,6 +305,45 @@ if ($metricsEnabled) {
       return
     }
 
+    # /api/propagation is the only endpoint that takes tuning parameters beyond
+    # the domain (the SPA's per-card settings panel sends them). Everything is
+    # read here, validated against a strict allowlist, and clamped, so the
+    # handler below can pass the values straight through.
+    $propType = 'TXT'
+    $propRegions = @()
+    $propMax = 0
+    $propTimeout = 0
+    $propExpected = ''
+    if ($path -eq '/api/propagation') {
+      try {
+        $qs = $ctx.Request.QueryString
+
+        # Record type: allowlisted, never passed through as free text.
+        $rawType = ([string]$qs['type']).Trim().ToUpperInvariant()
+        if ($rawType -in @('A','AAAA','CNAME','MX','NS','TXT','SOA','CAA')) { $propType = $rawType }
+
+        # Regions: allowlisted tokens only; anything unknown is dropped.
+        $rawRegions = [string]$qs['regions']
+        if (-not [string]::IsNullOrWhiteSpace($rawRegions)) {
+          $propRegions = @($rawRegions -split ',' |
+            ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
+            Where-Object { $_ -in @('global','namer','samer','europe','asia','oceania') })
+        }
+
+        # Numeric knobs: clamped here AND again inside Get-DnsPropagationStatus.
+        $parsedInt = 0
+        if ([int]::TryParse([string]$qs['max'], [ref]$parsedInt)) { $propMax = [Math]::Min(100, [Math]::Max(0, $parsedInt)) }
+        $parsedInt = 0
+        if ([int]::TryParse([string]$qs['timeout'], [ref]$parsedInt)) { $propTimeout = [Math]::Min(15000, [Math]::Max(0, $parsedInt)) }
+
+        # Optional expected-value substring. Length-capped so an oversized query
+        # string cannot be used to bloat the response payload.
+        $rawExpected = ([string]$qs['expected']).Trim()
+        if ($rawExpected.Length -gt 255) { $rawExpected = $rawExpected.Substring(0, 255) }
+        $propExpected = $rawExpected
+      } catch { }
+    }
+
     # Serialize duplicate work for this domain + endpoint, but allow other endpoints
     # for the same domain to execute in parallel.
     $sem = Get-DomainSemaphore -domain $domain -scope $path
@@ -328,6 +367,7 @@ if ($metricsEnabled) {
         "/api/reputation" { Write-Json -Context $ctx -Object (Get-DnsReputationStatus -Domain $domain) }
         "/api/website" { Write-Json -Context $ctx -Object (Get-WebsiteProbeStatus -Domain $domain) }
         "/api/nameservers" { Write-Json -Context $ctx -Object (Get-NameserverTxtStatus -Domain $domain) }
+        "/api/propagation" { Write-Json -Context $ctx -Object (Get-DnsPropagationStatus -Domain $domain -RecordType $propType -Regions $propRegions -MaxResolvers $propMax -TimeoutMs $propTimeout -ExpectedValue $propExpected) }
         default       { Write-Json -Context $ctx -Object @{ error = "Unknown endpoint." } -StatusCode 404 }
       }
     }
@@ -497,6 +537,22 @@ catch {
   try {
     $cid = $correlationId
     if ([string]::IsNullOrWhiteSpace($cid)) { $cid = Get-RequestCorrelationId -Context $ctx }
+
+    if (Test-AcsClientDisconnect -Exception $_) {
+      # The caller went away (page reload, navigation, or the SPA aborting an
+      # in-flight fetch when a new lookup starts). Nothing failed server-side and
+      # there is no socket left to answer on, so record it at Debug and stop.
+      Write-AcsLogEvent -Level 'Debug' -Component 'RequestHandler' -Operation 'handle-request' -EventId 'REQ-CLIENT-DISCONNECTED' -Message 'Client closed the connection before the response was sent.' -CorrelationId $cid
+      try {
+        if ($ctx -and $ctx.Response) {
+          # Abort() discards the dead connection without trying to flush; the
+          # TcpListener fallback shim only offers Close().
+          if ($ctx.Response -is [System.Net.HttpListenerResponse]) { $ctx.Response.Abort() } else { $ctx.Response.Close() }
+        }
+      } catch { }
+      return
+    }
+
     Write-AcsLogException -Level 'Error' -Component 'RequestHandler' -Operation 'handle-request' -EventId 'REQ-HANDLER-ERROR' -ErrorCode 'ACS-REQ-500' -Exception $_ -CorrelationId $cid -Fields @{ statusCode = 500 }
   } catch { }
   try { Write-Json -Context $ctx -Object @{ error = 'Internal server error.'; correlationId = $correlationId } -StatusCode 500 } catch {}
