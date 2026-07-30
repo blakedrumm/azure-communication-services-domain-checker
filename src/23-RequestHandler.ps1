@@ -157,7 +157,47 @@ if ($metricsEnabled) {
       try { $rng.Dispose() } catch { }
     }
     $nonce = [Convert]::ToBase64String($nonceBytes)
-    Write-Html -Context $ctx -Html $htmlPage -Nonce $nonce
+    Write-Html -Context $ctx -Html $htmlPage -Nonce $nonce -BaseUrl (Get-AcsPublicBaseUrl -Context $ctx)
+    return
+  }
+
+  # 1-seo) Crawler and AI-agent discovery documents. These are deliberately
+  # served before any API-key / rate-limit gate: they carry no domain data, are
+  # identical for every caller, and a crawler must be able to read robots.txt
+  # even on a deployment that requires a key for the JSON API.
+  #
+  # robots.txt and sitemap.xml embed the site origin. When that origin was
+  # derived from the request's Host header (no ACS_PUBLIC_BASE_URL) the document
+  # is client-influenced, so it is served no-store to keep a spoofed Host out of
+  # any shared cache. The SVGs are host-independent and always cacheable.
+  if ($path -in @('/robots.txt', '/sitemap.xml', '/llms.txt', '/openapi.json')) {
+    $seoBase = Get-AcsPublicBaseUrl -Context $ctx
+    $seoCache = if (Test-AcsPublicBaseUrlIsConfigured) { 3600 } else { 0 }
+
+    switch ($path) {
+      '/robots.txt' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsRobotsTxt -BaseUrl $seoBase) -CacheSeconds $seoCache
+      }
+      '/sitemap.xml' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsSitemapXml -BaseUrl $seoBase) -ContentType 'application/xml; charset=utf-8' -CacheSeconds $seoCache
+      }
+      '/llms.txt' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsLlmsTxt -BaseUrl $seoBase -Version $AcsAppVersion) -CacheSeconds $seoCache
+      }
+      '/openapi.json' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsOpenApiJson -BaseUrl $seoBase -Version $AcsAppVersion) -ContentType 'application/json; charset=utf-8' -CacheSeconds $seoCache
+      }
+    }
+    return
+  }
+
+  if ($path -eq '/favicon.svg') {
+    Write-TextResponse -Context $ctx -Body (Get-AcsBrandSvg -Variant 'icon') -ContentType 'image/svg+xml; charset=utf-8' -CacheSeconds 86400
+    return
+  }
+
+  if ($path -eq '/og-image.svg') {
+    Write-TextResponse -Context $ctx -Body (Get-AcsBrandSvg -Variant 'share') -ContentType 'image/svg+xml; charset=utf-8' -CacheSeconds 86400
     return
   }
 
@@ -165,7 +205,7 @@ if ($metricsEnabled) {
   if ($path -eq "/terms" -and -not [string]::IsNullOrWhiteSpace($tosPageHtml)) {
     $tosNonceBytes = [byte[]]::new(16); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($tosNonceBytes)
     $tosNonce = [Convert]::ToBase64String($tosNonceBytes)
-    Write-Html -Context $ctx -Html $tosPageHtml -Nonce $tosNonce
+    Write-Html -Context $ctx -Html $tosPageHtml -Nonce $tosNonce -BaseUrl (Get-AcsPublicBaseUrl -Context $ctx)
     return
   }
 
@@ -173,7 +213,7 @@ if ($metricsEnabled) {
   if ($path -eq "/privacy" -and -not [string]::IsNullOrWhiteSpace($privacyPageHtml)) {
     $privNonceBytes = [byte[]]::new(16); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($privNonceBytes)
     $privNonce = [Convert]::ToBase64String($privNonceBytes)
-    Write-Html -Context $ctx -Html $privacyPageHtml -Nonce $privNonce
+    Write-Html -Context $ctx -Html $privacyPageHtml -Nonce $privNonce -BaseUrl (Get-AcsPublicBaseUrl -Context $ctx)
     return
   }
 
@@ -314,6 +354,8 @@ if ($metricsEnabled) {
     $propMax = 0
     $propTimeout = 0
     $propExpected = ''
+    $propCustom = ''
+    $propValidate = $true
     if ($path -eq '/api/propagation') {
       try {
         $qs = $ctx.Request.QueryString
@@ -327,7 +369,7 @@ if ($metricsEnabled) {
         if (-not [string]::IsNullOrWhiteSpace($rawRegions)) {
           $propRegions = @($rawRegions -split ',' |
             ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
-            Where-Object { $_ -in @('global','namer','samer','europe','asia','oceania') })
+            Where-Object { $_ -in @('global','namer','samer','europe','asia','africa','oceania') })
         }
 
         # Numeric knobs: clamped here AND again inside Get-DnsPropagationStatus.
@@ -341,6 +383,16 @@ if ($metricsEnabled) {
         $rawExpected = ([string]$qs['expected']).Trim()
         if ($rawExpected.Length -gt 255) { $rawExpected = $rawExpected.Substring(0, 255) }
         $propExpected = $rawExpected
+
+        # User-supplied resolver addresses. Length-capped here; every entry is
+        # then parsed and SSRF-vetted (public IPv4 literals only, no hostnames)
+        # by ConvertFrom-DnsPropagationResolverInput before a socket is opened.
+        $rawCustom = ([string]$qs['custom']).Trim()
+        if ($rawCustom.Length -gt 4000) { $rawCustom = $rawCustom.Substring(0, 4000) }
+        $propCustom = $rawCustom
+
+        # Resolver health pre-check: on unless explicitly disabled.
+        if (([string]$qs['validate']).Trim() -eq '0') { $propValidate = $false }
       } catch { }
     }
 
@@ -367,7 +419,7 @@ if ($metricsEnabled) {
         "/api/reputation" { Write-Json -Context $ctx -Object (Get-DnsReputationStatus -Domain $domain) }
         "/api/website" { Write-Json -Context $ctx -Object (Get-WebsiteProbeStatus -Domain $domain) }
         "/api/nameservers" { Write-Json -Context $ctx -Object (Get-NameserverTxtStatus -Domain $domain) }
-        "/api/propagation" { Write-Json -Context $ctx -Object (Get-DnsPropagationStatus -Domain $domain -RecordType $propType -Regions $propRegions -MaxResolvers $propMax -TimeoutMs $propTimeout -ExpectedValue $propExpected) }
+        "/api/propagation" { Write-Json -Context $ctx -Object (Get-DnsPropagationStatus -Domain $domain -RecordType $propType -Regions $propRegions -MaxResolvers $propMax -TimeoutMs $propTimeout -ExpectedValue $propExpected -CustomResolvers $propCustom -ValidateResolvers $propValidate) }
         default       { Write-Json -Context $ctx -Object @{ error = "Unknown endpoint." } -StatusCode 404 }
       }
     }

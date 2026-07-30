@@ -98,3 +98,27 @@ if (-not [string]::IsNullOrWhiteSpace($msalSriRaw)) {
 $msalSriForJsLiteral = $msalSriJson.Replace('\', '\\').Replace("'", "\'")
 $htmlPage = $htmlPage.Replace('__ACS_MSAL_SRI__', $msalSriForJsLiteral)
 
+# Social/link-preview image. Unlike every other token above this one lands in an
+# HTML attribute (`<meta property="og:image" content="...">`), NOT a JS string
+# literal, so it needs HTML-attribute escaping rather than JS escaping --
+# ConvertTo-JsStringLiteralBody would emit \u003C sequences that a browser
+# renders literally.
+#
+# Default is the built-in card served from /og-image.svg. Operators who want a
+# raster image (some social platforms will not render SVG previews) can point
+# ACS_OG_IMAGE at an absolute https URL.
+$ogImage = ([string]$env:ACS_OG_IMAGE).Trim()
+if ([string]::IsNullOrWhiteSpace($ogImage)) {
+  # __ACS_SITE_URL__ is resolved later, per request, by Write-Html.
+  $ogImage = '__ACS_SITE_URL__/og-image.svg'
+} else {
+  $isAbsoluteHttpUrl = $false
+  try {
+    $ogUri = [uri]$ogImage
+    $isAbsoluteHttpUrl = $ogUri.IsAbsoluteUri -and ($ogUri.Scheme -eq 'http' -or $ogUri.Scheme -eq 'https')
+  } catch { $isAbsoluteHttpUrl = $false }
+  if (-not $isAbsoluteHttpUrl) { $ogImage = '__ACS_SITE_URL__/og-image.svg' }
+}
+$ogImageAttr = $ogImage.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
+$htmlPage = $htmlPage.Replace('__ACS_OG_IMAGE__', $ogImageAttr)
+

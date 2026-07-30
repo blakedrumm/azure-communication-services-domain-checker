@@ -56,7 +56,9 @@ try {
       [Parameter(Mandatory = $true)]
       [string]$RawTarget,
       [Parameter(Mandatory = $true)]
-      [hashtable]$Headers
+      [hashtable]$Headers,
+      [ValidateSet('GET', 'HEAD', 'POST')]
+      [string]$Method = 'GET'
     )
 
     $remote = $Client.Client.RemoteEndPoint
@@ -90,6 +92,7 @@ try {
       _client = $Client
       _stream = $networkStream
       _sent = $false
+      _suppressBody = ($Method -eq 'HEAD')
       _extraHeaders = [ordered]@{}
     }
 
@@ -133,7 +136,7 @@ try {
 
       try {
         $this._stream.Write($headerBytes, 0, $headerBytes.Length)
-        if ($Bytes.Length -gt 0) {
+        if (-not $this._suppressBody -and $Bytes.Length -gt 0) {
           $this._stream.Write($Bytes, 0, $Bytes.Length)
         }
         $this._stream.Flush()
@@ -154,6 +157,7 @@ try {
 
     $req = [pscustomobject]@{
       Url = $url
+      HttpMethod = $Method
       QueryString = $qs
       UserAgent = $ua
       RemoteEndPoint = $remote
@@ -392,7 +396,7 @@ try {
           continue
         }
 
-        if ($req.Method -ne 'GET' -and $req.Method -ne 'POST') {
+        if ($req.Method -notin @('GET', 'HEAD', 'POST')) {
           $ctx = New-TcpContext -Client $client -RawTarget ($req.Target) -Headers $req.Headers
           $ctx.Response.StatusCode = 405
           $ctx.Response.StatusDescription = 'Method Not Allowed'
@@ -401,7 +405,7 @@ try {
           continue
         }
 
-        $ctx = New-TcpContext -Client $client -RawTarget ($req.Target) -Headers $req.Headers
+        $ctx = New-TcpContext -Client $client -RawTarget ($req.Target) -Headers $req.Headers -Method $req.Method
 
         # Fast-path metrics for TcpListener fallback as well.
         try { $absPath = $ctx.Request.Url.AbsolutePath } catch { $absPath = $null }

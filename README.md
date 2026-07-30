@@ -376,6 +376,25 @@ The Nameserver TXT Consistency check asks *"do my authoritative servers agree?"*
 
 It queries a curated, geographically spread set of well-known public DNS resolvers **in parallel** and compares their answers. Because Azure Communication Services verifies domains through public DNS, a record that is visible from only some vantage points verifies intermittently — which is the single most common reason domain verification appears to fail at random.
 
+### The resolver catalog
+
+The built-in catalog holds **283 IPv4 resolvers across 80 countries**, in two tiers:
+
+- **Curated (30)** — the major public resolvers (Cloudflare, Google, Quad9, OpenDNS, AdGuard, NextDNS, dns0.eu, Control D, CleanBrowsing, Yandex, AliDNS, DNSPod, 114DNS, Baidu, NTT, KT, Telstra, UOL, DNS.WATCH, FDN, UncensoredDNS, …). Anycast operators are flagged as such.
+- **Community (253)** — open resolvers sourced from the public-dns.info dataset, cross-referenced against the standalone DNS Propagation Checker's vetted-healthy cache, then **live-probed before being committed**. Coordinates are the operator country's reference point, not a per-IP geolocation.
+
+Regions: `global`, `namer`, `samer`, `europe`, `asia`, `africa`, `oceania`.
+
+### Resolver validation
+
+The standalone tool keeps a background "vetting" job that probes every resolver and caches the healthy ones, so a check never wastes a slot on a dead server. The same guarantee is provided here without a state file:
+
+- **Over-selection** — asking for *N* resolvers builds a candidate pool of up to *3N* (capped at 300), balanced across regions.
+- **Validation with the real query** — the whole pool is queried in a single concurrent fan-out, and the first *N* that returned a **usable** answer are kept. Validating with the actual question (rather than a stand-in like `example.com`) matters: a resolver can happily answer a tiny A record and then fail on a domain with 60+ TXT records that needs TCP fallback.
+- **Health cache** — every resolver contacted is recorded in a process-wide, TTL'd cache (`ACS_PROPAGATION_HEALTH_TTL_MIN`, default 30 min) shared across request runspaces, so later selections skip servers that just failed.
+
+Net effect: **requesting 100 resolvers returns 100 responding resolvers**, and the check is usually *faster* with validation on, because dead servers are dropped instead of holding the fan-out open until timeout. Untick **Skip resolvers that are not answering** to query exactly *N* with no over-selection.
+
 The **DNS Propagation** card shows:
 
 - A verdict derived from **consensus** rather than a value you have to type in — the most common non-empty answer set becomes the reference and every other resolver is measured against it
@@ -392,8 +411,7 @@ Only resolvers that returned a **usable** answer (NOERROR or NXDOMAIN) appear in
 | State | Badge | Meaning |
 |-------|-------|---------|
 | `propagated` | **PASS** | Every responding resolver returned the same answer |
-| `partial` | **FAIL** | Present at some vantage points, missing at others — the classic "still propagating" signature that breaks ACS verification |
-| `mismatch` | **WARN** | All responders have a record, but not the same one (stale cache, geo-DNS, or an edit still rolling out) |
+| `partial` | **FAIL** | Present at some vantage points, missing at others — the classic "still propagating" signature that breaks ACS verification || `mismatch` | **WARN** | All responders have a record, but not the same one (stale cache, geo-DNS, or an edit still rolling out) |
 | `norecord` | **WARN** | No resolver found a record of this type |
 | `unknown` | **WARN** | Nothing answered — usually outbound UDP/53 blocked on the network running the tool, not a domain problem |
 
@@ -404,9 +422,11 @@ Resolvers that do not respond, that fail with a resolver-side rcode, and answers
 The gear button opens a per-card settings panel (persisted in browser storage under the *Preferences* cookie category):
 
 - **Record type** — `TXT` (default), `A`, `AAAA`, `CNAME`, `MX`, `NS`, `SOA`, `CAA`
-- **Resolver locations** — global anycast, North America, South America, Europe, Asia, Oceania (the list is built from the server's live resolver catalog)
-- **Max resolvers** — 4 up to the size of the resolver catalog (the built-in catalog holds 30; the server accepts up to 100, which you reach by extending the catalog with `ACS_PROPAGATION_RESOLVERS`)
+- **Resolver locations** — global anycast, North America, South America, Europe, Asia, Oceania, Africa (the list is built from the server's live resolver catalog)
+- **Max resolvers** — 4–100
 - **Timeout** — 1000–15000 ms
+- **Skip resolvers that are not answering** — the over-select + validate behaviour described above (on by default)
+- **Custom resolvers** — your own resolver IPv4 addresses, one per line, optionally followed by a label (`10.20.30.40 Branch office` or `9.9.9.9|Quad9`). When set, **only** these are queried and the location picker is ignored. Private, loopback, link-local and CGNAT addresses are rejected, and hostnames are refused outright so nothing is resolved on your behalf. Custom resolvers are not plotted on the map because arbitrary addresses cannot be geolocated.
 - **Expected value contains** — optional substring to assert instead of comparing resolvers against each other
 
 Applying settings re-runs only the propagation check. While it is in flight every value derived from the previous answer (chips, coverage bar, consensus answer, summary, per-resolver rows) is removed rather than left looking current; the map stays in place, dimmed under a spinner, so the card does not collapse.
@@ -417,10 +437,10 @@ All resolvers are queried concurrently from a **single thread**: one non-blockin
 
 ### Security guards (SSRF protection)
 
-- The resolver list is **operator-controlled** and never derived from the queried domain
-- Every resolver address must parse as a **public, routable IPv4** literal (reusing the website probe's guard); private/loopback/link-local/CGNAT targets are refused
+- The built-in resolver list is **operator-controlled** and never derived from the queried domain
+- Every resolver address — built-in, operator override, or user-supplied — must parse as a **public, routable IPv4** literal (reusing the website probe's guard); private/loopback/link-local/CGNAT targets are refused and **hostnames are rejected outright**, so a user-supplied entry can never trigger a name resolution or reach an internal address
 - Fan-out size, socket timeouts, and receive buffers are all bounded
-- All query parameters (`type`, `regions`, `max`, `timeout`, `expected`) are allowlisted and clamped server-side
+- All query parameters (`type`, `regions`, `max`, `timeout`, `expected`, `custom`, `validate`) are allowlisted, length-capped and clamped server-side
 
 ### Configuration
 
@@ -429,6 +449,7 @@ All resolvers are queried concurrently from a **single thread**: one non-blockin
 | `ACS_DISABLE_PROPAGATION_PROBE` | _(unset)_ | Set to `1` to disable the probe entirely (the card renders a neutral "disabled" note) |
 | `ACS_PROPAGATION_MAX_RESOLVERS` | `25` | Default number of resolvers to query (max 100) |
 | `ACS_PROPAGATION_TIMEOUT_MS` | `4000` | Per-resolver query timeout in milliseconds (500–15000) |
+| `ACS_PROPAGATION_HEALTH_TTL_MIN` | `30` | How long a resolver's success/failure is remembered before it is retried (max 1440) |
 | `ACS_PROPAGATION_RESOLVERS` | _(unset)_ | Replace the built-in resolver catalog. Semicolon-separated entries of `ip\|provider\|countryCode\|city\|lat\|lon\|region\|anycast(0\|1)`. Invalid entries are skipped; if nothing valid parses the built-in catalog is used. |
 
 ## 🌍 WHOIS / RDAP Diagnostics
@@ -470,11 +491,19 @@ The application exposes the following RESTful API endpoints:
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
 | `/api/website` | Website reachability snapshot | Performs a security-guarded HTTP(S) probe (apex + www, HTTPS first) and returns a neutral, factual snapshot: reachability, HTTP status, redirect chain, page title/description, a short text excerpt, and recognized placeholder/parked-page markers |
 | `/api/nameservers` | Per-nameserver TXT consistency | Queries each authoritative nameserver directly (raw UDP/TCP DNS) for the domain's TXT records and compares them, so you can see whether every nameserver serves the same SPF / verification records or whether divergence is making them resolve only intermittently |
-| `/api/propagation` | Global DNS propagation | Queries a geographically spread set of public DNS resolvers in parallel and compares their answers, so you can see whether a recent DNS change is visible everywhere yet. Accepts optional `type`, `regions`, `max`, `timeout`, and `expected` query parameters (all allowlisted and clamped server-side) |
+| `/api/propagation` | Global DNS propagation | Queries a geographically spread set of public DNS resolvers in parallel and compares their answers, so you can see whether a recent DNS change is visible everywhere yet. Accepts optional `type`, `regions`, `max`, `timeout`, `expected`, `custom` and `validate` query parameters (all allowlisted, length-capped and clamped server-side) |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
 | `/api/auth/event` | Anonymous Microsoft Entra ID sign-in ping | Header-only, consent-gated. SPA POSTs an opaque SHA-256 account hash and a Microsoft-employee boolean after client-side MSAL/Graph verification; the server never sees access tokens, UPN, oid, or tenant id. |
 | `/terms` | Terms of Service | Embedded, localized Terms of Service page |
 | `/privacy` | Privacy Statement | Embedded, localized Privacy Statement page |
+| `/robots.txt` | Crawler policy | Allows search engines on the pages, blocks `/api/` and `/dns` for general crawlers, and explicitly grants AI assistants access (including the JSON API). Points at the sitemap. |
+| `/sitemap.xml` | Sitemap | Lists `/`, `/terms` and `/privacy` with `hreflang` alternates for all 10 shipped locales |
+| `/llms.txt` | LLM-readable summary | [llmstxt.org](https://llmstxt.org)-style Markdown brief describing the tool, every endpoint, the propagation parameters, and how to read a verdict — so an AI agent can learn the whole API in one fetch |
+| `/openapi.json` | OpenAPI 3.1 contract | Machine-readable API definition covering all 12 lookup endpoints, their parameters, and the 400/401/429 responses |
+| `/favicon.svg` | Site icon | Scalable shield icon served from memory (keeps the single-file distribution intact) |
+| `/og-image.svg` | Social/link-preview card | 1200×630 branded card referenced by `og:image` / `twitter:image` |
+
+> **Note:** `/robots.txt`, `/sitemap.xml`, `/llms.txt`, `/openapi.json`, `/favicon.svg` and `/og-image.svg` are served **before** the API-key and rate-limit gates. They contain no domain data and are identical for every caller, and a crawler must be able to read `robots.txt` even on a deployment that requires a key for the JSON API.
 
 ### 📖 Example API Usage
 ```bash
@@ -486,7 +515,39 @@ curl "http://localhost:8080/api/mx?domain=example.com"
 
 # With API key authentication
 curl -H "X-Api-Key: your-secret-key" "http://localhost:8080/dns?domain=example.com"
+
+# Discover the API the way an AI agent would
+curl "http://localhost:8080/llms.txt"
+curl "http://localhost:8080/openapi.json"
 ```
+
+## 🔎 Search Engine & AI Assistant Optimization
+
+Every page ships complete, crawler-ready metadata so search results and link previews show a real description instead of scraped toolbar labels.
+
+**On every page:**
+
+- `<meta name="description">`, `<meta name="robots">`, `theme-color` (light/dark) and `color-scheme`
+- `<link rel="canonical">` — the home page canonicalizes to `/`, so the endless `?domain=…` permutations do not fragment ranking signals
+- `hreflang` alternates for all 10 shipped locales plus `x-default`
+- Open Graph and Twitter `summary_large_image` card metadata
+- `WebApplication` JSON-LD structured data (feature list, languages, free-to-use offer, `SearchAction`)
+- A `<noscript>` fallback describing the tool and pointing at the JSON API, so crawlers and agents that do not execute JavaScript still get real content
+- Bodyless `HEAD` responses with GET-equivalent status, content type and length across pages, discovery documents and JSON APIs in both HttpListener and TcpListener modes
+- Shareable `?domain=` links start their lookup even when opened in a background tab; a timer fallback prevents paused animation frames from stalling bootstrap
+
+**For AI assistants:** `robots.txt` explicitly names the major AI crawlers and answer engines (GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, Claude-User, Claude-SearchBot, PerplexityBot, Google-Extended, Applebot-Extended, CCBot, Amazonbot, and others) and grants them the JSON API as well as the pages. Combined with `/llms.txt` and `/openapi.json`, an agent can discover the tool, learn the endpoints, and call them directly to answer factual DNS questions.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACS_PUBLIC_BASE_URL` | _(derived from request)_ | **Recommended for public deployments.** Absolute origin (e.g. `https://acs-domain-checker.contoso.com`) used for canonical, `og:url`, `hreflang` and sitemap URLs. When unset the origin is derived from the request `Host` header, and `/robots.txt` + `/sitemap.xml` are then served `Cache-Control: no-store` so a spoofed `Host` cannot poison a shared cache. |
+| `ACS_SEO_NOINDEX` | `0` | Set to `1` on private/internal instances. Emits `noindex, nofollow` on every page and a blanket `Disallow: /` in `robots.txt`. |
+| `ACS_AI_DISALLOW` | `0` | Set to `1` to opt out of AI crawling and training while keeping normal search indexing. |
+| `ACS_OG_IMAGE` | _(built-in SVG card)_ | Absolute `http(s)` URL of a custom social preview image. Useful because some platforms will not render SVG previews — point this at a 1200×630 PNG. Non-absolute or non-HTTP values are ignored and the built-in card is used. |
+
+> `X-Forwarded-Proto` and `X-Forwarded-Host` are honored only when the immediate TCP peer is listed in `ACS_TRUSTED_PROXIES`, matching the trust model already used for client IPs and the session cookie's `Secure` flag.
 
 ## 🔐 Authentication
 
@@ -607,6 +668,20 @@ Run the secure logging validation suite with:
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
+```
+
+### 🧪 Validation Tools
+
+| Tool | Checks |
+|------|--------|
+| `tools/Audit-RunspaceFunctions.ps1` | Every function reachable from the HTTP request handler is registered in the runspace pool. An unregistered function surfaces to users as an HTTP 500 on one specific check. |
+| `tools/Test-SecureLogging.ps1` | Captured logs contain no PII, secrets, headers, query strings, bodies, or raw exception data. |
+| `tools/Test-SeoMetadata.ps1` | Language lists stay in sync across the SPA, sitemap and `hreflang` links; every `__TOKEN__` has a replacement site; `-f` format strings are valid; every lookup endpoint is documented in `/llms.txt` and `/openapi.json`; required `<head>` tags and the JSON-LD CSP nonce are present; both listener modes preserve bodyless `HEAD` semantics; share-link bootstrap has an idempotent hidden-tab fallback. |
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Audit-RunspaceFunctions.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SeoMetadata.ps1
 ```
 
 ### 🐛 Issue Reporting
@@ -749,7 +824,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.11.0`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.12.0`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -772,8 +847,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.11.0
-git push origin v2.11.0
+git tag v2.12.0
+git push origin v2.12.0
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -784,7 +859,7 @@ git push origin v2.11.0
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.11.0`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.12.0`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -801,11 +876,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.11.0
+docker pull limitlessworlds/acs-domain-checker:2.12.0
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.11.0
-docker pull limitlessworlds/acs-domain-checker:windows-2.11.0
+docker pull limitlessworlds/acs-domain-checker:linux-2.12.0
+docker pull limitlessworlds/acs-domain-checker:windows-2.12.0
 ```
 
 ### 🛠️ Manual Build Script
@@ -820,7 +895,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.11.0
+./acs-domain-checker-dockerhub.ps1 -Version 2.12.0
 ```
 
 **📋 Requirements for manual script:**

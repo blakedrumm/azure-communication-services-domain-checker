@@ -118,6 +118,31 @@ async function ensureMsalLoaded() {
 
 <body class="section-fade-enabled">
 
+<!-- Static fallback content. The results UI is client-rendered, so without this
+     a crawler (or an AI agent that does not execute JavaScript) sees only the
+     toolbar button labels and describes the page from those. -->
+<noscript>
+  <div class="noscript-notice">
+    <h2>Azure Communication Services Email Domain Checker</h2>
+    <p>
+      This tool checks whether a domain is correctly configured to send email through
+      Azure Communication Services. Enter a domain name and it reports the SPF record,
+      the ACS domain-verification TXT record, DKIM selector1 and selector2 keys, the
+      DMARC policy, MX records, CNAME chains, global DNS propagation across public
+      resolvers worldwide, authoritative nameserver consistency, DNSBL blocklist
+      reputation, and WHOIS/RDAP registration details.
+    </p>
+    <p><strong>JavaScript is required for the interactive report.</strong></p>
+    <p>
+      The same data is available as JSON without JavaScript &#8212; for example
+      <code>/dns?domain=example.com</code> returns the full aggregated report. See
+      <a href="/llms.txt">/llms.txt</a> for a plain-text API summary or
+      <a href="/openapi.json">/openapi.json</a> for the machine-readable contract.
+    </p>
+    <p><a href="/terms">Terms of Service</a> &#183; <a href="/privacy">Privacy Statement</a></p>
+  </div>
+</noscript>
+
 <div class="container">
 
 <div class="top-bar">

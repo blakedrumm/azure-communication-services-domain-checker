@@ -1358,17 +1358,19 @@ function getDnsTxtRecoveryState(r) {
 
 const PROPAGATION_SETTINGS_KEY = 'acsPropagationSettings';
 const PROPAGATION_RECORD_TYPES = ['TXT', 'A', 'AAAA', 'CNAME', 'MX', 'NS', 'SOA', 'CAA'];
-const PROPAGATION_REGIONS = ['global', 'namer', 'samer', 'europe', 'asia', 'oceania'];
+const PROPAGATION_REGIONS = ['global', 'namer', 'samer', 'europe', 'asia', 'africa', 'oceania'];
 const PROPAGATION_REGION_LABEL_KEYS = {
   global: 'propagationRegionGlobal',
   namer: 'propagationRegionNamer',
   samer: 'propagationRegionSamer',
   europe: 'propagationRegionEurope',
   asia: 'propagationRegionAsia',
-  oceania: 'propagationRegionOceania'
+  africa: 'propagationRegionAfrica',
+  oceania: 'propagationRegionOceania',
+  custom: 'propagationRegionCustom'
 };
 // An empty `regions` array means "every location the server catalog offers".
-const PROPAGATION_DEFAULTS = { recordType: 'TXT', regions: [], maxResolvers: 25, timeoutMs: 4000, expected: '' };
+const PROPAGATION_DEFAULTS = { recordType: 'TXT', regions: [], maxResolvers: 25, timeoutMs: 4000, expected: '', custom: '', validate: true };
 
 let propagationSettings = Object.assign({}, PROPAGATION_DEFAULTS);
 let propagationRerunInFlight = false;
@@ -1388,7 +1390,11 @@ function normalizePropagationSettings(raw) {
     regions: regions,
     maxResolvers: Number.isFinite(max) ? Math.min(100, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
     timeoutMs: Number.isFinite(timeout) ? Math.min(15000, Math.max(1000, Math.round(timeout))) : PROPAGATION_DEFAULTS.timeoutMs,
-    expected: String(src.expected || '').slice(0, 255)
+    expected: String(src.expected || '').slice(0, 255),
+    // Free text: normalized to one entry per line for the textarea, but sent to
+    // the server comma-separated. Every entry is IP-validated server-side.
+    custom: String(src.custom || '').slice(0, 4000),
+    validate: src.validate !== false
   };
 }
 
@@ -1423,6 +1429,10 @@ function buildPropagationQuery() {
   parts.push('max=' + encodeURIComponent(String(s.maxResolvers || PROPAGATION_DEFAULTS.maxResolvers)));
   parts.push('timeout=' + encodeURIComponent(String(s.timeoutMs || PROPAGATION_DEFAULTS.timeoutMs)));
   if (s.expected) parts.push('expected=' + encodeURIComponent(s.expected));
+  if (s.custom && s.custom.trim()) {
+    parts.push('custom=' + encodeURIComponent(s.custom.trim()));
+  }
+  if (s.validate === false) parts.push('validate=0');
   return parts.join('&');
 }
 

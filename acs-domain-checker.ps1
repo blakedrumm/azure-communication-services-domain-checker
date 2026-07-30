@@ -1665,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.11.0'
+$script:AppVersion = '2.12.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -4636,6 +4636,19 @@ function Set-NoCacheHeaders {
   } catch { }
 }
 
+function Test-AcsHeadRequest {
+  param($Context)
+  try {
+    return [string]::Equals(
+      [string]$Context.Request.HttpMethod,
+      'HEAD',
+      [System.StringComparison]::OrdinalIgnoreCase
+    )
+  } catch {
+    return $false
+  }
+}
+
 # Centralized outbound HTTP helper for user-driven lookups (DoH, RDAP, WHOIS,
 # RBL, etc.). Goals:
 # - Enforce HTTPS-only (refuses cleartext) so a typo in a custom endpoint
@@ -4804,6 +4817,10 @@ function Write-Json {
     try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
     $Context.Response.StatusCode  = $StatusCode
     $Context.Response.ContentLength64 = $bytes.Length
+    if (Test-AcsHeadRequest -Context $Context) {
+      $Context.Response.Close()
+      return
+    }
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $Context.Response.OutputStream.Close()
     return
@@ -4851,6 +4868,10 @@ function Write-FileResponse {
         } catch { }
         $Context.Response.StatusCode  = 200
         $Context.Response.ContentLength64 = $bytes.Length
+        if (Test-AcsHeadRequest -Context $Context) {
+          $Context.Response.Close()
+          return
+        }
         $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
         $Context.Response.OutputStream.Close()
         return
@@ -4868,7 +4889,8 @@ function Write-Html {
     param(
         $Context,
         [string]$Html,
-        [string]$Nonce
+        [string]$Nonce,
+        [string]$BaseUrl
     )
 
     # Serve the embedded SPA HTML. (All dynamic data is fetched from JSON endpoints.)
@@ -4877,6 +4899,18 @@ function Write-Html {
     } else {
       $Html = $Html.Replace('__CSP_NONCE__', $Nonce)
     }
+
+    # SEO tokens are resolved here rather than at startup because the public
+    # origin is a property of the deployment, not the build. An empty BaseUrl
+    # degrades canonical/hreflang to root-relative URLs, which stays valid.
+    if ($null -eq $BaseUrl) { $BaseUrl = '' }
+    $Html = $Html.Replace('__ACS_SITE_URL__', $BaseUrl.TrimEnd('/'))
+    $robotsDirective = if (Test-AcsSeoIndexingAllowed) {
+      'index, follow, max-image-preview:large, max-snippet:-1'
+    } else {
+      'noindex, nofollow'
+    }
+    $Html = $Html.Replace('__ACS_ROBOTS__', $robotsDirective)
 
     $bytes = [Text.Encoding]::UTF8.GetBytes($Html)
 
@@ -4888,6 +4922,10 @@ function Write-Html {
       try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
       $Context.Response.StatusCode  = 200
       $Context.Response.ContentLength64 = $bytes.Length
+      if (Test-AcsHeadRequest -Context $Context) {
+        $Context.Response.Close()
+        return
+      }
       $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
       $Context.Response.OutputStream.Close()
       return
@@ -4909,6 +4947,488 @@ function Write-Html {
 # Perform a DNS query using DNS-over-HTTPS (DoH).
 # Sends a JSON-format query (RFC 8484) to the configured DoH endpoint (default: Cloudflare).
 # Returns objects shaped like Resolve-DnsName output for downstream compatibility.
+# ===== SEO / AI Discovery Metadata =====
+#
+# The SPA HTML is assembled once at startup, so anything that depends on WHERE
+# the instance is actually deployed (public scheme + hostname) cannot be baked
+# in at build time. The HTML template therefore carries an __ACS_SITE_URL__
+# token that Write-Html resolves per request from Get-AcsPublicBaseUrl.
+#
+# This file also serves the machine-readable discovery documents:
+#   /robots.txt   - crawler policy (explicitly welcomes AI agents)
+#   /sitemap.xml  - page list + hreflang alternates for all 10 locales
+#   /llms.txt     - llmstxt.org summary so an LLM can learn the API in one fetch
+#   /openapi.json - OpenAPI 3.1 contract so an agent can call the API correctly
+
+# Language codes the SPA ships translations for. Drives the hreflang alternates
+# and the sitemap so ?lang= variants are understood as translations of one page
+# instead of duplicate content.
+function Get-AcsSeoLanguages {
+  return @('en', 'es', 'fr', 'de', 'pt-BR', 'ar', 'zh-CN', 'hi-IN', 'ja-JP', 'ru-RU')
+}
+
+# Operators running a private/internal instance set ACS_SEO_NOINDEX=1 to stay out
+# of search indexes entirely (robots.txt Disallow + noindex on every page).
+function Test-AcsSeoIndexingAllowed {
+  $raw = ([string]$env:ACS_SEO_NOINDEX).Trim().ToLowerInvariant()
+  return -not ($raw -in @('1', 'true', 'yes', 'on'))
+}
+
+# Operators who do not want their instance used as an AI/LLM data source set
+# ACS_AI_DISALLOW=1. Default is to welcome AI agents: this tool answers factual
+# DNS questions, which is exactly the kind of lookup an assistant benefits from.
+function Test-AcsAiCrawlingAllowed {
+  $raw = ([string]$env:ACS_AI_DISALLOW).Trim().ToLowerInvariant()
+  if ($raw -in @('1', 'true', 'yes', 'on')) { return $false }
+  return (Test-AcsSeoIndexingAllowed)
+}
+
+# Named AI crawlers / assistant fetchers that get an explicit Allow block in
+# robots.txt. Several of these (Google-Extended, Applebot-Extended) are
+# training-opt-out tokens rather than crawlers, so naming them is the only way
+# to signal "yes, this content may be used".
+function Get-AcsAiUserAgents {
+  return @(
+    'GPTBot', 'OAI-SearchBot', 'ChatGPT-User',
+    'ClaudeBot', 'Claude-User', 'Claude-SearchBot', 'anthropic-ai',
+    'Google-Extended', 'Applebot-Extended',
+    'PerplexityBot', 'Perplexity-User',
+    'meta-externalagent', 'FacebookBot',
+    'Amazonbot', 'Bytespider', 'CCBot',
+    'MistralAI-User', 'DuckAssistBot', 'YouBot',
+    'cohere-ai', 'cohere-training-data-crawler'
+  )
+}
+
+# Accept only characters that may legally appear in an authority we are willing
+# to echo back into a canonical URL. Rejecting anything else stops a spoofed
+# Host header from pointing canonical/og:url at an attacker-controlled domain.
+function Test-AcsSafeUrlAuthority {
+  param([string]$Authority)
+  if ([string]::IsNullOrWhiteSpace($Authority)) { return $false }
+  if ($Authority.Length -gt 255) { return $false }
+  return [bool]($Authority -match '^(?:\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9](?:[A-Za-z0-9\-.]*[A-Za-z0-9])?)(?::[0-9]{1,5})?$')
+}
+
+# Absolute origin (no trailing slash) used for canonical/og:url/sitemap entries.
+# Returns '' when no trustworthy value exists, in which case callers fall back to
+# root-relative URLs (valid for <link rel=canonical>, omitted for og:url).
+function Get-AcsPublicBaseUrl {
+  param($Context)
+
+  # 1) Explicit operator configuration wins. This is the only form that is
+  #    reliable behind a proxy/CDN that rewrites Host, and the only one that
+  #    cannot be influenced by the requesting client.
+  $configured = ([string]$env:ACS_PUBLIC_BASE_URL).Trim()
+  if (-not [string]::IsNullOrWhiteSpace($configured)) {
+    try {
+      $u = [uri]$configured
+      if ($u.IsAbsoluteUri -and ($u.Scheme -eq 'http' -or $u.Scheme -eq 'https')) {
+        return $u.GetLeftPart([System.UriPartial]::Path).TrimEnd('/')
+      }
+    } catch { }
+  }
+
+  if ($null -eq $Context) { return '' }
+
+  # 2) Derive from the live request. X-Forwarded-* is honored ONLY when the
+  #    immediate TCP peer is in ACS_TRUSTED_PROXIES -- the same trust model
+  #    Get-ClientIp and the session cookie's Secure flag already use.
+  $scheme = 'http'
+  $authority = ''
+  try { $scheme = [string]$Context.Request.Url.Scheme } catch { $scheme = 'http' }
+  try { $authority = [string]$Context.Request.Url.Authority } catch { $authority = '' }
+
+  try {
+    $peerIp = $null
+    try { $peerIp = [string]$Context.Request.RemoteEndPoint.Address } catch { $peerIp = $null }
+    if (-not [string]::IsNullOrWhiteSpace($peerIp) -and (Test-IsTrustedProxy -PeerIp $peerIp)) {
+      $fwdProto = ([string]$Context.Request.Headers['X-Forwarded-Proto']).Trim().ToLowerInvariant()
+      if (-not [string]::IsNullOrWhiteSpace($fwdProto)) { $fwdProto = ($fwdProto -split ',')[0].Trim() }
+      if ($fwdProto -eq 'https' -or $fwdProto -eq 'http') { $scheme = $fwdProto }
+
+      $fwdHost = ([string]$Context.Request.Headers['X-Forwarded-Host']).Trim()
+      if (-not [string]::IsNullOrWhiteSpace($fwdHost)) { $fwdHost = ($fwdHost -split ',')[0].Trim() }
+      if (Test-AcsSafeUrlAuthority -Authority $fwdHost) { $authority = $fwdHost }
+    }
+  } catch { }
+
+  if ($scheme -ne 'http' -and $scheme -ne 'https') { return '' }
+  if (-not (Test-AcsSafeUrlAuthority -Authority $authority)) { return '' }
+  return ('{0}://{1}' -f $scheme, $authority)
+}
+
+# True only when the operator pinned the origin via ACS_PUBLIC_BASE_URL. When it
+# is false the origin is derived from the request's Host header, which a client
+# controls -- so any document that embeds it must not be stored by a shared
+# cache, or one spoofed request could poison /robots.txt or /sitemap.xml for
+# everyone behind that cache.
+function Test-AcsPublicBaseUrlIsConfigured {
+  $configured = ([string]$env:ACS_PUBLIC_BASE_URL).Trim()
+  if ([string]::IsNullOrWhiteSpace($configured)) { return $false }
+  try {
+    $u = [uri]$configured
+    return ($u.IsAbsoluteUri -and ($u.Scheme -eq 'http' -or $u.Scheme -eq 'https'))
+  } catch { return $false }
+}
+
+function ConvertTo-AcsXmlText {
+  param([string]$Value)
+  if ([string]::IsNullOrEmpty($Value)) { return '' }
+  return $Value.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&apos;')
+}
+
+# Brand artwork served from memory so the single-file distribution stays intact.
+# 'icon'  -> /favicon.svg  (browser tab, 64x64 viewBox, scales to any size)
+# 'share' -> /og-image.svg (1200x630 social/link-preview card)
+function Get-AcsBrandSvg {
+  param([ValidateSet('icon', 'share')][string]$Variant = 'icon')
+
+  if ($Variant -eq 'icon') {
+    return @'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ACS Email Domain Checker">
+  <defs>
+    <linearGradient id="acsShield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#54b3ff"/>
+      <stop offset="1" stop-color="#0b5cd5"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#acsShield)" d="M32 3 8 11.5v18.9C8 44.6 17.9 56.9 32 61c14.1-4.1 24-16.4 24-30.6V11.5z"/>
+  <path fill="none" stroke="#ffffff" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" d="m19.5 32.5 8.8 8.8L45 24.5"/>
+</svg>
+'@
+  }
+
+  return @'
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Azure Communication Services Email Domain Checker">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#132b52"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#54b3ff"/>
+      <stop offset="1" stop-color="#0b5cd5"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <g transform="translate(92 175) scale(4.1)">
+    <path fill="url(#shield)" d="M32 3 8 11.5v18.9C8 44.6 17.9 56.9 32 61c14.1-4.1 24-16.4 24-30.6V11.5z"/>
+    <path fill="none" stroke="#ffffff" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" d="m19.5 32.5 8.8 8.8L45 24.5"/>
+  </g>
+  <g font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">
+    <text x="400" y="242" fill="#9fc6ff" font-size="30" font-weight="600" letter-spacing="3">AZURE COMMUNICATION SERVICES</text>
+    <text x="400" y="330" fill="#ffffff" font-size="72" font-weight="700">Email Domain Checker</text>
+    <text x="400" y="395" fill="#c9d8f2" font-size="31">SPF &#183; DKIM &#183; DMARC &#183; MX &#183; TXT &#183; CNAME</text>
+    <text x="400" y="447" fill="#c9d8f2" font-size="31">Global DNS propagation &#183; Blocklists &#183; WHOIS</text>
+  </g>
+</svg>
+'@
+}
+
+function Get-AcsRobotsTxt {
+  param([string]$BaseUrl)
+
+  $sb = [System.Text.StringBuilder]::new()
+  [void]$sb.AppendLine('# robots.txt - Azure Communication Services Email Domain Checker')
+
+  if (-not (Test-AcsSeoIndexingAllowed)) {
+    # Private deployment: keep everything out of every index.
+    [void]$sb.AppendLine('# Indexing disabled by operator (ACS_SEO_NOINDEX).')
+    [void]$sb.AppendLine('User-agent: *')
+    [void]$sb.AppendLine('Disallow: /')
+    return $sb.ToString()
+  }
+
+  # General crawlers: index the human-facing pages, skip the JSON endpoints
+  # (thin, per-domain, and infinite in cardinality). /assets/ is deliberately
+  # NOT blocked -- search engines need the CSS/JS/images to render the page.
+  [void]$sb.AppendLine('User-agent: *')
+  [void]$sb.AppendLine('Allow: /')
+  [void]$sb.AppendLine('Disallow: /api/')
+  [void]$sb.AppendLine('Disallow: /dns')
+  [void]$sb.AppendLine()
+
+  if (Test-AcsAiCrawlingAllowed) {
+    # AI assistants are explicitly granted the API too: this tool exists to
+    # answer factual DNS/email-authentication questions, and an agent that can
+    # call /api/* directly gives a far better answer than one scraping the SPA.
+    [void]$sb.AppendLine('# AI assistants and answer engines are welcome here, including the JSON API.')
+    [void]$sb.AppendLine('# Machine-readable docs: /llms.txt and /openapi.json')
+    foreach ($agent in (Get-AcsAiUserAgents)) {
+      [void]$sb.AppendLine(('User-agent: {0}' -f $agent))
+    }
+    [void]$sb.AppendLine('Allow: /')
+    [void]$sb.AppendLine('Disallow:')
+    [void]$sb.AppendLine()
+  } else {
+    [void]$sb.AppendLine('# AI use disabled by operator (ACS_AI_DISALLOW).')
+    foreach ($agent in (Get-AcsAiUserAgents)) {
+      [void]$sb.AppendLine(('User-agent: {0}' -f $agent))
+    }
+    [void]$sb.AppendLine('Disallow: /')
+    [void]$sb.AppendLine()
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
+    [void]$sb.AppendLine(('Sitemap: {0}/sitemap.xml' -f $BaseUrl))
+  }
+  return $sb.ToString()
+}
+
+function Get-AcsSitemapXml {
+  param([string]$BaseUrl)
+
+  $root = if ([string]::IsNullOrWhiteSpace($BaseUrl)) { '' } else { $BaseUrl }
+  $languages = Get-AcsSeoLanguages
+
+  $sb = [System.Text.StringBuilder]::new()
+  [void]$sb.AppendLine('<?xml version="1.0" encoding="UTF-8"?>')
+  [void]$sb.AppendLine('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">')
+
+  # The home page is the only one with translations, so it carries the full
+  # hreflang cluster; x-default points at the un-parameterized URL.
+  [void]$sb.AppendLine('  <url>')
+  [void]$sb.AppendLine(('    <loc>{0}</loc>' -f (ConvertTo-AcsXmlText ($root + '/'))))
+  [void]$sb.AppendLine('    <changefreq>weekly</changefreq>')
+  [void]$sb.AppendLine('    <priority>1.0</priority>')
+  [void]$sb.AppendLine(('    <xhtml:link rel="alternate" hreflang="x-default" href="{0}"/>' -f (ConvertTo-AcsXmlText ($root + '/'))))
+  foreach ($lang in $languages) {
+    $href = ConvertTo-AcsXmlText ('{0}/?lang={1}' -f $root, $lang)
+    [void]$sb.AppendLine(('    <xhtml:link rel="alternate" hreflang="{0}" href="{1}"/>' -f (ConvertTo-AcsXmlText $lang), $href))
+  }
+  [void]$sb.AppendLine('  </url>')
+
+  foreach ($page in @('/terms', '/privacy')) {
+    [void]$sb.AppendLine('  <url>')
+    [void]$sb.AppendLine(('    <loc>{0}</loc>' -f (ConvertTo-AcsXmlText ($root + $page))))
+    [void]$sb.AppendLine('    <changefreq>yearly</changefreq>')
+    [void]$sb.AppendLine('    <priority>0.3</priority>')
+    [void]$sb.AppendLine('  </url>')
+  }
+
+  [void]$sb.AppendLine('</urlset>')
+  return $sb.ToString()
+}
+
+# llmstxt.org-style brief. Written for a model with no prior knowledge of this
+# app: what it is, the exact endpoints, the parameters, and how to read a
+# verdict. Kept in Markdown because that is what the convention specifies.
+function Get-AcsLlmsTxt {
+  param([string]$BaseUrl, [string]$Version)
+
+  $root = if ([string]::IsNullOrWhiteSpace($BaseUrl)) { '' } else { $BaseUrl }
+  $ver  = if ([string]::IsNullOrWhiteSpace($Version)) { 'unknown' } else { $Version }
+
+  $body = @'
+# Azure Communication Services Email Domain Checker
+
+> A read-only DNS and email-authentication diagnostic service. Given a domain name it
+> reports SPF, DKIM, DMARC, MX, TXT and CNAME records, verifies the DNS setup Azure
+> Communication Services (ACS) requires for email sending, measures global DNS
+> propagation from hundreds of public resolvers, and returns domain registration
+> (WHOIS/RDAP) and DNSBL blocklist reputation data. Every endpoint returns JSON.
+
+Version: __ACS_VERSION__
+
+## How to use this API
+
+- All endpoints are `GET` and take a `domain` query parameter, e.g. `__ACS_ROOT__/api/base?domain=example.com`.
+- Responses are JSON. No request body is ever needed.
+- Requests are rate limited per client IP (default 240/min). Honor `Retry-After` on HTTP 429.
+- Some deployments require an API key sent as the `X-Api-Key` header. A 401 response means a key is required.
+- `__ACS_ROOT__/dns` returns every check in a single aggregated response. Prefer it when you want the whole picture; prefer the individual endpoints when you need one specific answer quickly.
+
+## Endpoints
+
+- [Full aggregated report](__ACS_ROOT__/dns?domain=example.com): every check below in one JSON document.
+- [Base records](__ACS_ROOT__/api/base?domain=example.com): SPF, ACS verification TXT, A/AAAA addresses.
+- [MX records](__ACS_ROOT__/api/mx?domain=example.com): mail exchangers and detected mail provider.
+- [All DNS records](__ACS_ROOT__/api/records?domain=example.com): full record table including TTLs.
+- [DMARC](__ACS_ROOT__/api/dmarc?domain=example.com): DMARC policy plus security guidance.
+- [DKIM](__ACS_ROOT__/api/dkim?domain=example.com): ACS `selector1`/`selector2` DKIM keys.
+- [CNAME](__ACS_ROOT__/api/cname?domain=example.com): CNAME chain resolution.
+- [WHOIS / RDAP](__ACS_ROOT__/api/whois?domain=example.com): registrar, creation and expiry dates, domain age.
+- [Blocklist reputation](__ACS_ROOT__/api/reputation?domain=example.com): DNSBL/RBL listing status for the domain's mail IPs.
+- [Website probe](__ACS_ROOT__/api/website?domain=example.com): HTTP reachability and page title/description.
+- [Nameserver consistency](__ACS_ROOT__/api/nameservers?domain=example.com): queries each authoritative nameserver directly and reports whether they serve identical TXT records.
+- [Global DNS propagation](__ACS_ROOT__/api/propagation?domain=example.com&type=TXT&max=25): queries public recursive resolvers worldwide and reports what percentage see the record.
+
+## Propagation parameters
+
+`__ACS_ROOT__/api/propagation` additionally accepts:
+`type` (A, AAAA, CNAME, MX, NS, TXT, SOA, CAA), `regions` (comma separated:
+global, namer, samer, europe, asia, africa, oceania), `max` (1-100 resolvers),
+`timeout` (milliseconds), `expected` (substring that must appear in the answer),
+`custom` (comma separated public IPv4 resolver addresses) and `validate` (0 to skip
+resolver health pre-selection).
+
+## Reading a verdict
+
+- Checks report a `state` or `status` string. `propagated`, `consistent`, `pass` and `ok` are healthy.
+- `partial` means the record exists at some vantage points but is missing at others - usually mid-propagation or a broken nameserver.
+- `mismatch` means resolvers disagree about the value. `norecord` means nothing was found.
+- For nameserver consistency, `partial` means the servers that answered agree but at least one did not answer at all.
+
+## Notes
+
+- This service performs live DNS lookups. Results change over time; do not cache aggressively.
+- It is read-only and never modifies DNS. It cannot fix a domain, only diagnose it.
+- Do not send personal data. Only public domain names are meaningful input.
+
+## Pages
+
+- [Terms of Service](__ACS_ROOT__/terms)
+- [Privacy Statement](__ACS_ROOT__/privacy)
+- [OpenAPI 3.1 contract](__ACS_ROOT__/openapi.json)
+'@
+
+  return $body.Replace('__ACS_ROOT__', $root).Replace('__ACS_VERSION__', $ver)
+}
+
+# OpenAPI 3.1 contract. Emitted as text (not via Write-Json) so it can be cached
+# and so the ordering stays stable/readable for anyone who opens it directly.
+function Get-AcsOpenApiJson {
+  param([string]$BaseUrl, [string]$Version)
+
+  # $BaseUrl has already passed Test-AcsSafeUrlAuthority, so it cannot contain a
+  # quote or backslash and is safe to interpolate into a JSON string literal.
+  $root = if ([string]::IsNullOrWhiteSpace($BaseUrl)) { '/' } else { $BaseUrl }
+  $ver  = if ([string]::IsNullOrWhiteSpace($Version)) { '0.0.0' } else { $Version }
+
+  $domainParam = @'
+        {
+          "name": "domain",
+          "in": "query",
+          "required": true,
+          "description": "Domain name to inspect, e.g. contoso.com",
+          "schema": { "type": "string", "format": "hostname", "maxLength": 253 }
+        }
+'@
+
+  $sb = [System.Text.StringBuilder]::new()
+  [void]$sb.AppendLine('{')
+  [void]$sb.AppendLine('  "openapi": "3.1.0",')
+  [void]$sb.AppendLine('  "info": {')
+  [void]$sb.AppendLine('    "title": "Azure Communication Services Email Domain Checker API",')
+  [void]$sb.AppendLine(('    "version": "{0}",' -f $ver))
+  [void]$sb.AppendLine('    "summary": "Read-only DNS and email-authentication diagnostics for a domain.",')
+  [void]$sb.AppendLine('    "description": "Checks SPF, DKIM, DMARC, MX, TXT and CNAME records, verifies Azure Communication Services email domain requirements, measures global DNS propagation, and returns WHOIS/RDAP registration and DNSBL blocklist reputation data. All endpoints are GET and return JSON."')
+  [void]$sb.AppendLine('  },')
+  [void]$sb.AppendLine(('  "servers": [ {{ "url": "{0}" }} ],' -f $root))
+  [void]$sb.AppendLine('  "components": {')
+  [void]$sb.AppendLine('    "securitySchemes": {')
+  [void]$sb.AppendLine('      "apiKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key", "description": "Only required when the deployment sets ACS_API_KEY." }')
+  [void]$sb.AppendLine('    }')
+  [void]$sb.AppendLine('  },')
+  [void]$sb.AppendLine('  "paths": {')
+
+  # path -> summary. /dns is listed first because it is the preferred entry point.
+  $endpoints = [ordered]@{
+    '/dns'              = 'Aggregated report containing every check below.'
+    '/api/base'         = 'SPF record, ACS domain-verification TXT record, and A/AAAA addresses.'
+    '/api/mx'           = 'MX records and the detected mail provider.'
+    '/api/records'      = 'Full DNS record table including TTLs.'
+    '/api/dmarc'        = 'DMARC policy and derived security guidance.'
+    '/api/dkim'         = 'ACS selector1/selector2 DKIM public keys.'
+    '/api/cname'        = 'CNAME chain resolution.'
+    '/api/whois'        = 'Registrar, creation/expiry dates and domain age via RDAP or WHOIS.'
+    '/api/reputation'   = 'DNSBL/RBL blocklist listing status for the domain mail IPs.'
+    '/api/website'      = 'HTTP reachability probe with page title and description.'
+    '/api/nameservers'  = 'Queries each authoritative nameserver directly and compares their TXT records.'
+    '/api/propagation'  = 'Queries public recursive resolvers worldwide and reports propagation coverage.'
+  }
+
+  $pathIndex = 0
+  foreach ($endpoint in $endpoints.Keys) {
+    $pathIndex++
+    $isLast = ($pathIndex -eq $endpoints.Count)
+    [void]$sb.AppendLine(('    "{0}": {{' -f $endpoint))
+    [void]$sb.AppendLine('      "get": {')
+    [void]$sb.AppendLine(('        "summary": "{0}",' -f $endpoints[$endpoint]))
+    [void]$sb.AppendLine(('        "operationId": "{0}",' -f ($endpoint.Trim('/') -replace '[^A-Za-z0-9]+', '_')))
+    [void]$sb.AppendLine('        "parameters": [')
+    [void]$sb.Append($domainParam)
+
+    if ($endpoint -eq '/api/propagation') {
+      [void]$sb.AppendLine(',')
+      [void]$sb.AppendLine('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } },')
+      [void]$sb.AppendLine('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } },')
+      [void]$sb.AppendLine('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 } },')
+      [void]$sb.AppendLine('        { "name": "timeout", "in": "query", "description": "Per-resolver timeout in milliseconds.", "schema": { "type": "integer", "minimum": 1, "maximum": 15000, "default": 4000 } },')
+      [void]$sb.AppendLine('        { "name": "expected", "in": "query", "description": "Substring the answer must contain to count as a match.", "schema": { "type": "string", "maxLength": 255 } },')
+      [void]$sb.AppendLine('        { "name": "custom", "in": "query", "description": "Comma-separated public IPv4 resolver addresses to query instead of the built-in catalog.", "schema": { "type": "string", "maxLength": 4000 } },')
+      [void]$sb.AppendLine('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
+    } else {
+      [void]$sb.AppendLine()
+    }
+
+    [void]$sb.AppendLine('        ],')
+    [void]$sb.AppendLine('        "responses": {')
+    [void]$sb.AppendLine('          "200": { "description": "Check result.", "content": { "application/json": { "schema": { "type": "object" } } } },')
+    [void]$sb.AppendLine('          "400": { "description": "Missing or invalid domain parameter." },')
+    [void]$sb.AppendLine('          "401": { "description": "An API key is required by this deployment." },')
+    [void]$sb.AppendLine('          "429": { "description": "Rate limit exceeded. Honor the Retry-After header." }')
+    [void]$sb.AppendLine('        }')
+    [void]$sb.AppendLine('      }')
+    [void]$sb.AppendLine(('    }}{0}' -f $(if ($isLast) { '' } else { ',' })))
+  }
+
+  [void]$sb.AppendLine('  }')
+  [void]$sb.AppendLine('}')
+  return $sb.ToString()
+}
+
+# Write a plain-text/XML/JSON body with the standard security headers. Unlike
+# Write-Json these documents are stable, so they are served cacheable.
+function Write-TextResponse {
+  param(
+    $Context,
+    [string]$Body,
+    [string]$ContentType = 'text/plain; charset=utf-8',
+    [int]$CacheSeconds = 3600,
+    [int]$StatusCode = 200
+  )
+
+  $bytes = [Text.Encoding]::UTF8.GetBytes([string]$Body)
+  Set-SecurityHeaders -Context $Context
+
+  # CacheSeconds <= 0 means "content varies by request" (see
+  # Test-AcsPublicBaseUrlIsConfigured), so keep it out of shared caches.
+  $cacheHeader = if ($CacheSeconds -le 0) { 'no-store' } else { ('public, max-age={0}' -f $CacheSeconds) }
+
+  if ($Context.Response -is [System.Net.HttpListenerResponse]) {
+    try { $Context.Response.Headers['Cache-Control'] = $cacheHeader } catch { }
+    $Context.Response.ContentType = $ContentType
+    try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
+    $Context.Response.StatusCode = $StatusCode
+    $Context.Response.ContentLength64 = $bytes.Length
+    if (Test-AcsHeadRequest -Context $Context) {
+      $Context.Response.Close()
+      return
+    }
+    $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $Context.Response.OutputStream.Close()
+    return
+  }
+
+  # TcpListener fallback: headers must go through _extraHeaders or SendBody
+  # drops them (the same gap Set-NoCacheHeaders exists to close).
+  try {
+    if ($null -ne $Context.Response.PSObject.Properties['_extraHeaders']) {
+      if ($null -eq $Context.Response._extraHeaders) {
+        $Context.Response._extraHeaders = [ordered]@{ 'Cache-Control' = $cacheHeader }
+      } else {
+        $Context.Response._extraHeaders['Cache-Control'] = $cacheHeader
+      }
+    }
+  } catch { }
+
+  $Context.Response.ContentType = $ContentType
+  $Context.Response.StatusCode = $StatusCode
+  $Context.Response.ContentLength64 = $bytes.Length
+  $Context.Response.SendBody($bytes)
+}
 # ===== DNS Resolution Layer =====
 function Resolve-DohName {
   param(
@@ -10830,6 +11350,268 @@ function Get-DnsPropagationResolverCatalog {
 
     # ---- Oceania ----
     [pscustomobject]@{ ip = '139.130.4.5';     provider = 'Telstra';               countryCode = 'AU'; city = 'Sydney';        latitude = -33.87; longitude = 151.21;  region = 'oceania'; anycast = $false }
+
+    # ---- Community open resolvers (generated) ----
+    # Sourced from the public-dns.info dataset, cross-referenced against the
+    # standalone DNS Propagation Checker's vetted-healthy cache, then live-probed
+    # before being committed here. Coordinates are the operator country reference
+    # point, not a per-IP geolocation, so the map shows "a resolver in this
+    # country" rather than claiming street-level accuracy. These exist so a
+    # 100-resolver request has enough real vantage points to draw from; dead
+    # entries are filtered out at request time by the health pre-check.
+    [pscustomobject]@{ ip = '194.158.78.137'; provider = 'Andorra Telecom S.a.u.'; countryCode = 'AD'; city = 'Andorra la Vella'; latitude = 42.5; longitude = 1.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '138.219.249.221'; provider = 'Coop de Prov.Serv.Telef.Obras'; countryCode = 'AR'; city = 'Rafael Castillo'; latitude = -34.6; longitude = -58.4; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.89.142.74'; provider = 'Telecom Argentina S.A.'; countryCode = 'AR'; city = 'Buenos Aires'; latitude = -34.6; longitude = -58.4; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '80.123.196.122'; provider = 'A1 Telekom Austria AG'; countryCode = 'AT'; city = 'Dornbirn'; latitude = 48.2; longitude = 16.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '110.145.154.62'; provider = 'Telstra Corporation Ltd'; countryCode = 'AU'; city = 'Melbourne'; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '111.118.223.243'; provider = 'Entity Data Pty Limited'; countryCode = 'AU'; city = ''; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '139.134.5.51'; provider = 'Telstra Corporation Ltd'; countryCode = 'AU'; city = ''; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '203.50.2.71'; provider = 'Telstra Corporation Ltd'; countryCode = 'AU'; city = 'Sydney'; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '210.18.214.38'; provider = 'Brennan IT'; countryCode = 'AU'; city = 'Sunshine Coast'; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '85.132.85.85'; provider = 'Delta Telecom Ltd'; countryCode = 'AZ'; city = ''; latitude = 40.4; longitude = 49.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.140.24.14'; provider = 'Hello IT'; countryCode = 'BD'; city = 'Cox''s Bazar'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.143.237.206'; provider = 'ARK Network'; countryCode = 'BD'; city = ''; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.143.237.85'; provider = 'ARK Network'; countryCode = 'BD'; city = ''; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.145.164.162'; provider = 'Speed 69.Net'; countryCode = 'BD'; city = 'Tejgaon'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.145.164.231'; provider = 'Speed 69.Net'; countryCode = 'BD'; city = 'Dhaka'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.153.48.174'; provider = 'MAYA SOFT'; countryCode = 'BD'; city = 'Mymensingh'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '194.6.227.15'; provider = 'VERIXI SA'; countryCode = 'BE'; city = ''; latitude = 50.8; longitude = 4.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '185.165.96.225'; provider = 'Global Electronic Solutions LT'; countryCode = 'BG'; city = ''; latitude = 42.7; longitude = 23.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '202.152.80.38'; provider = 'UNN'; countryCode = 'BN'; city = 'Bandar Seri Begawan'; latitude = 4.9; longitude = 114.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.181.247.29'; provider = 'gotcha net internet provider'; countryCode = 'BR'; city = 'São Paulo'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '168.181.247.54'; provider = 'gotcha net internet provider'; countryCode = 'BR'; city = 'São Paulo'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '177.131.18.34'; provider = 'Compuservice Empreendimentos L'; countryCode = 'BR'; city = 'Macapá'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '179.228.250.125'; provider = 'TELEFONICA BRASIL S.A'; countryCode = 'BR'; city = 'São Paulo'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '190.89.22.77'; provider = 'RDS TECNOLOGIA-ME'; countryCode = 'BR'; city = 'São Luís'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.195.170.186'; provider = 'Ligga Telecomunicacoes S.A.'; countryCode = 'BR'; city = 'Ivai'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '178.124.148.226'; provider = 'Republican Unitary Telecommuni'; countryCode = 'BY'; city = 'Minsk'; latitude = 53.9; longitude = 27.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '149.112.122.20'; provider = 'CIRADNS3'; countryCode = 'CA'; city = ''; latitude = 43.7; longitude = -79.4; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '208.91.112.52'; provider = 'FORTINET'; countryCode = 'CA'; city = 'Burnaby'; latitude = 43.7; longitude = -79.4; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '141.195.95.131'; provider = 'Init7 (Switzerland) Ltd.'; countryCode = 'CH'; city = 'Affoltern am Albis'; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.186.1.111'; provider = 'Bluewin'; countryCode = 'CH'; city = ''; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.186.4.192'; provider = 'Bluewin'; countryCode = 'CH'; city = ''; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.245.237.35'; provider = 'fenaco Genossenschaft'; countryCode = 'CH'; city = ''; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.17.17.170'; provider = 'Private Layer INC'; countryCode = 'CH'; city = 'Zurich'; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.90.9.166'; provider = 'netplusFR SA'; countryCode = 'CH'; city = 'Fribourg'; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '190.151.104.178'; provider = 'ENTEL CHILE S.A.'; countryCode = 'CL'; city = 'Vallenar'; latitude = -33.4; longitude = -70.7; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.68.46.21'; provider = 'CTC. CORP S.A. TELEFONICA EMPR'; countryCode = 'CL'; city = 'Chimbarongo'; latitude = -33.4; longitude = -70.7; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '201.148.107.14'; provider = 'HOSTING.'; countryCode = 'CL'; city = 'Santiago'; latitude = -33.4; longitude = -70.7; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '114.114.115.115'; provider = 'COGENT-174'; countryCode = 'CN'; city = ''; latitude = 39.9; longitude = 116.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '181.129.36.242'; provider = 'EPM Telecomunicaciones S.A. E.'; countryCode = 'CO'; city = 'Bogotá'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.143.37.202'; provider = 'EPM Telecomunicaciones S.A. E.'; countryCode = 'CO'; city = 'Medellín'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.48.196.182'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Bogotá'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.49.102.21'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Pereira'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.49.210.138'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Medellín'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '190.145.215.198'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Bogotá'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '190.171.97.250'; provider = 'Telecable Economico S.A.'; countryCode = 'CR'; city = 'San José'; latitude = 9.9; longitude = -84.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '185.43.135.1'; provider = 'CZ.NIC z.s.p.o.'; countryCode = 'CZ'; city = ''; latitude = 50.1; longitude = 14.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '89.190.65.200'; provider = 'N_SYS s.r.o.'; countryCode = 'CZ'; city = 'Broumov'; latitude = 50.1; longitude = 14.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.127.135.212'; provider = 'TFnet s.r.o.'; countryCode = 'CZ'; city = 'Tanvald'; latitude = 50.1; longitude = 14.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '185.93.180.131'; provider = 'M247 Ltd'; countryCode = 'DE'; city = 'Frankfurt am Main'; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.25.0.60'; provider = 'Deutsche Telekom AG'; countryCode = 'DE'; city = 'Rehau'; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '217.160.70.42'; provider = 'IONOS SE'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '78.31.67.99'; provider = 'myLoc managed IT AG'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.16.18.228'; provider = 'netcup GmbH'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.16.19.65'; provider = 'netcup GmbH'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.27.217.7'; provider = 'GlobalConnect A S'; countryCode = 'DK'; city = 'Odense'; latitude = 55.7; longitude = 12.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '157.100.63.48'; provider = 'NEDETEL S.A.'; countryCode = 'EC'; city = ''; latitude = -0.2; longitude = -78.5; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '170.239.204.230'; provider = 'FIBERNET'; countryCode = 'EC'; city = 'Ambato'; latitude = -0.2; longitude = -78.5; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '94.198.55.64'; provider = 'LLC Smart Ape'; countryCode = 'EE'; city = ''; latitude = 59.4; longitude = 24.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '41.33.166.19'; provider = 'TE-AS'; countryCode = 'EG'; city = 'Cairo'; latitude = 30; longitude = 31.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '5.1.38.155'; provider = 'Prisco Electronica S.L.'; countryCode = 'ES'; city = 'Roses'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.26.214.15'; provider = 'R Cable y Telecable Telecomuni'; countryCode = 'ES'; city = 'Sanxenxo'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.9.198.12'; provider = 'Euskaltel S.A.'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.9.198.202'; provider = 'Euskaltel S.A.'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.9.198.217'; provider = 'Euskaltel S.A.'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '82.223.43.222'; provider = 'IONOS SE'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.23.204.137'; provider = 'DNA Oyj'; countryCode = 'FI'; city = 'Oulu'; latitude = 60.2; longitude = 24.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '109.5.33.66'; provider = 'Societe Francaise Du Radiotele'; countryCode = 'FR'; city = 'Paris'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '141.95.6.51'; provider = 'OVH SAS'; countryCode = 'FR'; city = ''; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '15.188.45.248'; provider = 'AMAZON-02'; countryCode = 'FR'; city = 'Paris'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '151.80.145.143'; provider = 'OVH SAS'; countryCode = 'FR'; city = 'Roubaix'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.135.166.77'; provider = 'OVH SAS'; countryCode = 'FR'; city = 'Bonneuil-sur-Marne'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.39.71.50'; provider = 'OVH SAS'; countryCode = 'FR'; city = ''; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '109.228.0.238'; provider = 'IONOS SE'; countryCode = 'GB'; city = ''; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '167.98.161.41'; provider = 'Exponential-E Ltd.'; countryCode = 'GB'; city = 'London'; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '167.98.171.242'; provider = 'Exponential-E Ltd.'; countryCode = 'GB'; city = 'Sheffield'; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.168.4.123'; provider = 'Virgin Media Limited'; countryCode = 'GB'; city = 'Liverpool'; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.99.66.220'; provider = 'British Telecommunications PLC'; countryCode = 'GB'; city = ''; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.11.11.11'; provider = 'Liquid Telecommunications Ltd'; countryCode = 'GB'; city = ''; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '212.72.130.21'; provider = 'Caucasus Online Ltd.'; countryCode = 'GE'; city = ''; latitude = 41.7; longitude = 44.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '192.71.166.92'; provider = 'SYNAPSECOM S.A. Provider of Te'; countryCode = 'GR'; city = 'Thessaloniki'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.177.199.1'; provider = 'University Of Ioannina'; countryCode = 'GR'; city = ''; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.167.123.245'; provider = 'OTEnet S .A .'; countryCode = 'GR'; city = 'Thessaloniki'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.251.19.1'; provider = 'National Infrastructures for R'; countryCode = 'GR'; city = 'Marousi'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '212.251.32.202'; provider = 'Forthnet'; countryCode = 'GR'; city = 'Athens'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '113.28.67.147'; provider = 'HKT Limited'; countryCode = 'HK'; city = 'Central'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '175.45.16.253'; provider = 'HKBN Enterprise Solutions HK L'; countryCode = 'HK'; city = 'Central'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.131.73.38'; provider = 'HKBN Enterprise Solutions HK L'; countryCode = 'HK'; city = 'Tai Kok Tsui'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.181.242.131'; provider = 'HongKong Commercial Internet E'; countryCode = 'HK'; city = ''; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.198.167.39'; provider = 'HKT Limited'; countryCode = 'HK'; city = 'Central'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '223.255.176.195'; provider = 'HKBN Enterprise Solutions HK L'; countryCode = 'HK'; city = 'Wanchai'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '83.131.4.217'; provider = 'Hrvatski Telekom d.d.'; countryCode = 'HR'; city = 'Velika Jamnicka'; latitude = 45.8; longitude = 16; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '109.61.113.35'; provider = 'Dravanet Co Ltd.'; countryCode = 'HU'; city = 'Pécs'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.228.230.148'; provider = 'Magyar Telekom plc.'; countryCode = 'HU'; city = 'Budapest'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.249.168.172'; provider = 'Magyar Telekom plc.'; countryCode = 'HU'; city = 'Budapest'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.183.227.40'; provider = 'Magyar Telekom plc.'; countryCode = 'HU'; city = 'Budapest'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '103.175.237.3'; provider = 'PT Marva Global Telekomunikasi'; countryCode = 'ID'; city = 'Malang'; latitude = -6.2; longitude = 106.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.92.207.33'; provider = 'PT Hyperindo Media Perkasa'; countryCode = 'ID'; city = 'Jakarta'; latitude = -6.2; longitude = 106.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '36.67.236.161'; provider = 'PT Telekomunikasi Indonesia'; countryCode = 'ID'; city = 'Mangunsari'; latitude = -6.2; longitude = 106.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '54.229.171.243'; provider = 'AMAZON-02'; countryCode = 'IE'; city = 'Dublin'; latitude = 53.3; longitude = -6.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '185.106.131.141'; provider = 'O.m.c. Computers & Communicati'; countryCode = 'IL'; city = ''; latitude = 32.1; longitude = 34.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '91.223.106.229'; provider = 'O.m.c. Computers & Communicati'; countryCode = 'IL'; city = 'Tel Aviv'; latitude = 32.1; longitude = 34.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.13.112.251'; provider = 'LeapSwitch Networks Pvt Ltd'; countryCode = 'IN'; city = ''; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.174.102.61'; provider = 'IDIGITALCAMP WEB SERVICES'; countryCode = 'IN'; city = ''; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.241.181.28'; provider = 'CtrlS'; countryCode = 'IN'; city = ''; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '169.38.73.5'; provider = 'SOFTLAYER'; countryCode = 'IN'; city = 'Chennai'; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '213.176.123.5'; provider = 'Iranian Research Organization'; countryCode = 'IR'; city = ''; latitude = 35.7; longitude = 51.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '81.91.144.116'; provider = 'Farabord Dadeh Haye Iranian Co'; countryCode = 'IR'; city = 'Tehran'; latitude = 35.7; longitude = 51.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '154.14.16.251'; provider = 'GTT Communications Inc.'; countryCode = 'IT'; city = 'Canossa'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.53.180.252'; provider = 'Computer System'; countryCode = 'IT'; city = 'Terranova da Sibari'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '2.40.63.222'; provider = 'Vodafone Italia S.p.A.'; countryCode = 'IT'; city = 'Castel Maggiore'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '84.253.140.132'; provider = 'Irideos S.p.A.'; countryCode = 'IT'; city = 'Rome'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '124.32.115.205'; provider = 'ARTERIA Networks Corporation'; countryCode = 'JP'; city = 'Kawaguchi'; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '153.120.88.148'; provider = 'SAKURA Internet Inc.'; countryCode = 'JP'; city = ''; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.210.190.99'; provider = 'BEKKOAME INTERNET INC.'; countryCode = 'JP'; city = ''; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.171.38.41'; provider = 'Yahoo Japan Corporation'; countryCode = 'JP'; city = ''; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '59.158.8.83'; provider = 'ARTERIA Networks Corporation'; countryCode = 'JP'; city = 'Sapporo'; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '66.42.33.24'; provider = 'AS-CHOOPA'; countryCode = 'JP'; city = 'Heiwajima'; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '134.75.122.2'; provider = 'Hoseo University'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.154.160.4'; provider = 'SK Co.'; countryCode = 'KR'; city = 'Seongnam-si'; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.154.224.50'; provider = 'SK Co.'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.30.143.11'; provider = 'Shinbiro'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.225.255.11'; provider = 'Korea Telecom'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '211.115.194.3'; provider = 'Sejong Telecom'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '195.88.223.73'; provider = 'Kuwait Petroleum Corporation'; countryCode = 'KW'; city = 'Kuwait City'; latitude = 29.4; longitude = 48; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '5.63.111.235'; provider = 'JSC Kazakhtelecom'; countryCode = 'KZ'; city = 'Aktobe'; latitude = 43.2; longitude = 76.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '79.137.181.102'; provider = 'Ecotel Ltd.'; countryCode = 'KZ'; city = 'Taraz'; latitude = 43.2; longitude = 76.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '46.148.26.40'; provider = 'Infium UAB'; countryCode = 'LT'; city = ''; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '82.135.203.178'; provider = 'Telia Lietuva AB'; countryCode = 'LT'; city = 'Vilnius'; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.119.203.210'; provider = 'Telia Lietuva AB'; countryCode = 'LT'; city = 'Kaunas'; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '92.61.44.7'; provider = 'Telia Lietuva AB'; countryCode = 'LT'; city = ''; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.93.22.17'; provider = 'Jsc Balticom'; countryCode = 'LV'; city = 'Riga'; latitude = 56.9; longitude = 24.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '83.99.220.7'; provider = 'Jsc Balticom'; countryCode = 'LV'; city = 'Riga'; latitude = 56.9; longitude = 24.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '91.200.67.156'; provider = 'SIA Tet'; countryCode = 'LV'; city = ''; latitude = 56.9; longitude = 24.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '165.16.58.124'; provider = 'Aljeel-net'; countryCode = 'LY'; city = ''; latitude = 32.9; longitude = 13.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.77.116.62'; provider = 'GTCOMM'; countryCode = 'MA'; city = 'Marrakesh'; latitude = 33.6; longitude = -7.6; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '95.65.9.171'; provider = 'StarNet Solutii SRL'; countryCode = 'MD'; city = 'Bălţi'; latitude = 47; longitude = 28.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '103.121.228.5'; provider = 'MyanmarAPN'; countryCode = 'MM'; city = 'Yangon'; latitude = 16.8; longitude = 96.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.131.254.166'; provider = 'Mobinet LLC. AS Mobinet Intern'; countryCode = 'MN'; city = ''; latitude = 47.9; longitude = 106.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.21.116.206'; provider = 'Mobinet LLC. AS Mobinet Intern'; countryCode = 'MN'; city = ''; latitude = 47.9; longitude = 106.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.5.200.8'; provider = 'Mongolian National Research an'; countryCode = 'MN'; city = ''; latitude = 47.9; longitude = 106.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '94.124.152.158'; provider = 'Idom Technologies SAS'; countryCode = 'MQ'; city = 'Riviere Salee'; latitude = 14.6; longitude = -61.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '41.216.125.179'; provider = 'Liquid Telecommunications Ltd'; countryCode = 'MU'; city = ''; latitude = -20.2; longitude = 57.5; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '186.96.11.240'; provider = 'TOTAL PLAY TELECOMUNICACIONES'; countryCode = 'MX'; city = 'Monterrey'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '187.216.86.65'; provider = 'Uninet S.A. de C.V.'; countryCode = 'MX'; city = 'Hermosillo'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '189.196.91.198'; provider = 'Mega Cable S.A. de C.V.'; countryCode = 'MX'; city = 'Monterrey'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '189.204.6.253'; provider = 'Mexico Red de Telecomunicacion'; countryCode = 'MX'; city = 'Cuautitlan'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.76.5.147'; provider = 'Alestra S. de R.L. de C.V.'; countryCode = 'MX'; city = 'San Luis Potosí City'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '201.143.181.110'; provider = 'Telefonos del Noroeste S.A. de'; countryCode = 'MX'; city = 'San Luis Río Colorado'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '1.9.165.210'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Petaling Jaya'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '1.9.63.97'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Shah Alam'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.13.123.16'; provider = 'Exa Bytes Network Sdn.Bhd.'; countryCode = 'MY'; city = ''; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '175.139.1.45'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Taiping'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.184.80.21'; provider = 'TIME dotCom Berhad No. 14 Jala'; countryCode = 'MY'; city = 'Rawang'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.187.25.147'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Puchong Batu Dua Belas'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '41.218.90.154'; provider = 'Paratus-Telecom'; countryCode = 'NA'; city = 'Windhoek'; latitude = -22.6; longitude = 17.1; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '178.62.197.147'; provider = 'DIGITALOCEAN-ASN'; countryCode = 'NL'; city = 'Amsterdam'; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '45.14.48.185'; provider = 'Itglobal.com Nl B.v.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.146.233.162'; provider = 'Vodafone Libertel B.V.'; countryCode = 'NL'; city = 'Maastricht'; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.221.162.37'; provider = 'Akamai International B.V.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.221.162.94'; provider = 'Akamai International B.V.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.221.163.196'; provider = 'Akamai International B.V.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.159.253.130'; provider = 'Globalconnect As'; countryCode = 'NO'; city = 'Langhus'; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.222.170.103'; provider = 'Eltele AS'; countryCode = 'NO'; city = 'Alta'; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '78.31.85.18'; provider = 'Telenor Norge AS'; countryCode = 'NO'; city = 'Andalsnes'; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.127.59.12'; provider = 'mnemonic AS'; countryCode = 'NO'; city = ''; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.127.59.14'; provider = 'mnemonic AS'; countryCode = 'NO'; city = ''; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '124.83.13.150'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Balingasag'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.158.15.67'; provider = 'Unit 802 Orient Square Buildin'; countryCode = 'PH'; city = ''; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.177.52.229'; provider = 'Globe Telecoms'; countryCode = 'PH'; city = 'Andres Bonifacio'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.1.81.40'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Mandaue City'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.1.86.1'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Legazpi'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.5.101.242'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Ozamiz'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '118.103.239.33'; provider = 'Connect Communications'; countryCode = 'PK'; city = 'Karachi'; latitude = 24.9; longitude = 67; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.135.31.114'; provider = 'Pakistan Telecommunication Com'; countryCode = 'PK'; city = 'Gujrat'; latitude = 24.9; longitude = 67; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '195.3.204.225'; provider = 'TUCHA Sp. z o.o.'; countryCode = 'PL'; city = ''; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.45.111.51'; provider = 'Asta-net S.A.'; countryCode = 'PL'; city = 'Czarnkow'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.65.176.110'; provider = 'ICT FUTURE Sp. z o.o.'; countryCode = 'PL'; city = 'Wroclaw'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.87.39.34'; provider = 'INEA sp. z o.o.'; countryCode = 'PL'; city = 'Sompolno'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '91.233.237.201'; provider = 'PROSAT s.c.'; countryCode = 'PL'; city = 'Kościan'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.240.43.117'; provider = 'FHU PING'; countryCode = 'PL'; city = 'Warsaw'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.46.175.93'; provider = 'Almouroltec Servicos De Inform'; countryCode = 'PT'; city = 'Leiria'; latitude = 38.7; longitude = -9.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '190.52.135.140'; provider = 'COMPANIA PARAGUAYA DE COMUNICA'; countryCode = 'PY'; city = 'San Lorenzo'; latitude = -25.3; longitude = -57.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '201.217.57.148'; provider = 'COMPANIA PARAGUAYA DE COMUNICA'; countryCode = 'PY'; city = 'Asunción'; latitude = -25.3; longitude = -57.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '212.146.97.154'; provider = 'GTS Telecom SRL'; countryCode = 'RO'; city = 'Bucharest'; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.2.196.93'; provider = 'RCS & RDS'; countryCode = 'RO'; city = 'Cluj-Napoca'; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.96.177.217'; provider = 'Vodafone Romania S.A.'; countryCode = 'RO'; city = ''; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '89.42.219.106'; provider = 'ROMARG SRL'; countryCode = 'RO'; city = ''; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.52.89.226'; provider = 'Nextgen Communications Srl'; countryCode = 'RO'; city = 'Giurgiu'; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '93.87.119.162'; provider = 'TELEKOM SRBIJA a.d.'; countryCode = 'RS'; city = ''; latitude = 44.8; longitude = 20.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '93.87.127.66'; provider = 'TELEKOM SRBIJA a.d.'; countryCode = 'RS'; city = 'Opstina Arandelovac'; latitude = 44.8; longitude = 20.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '217.150.35.129'; provider = 'Joint Stock Company TransTeleC'; countryCode = 'RU'; city = 'Rostov-on-Don'; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.164.31.60'; provider = 'JSC ER-Telecom Holding'; countryCode = 'RU'; city = 'Tula'; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.188.42.199'; provider = 'OOO Network of data-centers Se'; countryCode = 'RU'; city = 'St Petersburg'; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '62.76.62.76'; provider = 'Joint-stock company Internet E'; countryCode = 'RU'; city = ''; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '91.223.120.25'; provider = 'Sibirskie Innovacionnye Sistem'; countryCode = 'RU'; city = ''; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '192.165.252.20'; provider = 'Fiberaccessbolaget i Sverige A'; countryCode = 'SE'; city = 'Ängelholm'; latitude = 59.3; longitude = 18.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '217.119.160.99'; provider = 'Tele2 SWIPnet'; countryCode = 'SE'; city = 'Stockholm'; latitude = 59.3; longitude = 18.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '116.12.172.241'; provider = 'SingNet'; countryCode = 'SG'; city = 'Singapore'; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '119.75.28.242'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '124.66.128.198'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '128.106.52.161'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '151.192.60.134'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '180.255.3.49'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '193.2.246.9'; provider = 'ARNES'; countryCode = 'SI'; city = 'Zgornje Gorje'; latitude = 46.1; longitude = 14.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '89.233.118.207'; provider = 'T-2 d.o.o.'; countryCode = 'SI'; city = 'Brezovica pri Ljubljani'; latitude = 46.1; longitude = 14.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '93.103.221.171'; provider = 'T-2 d.o.o.'; countryCode = 'SI'; city = 'Kamenica'; latitude = 46.1; longitude = 14.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '1.1.188.104'; provider = 'TOT Public Company Limited'; countryCode = 'TH'; city = 'Ban Phan Don'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '110.77.149.172'; provider = 'CAT TELECOM Public Company Ltd'; countryCode = 'TH'; city = 'Samut Prakan'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '122.155.213.7'; provider = 'The Communication Authoity of'; countryCode = 'TH'; city = ''; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '159.192.105.164'; provider = 'CAT TELECOM Public Company Ltd'; countryCode = 'TH'; city = ''; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '159.192.142.29'; provider = 'CAT TELECOM Public Company Ltd'; countryCode = 'TH'; city = 'Ban Dan Noen Sung'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.129.59.69'; provider = 'The Communication Authoity of'; countryCode = 'TH'; city = 'Si Khoraphum'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '85.9.129.36'; provider = 'Tacom LLC'; countryCode = 'TJ'; city = 'Dushanbe'; latitude = 38.6; longitude = 68.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '85.9.129.38'; provider = 'Tacom LLC'; countryCode = 'TJ'; city = 'Dushanbe'; latitude = 38.6; longitude = 68.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '196.203.125.132'; provider = 'EL-Khawarizmi'; countryCode = 'TN'; city = ''; latitude = 36.8; longitude = 10.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '196.203.125.133'; provider = 'EL-Khawarizmi'; countryCode = 'TN'; city = ''; latitude = 36.8; longitude = 10.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '176.235.135.204'; provider = 'Superonline Iletisim Hizmetler'; countryCode = 'TR'; city = ''; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.21.58.113'; provider = 'GTT Communications Inc.'; countryCode = 'TR'; city = ''; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '31.7.37.37'; provider = 'Teknet Yazlim Ve Bilgisayar Te'; countryCode = 'TR'; city = 'Antalya'; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.99.234.230'; provider = 'Turk Telekom'; countryCode = 'TR'; city = 'Istanbul'; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '196.3.132.154'; provider = 'Telecommunication Services of'; countryCode = 'TT'; city = ''; latitude = 10.7; longitude = -61.5; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '118.99.210.36'; provider = 'SaveCom Internation Inc.'; countryCode = 'TW'; city = 'Hsinchu County'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.95.1.1'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = ''; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '220.135.28.237'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Taipei'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '59.125.246.99'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Tainan City'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '60.250.158.126'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Taipei'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '60.250.159.76'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Taipei'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '176.104.57.223'; provider = 'UnderNet LLC'; countryCode = 'UA'; city = 'Irpin'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '176.104.59.191'; provider = 'UnderNet LLC'; countryCode = 'UA'; city = 'Kyiv'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '176.98.80.97'; provider = 'TOV TV&Radio Company TIM'; countryCode = 'UA'; city = 'Uman'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '178.158.234.89'; provider = 'Maximum-Net LLC'; countryCode = 'UA'; city = 'Vyshneve'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '95.67.81.143'; provider = 'Cosmonova LLC'; countryCode = 'UA'; city = 'Kyiv'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '151.196.0.37'; provider = 'UUNET'; countryCode = 'US'; city = 'Crofton'; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '151.197.0.37'; provider = 'UUNET'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '151.197.0.38'; provider = 'UUNET'; countryCode = 'US'; city = 'Philadelphia'; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '151.201.0.38'; provider = 'UUNET'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '156.154.71.2'; provider = 'SECURITYSERVICES'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '165.87.201.244'; provider = 'ATT-INTERNET4'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '80.80.218.218'; provider = 'LLC texnoprosistem'; countryCode = 'UZ'; city = 'Tashkent'; latitude = 41.3; longitude = 69.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.137.156.3'; provider = 'Vietnam News Agency'; countryCode = 'VN'; city = ''; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.239.32.36'; provider = 'Vietnam National Coaland Miner'; countryCode = 'VN'; city = ''; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '123.30.27.24'; provider = 'VNPT Corp'; countryCode = 'VN'; city = 'Thanh Hóa'; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '125.234.238.3'; provider = 'Viettel Group'; countryCode = 'VN'; city = 'Hanoi'; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.6.96.4'; provider = 'Vietnam News Agency'; countryCode = 'VN'; city = ''; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.78.224.129'; provider = 'Quang Trung Software City Deve'; countryCode = 'VN'; city = 'Ho Chi Minh City'; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '82.114.79.146'; provider = 'Kujtesa Net Sh.p.k.'; countryCode = 'XK'; city = 'Pristina'; latitude = 42.7; longitude = 21.2; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '105.243.213.211'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'Pretoria'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '105.255.121.94'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'George'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '196.216.134.71'; provider = 'Hero-Telecoms'; countryCode = 'ZA'; city = 'Mafikeng'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.0.170.154'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'Nelspruit'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.185.21.252'; provider = 'ZA-1-Grid'; countryCode = 'ZA'; city = ''; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.23.184.111'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'Johannesburg'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.60.129.80'; provider = 'realtime-as'; countryCode = 'ZM'; city = ''; latitude = -15.4; longitude = 28.3; region = 'africa'; anycast = $false }
   )
 
   $override = [string]$env:ACS_PROPAGATION_RESOLVERS
@@ -10866,13 +11648,146 @@ function Get-DnsPropagationResolverCatalog {
   return @($custom)
 }
 
+# ---- Resolver health cache -------------------------------------------------
+#
+# The standalone DNS Propagation Checker keeps a `PublicDns_VettedResolvers.json`
+# file listing every resolver that passed a UDP+TCP probe, refreshed on a 24h
+# timer, and uses it to avoid wasting a check slot on a dead server. We need the
+# same effect without adding a state file to a single-script app, so health is
+# remembered in-process instead: every fan-out records which resolvers answered,
+# and selection prefers proven-good ones on the next request.
+#
+# Entries expire (ACS_PROPAGATION_HEALTH_TTL_MIN, default 30) so a resolver that
+# was down temporarily gets another chance. The dictionary lives on the global
+# scope and is shared into the request runspace pool by 22-RunspaceSetup.ps1 so
+# every worker sees the same view.
+if (-not $global:AcsPropagationHealth) {
+  $global:AcsPropagationHealth = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+}
+
+function Get-DnsPropagationHealthTtlMinutes {
+  $ttl = 30
+  $parsed = 0
+  if ([int]::TryParse([string]$env:ACS_PROPAGATION_HEALTH_TTL_MIN, [ref]$parsed) -and $parsed -gt 0) {
+    $ttl = [Math]::Min(1440, $parsed)
+  }
+  return $ttl
+}
+
+# Returns $true (known good), $false (known bad), or $null (unknown / expired).
+#
+# NOTE: the dictionary is referenced UNQUALIFIED ($AcsPropagationHealth, not
+# $global:...) because 22-RunspaceSetup.ps1 injects it into each worker runspace
+# as a session-state variable at that runspace's global scope -- exactly how
+# $AcsRateLimitStore is handled. Using the global: prefix would resolve to an
+# empty variable inside workers and silently disable the cache.
+function Get-DnsPropagationHealthState {
+  param([string]$Ip)
+
+  if (-not $AcsPropagationHealth) { return $null }
+  $key = ([string]$Ip).Trim()
+  if ([string]::IsNullOrWhiteSpace($key)) { return $null }
+
+  $entry = $null
+  if (-not $AcsPropagationHealth.TryGetValue($key, [ref]$entry)) { return $null }
+  if ($null -eq $entry) { return $null }
+
+  try {
+    if (([DateTime]::UtcNow - [DateTime]$entry.atUtc).TotalMinutes -gt (Get-DnsPropagationHealthTtlMinutes)) { return $null }
+  } catch { return $null }
+
+  return [bool]$entry.healthy
+}
+
+function Set-DnsPropagationHealthState {
+  param([string]$Ip, [bool]$Healthy)
+
+  if (-not $AcsPropagationHealth) { return }
+  $key = ([string]$Ip).Trim()
+  if ([string]::IsNullOrWhiteSpace($key)) { return }
+
+  # Bound the dictionary: the catalog is finite, but an operator override or a
+  # very long-lived process could otherwise grow it without limit.
+  if ($AcsPropagationHealth.Count -gt 5000) {
+    foreach ($stale in @($AcsPropagationHealth.Keys)) {
+      $removed = $null
+      $null = $AcsPropagationHealth.TryRemove($stale, [ref]$removed)
+    }
+  }
+
+  $AcsPropagationHealth[$key] = @{ healthy = $Healthy; atUtc = [DateTime]::UtcNow }
+}
+
+# Parse operator- or user-supplied resolver addresses into catalog-shaped objects.
+#
+# Accepted per entry (newline, comma or semicolon separated):
+#   1.2.3.4
+#   1.2.3.4 My office resolver
+#   1.2.3.4|My office resolver
+#
+# SECURITY: this is the one place a *user* (not just the operator) can influence
+# which sockets we open, so every address must parse as a public IPv4 literal --
+# hostnames are refused outright so nothing is resolved on the user's behalf, and
+# Test-IsPublicIpAddress blocks loopback/private/link-local/CGNAT targets.
+function ConvertFrom-DnsPropagationResolverInput {
+  param(
+    [string]$Text,
+    [int]$MaxEntries = 100
+  )
+
+  $parsed = [System.Collections.Generic.List[object]]::new()
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $parsed.ToArray() }
+
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($rawEntry in ($Text -split '[\r\n,;]+')) {
+    if ($parsed.Count -ge $MaxEntries) { break }
+    $entry = ([string]$rawEntry).Trim()
+    if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+
+    $ip = $entry
+    $label = ''
+    $sepIndex = $entry.IndexOfAny([char[]]@('|', ' ', "`t"))
+    if ($sepIndex -gt 0) {
+      $ip = $entry.Substring(0, $sepIndex).Trim()
+      $label = $entry.Substring($sepIndex + 1).Trim()
+    }
+
+    $parsedIp = $null
+    if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsedIp)) { continue }
+    if ($parsedIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { continue }
+    if (-not (Test-IsPublicIpAddress -IpAddress $ip)) { continue }
+    if (-not $seen.Add($ip)) { continue }
+
+    if ($label.Length -gt 40) { $label = $label.Substring(0, 40).Trim() }
+    if ([string]::IsNullOrWhiteSpace($label)) { $label = $ip }
+
+    # No coordinates: we cannot geolocate an arbitrary address, and inventing one
+    # would put a misleading pin on the map. Null lat/lon keeps these out of the
+    # map rollup while still showing them in the per-resolver detail list.
+    $parsed.Add([pscustomobject]@{
+      ip          = $ip
+      provider    = $label
+      countryCode = ''
+      city        = ''
+      latitude    = $null
+      longitude   = $null
+      region      = 'custom'
+      anycast     = $false
+    })
+  }
+
+  return $parsed.ToArray()
+}
+
 # Pick the resolvers to query for one propagation run.
 #
 # The selection is deliberately *balanced*: we round-robin across the requested
 # regions so a small MaxResolvers budget still produces a geographically spread
 # sample instead of, say, five Chinese resolvers. Within a region the catalog
 # order is preserved so results are stable and reproducible across runs (the
-# card would otherwise flicker between lookups for no reason).
+# card would otherwise flicker between lookups for no reason) -- except that
+# resolvers we recently saw fail sink to the bottom of their region bucket, so a
+# large request is not silently padded out with servers already known to be dead.
 function Select-DnsPropagationResolvers {
   param(
     [string[]]$Regions = @(),
@@ -10915,6 +11830,27 @@ function Select-DnsPropagationResolvers {
     $key = ([string]$item.region).ToLowerInvariant()
     if (-not $groups.Contains($key)) { $groups[$key] = [System.Collections.Generic.List[object]]::new() }
     $groups[$key].Add($item)
+  }
+
+  # Within each region, float resolvers we know answered recently to the front and
+  # sink ones we know are dead. Unknown/expired entries stay in catalog order in
+  # between, so a fresh process still walks the list deterministically.
+  foreach ($key in @($groups.Keys)) {
+    $bucket = $groups[$key]
+    $known = [System.Collections.Generic.List[object]]::new()
+    $unknown = [System.Collections.Generic.List[object]]::new()
+    $dead = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $bucket) {
+      $health = Get-DnsPropagationHealthState -Ip ([string]$item.ip)
+      if ($health -eq $true) { $known.Add($item) }
+      elseif ($health -eq $false) { $dead.Add($item) }
+      else { $unknown.Add($item) }
+    }
+    $ordered = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $known) { $ordered.Add($item) }
+    foreach ($item in $unknown) { $ordered.Add($item) }
+    foreach ($item in $dead) { $ordered.Add($item) }
+    $groups[$key] = $ordered
   }
 
   $selected = [System.Collections.Generic.List[object]]::new()
@@ -11528,7 +12464,9 @@ function Get-DnsPropagationStatus {
     [string[]]$Regions = @(),
     [int]$MaxResolvers = 0,
     [int]$TimeoutMs = 0,
-    [string]$ExpectedValue = ''
+    [string]$ExpectedValue = '',
+    [string]$CustomResolvers = '',
+    [bool]$ValidateResolvers = $true
   )
 
   $d = ([string]$Domain).Trim().TrimEnd('.')
@@ -11546,6 +12484,11 @@ function Get-DnsPropagationStatus {
     expectedProvided   = (-not [string]::IsNullOrWhiteSpace($ExpectedValue))
     timeoutMs          = 0
     resolverCount      = 0
+    requestedCount     = 0
+    candidateCount     = 0
+    validated          = $false
+    usingCustom        = $false
+    catalogCount       = 0
     respondedCount     = 0
     unavailableCount   = 0
     truncatedCount     = 0
@@ -11606,6 +12549,7 @@ function Get-DnsPropagationStatus {
   # Advertise the regions the catalog can serve so the SPA settings panel can
   # build its region picker from live server data instead of a hard-coded list.
   $catalog = @(Get-DnsPropagationResolverCatalog)
+  $status.catalogCount = $catalog.Count
   $regionCounts = [ordered]@{}
   foreach ($item in $catalog) {
     $key = ([string]$item.region).ToLowerInvariant()
@@ -11617,7 +12561,71 @@ function Get-DnsPropagationStatus {
     [pscustomobject]@{ region = $_; resolverCount = $regionCounts[$_] }
   })
 
-  $selected = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $effectiveMax)
+  $status.requestedCount = $effectiveMax
+
+  # ---- Choose the resolvers to query ----
+  #
+  # A user-supplied list replaces the catalog entirely: "check these servers" is
+  # an unambiguous instruction, and silently blending in 25 public resolvers would
+  # make the verdict about something other than what was asked.
+  $customList = @(ConvertFrom-DnsPropagationResolverInput -Text $CustomResolvers -MaxEntries 100)
+  $selected = @()
+  $outcomes = @{}
+
+  if ($customList.Count -gt 0) {
+    $status.usingCustom = $true
+    $selected = @($customList | Select-Object -First $effectiveMax)
+    $status.candidateCount = $selected.Count
+    $outcomes = Invoke-DnsPropagationFanout -Resolvers $selected -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+  }
+  elseif ($ValidateResolvers) {
+    # Over-select, query them ALL in one fan-out, then keep the first
+    # $effectiveMax that returned a usable answer.
+    #
+    # The standalone tool validates candidates against `example.com` and then
+    # re-queries the survivors. That costs two round trips AND still overstates
+    # the yield, because a resolver can happily answer a tiny example.com A
+    # record and then fail on the real question (a domain with 60+ TXT records
+    # needs TCP fallback, which many open resolvers refuse). Validating with the
+    # actual query removes both problems: one fan-out instead of two, and
+    # "usable" means usable for THIS lookup. Because the fan-out is concurrent,
+    # probing 3x the candidates costs the same wall time as probing N.
+    $candidateTarget = [Math]::Min(300, [Math]::Max($effectiveMax * 3, $effectiveMax + 12))
+    $candidates = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $candidateTarget)
+    $status.candidateCount = $candidates.Count
+
+    if ($candidates.Count -gt 0) {
+      $outcomes = Invoke-DnsPropagationFanout -Resolvers $candidates -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+      $status.validated = $true
+
+      # Candidates arrive in region round-robin order, so taking the usable ones
+      # in sequence preserves the geographic spread.
+      $usableSelection = [System.Collections.Generic.List[object]]::new()
+      foreach ($candidate in $candidates) {
+        if ($usableSelection.Count -ge $effectiveMax) { break }
+        $outcome = $outcomes[([string]$candidate.ip).Trim()]
+        if ($null -eq $outcome) { continue }
+        if ($outcome.truncated) { continue }
+        if ($outcome.rcode -eq 0 -or $outcome.rcode -eq 3) { $usableSelection.Add($candidate) }
+      }
+
+      if ($usableSelection.Count -eq 0) {
+        # Nothing answered at all (typically outbound UDP/53 blocked). Fall back
+        # to the plain balanced selection so the card can report the attempt
+        # rather than claiming there are no resolvers.
+        $status.validated = $false
+        $selected = @($candidates | Select-Object -First $effectiveMax)
+      } else {
+        $selected = $usableSelection.ToArray()
+      }
+    }
+  }
+  else {
+    $selected = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $effectiveMax)
+    $status.candidateCount = $selected.Count
+    $outcomes = Invoke-DnsPropagationFanout -Resolvers $selected -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+  }
+
   if ($selected.Count -eq 0) {
     $status.error = 'No public resolvers available for the selected regions.'
     $status.summary = 'NoResolvers'
@@ -11626,7 +12634,11 @@ function Get-DnsPropagationStatus {
   $status.resolverCount = $selected.Count
   $status.regions = @($selected | ForEach-Object { ([string]$_.region).ToLowerInvariant() } | Sort-Object -Unique)
 
-  $outcomes = Invoke-DnsPropagationFanout -Resolvers $selected -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+  # Record health for every resolver we contacted, not just the ones we kept, so
+  # the next request's selection can skip the failures outright.
+  foreach ($probedIp in @($outcomes.Keys)) {
+    Set-DnsPropagationHealthState -Ip $probedIp -Healthy ([bool]($null -ne $outcomes[$probedIp].rcode))
+  }
 
   # ---- Build per-resolver rows ----
   $rows = [System.Collections.Generic.List[object]]::new()
@@ -11650,8 +12662,10 @@ function Get-DnsPropagationStatus {
       provider    = [string]$resolver.provider
       countryCode = [string]$resolver.countryCode
       city        = [string]$resolver.city
-      latitude    = [double]$resolver.latitude
-      longitude   = [double]$resolver.longitude
+      # Kept nullable: a user-supplied resolver has no geolocation, and coercing
+      # $null to 0.0 would drop a pin in the Atlantic off West Africa.
+      latitude    = $(if ($null -eq $resolver.latitude) { $null } else { [double]$resolver.latitude })
+      longitude   = $(if ($null -eq $resolver.longitude) { $null } else { [double]$resolver.longitude })
       region      = ([string]$resolver.region).ToLowerInvariant()
       anycast     = [bool]$resolver.anycast
       responded   = $responded
@@ -11747,18 +12761,32 @@ function Get-DnsPropagationStatus {
   $status.propagationPercent = if ($responders.Count -gt 0) { [int][Math]::Round(100.0 * $status.matchingCount / $responders.Count) } else { 0 }
 
   # ---- Overall state ----
+  #
+  # Outlier tolerance for large samples: with 100 public resolvers in play, a
+  # handful are ad-blocking, captive or deliberately lying resolvers that return
+  # an empty answer for names they have never heard of. Letting a single such
+  # server drive the whole card to FAIL would make big samples less trustworthy
+  # than small ones. Below 20 responders every miss still counts, because there a
+  # single divergent vantage point genuinely is signal.
+  $partialThreshold = 1
+  if ($responders.Count -ge 20) {
+    $partialThreshold = [int][Math]::Ceiling($responders.Count * 0.05)
+    if ($partialThreshold -lt 1) { $partialThreshold = 1 }
+  }
+
   if ($status.matchingCount -eq 0 -and $status.mismatchCount -eq 0) {
     # Every responder agrees the record does not exist.
     $status.state = 'norecord'
     $status.summary = 'NoRecordAnywhere'
-  } elseif ($noRecordCount -gt 0 -and $status.matchingCount -gt 0) {
+  } elseif ($noRecordCount -ge $partialThreshold -and $status.matchingCount -gt 0) {
     # The classic "still propagating" signature: present at some vantage points,
     # absent at others. This is the case that breaks ACS domain verification.
     $status.state = 'partial'
     $status.summary = 'PartiallyPropagated'
-  } elseif ($status.mismatchCount -gt 0) {
+  } elseif ($status.mismatchCount -gt 0 -or $noRecordCount -gt 0) {
     # Everyone has *a* record, but not the same one (stale cache, split-horizon,
-    # geo-DNS, or an edit that is still rolling out).
+    # geo-DNS, or an edit that is still rolling out) -- or a below-threshold
+    # number of resolvers reported no record at all.
     $status.state = 'mismatch'
     $status.summary = 'InconsistentAnswers'
   } else {
@@ -11778,7 +12806,7 @@ function Get-DnsPropagationStatus {
   # adds noise to the map. Non-responding resolvers remain in `results` for
   # callers that want the full picture.
   $locationMap = [ordered]@{}
-  foreach ($row in ($rows | Where-Object { $_.responded -eq $true })) {
+  foreach ($row in ($rows | Where-Object { $_.responded -eq $true -and $null -ne $_.latitude -and $null -ne $_.longitude })) {
     $key = '{0:N2}|{1:N2}' -f $row.latitude, $row.longitude
     if (-not $locationMap.Contains($key)) {
       $locationMap[$key] = [pscustomobject]@{
@@ -12628,7 +13656,89 @@ $htmlPage = @'
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>Azure Communication Services - Email Domain Checker</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
+
+<!--
+  SEO / link-preview metadata.
+  __ACS_SITE_URL__ is replaced per request by Write-Html (11-HttpHelpers.ps1)
+  with the deployment's public origin, because the HTML here-string is built
+  once at startup and cannot know the hostname it will be served from.
+  __ACS_OG_IMAGE__ is replaced at startup by 20f-HtmlPostProcess.ps1.
+-->
+<meta name="description" content="Check SPF, DKIM, DMARC, MX and TXT records, global DNS propagation, blocklist reputation and WHOIS for Azure Communication Services email domain setup." />
+<meta name="application-name" content="ACS Email Domain Checker" />
+<meta name="robots" content="__ACS_ROBOTS__" />
+<meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#020617" media="(prefers-color-scheme: dark)" />
+<link rel="canonical" href="__ACS_SITE_URL__/" />
+
+<!-- One hreflang entry per shipped translation so ?lang= variants are treated
+     as alternates of a single page instead of duplicate content. -->
+<link rel="alternate" hreflang="x-default" href="__ACS_SITE_URL__/" />
+<link rel="alternate" hreflang="en" href="__ACS_SITE_URL__/?lang=en" />
+<link rel="alternate" hreflang="es" href="__ACS_SITE_URL__/?lang=es" />
+<link rel="alternate" hreflang="fr" href="__ACS_SITE_URL__/?lang=fr" />
+<link rel="alternate" hreflang="de" href="__ACS_SITE_URL__/?lang=de" />
+<link rel="alternate" hreflang="pt-BR" href="__ACS_SITE_URL__/?lang=pt-BR" />
+<link rel="alternate" hreflang="ar" href="__ACS_SITE_URL__/?lang=ar" />
+<link rel="alternate" hreflang="zh-CN" href="__ACS_SITE_URL__/?lang=zh-CN" />
+<link rel="alternate" hreflang="hi-IN" href="__ACS_SITE_URL__/?lang=hi-IN" />
+<link rel="alternate" hreflang="ja-JP" href="__ACS_SITE_URL__/?lang=ja-JP" />
+<link rel="alternate" hreflang="ru-RU" href="__ACS_SITE_URL__/?lang=ru-RU" />
+
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="ACS Email Domain Checker" />
+<meta property="og:title" content="Azure Communication Services Email Domain Checker" />
+<meta property="og:description" content="Check SPF, DKIM, DMARC, MX and TXT records, global DNS propagation, blocklist reputation and WHOIS for Azure Communication Services email domain setup." />
+<meta property="og:url" content="__ACS_SITE_URL__/" />
+<meta property="og:image" content="__ACS_OG_IMAGE__" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:locale" content="en_US" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Azure Communication Services Email Domain Checker" />
+<meta name="twitter:description" content="Check SPF, DKIM, DMARC, MX and TXT records, global DNS propagation, blocklist reputation and WHOIS for ACS email domain setup." />
+<meta name="twitter:image" content="__ACS_OG_IMAGE__" />
+
+<!-- Machine-readable API discovery for AI assistants and API clients. -->
+<link rel="alternate" type="text/plain" href="__ACS_SITE_URL__/llms.txt" title="LLM-readable site and API summary" />
+<link rel="alternate" type="application/json" href="__ACS_SITE_URL__/openapi.json" title="OpenAPI 3.1 contract" />
+
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+<script type="application/ld+json" nonce="__CSP_NONCE__">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "Azure Communication Services Email Domain Checker",
+  "alternateName": "ACS Email Domain Checker",
+  "url": "__ACS_SITE_URL__/",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "DNS and email authentication diagnostics",
+  "operatingSystem": "Any (web browser)",
+  "browserRequirements": "Requires JavaScript",
+  "description": "Diagnostic tool that verifies the DNS configuration required to send email from an Azure Communication Services domain. Checks SPF, DKIM, DMARC, MX, TXT and CNAME records, measures DNS propagation across public resolvers worldwide, compares authoritative nameservers, and reports WHOIS registration and DNSBL blocklist reputation.",
+  "inLanguage": ["en", "es", "fr", "de", "pt-BR", "ar", "zh-CN", "hi-IN", "ja-JP", "ru-RU"],
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "featureList": [
+    "SPF record lookup, recursive include expansion and lookup-limit analysis",
+    "DKIM selector1/selector2 verification for Azure Communication Services",
+    "DMARC policy parsing with security guidance",
+    "MX record and mail provider detection",
+    "Azure Communication Services domain verification TXT check",
+    "Global DNS propagation across hundreds of public resolvers",
+    "Authoritative nameserver TXT consistency comparison",
+    "DNSBL and RBL blocklist reputation checking",
+    "WHOIS and RDAP domain registration lookup"
+  ],
+  "potentialAction": {
+    "@type": "SearchAction",
+    "target": { "@type": "EntryPoint", "urlTemplate": "__ACS_SITE_URL__/?domain={domain}" },
+    "query-input": "required name=domain"
+  }
+}
+</script>
 
 <style nonce="__CSP_NONCE__">
 :root {
@@ -14427,7 +15537,8 @@ input.dns-records-search-input {
 
 .prop-settings-row select,
 .prop-settings-row input[type="number"],
-.prop-settings-row input[type="text"] {
+.prop-settings-row input[type="text"],
+.prop-settings-row textarea {
   padding: 6px 9px;
   border-radius: 6px;
   border: 1px solid var(--input-border);
@@ -14435,6 +15546,21 @@ input.dns-records-search-input {
   color: var(--fg);
   font-size: 13px;
   max-width: 320px;
+}
+
+.prop-settings-row textarea {
+  max-width: 420px;
+  width: 100%;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.prop-settings-hint {
+  font-size: 11px;
+  color: var(--status);
+  line-height: 1.5;
+  max-width: 520px;
 }
 
 /* The native option popup is drawn by the OS, not by our theme, so it ignores
@@ -16239,6 +17365,24 @@ ul.guidance li {
   .cookie-consent-actions { flex-direction: column; }
   .cookie-consent-actions button { width: 100%; text-align: center; }
 }
+
+.noscript-notice {
+  max-width: 760px;
+  margin: 32px auto;
+  padding: 20px 24px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  color: var(--fg);
+  line-height: 1.65;
+}
+.noscript-notice h2 { margin-top: 0; }
+.noscript-notice code {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
 </style>
 '@
 # ===== HTML Body Structure & Script Setup =====
@@ -16360,6 +17504,31 @@ async function ensureMsalLoaded() {
 </head>
 
 <body class="section-fade-enabled">
+
+<!-- Static fallback content. The results UI is client-rendered, so without this
+     a crawler (or an AI agent that does not execute JavaScript) sees only the
+     toolbar button labels and describes the page from those. -->
+<noscript>
+  <div class="noscript-notice">
+    <h2>Azure Communication Services Email Domain Checker</h2>
+    <p>
+      This tool checks whether a domain is correctly configured to send email through
+      Azure Communication Services. Enter a domain name and it reports the SPF record,
+      the ACS domain-verification TXT record, DKIM selector1 and selector2 keys, the
+      DMARC policy, MX records, CNAME chains, global DNS propagation across public
+      resolvers worldwide, authoritative nameserver consistency, DNSBL blocklist
+      reputation, and WHOIS/RDAP registration details.
+    </p>
+    <p><strong>JavaScript is required for the interactive report.</strong></p>
+    <p>
+      The same data is available as JSON without JavaScript &#8212; for example
+      <code>/dns?domain=example.com</code> returns the full aggregated report. See
+      <a href="/llms.txt">/llms.txt</a> for a plain-text API summary or
+      <a href="/openapi.json">/openapi.json</a> for the machine-readable contract.
+    </p>
+    <p><a href="/terms">Terms of Service</a> &#183; <a href="/privacy">Privacy Statement</a></p>
+  </div>
+</noscript>
 
 <div class="container">
 
@@ -20499,6 +21668,13 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: 'Europe',
     propagationRegionAsia: 'Asia',
     propagationRegionOceania: 'Oceania',
+    propagationRegionAfrica: 'Africa',
+    propagationRegionCustom: 'Custom',
+    propagationSettingCustom: 'Custom resolvers (one per line)',
+    propagationSettingCustomHint: 'Optional. Enter public resolver IPv4 addresses, optionally followed by a label (for example "9.9.9.9 Branch office"). When set, ONLY these resolvers are queried and the location picker is ignored. Private, loopback and link-local addresses are rejected.',
+    propagationSettingValidate: 'Skip resolvers that are not answering',
+    propagationSettingValidateHint: 'Probes a wider pool of candidates first and keeps only the ones that resolve, so the requested number of resolvers is actually reached. Usually makes the check faster too, because dead servers are dropped before the real query.',
+    propagationCustomNote: 'Querying {count} custom resolver(s) only. Locations are not plotted because arbitrary addresses cannot be geolocated.',
     propagationAnycastBadge: 'Anycast',
     propagationNoAnswerText: 'This resolver returned no records.',
     guidancePropagationPartial: 'DNS propagation is incomplete for {domain}: {missing} of {responding} responding public resolvers still return no {type} record. Azure verifies domains through public DNS, so verification can fail intermittently until every resolver agrees. Wait for the record TTL to expire, then re-check.',
@@ -20556,6 +21732,13 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: 'Europa',
     propagationRegionAsia: 'Asia',
     propagationRegionOceania: 'Ocean\u00EDa',
+    propagationRegionAfrica: '\u00C1frica',
+    propagationRegionCustom: 'Personalizado',
+    propagationSettingCustom: 'Resolutores personalizados (uno por l\u00EDnea)',
+    propagationSettingCustomHint: 'Opcional. Introduzca direcciones IPv4 p\u00FAblicas de resolutores, seguidas opcionalmente de una etiqueta. Si se define, SOLO se consultan estos resolutores y se ignora el selector de ubicaciones. Se rechazan direcciones privadas, de bucle invertido y de enlace local.',
+    propagationSettingValidate: 'Omitir resolutores que no responden',
+    propagationSettingValidateHint: 'Primero prueba un grupo m\u00E1s amplio de candidatos y conserva solo los que resuelven, para alcanzar realmente el n\u00FAmero solicitado. Normalmente tambi\u00E9n acelera la comprobaci\u00F3n.',
+    propagationCustomNote: 'Consultando solo {count} resolutor(es) personalizado(s). No se muestran ubicaciones porque no se pueden geolocalizar direcciones arbitrarias.',
     propagationAnycastBadge: 'Anycast',
     propagationNoAnswerText: 'Este resolutor no devolvi\u00F3 ning\u00FAn registro.',
     guidancePropagationPartial: 'La propagaci\u00F3n de DNS est\u00E1 incompleta para {domain}: {missing} de {responding} resolutores p\u00FAblicos que respondieron a\u00FAn no devuelven un registro {type}. Azure verifica los dominios mediante DNS p\u00FAblico, por lo que la verificaci\u00F3n puede fallar de forma intermitente hasta que todos coincidan. Espere a que expire el TTL y vuelva a comprobarlo.',
@@ -20613,6 +21796,13 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: 'Europe',
     propagationRegionAsia: 'Asie',
     propagationRegionOceania: 'Oc\u00E9anie',
+    propagationRegionAfrica: 'Afrique',
+    propagationRegionCustom: 'Personnalis\u00E9',
+    propagationSettingCustom: 'R\u00E9solveurs personnalis\u00E9s (un par ligne)',
+    propagationSettingCustomHint: 'Facultatif. Saisissez des adresses IPv4 publiques de r\u00E9solveurs, suivies au besoin d\u2019un libell\u00E9. Si renseign\u00E9, SEULS ces r\u00E9solveurs sont interrog\u00E9s et le s\u00E9lecteur d\u2019emplacements est ignor\u00E9. Les adresses priv\u00E9es, de bouclage et lien-local sont refus\u00E9es.',
+    propagationSettingValidate: 'Ignorer les r\u00E9solveurs qui ne r\u00E9pondent pas',
+    propagationSettingValidateHint: 'Teste d\u2019abord un ensemble plus large de candidats et ne garde que ceux qui r\u00E9solvent, afin d\u2019atteindre r\u00E9ellement le nombre demand\u00E9. Acc\u00E9l\u00E8re g\u00E9n\u00E9ralement aussi la v\u00E9rification.',
+    propagationCustomNote: 'Interrogation de {count} r\u00E9solveur(s) personnalis\u00E9(s) uniquement. Les emplacements ne sont pas affich\u00E9s car des adresses arbitraires ne peuvent pas \u00EAtre g\u00E9olocalis\u00E9es.',
     propagationAnycastBadge: 'Anycast',
     propagationNoAnswerText: 'Ce r\u00E9solveur n\u2019a renvoy\u00E9 aucun enregistrement.',
     guidancePropagationPartial: 'La propagation DNS est incompl\u00E8te pour {domain} : {missing} des {responding} r\u00E9solveurs publics ayant r\u00E9pondu ne renvoient toujours aucun enregistrement {type}. Azure v\u00E9rifie les domaines via le DNS public, la v\u00E9rification peut donc \u00E9chouer par intermittence tant que tous ne concordent pas. Attendez l\u2019expiration du TTL puis rev\u00E9rifiez.',
@@ -20670,6 +21860,13 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: 'Europa',
     propagationRegionAsia: 'Asien',
     propagationRegionOceania: 'Ozeanien',
+    propagationRegionAfrica: 'Afrika',
+    propagationRegionCustom: 'Benutzerdefiniert',
+    propagationSettingCustom: 'Eigene Resolver (einer pro Zeile)',
+    propagationSettingCustomHint: 'Optional. Geben Sie \u00F6ffentliche IPv4-Adressen von Resolvern an, optional gefolgt von einer Bezeichnung. Wenn gesetzt, werden NUR diese Resolver abgefragt und die Standortauswahl wird ignoriert. Private, Loopback- und Link-Local-Adressen werden abgelehnt.',
+    propagationSettingValidate: 'Nicht antwortende Resolver \u00FCberspringen',
+    propagationSettingValidateHint: 'Pr\u00FCft zuerst eine gr\u00F6\u00DFere Auswahl an Kandidaten und beh\u00E4lt nur die, die aufl\u00F6sen, damit die gew\u00FCnschte Anzahl tats\u00E4chlich erreicht wird. Beschleunigt die Pr\u00FCfung meist zus\u00E4tzlich.',
+    propagationCustomNote: 'Es werden nur {count} eigene Resolver abgefragt. Standorte werden nicht dargestellt, da beliebige Adressen nicht geolokalisiert werden k\u00F6nnen.',
     propagationAnycastBadge: 'Anycast',
     propagationNoAnswerText: 'Dieser Resolver lieferte keine Eintr\u00E4ge.',
     guidancePropagationPartial: 'Die DNS-Verbreitung f\u00FCr {domain} ist unvollst\u00E4ndig: {missing} von {responding} antwortenden \u00F6ffentlichen Resolvern liefern weiterhin keinen {type}-Eintrag. Azure pr\u00FCft Dom\u00E4nen \u00FCber \u00F6ffentliches DNS, daher kann die Verifizierung zeitweise fehlschlagen, bis alle \u00FCbereinstimmen. Warten Sie den Ablauf der TTL ab und pr\u00FCfen Sie erneut.',
@@ -20727,6 +21924,13 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: 'Europa',
     propagationRegionAsia: '\u00C1sia',
     propagationRegionOceania: 'Oceania',
+    propagationRegionAfrica: '\u00C1frica',
+    propagationRegionCustom: 'Personalizado',
+    propagationSettingCustom: 'Resolvedores personalizados (um por linha)',
+    propagationSettingCustomHint: 'Opcional. Informe endere\u00E7os IPv4 p\u00FAblicos de resolvedores, opcionalmente seguidos de um r\u00F3tulo. Quando definido, APENAS esses resolvedores s\u00E3o consultados e o seletor de locais \u00E9 ignorado. Endere\u00E7os privados, de loopback e link-local s\u00E3o rejeitados.',
+    propagationSettingValidate: 'Ignorar resolvedores que n\u00E3o respondem',
+    propagationSettingValidateHint: 'Testa primeiro um conjunto maior de candidatos e mant\u00E9m apenas os que resolvem, para realmente atingir o n\u00FAmero solicitado. Normalmente tamb\u00E9m deixa a verifica\u00E7\u00E3o mais r\u00E1pida.',
+    propagationCustomNote: 'Consultando apenas {count} resolvedor(es) personalizado(s). Locais n\u00E3o s\u00E3o plotados porque endere\u00E7os arbitr\u00E1rios n\u00E3o podem ser geolocalizados.',
     propagationAnycastBadge: 'Anycast',
     propagationNoAnswerText: 'Este resolvedor n\u00E3o retornou nenhum registro.',
     guidancePropagationPartial: 'A propaga\u00E7\u00E3o de DNS est\u00E1 incompleta para {domain}: {missing} de {responding} resolvedores p\u00FAblicos que responderam ainda n\u00E3o retornam um registro {type}. O Azure verifica dom\u00EDnios pelo DNS p\u00FAblico, portanto a verifica\u00E7\u00E3o pode falhar de forma intermitente at\u00E9 que todos concordem. Aguarde o TTL expirar e verifique novamente.',
@@ -20769,6 +21973,10 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: '\u0623\u0648\u0631\u0648\u0628\u0627',
     propagationRegionAsia: '\u0622\u0633\u064A\u0627',
     propagationRegionOceania: '\u0623\u0648\u0642\u064A\u0627\u0646\u0648\u0633\u064A\u0627',
+    propagationRegionAfrica: '\u0623\u0641\u0631\u064A\u0642\u064A\u0627',
+    propagationRegionCustom: '\u0645\u062E\u0635\u0635',
+    propagationSettingCustom: '\u0645\u062D\u0644\u0644\u0627\u062A \u0645\u062E\u0635\u0635\u0629 (\u0648\u0627\u062D\u062F \u0641\u064A \u0643\u0644 \u0633\u0637\u0631)',
+    propagationSettingValidate: '\u062A\u062E\u0637\u064A \u0627\u0644\u0645\u062D\u0644\u0644\u0627\u062A \u063A\u064A\u0631 \u0627\u0644\u0645\u0633\u062A\u062C\u064A\u0628\u0629',
     propagationAnycastBadge: 'Anycast'
   },
   'zh-CN': {
@@ -20807,6 +22015,10 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: '\u6B27\u6D32',
     propagationRegionAsia: '\u4E9A\u6D32',
     propagationRegionOceania: '\u5927\u6D0B\u6D32',
+    propagationRegionAfrica: '\u975E\u6D32',
+    propagationRegionCustom: '\u81EA\u5B9A\u4E49',
+    propagationSettingCustom: '\u81EA\u5B9A\u4E49\u89E3\u6790\u5668\uFF08\u6BCF\u884C\u4E00\u4E2A\uFF09',
+    propagationSettingValidate: '\u8DF3\u8FC7\u65E0\u54CD\u5E94\u7684\u89E3\u6790\u5668',
     propagationAnycastBadge: 'Anycast'
   },
   'hi-IN': {
@@ -20845,6 +22057,10 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: '\u092F\u0942\u0930\u094B\u092A',
     propagationRegionAsia: '\u090F\u0936\u093F\u092F\u093E',
     propagationRegionOceania: '\u0913\u0936\u093F\u092F\u093E\u0928\u093F\u092F\u093E',
+    propagationRegionAfrica: '\u0905\u092B\u094D\u0930\u0940\u0915\u093E',
+    propagationRegionCustom: '\u0915\u0938\u094D\u091F\u092E',
+    propagationSettingCustom: '\u0915\u0938\u094D\u091F\u092E \u0930\u093F\u091C\u093C\u0949\u0932\u094D\u0935\u0930 (\u092A\u094D\u0930\u0924\u093F \u092A\u0902\u0915\u094D\u0924\u093F \u090F\u0915)',
+    propagationSettingValidate: '\u0909\u0924\u094D\u0924\u0930 \u0928 \u0926\u0947\u0928\u0947 \u0935\u093E\u0932\u0947 \u0930\u093F\u091C\u093C\u0949\u0932\u094D\u0935\u0930 \u091B\u094B\u0921\u093C\u0947\u0902',
     propagationAnycastBadge: 'Anycast'
   },
   'ja-JP': {
@@ -20883,6 +22099,10 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: '\u30E8\u30FC\u30ED\u30C3\u30D1',
     propagationRegionAsia: '\u30A2\u30B8\u30A2',
     propagationRegionOceania: '\u30AA\u30BB\u30A2\u30CB\u30A2',
+    propagationRegionAfrica: '\u30A2\u30D5\u30EA\u30AB',
+    propagationRegionCustom: '\u30AB\u30B9\u30BF\u30E0',
+    propagationSettingCustom: '\u30AB\u30B9\u30BF\u30E0 \u30EA\u30BE\u30EB\u30D0\u30FC\uFF081 \u884C\u306B 1 \u3064\uFF09',
+    propagationSettingValidate: '\u5FDC\u7B54\u3057\u306A\u3044\u30EA\u30BE\u30EB\u30D0\u30FC\u3092\u30B9\u30AD\u30C3\u30D7',
     propagationAnycastBadge: 'Anycast'
   },
   'ru-RU': {
@@ -20921,6 +22141,10 @@ const PROPAGATION_TRANSLATION_OVERRIDES = {
     propagationRegionEurope: '\u0415\u0432\u0440\u043E\u043F\u0430',
     propagationRegionAsia: '\u0410\u0437\u0438\u044F',
     propagationRegionOceania: '\u041E\u043A\u0435\u0430\u043D\u0438\u044F',
+    propagationRegionAfrica: '\u0410\u0444\u0440\u0438\u043A\u0430',
+    propagationRegionCustom: '\u0421\u0432\u043E\u0438',
+    propagationSettingCustom: '\u0421\u0432\u043E\u0438 \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u044B (\u043F\u043E \u043E\u0434\u043D\u043E\u043C\u0443 \u0432 \u0441\u0442\u0440\u043E\u043A\u0435)',
+    propagationSettingValidate: '\u041F\u0440\u043E\u043F\u0443\u0441\u043A\u0430\u0442\u044C \u043D\u0435\u043E\u0442\u0432\u0435\u0447\u0430\u044E\u0449\u0438\u0435 \u0440\u0435\u0437\u043E\u043B\u0432\u0435\u0440\u044B',
     propagationAnycastBadge: 'Anycast'
   }
 };
@@ -24246,17 +25470,19 @@ function getDnsTxtRecoveryState(r) {
 
 const PROPAGATION_SETTINGS_KEY = 'acsPropagationSettings';
 const PROPAGATION_RECORD_TYPES = ['TXT', 'A', 'AAAA', 'CNAME', 'MX', 'NS', 'SOA', 'CAA'];
-const PROPAGATION_REGIONS = ['global', 'namer', 'samer', 'europe', 'asia', 'oceania'];
+const PROPAGATION_REGIONS = ['global', 'namer', 'samer', 'europe', 'asia', 'africa', 'oceania'];
 const PROPAGATION_REGION_LABEL_KEYS = {
   global: 'propagationRegionGlobal',
   namer: 'propagationRegionNamer',
   samer: 'propagationRegionSamer',
   europe: 'propagationRegionEurope',
   asia: 'propagationRegionAsia',
-  oceania: 'propagationRegionOceania'
+  africa: 'propagationRegionAfrica',
+  oceania: 'propagationRegionOceania',
+  custom: 'propagationRegionCustom'
 };
 // An empty `regions` array means "every location the server catalog offers".
-const PROPAGATION_DEFAULTS = { recordType: 'TXT', regions: [], maxResolvers: 25, timeoutMs: 4000, expected: '' };
+const PROPAGATION_DEFAULTS = { recordType: 'TXT', regions: [], maxResolvers: 25, timeoutMs: 4000, expected: '', custom: '', validate: true };
 
 let propagationSettings = Object.assign({}, PROPAGATION_DEFAULTS);
 let propagationRerunInFlight = false;
@@ -24276,7 +25502,11 @@ function normalizePropagationSettings(raw) {
     regions: regions,
     maxResolvers: Number.isFinite(max) ? Math.min(100, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
     timeoutMs: Number.isFinite(timeout) ? Math.min(15000, Math.max(1000, Math.round(timeout))) : PROPAGATION_DEFAULTS.timeoutMs,
-    expected: String(src.expected || '').slice(0, 255)
+    expected: String(src.expected || '').slice(0, 255),
+    // Free text: normalized to one entry per line for the textarea, but sent to
+    // the server comma-separated. Every entry is IP-validated server-side.
+    custom: String(src.custom || '').slice(0, 4000),
+    validate: src.validate !== false
   };
 }
 
@@ -24311,6 +25541,10 @@ function buildPropagationQuery() {
   parts.push('max=' + encodeURIComponent(String(s.maxResolvers || PROPAGATION_DEFAULTS.maxResolvers)));
   parts.push('timeout=' + encodeURIComponent(String(s.timeoutMs || PROPAGATION_DEFAULTS.timeoutMs)));
   if (s.expected) parts.push('expected=' + encodeURIComponent(s.expected));
+  if (s.custom && s.custom.trim()) {
+    parts.push('custom=' + encodeURIComponent(s.custom.trim()));
+  }
+  if (s.validate === false) parts.push('validate=0');
   return parts.join('&');
 }
 
@@ -27593,6 +28827,18 @@ function buildPropagationSettingsHtml(prop) {
       <div class="prop-region-list">${regionOptions}</div>
     </div>
     <div class="prop-settings-row">
+      <label class="prop-region-option" style="text-transform:none;font-weight:400;">
+        <input type="checkbox" id="propSettingValidate"${s.validate === false ? '' : ' checked'}>
+        ${escapeHtml(t('propagationSettingValidate'))}
+      </label>
+      <span class="prop-settings-hint">${escapeHtml(t('propagationSettingValidateHint'))}</span>
+    </div>
+    <div class="prop-settings-row">
+      <label for="propSettingCustom">${escapeHtml(t('propagationSettingCustom'))}</label>
+      <textarea id="propSettingCustom" rows="4" maxlength="4000" spellcheck="false" placeholder="8.8.8.8&#10;1.1.1.1 Office resolver">${escapeHtml(String(s.custom || ''))}</textarea>
+      <span class="prop-settings-hint">${escapeHtml(t('propagationSettingCustomHint'))}</span>
+    </div>
+    <div class="prop-settings-row">
       <label for="propSettingExpected">${escapeHtml(t('propagationSettingExpected'))}</label>
       <input type="text" id="propSettingExpected" maxlength="255" value="${escapeHtml(String(s.expected || ''))}" placeholder="${escapeHtml(t('propagationSettingExpectedHint'))}">
     </div>
@@ -27628,6 +28874,8 @@ function applyPropagationSettings() {
   const maxEl = document.getElementById('propSettingMax');
   const timeoutEl = document.getElementById('propSettingTimeout');
   const expectedEl = document.getElementById('propSettingExpected');
+  const customEl = document.getElementById('propSettingCustom');
+  const validateEl = document.getElementById('propSettingValidate');
   const regionEls = Array.from(document.querySelectorAll('.prop-region-check'));
   const checkedRegions = regionEls.filter(el => el.checked).map(el => String(el.value || ''));
 
@@ -27638,7 +28886,9 @@ function applyPropagationSettings() {
     regions: (checkedRegions.length === 0 || checkedRegions.length === regionEls.length) ? [] : checkedRegions,
     maxResolvers: maxEl ? maxEl.value : PROPAGATION_DEFAULTS.maxResolvers,
     timeoutMs: timeoutEl ? timeoutEl.value : PROPAGATION_DEFAULTS.timeoutMs,
-    expected: expectedEl ? expectedEl.value : ''
+    expected: expectedEl ? expectedEl.value : '',
+    custom: customEl ? customEl.value : '',
+    validate: validateEl ? !!validateEl.checked : true
   });
   savePropagationSettings();
   rerunPropagationCheck();
@@ -30590,6 +31840,7 @@ function render(r) {
 
       const mapHtml = buildPropagationMapSvg(prop.locations);
       const noteParts = [];
+      if (prop.usingCustom) noteParts.push(t('propagationCustomNote', { count: String(prop.resolverCount || 0) }));
       if (respondingResults.some(x => x && x.anycast)) noteParts.push(t('propagationAnycastNote'));
       if (excludedCount > 0) noteParts.push(t('propagationExcludedNote', { excluded: String(excludedCount), total: String(propResults.length) }));
       const anycastNoteHtml = noteParts.length > 0
@@ -32681,17 +33932,23 @@ function scheduleInitialLookup(domain) {
   toggleClearBtn();
   initialLookupIsScheduled = true;
 
+  const startInitialLookup = () => {
+    if (initialLookupHasStarted) return;
+    initialLookupIsScheduled = false;
+    initialLookupHasStarted = true;
+    if (bootstrapDomains.length > 1) {
+      runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
+    } else {
+      lookup({ animateTopIntro: true, domainOverride: primary });
+    }
+  };
+
   window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => {
-      initialLookupIsScheduled = false;
-      initialLookupHasStarted = true;
-      if (bootstrapDomains.length > 1) {
-        runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
-      } else {
-        lookup({ animateTopIntro: true, domainOverride: primary });
-      }
-    });
+    window.requestAnimationFrame(startInitialLookup);
   });
+  // Hidden tabs may pause animation frames indefinitely; the guard above makes
+  // this timer a no-op when the normal two-frame path has already started.
+  window.setTimeout(startInitialLookup, 250);
 }
 
 if (document.readyState === 'loading') {
@@ -33188,6 +34445,30 @@ if (-not [string]::IsNullOrWhiteSpace($msalSriRaw)) {
 $msalSriForJsLiteral = $msalSriJson.Replace('\', '\\').Replace("'", "\'")
 $htmlPage = $htmlPage.Replace('__ACS_MSAL_SRI__', $msalSriForJsLiteral)
 
+# Social/link-preview image. Unlike every other token above this one lands in an
+# HTML attribute (`<meta property="og:image" content="...">`), NOT a JS string
+# literal, so it needs HTML-attribute escaping rather than JS escaping --
+# ConvertTo-JsStringLiteralBody would emit \u003C sequences that a browser
+# renders literally.
+#
+# Default is the built-in card served from /og-image.svg. Operators who want a
+# raster image (some social platforms will not render SVG previews) can point
+# ACS_OG_IMAGE at an absolute https URL.
+$ogImage = ([string]$env:ACS_OG_IMAGE).Trim()
+if ([string]::IsNullOrWhiteSpace($ogImage)) {
+  # __ACS_SITE_URL__ is resolved later, per request, by Write-Html.
+  $ogImage = '__ACS_SITE_URL__/og-image.svg'
+} else {
+  $isAbsoluteHttpUrl = $false
+  try {
+    $ogUri = [uri]$ogImage
+    $isAbsoluteHttpUrl = $ogUri.IsAbsoluteUri -and ($ogUri.Scheme -eq 'http' -or $ogUri.Scheme -eq 'https')
+  } catch { $isAbsoluteHttpUrl = $false }
+  if (-not $isAbsoluteHttpUrl) { $ogImage = '__ACS_SITE_URL__/og-image.svg' }
+}
+$ogImageAttr = $ogImage.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
+$htmlPage = $htmlPage.Replace('__ACS_OG_IMAGE__', $ogImageAttr)
+
 # ===== HTML Accessibility Layer (CSS + JS) =====
 #
 # PURPOSE
@@ -33337,6 +34618,15 @@ $script:TosPageHtml = @'
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Terms of Service - ACS Email Domain Checker</title>
+<meta name="description" content="Terms of Service for the Azure Communication Services Email Domain Checker, a read-only DNS and email authentication diagnostic tool." />
+<meta name="robots" content="__ACS_ROBOTS__" />
+<meta name="color-scheme" content="light dark" />
+<link rel="canonical" href="__ACS_SITE_URL__/terms" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="ACS Email Domain Checker" />
+<meta property="og:title" content="Terms of Service - ACS Email Domain Checker" />
+<meta property="og:url" content="__ACS_SITE_URL__/terms" />
 <style nonce="__CSP_NONCE__">
   :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
   @media (prefers-color-scheme: dark) {
@@ -33613,6 +34903,15 @@ $script:PrivacyPageHtml = @'
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Privacy Statement - ACS Email Domain Checker</title>
+<meta name="description" content="Privacy Statement for the Azure Communication Services Email Domain Checker, covering cookies, anonymous usage metrics and what domain data is processed." />
+<meta name="robots" content="__ACS_ROBOTS__" />
+<meta name="color-scheme" content="light dark" />
+<link rel="canonical" href="__ACS_SITE_URL__/privacy" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="ACS Email Domain Checker" />
+<meta property="og:title" content="Privacy Statement - ACS Email Domain Checker" />
+<meta property="og:url" content="__ACS_SITE_URL__/privacy" />
 <style nonce="__CSP_NONCE__">
   :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
   @media (prefers-color-scheme: dark) {
@@ -33944,7 +35243,8 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
   'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Test-AcsConsoleJsonMode','Write-AcsConsoleEvent','Write-AcsLogEvent','Write-AcsLogException',
-  'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
+  'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Test-AcsHeadRequest','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
+  'Get-AcsSeoLanguages','Test-AcsSeoIndexingAllowed','Test-AcsAiCrawlingAllowed','Get-AcsAiUserAgents','Test-AcsSafeUrlAuthority','Get-AcsPublicBaseUrl','Test-AcsPublicBaseUrlIsConfigured','ConvertTo-AcsXmlText','Get-AcsBrandSvg','Get-AcsRobotsTxt','Get-AcsSitemapXml','Get-AcsLlmsTxt','Get-AcsOpenApiJson','Write-TextResponse',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain','Invoke-MetricsRequest','Lock-MetricsFileMutex',
   'Get-AnonymousMetricsPersistPath','Import-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions','ConvertTo-Iso8601Utc',
@@ -33958,7 +35258,7 @@ $functionNames = @(
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
   'Invoke-RawDnsTxtQuery','Get-AuthoritativeNameserverHosts','Resolve-NameserverPublicIps','Get-NameserverTxtStatus',
-  'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
+  'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Get-DnsPropagationHealthTtlMinutes','Get-DnsPropagationHealthState','Set-DnsPropagationHealthState','ConvertFrom-DnsPropagationResolverInput','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
   'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-FirstNonEmptyPropertyValue','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Test-WhoisDomainNameSafe','Initialize-WhoisFieldRegexes','Get-WhoisParsedRegistrationData','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Invoke-WhoisProcess','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
@@ -33979,6 +35279,8 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogConsoleMode', $script:AcsLogConsoleMode, 'Secure logging console output mode'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogFilePath', $script:AcsLogFilePath, 'Secure logging JSONL file path'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMaxBytes', $script:AcsLogMaxBytes, 'Secure logging file size cap'))
+# Referenced UNQUALIFIED as $AcsAppVersion inside handler runspaces ($script: does not cross the runspace boundary).
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsAppVersion', $script:AppVersion, 'Application version string'))
 
 # Share the global metrics objects with handler runspaces (must be added before pool creation).
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsMetrics', $global:AcsMetrics, 'Shared metrics object'))
@@ -33994,6 +35296,14 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 # remove the global still leave the runspace pool in a working state.
 if ($global:AcsWhoisServerCooldown) {
   $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsWhoisServerCooldown', $global:AcsWhoisServerCooldown, 'Shared WHOIS-server cooldown map'))
+}
+
+# Share the resolver health cache so every worker contributes to (and benefits
+# from) the same view of which public resolvers are currently answering. Without
+# this each runspace would keep its own empty dictionary and the propagation
+# health pre-check could never learn across requests.
+if ($global:AcsPropagationHealth) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsPropagationHealth', $global:AcsPropagationHealth, 'Shared DNS propagation resolver health cache'))
 }
 
 foreach ($name in $functionNames) {
@@ -34246,7 +35556,47 @@ if ($metricsEnabled) {
       try { $rng.Dispose() } catch { }
     }
     $nonce = [Convert]::ToBase64String($nonceBytes)
-    Write-Html -Context $ctx -Html $htmlPage -Nonce $nonce
+    Write-Html -Context $ctx -Html $htmlPage -Nonce $nonce -BaseUrl (Get-AcsPublicBaseUrl -Context $ctx)
+    return
+  }
+
+  # 1-seo) Crawler and AI-agent discovery documents. These are deliberately
+  # served before any API-key / rate-limit gate: they carry no domain data, are
+  # identical for every caller, and a crawler must be able to read robots.txt
+  # even on a deployment that requires a key for the JSON API.
+  #
+  # robots.txt and sitemap.xml embed the site origin. When that origin was
+  # derived from the request's Host header (no ACS_PUBLIC_BASE_URL) the document
+  # is client-influenced, so it is served no-store to keep a spoofed Host out of
+  # any shared cache. The SVGs are host-independent and always cacheable.
+  if ($path -in @('/robots.txt', '/sitemap.xml', '/llms.txt', '/openapi.json')) {
+    $seoBase = Get-AcsPublicBaseUrl -Context $ctx
+    $seoCache = if (Test-AcsPublicBaseUrlIsConfigured) { 3600 } else { 0 }
+
+    switch ($path) {
+      '/robots.txt' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsRobotsTxt -BaseUrl $seoBase) -CacheSeconds $seoCache
+      }
+      '/sitemap.xml' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsSitemapXml -BaseUrl $seoBase) -ContentType 'application/xml; charset=utf-8' -CacheSeconds $seoCache
+      }
+      '/llms.txt' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsLlmsTxt -BaseUrl $seoBase -Version $AcsAppVersion) -CacheSeconds $seoCache
+      }
+      '/openapi.json' {
+        Write-TextResponse -Context $ctx -Body (Get-AcsOpenApiJson -BaseUrl $seoBase -Version $AcsAppVersion) -ContentType 'application/json; charset=utf-8' -CacheSeconds $seoCache
+      }
+    }
+    return
+  }
+
+  if ($path -eq '/favicon.svg') {
+    Write-TextResponse -Context $ctx -Body (Get-AcsBrandSvg -Variant 'icon') -ContentType 'image/svg+xml; charset=utf-8' -CacheSeconds 86400
+    return
+  }
+
+  if ($path -eq '/og-image.svg') {
+    Write-TextResponse -Context $ctx -Body (Get-AcsBrandSvg -Variant 'share') -ContentType 'image/svg+xml; charset=utf-8' -CacheSeconds 86400
     return
   }
 
@@ -34254,7 +35604,7 @@ if ($metricsEnabled) {
   if ($path -eq "/terms" -and -not [string]::IsNullOrWhiteSpace($tosPageHtml)) {
     $tosNonceBytes = [byte[]]::new(16); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($tosNonceBytes)
     $tosNonce = [Convert]::ToBase64String($tosNonceBytes)
-    Write-Html -Context $ctx -Html $tosPageHtml -Nonce $tosNonce
+    Write-Html -Context $ctx -Html $tosPageHtml -Nonce $tosNonce -BaseUrl (Get-AcsPublicBaseUrl -Context $ctx)
     return
   }
 
@@ -34262,7 +35612,7 @@ if ($metricsEnabled) {
   if ($path -eq "/privacy" -and -not [string]::IsNullOrWhiteSpace($privacyPageHtml)) {
     $privNonceBytes = [byte[]]::new(16); [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($privNonceBytes)
     $privNonce = [Convert]::ToBase64String($privNonceBytes)
-    Write-Html -Context $ctx -Html $privacyPageHtml -Nonce $privNonce
+    Write-Html -Context $ctx -Html $privacyPageHtml -Nonce $privNonce -BaseUrl (Get-AcsPublicBaseUrl -Context $ctx)
     return
   }
 
@@ -34403,6 +35753,8 @@ if ($metricsEnabled) {
     $propMax = 0
     $propTimeout = 0
     $propExpected = ''
+    $propCustom = ''
+    $propValidate = $true
     if ($path -eq '/api/propagation') {
       try {
         $qs = $ctx.Request.QueryString
@@ -34416,7 +35768,7 @@ if ($metricsEnabled) {
         if (-not [string]::IsNullOrWhiteSpace($rawRegions)) {
           $propRegions = @($rawRegions -split ',' |
             ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
-            Where-Object { $_ -in @('global','namer','samer','europe','asia','oceania') })
+            Where-Object { $_ -in @('global','namer','samer','europe','asia','africa','oceania') })
         }
 
         # Numeric knobs: clamped here AND again inside Get-DnsPropagationStatus.
@@ -34430,6 +35782,16 @@ if ($metricsEnabled) {
         $rawExpected = ([string]$qs['expected']).Trim()
         if ($rawExpected.Length -gt 255) { $rawExpected = $rawExpected.Substring(0, 255) }
         $propExpected = $rawExpected
+
+        # User-supplied resolver addresses. Length-capped here; every entry is
+        # then parsed and SSRF-vetted (public IPv4 literals only, no hostnames)
+        # by ConvertFrom-DnsPropagationResolverInput before a socket is opened.
+        $rawCustom = ([string]$qs['custom']).Trim()
+        if ($rawCustom.Length -gt 4000) { $rawCustom = $rawCustom.Substring(0, 4000) }
+        $propCustom = $rawCustom
+
+        # Resolver health pre-check: on unless explicitly disabled.
+        if (([string]$qs['validate']).Trim() -eq '0') { $propValidate = $false }
       } catch { }
     }
 
@@ -34456,7 +35818,7 @@ if ($metricsEnabled) {
         "/api/reputation" { Write-Json -Context $ctx -Object (Get-DnsReputationStatus -Domain $domain) }
         "/api/website" { Write-Json -Context $ctx -Object (Get-WebsiteProbeStatus -Domain $domain) }
         "/api/nameservers" { Write-Json -Context $ctx -Object (Get-NameserverTxtStatus -Domain $domain) }
-        "/api/propagation" { Write-Json -Context $ctx -Object (Get-DnsPropagationStatus -Domain $domain -RecordType $propType -Regions $propRegions -MaxResolvers $propMax -TimeoutMs $propTimeout -ExpectedValue $propExpected) }
+        "/api/propagation" { Write-Json -Context $ctx -Object (Get-DnsPropagationStatus -Domain $domain -RecordType $propType -Regions $propRegions -MaxResolvers $propMax -TimeoutMs $propTimeout -ExpectedValue $propExpected -CustomResolvers $propCustom -ValidateResolvers $propValidate) }
         default       { Write-Json -Context $ctx -Object @{ error = "Unknown endpoint." } -StatusCode 404 }
       }
     }
@@ -34706,7 +36068,9 @@ try {
       [Parameter(Mandatory = $true)]
       [string]$RawTarget,
       [Parameter(Mandatory = $true)]
-      [hashtable]$Headers
+      [hashtable]$Headers,
+      [ValidateSet('GET', 'HEAD', 'POST')]
+      [string]$Method = 'GET'
     )
 
     $remote = $Client.Client.RemoteEndPoint
@@ -34740,6 +36104,7 @@ try {
       _client = $Client
       _stream = $networkStream
       _sent = $false
+      _suppressBody = ($Method -eq 'HEAD')
       _extraHeaders = [ordered]@{}
     }
 
@@ -34783,7 +36148,7 @@ try {
 
       try {
         $this._stream.Write($headerBytes, 0, $headerBytes.Length)
-        if ($Bytes.Length -gt 0) {
+        if (-not $this._suppressBody -and $Bytes.Length -gt 0) {
           $this._stream.Write($Bytes, 0, $Bytes.Length)
         }
         $this._stream.Flush()
@@ -34804,6 +36169,7 @@ try {
 
     $req = [pscustomobject]@{
       Url = $url
+      HttpMethod = $Method
       QueryString = $qs
       UserAgent = $ua
       RemoteEndPoint = $remote
@@ -35042,7 +36408,7 @@ try {
           continue
         }
 
-        if ($req.Method -ne 'GET' -and $req.Method -ne 'POST') {
+        if ($req.Method -notin @('GET', 'HEAD', 'POST')) {
           $ctx = New-TcpContext -Client $client -RawTarget ($req.Target) -Headers $req.Headers
           $ctx.Response.StatusCode = 405
           $ctx.Response.StatusDescription = 'Method Not Allowed'
@@ -35051,7 +36417,7 @@ try {
           continue
         }
 
-        $ctx = New-TcpContext -Client $client -RawTarget ($req.Target) -Headers $req.Headers
+        $ctx = New-TcpContext -Client $client -RawTarget ($req.Target) -Headers $req.Headers -Method $req.Method
 
         # Fast-path metrics for TcpListener fallback as well.
         try { $absPath = $ctx.Request.Url.AbsolutePath } catch { $absPath = $null }

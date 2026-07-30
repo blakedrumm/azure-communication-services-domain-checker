@@ -2342,6 +2342,18 @@ function buildPropagationSettingsHtml(prop) {
       <div class="prop-region-list">${regionOptions}</div>
     </div>
     <div class="prop-settings-row">
+      <label class="prop-region-option" style="text-transform:none;font-weight:400;">
+        <input type="checkbox" id="propSettingValidate"${s.validate === false ? '' : ' checked'}>
+        ${escapeHtml(t('propagationSettingValidate'))}
+      </label>
+      <span class="prop-settings-hint">${escapeHtml(t('propagationSettingValidateHint'))}</span>
+    </div>
+    <div class="prop-settings-row">
+      <label for="propSettingCustom">${escapeHtml(t('propagationSettingCustom'))}</label>
+      <textarea id="propSettingCustom" rows="4" maxlength="4000" spellcheck="false" placeholder="8.8.8.8&#10;1.1.1.1 Office resolver">${escapeHtml(String(s.custom || ''))}</textarea>
+      <span class="prop-settings-hint">${escapeHtml(t('propagationSettingCustomHint'))}</span>
+    </div>
+    <div class="prop-settings-row">
       <label for="propSettingExpected">${escapeHtml(t('propagationSettingExpected'))}</label>
       <input type="text" id="propSettingExpected" maxlength="255" value="${escapeHtml(String(s.expected || ''))}" placeholder="${escapeHtml(t('propagationSettingExpectedHint'))}">
     </div>
@@ -2377,6 +2389,8 @@ function applyPropagationSettings() {
   const maxEl = document.getElementById('propSettingMax');
   const timeoutEl = document.getElementById('propSettingTimeout');
   const expectedEl = document.getElementById('propSettingExpected');
+  const customEl = document.getElementById('propSettingCustom');
+  const validateEl = document.getElementById('propSettingValidate');
   const regionEls = Array.from(document.querySelectorAll('.prop-region-check'));
   const checkedRegions = regionEls.filter(el => el.checked).map(el => String(el.value || ''));
 
@@ -2387,7 +2401,9 @@ function applyPropagationSettings() {
     regions: (checkedRegions.length === 0 || checkedRegions.length === regionEls.length) ? [] : checkedRegions,
     maxResolvers: maxEl ? maxEl.value : PROPAGATION_DEFAULTS.maxResolvers,
     timeoutMs: timeoutEl ? timeoutEl.value : PROPAGATION_DEFAULTS.timeoutMs,
-    expected: expectedEl ? expectedEl.value : ''
+    expected: expectedEl ? expectedEl.value : '',
+    custom: customEl ? customEl.value : '',
+    validate: validateEl ? !!validateEl.checked : true
   });
   savePropagationSettings();
   rerunPropagationCheck();
@@ -5339,6 +5355,7 @@ function render(r) {
 
       const mapHtml = buildPropagationMapSvg(prop.locations);
       const noteParts = [];
+      if (prop.usingCustom) noteParts.push(t('propagationCustomNote', { count: String(prop.resolverCount || 0) }));
       if (respondingResults.some(x => x && x.anycast)) noteParts.push(t('propagationAnycastNote'));
       if (excludedCount > 0) noteParts.push(t('propagationExcludedNote', { excluded: String(excludedCount), total: String(propResults.length) }));
       const anycastNoteHtml = noteParts.length > 0
@@ -7430,17 +7447,23 @@ function scheduleInitialLookup(domain) {
   toggleClearBtn();
   initialLookupIsScheduled = true;
 
+  const startInitialLookup = () => {
+    if (initialLookupHasStarted) return;
+    initialLookupIsScheduled = false;
+    initialLookupHasStarted = true;
+    if (bootstrapDomains.length > 1) {
+      runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
+    } else {
+      lookup({ animateTopIntro: true, domainOverride: primary });
+    }
+  };
+
   window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => {
-      initialLookupIsScheduled = false;
-      initialLookupHasStarted = true;
-      if (bootstrapDomains.length > 1) {
-        runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
-      } else {
-        lookup({ animateTopIntro: true, domainOverride: primary });
-      }
-    });
+    window.requestAnimationFrame(startInitialLookup);
   });
+  // Hidden tabs may pause animation frames indefinitely; the guard above makes
+  // this timer a no-op when the normal two-frame path has already started.
+  window.setTimeout(startInitialLookup, 250);
 }
 
 if (document.readyState === 'loading') {

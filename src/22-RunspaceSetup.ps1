@@ -19,7 +19,8 @@ $domainLocks = [System.Collections.Concurrent.ConcurrentDictionary[string, Syste
 # These are injected into the InitialSessionState so each runspace can call them.
 $functionNames = @(
   'Get-AcsApprovedLogFields','Get-AcsLogLevelValue','Test-AcsLogLevelEnabled','New-AcsCorrelationId','Get-AcsLogEnvironmentName','ConvertTo-AcsLogToken','Get-AcsSafeExceptionSummary','ConvertTo-AcsAllowedLogEvent','Test-AcsConsoleJsonMode','Write-AcsConsoleEvent','Write-AcsLogEvent','Write-AcsLogException',
-  'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
+  'Set-SecurityHeaders','Get-SecurityHeaderMap','Set-NoCacheHeaders','Test-AcsHeadRequest','Write-Json','Write-Html','Write-FileResponse','Invoke-OutboundHttp',
+  'Get-AcsSeoLanguages','Test-AcsSeoIndexingAllowed','Test-AcsAiCrawlingAllowed','Get-AcsAiUserAgents','Test-AcsSafeUrlAuthority','Get-AcsPublicBaseUrl','Test-AcsPublicBaseUrlIsConfigured','ConvertTo-AcsXmlText','Get-AcsBrandSvg','Get-AcsRobotsTxt','Get-AcsSitemapXml','Get-AcsLlmsTxt','Get-AcsOpenApiJson','Write-TextResponse',
   'New-AnonSessionId','Get-RequestCookies','Get-RequestHeaderValue','Get-AnonymousAnalyticsConsentState','Clear-AnonymousSessionCookie','Get-OrCreate-AnonymousSessionId',
   'Get-HashedDomain','Invoke-MetricsRequest','Lock-MetricsFileMutex',
   'Get-AnonymousMetricsPersistPath','Import-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions','ConvertTo-Iso8601Utc',
@@ -33,7 +34,7 @@ $functionNames = @(
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
   'Invoke-RawDnsTxtQuery','Get-AuthoritativeNameserverHosts','Resolve-NameserverPublicIps','Get-NameserverTxtStatus',
-  'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
+  'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Get-DnsPropagationHealthTtlMinutes','Get-DnsPropagationHealthState','Set-DnsPropagationHealthState','ConvertFrom-DnsPropagationResolverInput','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
   'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-FirstNonEmptyPropertyValue','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Test-WhoisDomainNameSafe','Initialize-WhoisFieldRegexes','Get-WhoisParsedRegistrationData','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Invoke-WhoisProcess','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
@@ -54,6 +55,8 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogConsoleMode', $script:AcsLogConsoleMode, 'Secure logging console output mode'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogFilePath', $script:AcsLogFilePath, 'Secure logging JSONL file path'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLogMaxBytes', $script:AcsLogMaxBytes, 'Secure logging file size cap'))
+# Referenced UNQUALIFIED as $AcsAppVersion inside handler runspaces ($script: does not cross the runspace boundary).
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsAppVersion', $script:AppVersion, 'Application version string'))
 
 # Share the global metrics objects with handler runspaces (must be added before pool creation).
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsMetrics', $global:AcsMetrics, 'Shared metrics object'))
@@ -69,6 +72,14 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 # remove the global still leave the runspace pool in a working state.
 if ($global:AcsWhoisServerCooldown) {
   $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsWhoisServerCooldown', $global:AcsWhoisServerCooldown, 'Shared WHOIS-server cooldown map'))
+}
+
+# Share the resolver health cache so every worker contributes to (and benefits
+# from) the same view of which public resolvers are currently answering. Without
+# this each runspace would keep its own empty dictionary and the propagation
+# health pre-check could never learn across requests.
+if ($global:AcsPropagationHealth) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsPropagationHealth', $global:AcsPropagationHealth, 'Shared DNS propagation resolver health cache'))
 }
 
 foreach ($name in $functionNames) {

@@ -17,7 +17,89 @@ $htmlPage = @'
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
 <title>Azure Communication Services - Email Domain Checker</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
+
+<!--
+  SEO / link-preview metadata.
+  __ACS_SITE_URL__ is replaced per request by Write-Html (11-HttpHelpers.ps1)
+  with the deployment's public origin, because the HTML here-string is built
+  once at startup and cannot know the hostname it will be served from.
+  __ACS_OG_IMAGE__ is replaced at startup by 20f-HtmlPostProcess.ps1.
+-->
+<meta name="description" content="Check SPF, DKIM, DMARC, MX and TXT records, global DNS propagation, blocklist reputation and WHOIS for Azure Communication Services email domain setup." />
+<meta name="application-name" content="ACS Email Domain Checker" />
+<meta name="robots" content="__ACS_ROBOTS__" />
+<meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#020617" media="(prefers-color-scheme: dark)" />
+<link rel="canonical" href="__ACS_SITE_URL__/" />
+
+<!-- One hreflang entry per shipped translation so ?lang= variants are treated
+     as alternates of a single page instead of duplicate content. -->
+<link rel="alternate" hreflang="x-default" href="__ACS_SITE_URL__/" />
+<link rel="alternate" hreflang="en" href="__ACS_SITE_URL__/?lang=en" />
+<link rel="alternate" hreflang="es" href="__ACS_SITE_URL__/?lang=es" />
+<link rel="alternate" hreflang="fr" href="__ACS_SITE_URL__/?lang=fr" />
+<link rel="alternate" hreflang="de" href="__ACS_SITE_URL__/?lang=de" />
+<link rel="alternate" hreflang="pt-BR" href="__ACS_SITE_URL__/?lang=pt-BR" />
+<link rel="alternate" hreflang="ar" href="__ACS_SITE_URL__/?lang=ar" />
+<link rel="alternate" hreflang="zh-CN" href="__ACS_SITE_URL__/?lang=zh-CN" />
+<link rel="alternate" hreflang="hi-IN" href="__ACS_SITE_URL__/?lang=hi-IN" />
+<link rel="alternate" hreflang="ja-JP" href="__ACS_SITE_URL__/?lang=ja-JP" />
+<link rel="alternate" hreflang="ru-RU" href="__ACS_SITE_URL__/?lang=ru-RU" />
+
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="ACS Email Domain Checker" />
+<meta property="og:title" content="Azure Communication Services Email Domain Checker" />
+<meta property="og:description" content="Check SPF, DKIM, DMARC, MX and TXT records, global DNS propagation, blocklist reputation and WHOIS for Azure Communication Services email domain setup." />
+<meta property="og:url" content="__ACS_SITE_URL__/" />
+<meta property="og:image" content="__ACS_OG_IMAGE__" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:locale" content="en_US" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Azure Communication Services Email Domain Checker" />
+<meta name="twitter:description" content="Check SPF, DKIM, DMARC, MX and TXT records, global DNS propagation, blocklist reputation and WHOIS for ACS email domain setup." />
+<meta name="twitter:image" content="__ACS_OG_IMAGE__" />
+
+<!-- Machine-readable API discovery for AI assistants and API clients. -->
+<link rel="alternate" type="text/plain" href="__ACS_SITE_URL__/llms.txt" title="LLM-readable site and API summary" />
+<link rel="alternate" type="application/json" href="__ACS_SITE_URL__/openapi.json" title="OpenAPI 3.1 contract" />
+
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+<script type="application/ld+json" nonce="__CSP_NONCE__">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "Azure Communication Services Email Domain Checker",
+  "alternateName": "ACS Email Domain Checker",
+  "url": "__ACS_SITE_URL__/",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "DNS and email authentication diagnostics",
+  "operatingSystem": "Any (web browser)",
+  "browserRequirements": "Requires JavaScript",
+  "description": "Diagnostic tool that verifies the DNS configuration required to send email from an Azure Communication Services domain. Checks SPF, DKIM, DMARC, MX, TXT and CNAME records, measures DNS propagation across public resolvers worldwide, compares authoritative nameservers, and reports WHOIS registration and DNSBL blocklist reputation.",
+  "inLanguage": ["en", "es", "fr", "de", "pt-BR", "ar", "zh-CN", "hi-IN", "ja-JP", "ru-RU"],
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "featureList": [
+    "SPF record lookup, recursive include expansion and lookup-limit analysis",
+    "DKIM selector1/selector2 verification for Azure Communication Services",
+    "DMARC policy parsing with security guidance",
+    "MX record and mail provider detection",
+    "Azure Communication Services domain verification TXT check",
+    "Global DNS propagation across hundreds of public resolvers",
+    "Authoritative nameserver TXT consistency comparison",
+    "DNSBL and RBL blocklist reputation checking",
+    "WHOIS and RDAP domain registration lookup"
+  ],
+  "potentialAction": {
+    "@type": "SearchAction",
+    "target": { "@type": "EntryPoint", "urlTemplate": "__ACS_SITE_URL__/?domain={domain}" },
+    "query-input": "required name=domain"
+  }
+}
+</script>
 
 <style nonce="__CSP_NONCE__">
 :root {
@@ -1816,7 +1898,8 @@ input.dns-records-search-input {
 
 .prop-settings-row select,
 .prop-settings-row input[type="number"],
-.prop-settings-row input[type="text"] {
+.prop-settings-row input[type="text"],
+.prop-settings-row textarea {
   padding: 6px 9px;
   border-radius: 6px;
   border: 1px solid var(--input-border);
@@ -1824,6 +1907,21 @@ input.dns-records-search-input {
   color: var(--fg);
   font-size: 13px;
   max-width: 320px;
+}
+
+.prop-settings-row textarea {
+  max-width: 420px;
+  width: 100%;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.prop-settings-hint {
+  font-size: 11px;
+  color: var(--status);
+  line-height: 1.5;
+  max-width: 520px;
 }
 
 /* The native option popup is drawn by the OS, not by our theme, so it ignores
@@ -3627,6 +3725,24 @@ ul.guidance li {
   .cookie-consent-banner { padding: 18px 16px 16px 16px; }
   .cookie-consent-actions { flex-direction: column; }
   .cookie-consent-actions button { width: 100%; text-align: center; }
+}
+
+.noscript-notice {
+  max-width: 760px;
+  margin: 32px auto;
+  padding: 20px 24px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  color: var(--fg);
+  line-height: 1.65;
+}
+.noscript-notice h2 { margin-top: 0; }
+.noscript-notice code {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 </style>
 '@

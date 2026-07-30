@@ -7,6 +7,15 @@ $script:TosPageHtml = @'
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Terms of Service - ACS Email Domain Checker</title>
+<meta name="description" content="Terms of Service for the Azure Communication Services Email Domain Checker, a read-only DNS and email authentication diagnostic tool." />
+<meta name="robots" content="__ACS_ROBOTS__" />
+<meta name="color-scheme" content="light dark" />
+<link rel="canonical" href="__ACS_SITE_URL__/terms" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="ACS Email Domain Checker" />
+<meta property="og:title" content="Terms of Service - ACS Email Domain Checker" />
+<meta property="og:url" content="__ACS_SITE_URL__/terms" />
 <style nonce="__CSP_NONCE__">
   :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
   @media (prefers-color-scheme: dark) {
@@ -283,6 +292,15 @@ $script:PrivacyPageHtml = @'
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Privacy Statement - ACS Email Domain Checker</title>
+<meta name="description" content="Privacy Statement for the Azure Communication Services Email Domain Checker, covering cookies, anonymous usage metrics and what domain data is processed." />
+<meta name="robots" content="__ACS_ROBOTS__" />
+<meta name="color-scheme" content="light dark" />
+<link rel="canonical" href="__ACS_SITE_URL__/privacy" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="ACS Email Domain Checker" />
+<meta property="og:title" content="Privacy Statement - ACS Email Domain Checker" />
+<meta property="og:url" content="__ACS_SITE_URL__/privacy" />
 <style nonce="__CSP_NONCE__">
   :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
   @media (prefers-color-scheme: dark) {

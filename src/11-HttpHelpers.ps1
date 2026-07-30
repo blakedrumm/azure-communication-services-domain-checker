@@ -155,6 +155,19 @@ function Set-NoCacheHeaders {
   } catch { }
 }
 
+function Test-AcsHeadRequest {
+  param($Context)
+  try {
+    return [string]::Equals(
+      [string]$Context.Request.HttpMethod,
+      'HEAD',
+      [System.StringComparison]::OrdinalIgnoreCase
+    )
+  } catch {
+    return $false
+  }
+}
+
 # Centralized outbound HTTP helper for user-driven lookups (DoH, RDAP, WHOIS,
 # RBL, etc.). Goals:
 # - Enforce HTTPS-only (refuses cleartext) so a typo in a custom endpoint
@@ -323,6 +336,10 @@ function Write-Json {
     try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
     $Context.Response.StatusCode  = $StatusCode
     $Context.Response.ContentLength64 = $bytes.Length
+    if (Test-AcsHeadRequest -Context $Context) {
+      $Context.Response.Close()
+      return
+    }
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $Context.Response.OutputStream.Close()
     return
@@ -370,6 +387,10 @@ function Write-FileResponse {
         } catch { }
         $Context.Response.StatusCode  = 200
         $Context.Response.ContentLength64 = $bytes.Length
+        if (Test-AcsHeadRequest -Context $Context) {
+          $Context.Response.Close()
+          return
+        }
         $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
         $Context.Response.OutputStream.Close()
         return
@@ -387,7 +408,8 @@ function Write-Html {
     param(
         $Context,
         [string]$Html,
-        [string]$Nonce
+        [string]$Nonce,
+        [string]$BaseUrl
     )
 
     # Serve the embedded SPA HTML. (All dynamic data is fetched from JSON endpoints.)
@@ -396,6 +418,18 @@ function Write-Html {
     } else {
       $Html = $Html.Replace('__CSP_NONCE__', $Nonce)
     }
+
+    # SEO tokens are resolved here rather than at startup because the public
+    # origin is a property of the deployment, not the build. An empty BaseUrl
+    # degrades canonical/hreflang to root-relative URLs, which stays valid.
+    if ($null -eq $BaseUrl) { $BaseUrl = '' }
+    $Html = $Html.Replace('__ACS_SITE_URL__', $BaseUrl.TrimEnd('/'))
+    $robotsDirective = if (Test-AcsSeoIndexingAllowed) {
+      'index, follow, max-image-preview:large, max-snippet:-1'
+    } else {
+      'noindex, nofollow'
+    }
+    $Html = $Html.Replace('__ACS_ROBOTS__', $robotsDirective)
 
     $bytes = [Text.Encoding]::UTF8.GetBytes($Html)
 
@@ -407,6 +441,10 @@ function Write-Html {
       try { $Context.Response.ContentEncoding = [System.Text.Encoding]::UTF8 } catch { }
       $Context.Response.StatusCode  = 200
       $Context.Response.ContentLength64 = $bytes.Length
+      if (Test-AcsHeadRequest -Context $Context) {
+        $Context.Response.Close()
+        return
+      }
       $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
       $Context.Response.OutputStream.Close()
       return

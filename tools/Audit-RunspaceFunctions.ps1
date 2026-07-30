@@ -34,7 +34,17 @@ foreach ($f in $psFiles) {
                 # here-string terminator: newline + tag + '@
                 if ($c -eq "`n") {
                     $rest = $raw.Substring($i + 1)
-                    if ($rest -match ('^\s*' + [regex]::Escape($hereTag) + '@')) { $inHere = $false; $hereTag = $null }
+                    # [ \t]* (not \s*) so a blank line cannot let a LATER
+                    # terminator match early.
+                    $term = [regex]::Match($rest, ('^[ \t]*' + [regex]::Escape($hereTag) + '@'))
+                    if ($term.Success) {
+                        $inHere = $false; $hereTag = $null
+                        # Jump past the terminator. Without this the closing
+                        # quote of '@ is re-read as the START of a new string
+                        # literal, which swallows the following braces and
+                        # makes the whole function look undefined.
+                        $i += $term.Length
+                    }
                 }
                 continue
             }

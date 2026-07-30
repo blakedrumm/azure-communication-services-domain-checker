@@ -119,6 +119,268 @@ function Get-DnsPropagationResolverCatalog {
 
     # ---- Oceania ----
     [pscustomobject]@{ ip = '139.130.4.5';     provider = 'Telstra';               countryCode = 'AU'; city = 'Sydney';        latitude = -33.87; longitude = 151.21;  region = 'oceania'; anycast = $false }
+
+    # ---- Community open resolvers (generated) ----
+    # Sourced from the public-dns.info dataset, cross-referenced against the
+    # standalone DNS Propagation Checker's vetted-healthy cache, then live-probed
+    # before being committed here. Coordinates are the operator country reference
+    # point, not a per-IP geolocation, so the map shows "a resolver in this
+    # country" rather than claiming street-level accuracy. These exist so a
+    # 100-resolver request has enough real vantage points to draw from; dead
+    # entries are filtered out at request time by the health pre-check.
+    [pscustomobject]@{ ip = '194.158.78.137'; provider = 'Andorra Telecom S.a.u.'; countryCode = 'AD'; city = 'Andorra la Vella'; latitude = 42.5; longitude = 1.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '138.219.249.221'; provider = 'Coop de Prov.Serv.Telef.Obras'; countryCode = 'AR'; city = 'Rafael Castillo'; latitude = -34.6; longitude = -58.4; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.89.142.74'; provider = 'Telecom Argentina S.A.'; countryCode = 'AR'; city = 'Buenos Aires'; latitude = -34.6; longitude = -58.4; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '80.123.196.122'; provider = 'A1 Telekom Austria AG'; countryCode = 'AT'; city = 'Dornbirn'; latitude = 48.2; longitude = 16.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '110.145.154.62'; provider = 'Telstra Corporation Ltd'; countryCode = 'AU'; city = 'Melbourne'; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '111.118.223.243'; provider = 'Entity Data Pty Limited'; countryCode = 'AU'; city = ''; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '139.134.5.51'; provider = 'Telstra Corporation Ltd'; countryCode = 'AU'; city = ''; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '203.50.2.71'; provider = 'Telstra Corporation Ltd'; countryCode = 'AU'; city = 'Sydney'; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '210.18.214.38'; provider = 'Brennan IT'; countryCode = 'AU'; city = 'Sunshine Coast'; latitude = -33.9; longitude = 151.2; region = 'oceania'; anycast = $false }
+    [pscustomobject]@{ ip = '85.132.85.85'; provider = 'Delta Telecom Ltd'; countryCode = 'AZ'; city = ''; latitude = 40.4; longitude = 49.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.140.24.14'; provider = 'Hello IT'; countryCode = 'BD'; city = 'Cox''s Bazar'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.143.237.206'; provider = 'ARK Network'; countryCode = 'BD'; city = ''; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.143.237.85'; provider = 'ARK Network'; countryCode = 'BD'; city = ''; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.145.164.162'; provider = 'Speed 69.Net'; countryCode = 'BD'; city = 'Tejgaon'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.145.164.231'; provider = 'Speed 69.Net'; countryCode = 'BD'; city = 'Dhaka'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.153.48.174'; provider = 'MAYA SOFT'; countryCode = 'BD'; city = 'Mymensingh'; latitude = 23.8; longitude = 90.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '194.6.227.15'; provider = 'VERIXI SA'; countryCode = 'BE'; city = ''; latitude = 50.8; longitude = 4.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '185.165.96.225'; provider = 'Global Electronic Solutions LT'; countryCode = 'BG'; city = ''; latitude = 42.7; longitude = 23.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '202.152.80.38'; provider = 'UNN'; countryCode = 'BN'; city = 'Bandar Seri Begawan'; latitude = 4.9; longitude = 114.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.181.247.29'; provider = 'gotcha net internet provider'; countryCode = 'BR'; city = 'São Paulo'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '168.181.247.54'; provider = 'gotcha net internet provider'; countryCode = 'BR'; city = 'São Paulo'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '177.131.18.34'; provider = 'Compuservice Empreendimentos L'; countryCode = 'BR'; city = 'Macapá'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '179.228.250.125'; provider = 'TELEFONICA BRASIL S.A'; countryCode = 'BR'; city = 'São Paulo'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '190.89.22.77'; provider = 'RDS TECNOLOGIA-ME'; countryCode = 'BR'; city = 'São Luís'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.195.170.186'; provider = 'Ligga Telecomunicacoes S.A.'; countryCode = 'BR'; city = 'Ivai'; latitude = -23.5; longitude = -46.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '178.124.148.226'; provider = 'Republican Unitary Telecommuni'; countryCode = 'BY'; city = 'Minsk'; latitude = 53.9; longitude = 27.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '149.112.122.20'; provider = 'CIRADNS3'; countryCode = 'CA'; city = ''; latitude = 43.7; longitude = -79.4; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '208.91.112.52'; provider = 'FORTINET'; countryCode = 'CA'; city = 'Burnaby'; latitude = 43.7; longitude = -79.4; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '141.195.95.131'; provider = 'Init7 (Switzerland) Ltd.'; countryCode = 'CH'; city = 'Affoltern am Albis'; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.186.1.111'; provider = 'Bluewin'; countryCode = 'CH'; city = ''; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.186.4.192'; provider = 'Bluewin'; countryCode = 'CH'; city = ''; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.245.237.35'; provider = 'fenaco Genossenschaft'; countryCode = 'CH'; city = ''; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.17.17.170'; provider = 'Private Layer INC'; countryCode = 'CH'; city = 'Zurich'; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.90.9.166'; provider = 'netplusFR SA'; countryCode = 'CH'; city = 'Fribourg'; latitude = 47.4; longitude = 8.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '190.151.104.178'; provider = 'ENTEL CHILE S.A.'; countryCode = 'CL'; city = 'Vallenar'; latitude = -33.4; longitude = -70.7; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.68.46.21'; provider = 'CTC. CORP S.A. TELEFONICA EMPR'; countryCode = 'CL'; city = 'Chimbarongo'; latitude = -33.4; longitude = -70.7; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '201.148.107.14'; provider = 'HOSTING.'; countryCode = 'CL'; city = 'Santiago'; latitude = -33.4; longitude = -70.7; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '114.114.115.115'; provider = 'COGENT-174'; countryCode = 'CN'; city = ''; latitude = 39.9; longitude = 116.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '181.129.36.242'; provider = 'EPM Telecomunicaciones S.A. E.'; countryCode = 'CO'; city = 'Bogotá'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.143.37.202'; provider = 'EPM Telecomunicaciones S.A. E.'; countryCode = 'CO'; city = 'Medellín'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.48.196.182'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Bogotá'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.49.102.21'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Pereira'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '181.49.210.138'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Medellín'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '190.145.215.198'; provider = 'Telmex Colombia S.A.'; countryCode = 'CO'; city = 'Bogotá'; latitude = 4.7; longitude = -74.1; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '190.171.97.250'; provider = 'Telecable Economico S.A.'; countryCode = 'CR'; city = 'San José'; latitude = 9.9; longitude = -84.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '185.43.135.1'; provider = 'CZ.NIC z.s.p.o.'; countryCode = 'CZ'; city = ''; latitude = 50.1; longitude = 14.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '89.190.65.200'; provider = 'N_SYS s.r.o.'; countryCode = 'CZ'; city = 'Broumov'; latitude = 50.1; longitude = 14.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.127.135.212'; provider = 'TFnet s.r.o.'; countryCode = 'CZ'; city = 'Tanvald'; latitude = 50.1; longitude = 14.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '185.93.180.131'; provider = 'M247 Ltd'; countryCode = 'DE'; city = 'Frankfurt am Main'; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.25.0.60'; provider = 'Deutsche Telekom AG'; countryCode = 'DE'; city = 'Rehau'; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '217.160.70.42'; provider = 'IONOS SE'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '78.31.67.99'; provider = 'myLoc managed IT AG'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.16.18.228'; provider = 'netcup GmbH'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.16.19.65'; provider = 'netcup GmbH'; countryCode = 'DE'; city = ''; latitude = 50.1; longitude = 8.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.27.217.7'; provider = 'GlobalConnect A S'; countryCode = 'DK'; city = 'Odense'; latitude = 55.7; longitude = 12.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '157.100.63.48'; provider = 'NEDETEL S.A.'; countryCode = 'EC'; city = ''; latitude = -0.2; longitude = -78.5; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '170.239.204.230'; provider = 'FIBERNET'; countryCode = 'EC'; city = 'Ambato'; latitude = -0.2; longitude = -78.5; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '94.198.55.64'; provider = 'LLC Smart Ape'; countryCode = 'EE'; city = ''; latitude = 59.4; longitude = 24.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '41.33.166.19'; provider = 'TE-AS'; countryCode = 'EG'; city = 'Cairo'; latitude = 30; longitude = 31.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '5.1.38.155'; provider = 'Prisco Electronica S.L.'; countryCode = 'ES'; city = 'Roses'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.26.214.15'; provider = 'R Cable y Telecable Telecomuni'; countryCode = 'ES'; city = 'Sanxenxo'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.9.198.12'; provider = 'Euskaltel S.A.'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.9.198.202'; provider = 'Euskaltel S.A.'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.9.198.217'; provider = 'Euskaltel S.A.'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '82.223.43.222'; provider = 'IONOS SE'; countryCode = 'ES'; city = 'Madrid'; latitude = 40.4; longitude = -3.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.23.204.137'; provider = 'DNA Oyj'; countryCode = 'FI'; city = 'Oulu'; latitude = 60.2; longitude = 24.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '109.5.33.66'; provider = 'Societe Francaise Du Radiotele'; countryCode = 'FR'; city = 'Paris'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '141.95.6.51'; provider = 'OVH SAS'; countryCode = 'FR'; city = ''; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '15.188.45.248'; provider = 'AMAZON-02'; countryCode = 'FR'; city = 'Paris'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '151.80.145.143'; provider = 'OVH SAS'; countryCode = 'FR'; city = 'Roubaix'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.135.166.77'; provider = 'OVH SAS'; countryCode = 'FR'; city = 'Bonneuil-sur-Marne'; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.39.71.50'; provider = 'OVH SAS'; countryCode = 'FR'; city = ''; latitude = 48.9; longitude = 2.4; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '109.228.0.238'; provider = 'IONOS SE'; countryCode = 'GB'; city = ''; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '167.98.161.41'; provider = 'Exponential-E Ltd.'; countryCode = 'GB'; city = 'London'; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '167.98.171.242'; provider = 'Exponential-E Ltd.'; countryCode = 'GB'; city = 'Sheffield'; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.168.4.123'; provider = 'Virgin Media Limited'; countryCode = 'GB'; city = 'Liverpool'; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.99.66.220'; provider = 'British Telecommunications PLC'; countryCode = 'GB'; city = ''; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.11.11.11'; provider = 'Liquid Telecommunications Ltd'; countryCode = 'GB'; city = ''; latitude = 51.5; longitude = -0.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '212.72.130.21'; provider = 'Caucasus Online Ltd.'; countryCode = 'GE'; city = ''; latitude = 41.7; longitude = 44.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '192.71.166.92'; provider = 'SYNAPSECOM S.A. Provider of Te'; countryCode = 'GR'; city = 'Thessaloniki'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.177.199.1'; provider = 'University Of Ioannina'; countryCode = 'GR'; city = ''; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.167.123.245'; provider = 'OTEnet S .A .'; countryCode = 'GR'; city = 'Thessaloniki'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.251.19.1'; provider = 'National Infrastructures for R'; countryCode = 'GR'; city = 'Marousi'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '212.251.32.202'; provider = 'Forthnet'; countryCode = 'GR'; city = 'Athens'; latitude = 38; longitude = 23.7; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '113.28.67.147'; provider = 'HKT Limited'; countryCode = 'HK'; city = 'Central'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '175.45.16.253'; provider = 'HKBN Enterprise Solutions HK L'; countryCode = 'HK'; city = 'Central'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.131.73.38'; provider = 'HKBN Enterprise Solutions HK L'; countryCode = 'HK'; city = 'Tai Kok Tsui'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.181.242.131'; provider = 'HongKong Commercial Internet E'; countryCode = 'HK'; city = ''; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.198.167.39'; provider = 'HKT Limited'; countryCode = 'HK'; city = 'Central'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '223.255.176.195'; provider = 'HKBN Enterprise Solutions HK L'; countryCode = 'HK'; city = 'Wanchai'; latitude = 22.3; longitude = 114.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '83.131.4.217'; provider = 'Hrvatski Telekom d.d.'; countryCode = 'HR'; city = 'Velika Jamnicka'; latitude = 45.8; longitude = 16; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '109.61.113.35'; provider = 'Dravanet Co Ltd.'; countryCode = 'HU'; city = 'Pécs'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.228.230.148'; provider = 'Magyar Telekom plc.'; countryCode = 'HU'; city = 'Budapest'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.249.168.172'; provider = 'Magyar Telekom plc.'; countryCode = 'HU'; city = 'Budapest'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '81.183.227.40'; provider = 'Magyar Telekom plc.'; countryCode = 'HU'; city = 'Budapest'; latitude = 47.5; longitude = 19; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '103.175.237.3'; provider = 'PT Marva Global Telekomunikasi'; countryCode = 'ID'; city = 'Malang'; latitude = -6.2; longitude = 106.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.92.207.33'; provider = 'PT Hyperindo Media Perkasa'; countryCode = 'ID'; city = 'Jakarta'; latitude = -6.2; longitude = 106.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '36.67.236.161'; provider = 'PT Telekomunikasi Indonesia'; countryCode = 'ID'; city = 'Mangunsari'; latitude = -6.2; longitude = 106.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '54.229.171.243'; provider = 'AMAZON-02'; countryCode = 'IE'; city = 'Dublin'; latitude = 53.3; longitude = -6.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '185.106.131.141'; provider = 'O.m.c. Computers & Communicati'; countryCode = 'IL'; city = ''; latitude = 32.1; longitude = 34.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '91.223.106.229'; provider = 'O.m.c. Computers & Communicati'; countryCode = 'IL'; city = 'Tel Aviv'; latitude = 32.1; longitude = 34.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.13.112.251'; provider = 'LeapSwitch Networks Pvt Ltd'; countryCode = 'IN'; city = ''; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.174.102.61'; provider = 'IDIGITALCAMP WEB SERVICES'; countryCode = 'IN'; city = ''; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.241.181.28'; provider = 'CtrlS'; countryCode = 'IN'; city = ''; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '169.38.73.5'; provider = 'SOFTLAYER'; countryCode = 'IN'; city = 'Chennai'; latitude = 19.1; longitude = 72.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '213.176.123.5'; provider = 'Iranian Research Organization'; countryCode = 'IR'; city = ''; latitude = 35.7; longitude = 51.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '81.91.144.116'; provider = 'Farabord Dadeh Haye Iranian Co'; countryCode = 'IR'; city = 'Tehran'; latitude = 35.7; longitude = 51.4; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '154.14.16.251'; provider = 'GTT Communications Inc.'; countryCode = 'IT'; city = 'Canossa'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '194.53.180.252'; provider = 'Computer System'; countryCode = 'IT'; city = 'Terranova da Sibari'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '2.40.63.222'; provider = 'Vodafone Italia S.p.A.'; countryCode = 'IT'; city = 'Castel Maggiore'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '84.253.140.132'; provider = 'Irideos S.p.A.'; countryCode = 'IT'; city = 'Rome'; latitude = 41.9; longitude = 12.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '124.32.115.205'; provider = 'ARTERIA Networks Corporation'; countryCode = 'JP'; city = 'Kawaguchi'; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '153.120.88.148'; provider = 'SAKURA Internet Inc.'; countryCode = 'JP'; city = ''; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.210.190.99'; provider = 'BEKKOAME INTERNET INC.'; countryCode = 'JP'; city = ''; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.171.38.41'; provider = 'Yahoo Japan Corporation'; countryCode = 'JP'; city = ''; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '59.158.8.83'; provider = 'ARTERIA Networks Corporation'; countryCode = 'JP'; city = 'Sapporo'; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '66.42.33.24'; provider = 'AS-CHOOPA'; countryCode = 'JP'; city = 'Heiwajima'; latitude = 35.7; longitude = 139.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '134.75.122.2'; provider = 'Hoseo University'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.154.160.4'; provider = 'SK Co.'; countryCode = 'KR'; city = 'Seongnam-si'; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.154.224.50'; provider = 'SK Co.'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.30.143.11'; provider = 'Shinbiro'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.225.255.11'; provider = 'Korea Telecom'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '211.115.194.3'; provider = 'Sejong Telecom'; countryCode = 'KR'; city = ''; latitude = 37.6; longitude = 127; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '195.88.223.73'; provider = 'Kuwait Petroleum Corporation'; countryCode = 'KW'; city = 'Kuwait City'; latitude = 29.4; longitude = 48; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '5.63.111.235'; provider = 'JSC Kazakhtelecom'; countryCode = 'KZ'; city = 'Aktobe'; latitude = 43.2; longitude = 76.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '79.137.181.102'; provider = 'Ecotel Ltd.'; countryCode = 'KZ'; city = 'Taraz'; latitude = 43.2; longitude = 76.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '46.148.26.40'; provider = 'Infium UAB'; countryCode = 'LT'; city = ''; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '82.135.203.178'; provider = 'Telia Lietuva AB'; countryCode = 'LT'; city = 'Vilnius'; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.119.203.210'; provider = 'Telia Lietuva AB'; countryCode = 'LT'; city = 'Kaunas'; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '92.61.44.7'; provider = 'Telia Lietuva AB'; countryCode = 'LT'; city = ''; latitude = 54.7; longitude = 25.3; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.93.22.17'; provider = 'Jsc Balticom'; countryCode = 'LV'; city = 'Riga'; latitude = 56.9; longitude = 24.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '83.99.220.7'; provider = 'Jsc Balticom'; countryCode = 'LV'; city = 'Riga'; latitude = 56.9; longitude = 24.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '91.200.67.156'; provider = 'SIA Tet'; countryCode = 'LV'; city = ''; latitude = 56.9; longitude = 24.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '165.16.58.124'; provider = 'Aljeel-net'; countryCode = 'LY'; city = ''; latitude = 32.9; longitude = 13.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.77.116.62'; provider = 'GTCOMM'; countryCode = 'MA'; city = 'Marrakesh'; latitude = 33.6; longitude = -7.6; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '95.65.9.171'; provider = 'StarNet Solutii SRL'; countryCode = 'MD'; city = 'Bălţi'; latitude = 47; longitude = 28.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '103.121.228.5'; provider = 'MyanmarAPN'; countryCode = 'MM'; city = 'Yangon'; latitude = 16.8; longitude = 96.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.131.254.166'; provider = 'Mobinet LLC. AS Mobinet Intern'; countryCode = 'MN'; city = ''; latitude = 47.9; longitude = 106.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.21.116.206'; provider = 'Mobinet LLC. AS Mobinet Intern'; countryCode = 'MN'; city = ''; latitude = 47.9; longitude = 106.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.5.200.8'; provider = 'Mongolian National Research an'; countryCode = 'MN'; city = ''; latitude = 47.9; longitude = 106.9; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '94.124.152.158'; provider = 'Idom Technologies SAS'; countryCode = 'MQ'; city = 'Riviere Salee'; latitude = 14.6; longitude = -61.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '41.216.125.179'; provider = 'Liquid Telecommunications Ltd'; countryCode = 'MU'; city = ''; latitude = -20.2; longitude = 57.5; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '186.96.11.240'; provider = 'TOTAL PLAY TELECOMUNICACIONES'; countryCode = 'MX'; city = 'Monterrey'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '187.216.86.65'; provider = 'Uninet S.A. de C.V.'; countryCode = 'MX'; city = 'Hermosillo'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '189.196.91.198'; provider = 'Mega Cable S.A. de C.V.'; countryCode = 'MX'; city = 'Monterrey'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '189.204.6.253'; provider = 'Mexico Red de Telecomunicacion'; countryCode = 'MX'; city = 'Cuautitlan'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '200.76.5.147'; provider = 'Alestra S. de R.L. de C.V.'; countryCode = 'MX'; city = 'San Luis Potosí City'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '201.143.181.110'; provider = 'Telefonos del Noroeste S.A. de'; countryCode = 'MX'; city = 'San Luis Río Colorado'; latitude = 19.4; longitude = -99.1; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '1.9.165.210'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Petaling Jaya'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '1.9.63.97'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Shah Alam'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.13.123.16'; provider = 'Exa Bytes Network Sdn.Bhd.'; countryCode = 'MY'; city = ''; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '175.139.1.45'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Taiping'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.184.80.21'; provider = 'TIME dotCom Berhad No. 14 Jala'; countryCode = 'MY'; city = 'Rawang'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.187.25.147'; provider = 'TM Net Internet Service Provid'; countryCode = 'MY'; city = 'Puchong Batu Dua Belas'; latitude = 3.1; longitude = 101.7; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '41.218.90.154'; provider = 'Paratus-Telecom'; countryCode = 'NA'; city = 'Windhoek'; latitude = -22.6; longitude = 17.1; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '178.62.197.147'; provider = 'DIGITALOCEAN-ASN'; countryCode = 'NL'; city = 'Amsterdam'; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '45.14.48.185'; provider = 'Itglobal.com Nl B.v.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.146.233.162'; provider = 'Vodafone Libertel B.V.'; countryCode = 'NL'; city = 'Maastricht'; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.221.162.37'; provider = 'Akamai International B.V.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.221.162.94'; provider = 'Akamai International B.V.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '88.221.163.196'; provider = 'Akamai International B.V.'; countryCode = 'NL'; city = ''; latitude = 52.4; longitude = 4.9; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.159.253.130'; provider = 'Globalconnect As'; countryCode = 'NO'; city = 'Langhus'; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.222.170.103'; provider = 'Eltele AS'; countryCode = 'NO'; city = 'Alta'; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '78.31.85.18'; provider = 'Telenor Norge AS'; countryCode = 'NO'; city = 'Andalsnes'; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.127.59.12'; provider = 'mnemonic AS'; countryCode = 'NO'; city = ''; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.127.59.14'; provider = 'mnemonic AS'; countryCode = 'NO'; city = ''; latitude = 59.9; longitude = 10.8; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '124.83.13.150'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Balingasag'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.158.15.67'; provider = 'Unit 802 Orient Square Buildin'; countryCode = 'PH'; city = ''; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.177.52.229'; provider = 'Globe Telecoms'; countryCode = 'PH'; city = 'Andres Bonifacio'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.1.81.40'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Mandaue City'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.1.86.1'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Legazpi'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '210.5.101.242'; provider = 'Philippine Long Distance Telep'; countryCode = 'PH'; city = 'Ozamiz'; latitude = 14.6; longitude = 121; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '118.103.239.33'; provider = 'Connect Communications'; countryCode = 'PK'; city = 'Karachi'; latitude = 24.9; longitude = 67; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '203.135.31.114'; provider = 'Pakistan Telecommunication Com'; countryCode = 'PK'; city = 'Gujrat'; latitude = 24.9; longitude = 67; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '195.3.204.225'; provider = 'TUCHA Sp. z o.o.'; countryCode = 'PL'; city = ''; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.45.111.51'; provider = 'Asta-net S.A.'; countryCode = 'PL'; city = 'Czarnkow'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '77.65.176.110'; provider = 'ICT FUTURE Sp. z o.o.'; countryCode = 'PL'; city = 'Wroclaw'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.87.39.34'; provider = 'INEA sp. z o.o.'; countryCode = 'PL'; city = 'Sompolno'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '91.233.237.201'; provider = 'PROSAT s.c.'; countryCode = 'PL'; city = 'Kościan'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.240.43.117'; provider = 'FHU PING'; countryCode = 'PL'; city = 'Warsaw'; latitude = 52.2; longitude = 21; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.46.175.93'; provider = 'Almouroltec Servicos De Inform'; countryCode = 'PT'; city = 'Leiria'; latitude = 38.7; longitude = -9.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '190.52.135.140'; provider = 'COMPANIA PARAGUAYA DE COMUNICA'; countryCode = 'PY'; city = 'San Lorenzo'; latitude = -25.3; longitude = -57.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '201.217.57.148'; provider = 'COMPANIA PARAGUAYA DE COMUNICA'; countryCode = 'PY'; city = 'Asunción'; latitude = -25.3; longitude = -57.6; region = 'samer'; anycast = $false }
+    [pscustomobject]@{ ip = '212.146.97.154'; provider = 'GTS Telecom SRL'; countryCode = 'RO'; city = 'Bucharest'; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.2.196.93'; provider = 'RCS & RDS'; countryCode = 'RO'; city = 'Cluj-Napoca'; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '80.96.177.217'; provider = 'Vodafone Romania S.A.'; countryCode = 'RO'; city = ''; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '89.42.219.106'; provider = 'ROMARG SRL'; countryCode = 'RO'; city = ''; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '94.52.89.226'; provider = 'Nextgen Communications Srl'; countryCode = 'RO'; city = 'Giurgiu'; latitude = 44.4; longitude = 26.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '93.87.119.162'; provider = 'TELEKOM SRBIJA a.d.'; countryCode = 'RS'; city = ''; latitude = 44.8; longitude = 20.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '93.87.127.66'; provider = 'TELEKOM SRBIJA a.d.'; countryCode = 'RS'; city = 'Opstina Arandelovac'; latitude = 44.8; longitude = 20.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '217.150.35.129'; provider = 'Joint Stock Company TransTeleC'; countryCode = 'RU'; city = 'Rostov-on-Don'; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.164.31.60'; provider = 'JSC ER-Telecom Holding'; countryCode = 'RU'; city = 'Tula'; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '5.188.42.199'; provider = 'OOO Network of data-centers Se'; countryCode = 'RU'; city = 'St Petersburg'; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '62.76.62.76'; provider = 'Joint-stock company Internet E'; countryCode = 'RU'; city = ''; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '91.223.120.25'; provider = 'Sibirskie Innovacionnye Sistem'; countryCode = 'RU'; city = ''; latitude = 55.8; longitude = 37.6; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '192.165.252.20'; provider = 'Fiberaccessbolaget i Sverige A'; countryCode = 'SE'; city = 'Ängelholm'; latitude = 59.3; longitude = 18.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '217.119.160.99'; provider = 'Tele2 SWIPnet'; countryCode = 'SE'; city = 'Stockholm'; latitude = 59.3; longitude = 18.1; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '116.12.172.241'; provider = 'SingNet'; countryCode = 'SG'; city = 'Singapore'; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '119.75.28.242'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '124.66.128.198'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '128.106.52.161'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '151.192.60.134'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '180.255.3.49'; provider = 'SingNet'; countryCode = 'SG'; city = ''; latitude = 1.35; longitude = 103.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '193.2.246.9'; provider = 'ARNES'; countryCode = 'SI'; city = 'Zgornje Gorje'; latitude = 46.1; longitude = 14.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '89.233.118.207'; provider = 'T-2 d.o.o.'; countryCode = 'SI'; city = 'Brezovica pri Ljubljani'; latitude = 46.1; longitude = 14.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '93.103.221.171'; provider = 'T-2 d.o.o.'; countryCode = 'SI'; city = 'Kamenica'; latitude = 46.1; longitude = 14.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '1.1.188.104'; provider = 'TOT Public Company Limited'; countryCode = 'TH'; city = 'Ban Phan Don'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '110.77.149.172'; provider = 'CAT TELECOM Public Company Ltd'; countryCode = 'TH'; city = 'Samut Prakan'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '122.155.213.7'; provider = 'The Communication Authoity of'; countryCode = 'TH'; city = ''; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '159.192.105.164'; provider = 'CAT TELECOM Public Company Ltd'; countryCode = 'TH'; city = ''; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '159.192.142.29'; provider = 'CAT TELECOM Public Company Ltd'; countryCode = 'TH'; city = 'Ban Dan Noen Sung'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.129.59.69'; provider = 'The Communication Authoity of'; countryCode = 'TH'; city = 'Si Khoraphum'; latitude = 13.8; longitude = 100.5; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '85.9.129.36'; provider = 'Tacom LLC'; countryCode = 'TJ'; city = 'Dushanbe'; latitude = 38.6; longitude = 68.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '85.9.129.38'; provider = 'Tacom LLC'; countryCode = 'TJ'; city = 'Dushanbe'; latitude = 38.6; longitude = 68.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '196.203.125.132'; provider = 'EL-Khawarizmi'; countryCode = 'TN'; city = ''; latitude = 36.8; longitude = 10.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '196.203.125.133'; provider = 'EL-Khawarizmi'; countryCode = 'TN'; city = ''; latitude = 36.8; longitude = 10.2; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '176.235.135.204'; provider = 'Superonline Iletisim Hizmetler'; countryCode = 'TR'; city = ''; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '195.21.58.113'; provider = 'GTT Communications Inc.'; countryCode = 'TR'; city = ''; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '31.7.37.37'; provider = 'Teknet Yazlim Ve Bilgisayar Te'; countryCode = 'TR'; city = 'Antalya'; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '85.99.234.230'; provider = 'Turk Telekom'; countryCode = 'TR'; city = 'Istanbul'; latitude = 41; longitude = 29; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '196.3.132.154'; provider = 'Telecommunication Services of'; countryCode = 'TT'; city = ''; latitude = 10.7; longitude = -61.5; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '118.99.210.36'; provider = 'SaveCom Internation Inc.'; countryCode = 'TW'; city = 'Hsinchu County'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '168.95.1.1'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = ''; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '220.135.28.237'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Taipei'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '59.125.246.99'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Tainan City'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '60.250.158.126'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Taipei'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '60.250.159.76'; provider = 'Data Communication Business Gr'; countryCode = 'TW'; city = 'Taipei'; latitude = 25; longitude = 121.6; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '176.104.57.223'; provider = 'UnderNet LLC'; countryCode = 'UA'; city = 'Irpin'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '176.104.59.191'; provider = 'UnderNet LLC'; countryCode = 'UA'; city = 'Kyiv'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '176.98.80.97'; provider = 'TOV TV&Radio Company TIM'; countryCode = 'UA'; city = 'Uman'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '178.158.234.89'; provider = 'Maximum-Net LLC'; countryCode = 'UA'; city = 'Vyshneve'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '95.67.81.143'; provider = 'Cosmonova LLC'; countryCode = 'UA'; city = 'Kyiv'; latitude = 50.5; longitude = 30.5; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '151.196.0.37'; provider = 'UUNET'; countryCode = 'US'; city = 'Crofton'; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '151.197.0.37'; provider = 'UUNET'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '151.197.0.38'; provider = 'UUNET'; countryCode = 'US'; city = 'Philadelphia'; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '151.201.0.38'; provider = 'UUNET'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '156.154.71.2'; provider = 'SECURITYSERVICES'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '165.87.201.244'; provider = 'ATT-INTERNET4'; countryCode = 'US'; city = ''; latitude = 38.9; longitude = -77; region = 'namer'; anycast = $false }
+    [pscustomobject]@{ ip = '80.80.218.218'; provider = 'LLC texnoprosistem'; countryCode = 'UZ'; city = 'Tashkent'; latitude = 41.3; longitude = 69.2; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.137.156.3'; provider = 'Vietnam News Agency'; countryCode = 'VN'; city = ''; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '103.239.32.36'; provider = 'Vietnam National Coaland Miner'; countryCode = 'VN'; city = ''; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '123.30.27.24'; provider = 'VNPT Corp'; countryCode = 'VN'; city = 'Thanh Hóa'; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '125.234.238.3'; provider = 'Viettel Group'; countryCode = 'VN'; city = 'Hanoi'; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.6.96.4'; provider = 'Vietnam News Agency'; countryCode = 'VN'; city = ''; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '202.78.224.129'; provider = 'Quang Trung Software City Deve'; countryCode = 'VN'; city = 'Ho Chi Minh City'; latitude = 21; longitude = 105.8; region = 'asia'; anycast = $false }
+    [pscustomobject]@{ ip = '82.114.79.146'; provider = 'Kujtesa Net Sh.p.k.'; countryCode = 'XK'; city = 'Pristina'; latitude = 42.7; longitude = 21.2; region = 'europe'; anycast = $false }
+    [pscustomobject]@{ ip = '105.243.213.211'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'Pretoria'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '105.255.121.94'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'George'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '196.216.134.71'; provider = 'Hero-Telecoms'; countryCode = 'ZA'; city = 'Mafikeng'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.0.170.154'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'Nelspruit'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.185.21.252'; provider = 'ZA-1-Grid'; countryCode = 'ZA'; city = ''; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.23.184.111'; provider = 'Vodacom-VB'; countryCode = 'ZA'; city = 'Johannesburg'; latitude = -26.2; longitude = 28; region = 'africa'; anycast = $false }
+    [pscustomobject]@{ ip = '41.60.129.80'; provider = 'realtime-as'; countryCode = 'ZM'; city = ''; latitude = -15.4; longitude = 28.3; region = 'africa'; anycast = $false }
   )
 
   $override = [string]$env:ACS_PROPAGATION_RESOLVERS
@@ -155,13 +417,146 @@ function Get-DnsPropagationResolverCatalog {
   return @($custom)
 }
 
+# ---- Resolver health cache -------------------------------------------------
+#
+# The standalone DNS Propagation Checker keeps a `PublicDns_VettedResolvers.json`
+# file listing every resolver that passed a UDP+TCP probe, refreshed on a 24h
+# timer, and uses it to avoid wasting a check slot on a dead server. We need the
+# same effect without adding a state file to a single-script app, so health is
+# remembered in-process instead: every fan-out records which resolvers answered,
+# and selection prefers proven-good ones on the next request.
+#
+# Entries expire (ACS_PROPAGATION_HEALTH_TTL_MIN, default 30) so a resolver that
+# was down temporarily gets another chance. The dictionary lives on the global
+# scope and is shared into the request runspace pool by 22-RunspaceSetup.ps1 so
+# every worker sees the same view.
+if (-not $global:AcsPropagationHealth) {
+  $global:AcsPropagationHealth = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+}
+
+function Get-DnsPropagationHealthTtlMinutes {
+  $ttl = 30
+  $parsed = 0
+  if ([int]::TryParse([string]$env:ACS_PROPAGATION_HEALTH_TTL_MIN, [ref]$parsed) -and $parsed -gt 0) {
+    $ttl = [Math]::Min(1440, $parsed)
+  }
+  return $ttl
+}
+
+# Returns $true (known good), $false (known bad), or $null (unknown / expired).
+#
+# NOTE: the dictionary is referenced UNQUALIFIED ($AcsPropagationHealth, not
+# $global:...) because 22-RunspaceSetup.ps1 injects it into each worker runspace
+# as a session-state variable at that runspace's global scope -- exactly how
+# $AcsRateLimitStore is handled. Using the global: prefix would resolve to an
+# empty variable inside workers and silently disable the cache.
+function Get-DnsPropagationHealthState {
+  param([string]$Ip)
+
+  if (-not $AcsPropagationHealth) { return $null }
+  $key = ([string]$Ip).Trim()
+  if ([string]::IsNullOrWhiteSpace($key)) { return $null }
+
+  $entry = $null
+  if (-not $AcsPropagationHealth.TryGetValue($key, [ref]$entry)) { return $null }
+  if ($null -eq $entry) { return $null }
+
+  try {
+    if (([DateTime]::UtcNow - [DateTime]$entry.atUtc).TotalMinutes -gt (Get-DnsPropagationHealthTtlMinutes)) { return $null }
+  } catch { return $null }
+
+  return [bool]$entry.healthy
+}
+
+function Set-DnsPropagationHealthState {
+  param([string]$Ip, [bool]$Healthy)
+
+  if (-not $AcsPropagationHealth) { return }
+  $key = ([string]$Ip).Trim()
+  if ([string]::IsNullOrWhiteSpace($key)) { return }
+
+  # Bound the dictionary: the catalog is finite, but an operator override or a
+  # very long-lived process could otherwise grow it without limit.
+  if ($AcsPropagationHealth.Count -gt 5000) {
+    foreach ($stale in @($AcsPropagationHealth.Keys)) {
+      $removed = $null
+      $null = $AcsPropagationHealth.TryRemove($stale, [ref]$removed)
+    }
+  }
+
+  $AcsPropagationHealth[$key] = @{ healthy = $Healthy; atUtc = [DateTime]::UtcNow }
+}
+
+# Parse operator- or user-supplied resolver addresses into catalog-shaped objects.
+#
+# Accepted per entry (newline, comma or semicolon separated):
+#   1.2.3.4
+#   1.2.3.4 My office resolver
+#   1.2.3.4|My office resolver
+#
+# SECURITY: this is the one place a *user* (not just the operator) can influence
+# which sockets we open, so every address must parse as a public IPv4 literal --
+# hostnames are refused outright so nothing is resolved on the user's behalf, and
+# Test-IsPublicIpAddress blocks loopback/private/link-local/CGNAT targets.
+function ConvertFrom-DnsPropagationResolverInput {
+  param(
+    [string]$Text,
+    [int]$MaxEntries = 100
+  )
+
+  $parsed = [System.Collections.Generic.List[object]]::new()
+  if ([string]::IsNullOrWhiteSpace($Text)) { return $parsed.ToArray() }
+
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($rawEntry in ($Text -split '[\r\n,;]+')) {
+    if ($parsed.Count -ge $MaxEntries) { break }
+    $entry = ([string]$rawEntry).Trim()
+    if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+
+    $ip = $entry
+    $label = ''
+    $sepIndex = $entry.IndexOfAny([char[]]@('|', ' ', "`t"))
+    if ($sepIndex -gt 0) {
+      $ip = $entry.Substring(0, $sepIndex).Trim()
+      $label = $entry.Substring($sepIndex + 1).Trim()
+    }
+
+    $parsedIp = $null
+    if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsedIp)) { continue }
+    if ($parsedIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { continue }
+    if (-not (Test-IsPublicIpAddress -IpAddress $ip)) { continue }
+    if (-not $seen.Add($ip)) { continue }
+
+    if ($label.Length -gt 40) { $label = $label.Substring(0, 40).Trim() }
+    if ([string]::IsNullOrWhiteSpace($label)) { $label = $ip }
+
+    # No coordinates: we cannot geolocate an arbitrary address, and inventing one
+    # would put a misleading pin on the map. Null lat/lon keeps these out of the
+    # map rollup while still showing them in the per-resolver detail list.
+    $parsed.Add([pscustomobject]@{
+      ip          = $ip
+      provider    = $label
+      countryCode = ''
+      city        = ''
+      latitude    = $null
+      longitude   = $null
+      region      = 'custom'
+      anycast     = $false
+    })
+  }
+
+  return $parsed.ToArray()
+}
+
 # Pick the resolvers to query for one propagation run.
 #
 # The selection is deliberately *balanced*: we round-robin across the requested
 # regions so a small MaxResolvers budget still produces a geographically spread
 # sample instead of, say, five Chinese resolvers. Within a region the catalog
 # order is preserved so results are stable and reproducible across runs (the
-# card would otherwise flicker between lookups for no reason).
+# card would otherwise flicker between lookups for no reason) -- except that
+# resolvers we recently saw fail sink to the bottom of their region bucket, so a
+# large request is not silently padded out with servers already known to be dead.
 function Select-DnsPropagationResolvers {
   param(
     [string[]]$Regions = @(),
@@ -204,6 +599,27 @@ function Select-DnsPropagationResolvers {
     $key = ([string]$item.region).ToLowerInvariant()
     if (-not $groups.Contains($key)) { $groups[$key] = [System.Collections.Generic.List[object]]::new() }
     $groups[$key].Add($item)
+  }
+
+  # Within each region, float resolvers we know answered recently to the front and
+  # sink ones we know are dead. Unknown/expired entries stay in catalog order in
+  # between, so a fresh process still walks the list deterministically.
+  foreach ($key in @($groups.Keys)) {
+    $bucket = $groups[$key]
+    $known = [System.Collections.Generic.List[object]]::new()
+    $unknown = [System.Collections.Generic.List[object]]::new()
+    $dead = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $bucket) {
+      $health = Get-DnsPropagationHealthState -Ip ([string]$item.ip)
+      if ($health -eq $true) { $known.Add($item) }
+      elseif ($health -eq $false) { $dead.Add($item) }
+      else { $unknown.Add($item) }
+    }
+    $ordered = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in $known) { $ordered.Add($item) }
+    foreach ($item in $unknown) { $ordered.Add($item) }
+    foreach ($item in $dead) { $ordered.Add($item) }
+    $groups[$key] = $ordered
   }
 
   $selected = [System.Collections.Generic.List[object]]::new()
@@ -817,7 +1233,9 @@ function Get-DnsPropagationStatus {
     [string[]]$Regions = @(),
     [int]$MaxResolvers = 0,
     [int]$TimeoutMs = 0,
-    [string]$ExpectedValue = ''
+    [string]$ExpectedValue = '',
+    [string]$CustomResolvers = '',
+    [bool]$ValidateResolvers = $true
   )
 
   $d = ([string]$Domain).Trim().TrimEnd('.')
@@ -835,6 +1253,11 @@ function Get-DnsPropagationStatus {
     expectedProvided   = (-not [string]::IsNullOrWhiteSpace($ExpectedValue))
     timeoutMs          = 0
     resolverCount      = 0
+    requestedCount     = 0
+    candidateCount     = 0
+    validated          = $false
+    usingCustom        = $false
+    catalogCount       = 0
     respondedCount     = 0
     unavailableCount   = 0
     truncatedCount     = 0
@@ -895,6 +1318,7 @@ function Get-DnsPropagationStatus {
   # Advertise the regions the catalog can serve so the SPA settings panel can
   # build its region picker from live server data instead of a hard-coded list.
   $catalog = @(Get-DnsPropagationResolverCatalog)
+  $status.catalogCount = $catalog.Count
   $regionCounts = [ordered]@{}
   foreach ($item in $catalog) {
     $key = ([string]$item.region).ToLowerInvariant()
@@ -906,7 +1330,71 @@ function Get-DnsPropagationStatus {
     [pscustomobject]@{ region = $_; resolverCount = $regionCounts[$_] }
   })
 
-  $selected = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $effectiveMax)
+  $status.requestedCount = $effectiveMax
+
+  # ---- Choose the resolvers to query ----
+  #
+  # A user-supplied list replaces the catalog entirely: "check these servers" is
+  # an unambiguous instruction, and silently blending in 25 public resolvers would
+  # make the verdict about something other than what was asked.
+  $customList = @(ConvertFrom-DnsPropagationResolverInput -Text $CustomResolvers -MaxEntries 100)
+  $selected = @()
+  $outcomes = @{}
+
+  if ($customList.Count -gt 0) {
+    $status.usingCustom = $true
+    $selected = @($customList | Select-Object -First $effectiveMax)
+    $status.candidateCount = $selected.Count
+    $outcomes = Invoke-DnsPropagationFanout -Resolvers $selected -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+  }
+  elseif ($ValidateResolvers) {
+    # Over-select, query them ALL in one fan-out, then keep the first
+    # $effectiveMax that returned a usable answer.
+    #
+    # The standalone tool validates candidates against `example.com` and then
+    # re-queries the survivors. That costs two round trips AND still overstates
+    # the yield, because a resolver can happily answer a tiny example.com A
+    # record and then fail on the real question (a domain with 60+ TXT records
+    # needs TCP fallback, which many open resolvers refuse). Validating with the
+    # actual query removes both problems: one fan-out instead of two, and
+    # "usable" means usable for THIS lookup. Because the fan-out is concurrent,
+    # probing 3x the candidates costs the same wall time as probing N.
+    $candidateTarget = [Math]::Min(300, [Math]::Max($effectiveMax * 3, $effectiveMax + 12))
+    $candidates = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $candidateTarget)
+    $status.candidateCount = $candidates.Count
+
+    if ($candidates.Count -gt 0) {
+      $outcomes = Invoke-DnsPropagationFanout -Resolvers $candidates -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+      $status.validated = $true
+
+      # Candidates arrive in region round-robin order, so taking the usable ones
+      # in sequence preserves the geographic spread.
+      $usableSelection = [System.Collections.Generic.List[object]]::new()
+      foreach ($candidate in $candidates) {
+        if ($usableSelection.Count -ge $effectiveMax) { break }
+        $outcome = $outcomes[([string]$candidate.ip).Trim()]
+        if ($null -eq $outcome) { continue }
+        if ($outcome.truncated) { continue }
+        if ($outcome.rcode -eq 0 -or $outcome.rcode -eq 3) { $usableSelection.Add($candidate) }
+      }
+
+      if ($usableSelection.Count -eq 0) {
+        # Nothing answered at all (typically outbound UDP/53 blocked). Fall back
+        # to the plain balanced selection so the card can report the attempt
+        # rather than claiming there are no resolvers.
+        $status.validated = $false
+        $selected = @($candidates | Select-Object -First $effectiveMax)
+      } else {
+        $selected = $usableSelection.ToArray()
+      }
+    }
+  }
+  else {
+    $selected = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $effectiveMax)
+    $status.candidateCount = $selected.Count
+    $outcomes = Invoke-DnsPropagationFanout -Resolvers $selected -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+  }
+
   if ($selected.Count -eq 0) {
     $status.error = 'No public resolvers available for the selected regions.'
     $status.summary = 'NoResolvers'
@@ -915,7 +1403,11 @@ function Get-DnsPropagationStatus {
   $status.resolverCount = $selected.Count
   $status.regions = @($selected | ForEach-Object { ([string]$_.region).ToLowerInvariant() } | Sort-Object -Unique)
 
-  $outcomes = Invoke-DnsPropagationFanout -Resolvers $selected -Name $d -TypeCode $typeCode -TimeoutMs $effectiveTimeout
+  # Record health for every resolver we contacted, not just the ones we kept, so
+  # the next request's selection can skip the failures outright.
+  foreach ($probedIp in @($outcomes.Keys)) {
+    Set-DnsPropagationHealthState -Ip $probedIp -Healthy ([bool]($null -ne $outcomes[$probedIp].rcode))
+  }
 
   # ---- Build per-resolver rows ----
   $rows = [System.Collections.Generic.List[object]]::new()
@@ -939,8 +1431,10 @@ function Get-DnsPropagationStatus {
       provider    = [string]$resolver.provider
       countryCode = [string]$resolver.countryCode
       city        = [string]$resolver.city
-      latitude    = [double]$resolver.latitude
-      longitude   = [double]$resolver.longitude
+      # Kept nullable: a user-supplied resolver has no geolocation, and coercing
+      # $null to 0.0 would drop a pin in the Atlantic off West Africa.
+      latitude    = $(if ($null -eq $resolver.latitude) { $null } else { [double]$resolver.latitude })
+      longitude   = $(if ($null -eq $resolver.longitude) { $null } else { [double]$resolver.longitude })
       region      = ([string]$resolver.region).ToLowerInvariant()
       anycast     = [bool]$resolver.anycast
       responded   = $responded
@@ -1036,18 +1530,32 @@ function Get-DnsPropagationStatus {
   $status.propagationPercent = if ($responders.Count -gt 0) { [int][Math]::Round(100.0 * $status.matchingCount / $responders.Count) } else { 0 }
 
   # ---- Overall state ----
+  #
+  # Outlier tolerance for large samples: with 100 public resolvers in play, a
+  # handful are ad-blocking, captive or deliberately lying resolvers that return
+  # an empty answer for names they have never heard of. Letting a single such
+  # server drive the whole card to FAIL would make big samples less trustworthy
+  # than small ones. Below 20 responders every miss still counts, because there a
+  # single divergent vantage point genuinely is signal.
+  $partialThreshold = 1
+  if ($responders.Count -ge 20) {
+    $partialThreshold = [int][Math]::Ceiling($responders.Count * 0.05)
+    if ($partialThreshold -lt 1) { $partialThreshold = 1 }
+  }
+
   if ($status.matchingCount -eq 0 -and $status.mismatchCount -eq 0) {
     # Every responder agrees the record does not exist.
     $status.state = 'norecord'
     $status.summary = 'NoRecordAnywhere'
-  } elseif ($noRecordCount -gt 0 -and $status.matchingCount -gt 0) {
+  } elseif ($noRecordCount -ge $partialThreshold -and $status.matchingCount -gt 0) {
     # The classic "still propagating" signature: present at some vantage points,
     # absent at others. This is the case that breaks ACS domain verification.
     $status.state = 'partial'
     $status.summary = 'PartiallyPropagated'
-  } elseif ($status.mismatchCount -gt 0) {
+  } elseif ($status.mismatchCount -gt 0 -or $noRecordCount -gt 0) {
     # Everyone has *a* record, but not the same one (stale cache, split-horizon,
-    # geo-DNS, or an edit that is still rolling out).
+    # geo-DNS, or an edit that is still rolling out) -- or a below-threshold
+    # number of resolvers reported no record at all.
     $status.state = 'mismatch'
     $status.summary = 'InconsistentAnswers'
   } else {
@@ -1067,7 +1575,7 @@ function Get-DnsPropagationStatus {
   # adds noise to the map. Non-responding resolvers remain in `results` for
   # callers that want the full picture.
   $locationMap = [ordered]@{}
-  foreach ($row in ($rows | Where-Object { $_.responded -eq $true })) {
+  foreach ($row in ($rows | Where-Object { $_.responded -eq $true -and $null -ne $_.latitude -and $null -ne $_.longitude })) {
     $key = '{0:N2}|{1:N2}' -f $row.latitude, $row.longitude
     if (-not $locationMap.Contains($key)) {
       $locationMap[$key] = [pscustomobject]@{
