@@ -1296,11 +1296,28 @@ function getDnsTxtRecoveryState(r) {
   const ipv6Addresses = recoveredAddressesFromDetailedRecords
     ? detailedAaaaRecords
     : asStringArray(r && r.ipv6Addresses);
+  // Full record SETS, never a single first match. RFC 7208 3.2/4.5: publishing more
+  // than one SPF record is a PermError, so the card must show every record and say so.
+  // Picking one silently is what made the SPF card contradict the DNS records table
+  // on the same page for a real customer domain.
+  const spfRecords = (recoveredFromDetailedRecords || recoveredFromNameservers)
+    ? txtRecords.filter(value => /^v=spf1\b/i.test(String(value || '').trim()))
+    : (Array.isArray(r && r.spfRecords)
+      ? r.spfRecords.filter(Boolean)
+      : ((r && r.spfValue) ? [r.spfValue] : []));
+  const spfMultipleRecords = spfRecords.length > 1;
+  // Mirror Select-SpfRecordFromSet on the server: prefer the record carrying the
+  // Outlook include so the requirement verdict never depends on RRset ordering.
   const spfValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
-    ? (txtRecords.find(value => /^v=spf1/i.test(String(value || '').trim())) || null)
+    ? (spfRecords.find(value => /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(value || ''))) || spfRecords[0] || null)
     : (r ? r.spfValue : null);
+  const acsValues = (recoveredFromDetailedRecords || recoveredFromNameservers)
+    ? txtRecords.filter(value => /ms-domain-verification/i.test(String(value || '').trim()))
+    : (Array.isArray(r && r.acsValues)
+      ? r.acsValues.filter(Boolean)
+      : ((r && r.acsValue) ? [r.acsValue] : []));
   const acsValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
-    ? (txtRecords.find(value => /ms-domain-verification/i.test(String(value || '').trim())) || null)
+    ? (acsValues[0] || null)
     : (r ? r.acsValue : null);
   const spfHasRequiredInclude = (recoveredFromDetailedRecords || recoveredFromNameservers) && spfValue
     ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
@@ -1335,11 +1352,17 @@ function getDnsTxtRecoveryState(r) {
     ipUsedParent: recoveredAddressesFromDetailedRecords ? false : !!(r && r.ipUsedParent),
     spfValue,
     spfPresent: !!spfValue,
+    spfRecords,
+    spfRecordCount: spfRecords.length,
+    spfMultipleRecords,
+    spfMergedSuggestion: (r && r.spfMergedSuggestion) ? String(r.spfMergedSuggestion) : null,
+    spfMergedExceedsLookupLimit: !!(r && r.spfMergedExceedsLookupLimit),
     spfHasRequiredInclude: spfHasRequiredIncludeEffective,
     spfRequiredIncludeMatchType,
     spfRequiredIncludeProvider: r ? r.spfRequiredIncludeProvider : null,
     spfRequiredIncludeMacroTarget: r ? r.spfRequiredIncludeMacroTarget : null,
     acsValue,
+    acsValues,
     acsPresent: !!acsValue
   };
 }
@@ -1613,6 +1636,10 @@ function buildPropagationLegendHtml() {
 function buildGuidance(r) {
   const guidance = [];
   const loaded = r && r._loaded ? r._loaded : {};
+  // A failed fetch sets BOTH loaded and errors for that key, so every "this record is
+  // missing, add it" branch below must check errors too -- otherwise an endpoint that
+  // errored produces advice to create records we never managed to read.
+  const errors = r && r._errors ? r._errors : {};
   const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
   const txtRecovery = getDnsTxtRecoveryState(r);
   const guidanceWorkflowComplete = ['base', 'mx', 'records', 'whois', 'dmarc', 'dkim', 'cname', 'reputation'].every(key => loaded[key] === true);
@@ -1668,6 +1695,20 @@ function buildGuidance(r) {
   }
 
   if (loaded.base && txtRecovery.txtLookupResolved) {
+    // A duplicate SPF record set is a PermError (RFC 7208 3.2/4.5) that invalidates every
+    // other SPF finding, so it leads the SPF guidance.
+    if (txtRecovery.spfMultipleRecords) {
+      guidance.push({
+        type: 'error',
+        text: t('guidanceSpfMultipleRecords', { domain: r.domain || '', count: String(txtRecovery.spfRecordCount || 0) })
+      });
+      if (txtRecovery.spfMergedSuggestion) {
+        guidance.push({ type: 'attention', text: t('guidanceSpfMergedSuggestion', { suggestion: txtRecovery.spfMergedSuggestion }) });
+      }
+      if (txtRecovery.spfMergedExceedsLookupLimit) {
+        guidance.push({ type: 'attention', text: t('guidanceSpfMergedExceedsLookupLimit') });
+      }
+    }
     if (!txtRecovery.spfPresent) {
       if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
@@ -1703,7 +1744,7 @@ function buildGuidance(r) {
     }
   }
 
-  if (loaded.mx) {
+  if (loaded.mx && !errors.mx) {
     const mxList = r.mxRecords || [];
     const hasMx = Array.isArray(mxList) && mxList.length > 0;
     if (!hasMx) {
@@ -1733,14 +1774,25 @@ function buildGuidance(r) {
     }
   }
 
-  if (loaded.dmarc && !r.dmarc) {
+  // Gate on `!errors.dmarc` too: a failed /api/dmarc fetch sets loaded AND errors, and
+  // telling the operator to add a record we never managed to read is worse than silence.
+  if (loaded.dmarc && !errors.dmarc && !r.dmarc) {
     guidance.push({ type: 'attention', text: t('guidanceDmarcMissing', { domain: r.domain || '' }) });
     // Bulk-sender callout: missing DMARC is the worst case for high-volume
     // senders since Google/Yahoo/Microsoft now require an enforced policy
     // above ~5,000 messages/day. Surface it next to the missing-DMARC line
     // so the operator immediately understands the deliverability impact.
     guidance.push({ type: 'attention', text: t('dmarcBulkSenderThreshold') });
-  } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
+  } else if (loaded.dmarc && !errors.dmarc && r.dmarc && r.dmarcMultipleRecords) {
+    // RFC 7489 6.6.3: more than one qualifying record means receivers apply NO policy.
+    guidance.push({
+      type: 'error',
+      text: t('guidanceDmarcMultipleRecords', {
+        lookupDomain: r.dmarcLookupDomain || r.domain || '',
+        count: String(r.dmarcRecordCount || 0)
+      })
+    });
+  } else if (loaded.dmarc && !errors.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
     guidance.push({ type: 'info', text: t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }) });
   }
 
@@ -1755,7 +1807,7 @@ function buildGuidance(r) {
     guidance.push({ type: 'info', text: t('guidanceDmarcMoreInfo', { url: dmarcHelpUrl }) });
   }
 
-  if (loaded.dkim) {
+  if (loaded.dkim && !errors.dkim) {
     // The "missing" message is suppressed when something is published at the
     // ACS selector hostname (even if pointed at the wrong target) AND when
     // only a fallback selector was detected. The "wrong CNAME" warning is
@@ -1783,7 +1835,7 @@ function buildGuidance(r) {
     }
   }
 
-  if (loaded.cname && !r.cname) {
+  if (loaded.cname && !errors.cname && !r.cname) {
     guidance.push({ type: 'attention', text: t('guidanceCnameMissing') });
   }
 

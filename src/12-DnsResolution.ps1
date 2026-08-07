@@ -1,4 +1,50 @@
 # ===== DNS Resolution Layer =====
+function ConvertFrom-DnsTxtPresentationData {
+  param([string]$Data)
+
+  # A DNS TXT RDATA can hold multiple <character-string>s (RFC 1035 3.3.14), each up
+  # to 255 octets, which DoH returns in presentation form as a space-separated run of
+  # double-quoted strings (`"foo" "bar"`). RFC 7208 3.3 requires concatenating them
+  # with NO separator. Stripping only the OUTER quotes leaves the inner `" "` embedded
+  # and corrupts every record longer than 255 octets -- most visibly a 2048-bit DKIM
+  # public key, which renders as `...50v8r" "RRo9toe...` in the records grid.
+  # Returns one element per character-string so callers can rely on `-join ''`.
+  $text = ([string]$Data).Trim()
+  if ([string]::IsNullOrWhiteSpace($text)) { return @() }
+
+  $strings = New-Object System.Collections.Generic.List[string]
+  $index = 0
+  $length = $text.Length
+  while ($index -lt $length) {
+    # Skip inter-string whitespace.
+    while ($index -lt $length -and [char]::IsWhiteSpace($text[$index])) { $index++ }
+    if ($index -ge $length) { break }
+
+    if ($text[$index] -ne '"') {
+      # Defensive: non-conforming server returned unquoted data -- take the remainder.
+      $strings.Add($text.Substring($index))
+      break
+    }
+
+    # Consume one quoted character-string, honoring backslash escapes for `\\` and `\"`.
+    $index++  # opening quote
+    $builder = New-Object System.Text.StringBuilder
+    while ($index -lt $length -and $text[$index] -ne '"') {
+      if ($text[$index] -eq '\' -and ($index + 1) -lt $length) {
+        [void]$builder.Append($text[$index + 1])
+        $index += 2
+        continue
+      }
+      [void]$builder.Append($text[$index])
+      $index++
+    }
+    if ($index -lt $length -and $text[$index] -eq '"') { $index++ }  # closing quote
+    $strings.Add($builder.ToString())
+  }
+
+  return $strings.ToArray()
+}
+
 function Resolve-DohName {
   param(
     [Parameter(Mandatory = $true)]
@@ -50,51 +96,12 @@ function Resolve-DohName {
 
         $data = [string]$a.data
         if ([string]::IsNullOrWhiteSpace($data)) { continue }
-        $data = $data.Trim()
 
-        # A DNS TXT RDATA can hold multiple <character-string>s (RFC 1035 §3.3.14),
-        # each up to 255 octets. Cloudflare DoH returns them in presentation form as a
-        # space-separated sequence of double-quoted strings, e.g. `"foo" "bar"`.
-        # Per RFC 7208 §3.3, SPF parsers MUST concatenate those strings together with
-        # NO separator. Naively stripping only the outer quotes would leave the inner
-        # `" "` literal embedded in the record (e.g.
-        # `include:spf.protection." "outlook.com -all`), which breaks SPF tokenization.
-        # Walk the data string and emit each character-string as a separate element of
-        # `Strings`, mirroring the shape produced by Resolve-DnsName so downstream code
-        # can rely on `($record.Strings -join '')` to reconstruct the canonical TXT value.
-        $strings = New-Object System.Collections.Generic.List[string]
-        $index = 0
-        $length = $data.Length
-        while ($index -lt $length) {
-          # Skip inter-string whitespace.
-          while ($index -lt $length -and [char]::IsWhiteSpace($data[$index])) { $index++ }
-          if ($index -ge $length) { break }
-
-          if ($data[$index] -ne '"') {
-            # Defensive: if the payload isn't quoted (non-conforming server), take the
-            # remainder as a single character-string and stop.
-            $strings.Add($data.Substring($index))
-            break
-          }
-
-          # Consume one quoted character-string, honoring backslash escapes for `\\` and `\"`.
-          $index++  # opening quote
-          $builder = New-Object System.Text.StringBuilder
-          while ($index -lt $length -and $data[$index] -ne '"') {
-            if ($data[$index] -eq '\' -and ($index + 1) -lt $length) {
-              [void]$builder.Append($data[$index + 1])
-              $index += 2
-              continue
-            }
-            [void]$builder.Append($data[$index])
-            $index++
-          }
-          if ($index -lt $length -and $data[$index] -eq '"') { $index++ }  # closing quote
-          $strings.Add($builder.ToString())
-        }
-
+        # Mirrors the shape produced by Resolve-DnsName so downstream code can rely on
+        # `($record.Strings -join '')` to reconstruct the canonical TXT value.
+        $strings = @(ConvertFrom-DnsTxtPresentationData -Data $data)
         if ($strings.Count -eq 0) { continue }
-        [pscustomobject]@{ Strings = $strings.ToArray() }
+        [pscustomobject]@{ Strings = $strings }
       }
     }
     'MX' {
@@ -1126,10 +1133,9 @@ function Resolve-DohRecordsDetailed {
     $rawData = [string]$answer.data
     $data = $rawData
     if ($recordType -eq 'TXT') {
-      if ($data.StartsWith('"') -and $data.EndsWith('"') -and $data.Length -ge 2) {
-        $data = $data.Substring(1, $data.Length - 2)
-      }
-      $data = $data -replace '\\"','"'
+      # Must use the same character-string walker as Resolve-DohName: stripping only the
+      # outer quotes leaves the `" "` separator inside every TXT longer than 255 octets.
+      $data = (@(ConvertFrom-DnsTxtPresentationData -Data $data) -join '')
     }
     elseif ($recordType -eq 'MX') {
       $parts = $data.Trim() -split '\s+', 2

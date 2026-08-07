@@ -65,6 +65,82 @@ function Get-SpfMechanismType {
   return $null
 }
 
+# Pick which record to analyze when a domain publishes MORE than one SPF record.
+# The set is a PermError either way (RFC 7208 3.2), but for an ACS domain checker the
+# record carrying the Outlook include is the one the customer intended for ACS, so
+# preferring it keeps the requirement verdict truthful while the duplicate-record error
+# stays the headline. Without this the choice would depend on RRset ordering, which
+# varies per resolver and per query.
+function Select-SpfRecordFromSet {
+  param([string[]]$Records)
+
+  $set = @($Records | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($set.Count -eq 0) { return $null }
+
+  foreach ($record in $set) {
+    if (Test-SpfOutlookIncludeToken -Text $record) { return $record }
+  }
+  return $set[0]
+}
+
+# Build one RFC-compliant SPF record out of a set a domain wrongly publishes as several,
+# so the UI can hand the operator a ready-to-paste replacement instead of just an error.
+function Merge-SpfRecordSet {
+  param([string[]]$Records)
+
+  $set = @($Records | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($set.Count -eq 0) { return $null }
+
+  $terms = [System.Collections.Generic.List[string]]::new()
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $allQualifier = $null
+  # Lower rank == more permissive. The merged record keeps the MOST permissive `all`
+  # qualifier found so combining records can never silently tighten policy and start
+  # rejecting mail the operator is currently delivering.
+  $qualifierRank = @{ '+' = 0; '?' = 1; '~' = 2; '-' = 3 }
+
+  foreach ($record in $set) {
+    foreach ($token in @(Get-SpfTokens -SpfRecord $record)) {
+      $item = ([string]$token).Trim()
+      if ([string]::IsNullOrWhiteSpace($item)) { continue }
+      if ($item -match '(?i)^v=spf1$') { continue }
+
+      $bare = $item -replace '^[\+\-~\?]', ''
+
+      if ($bare -match '^(?i)all$') {
+        $qualifier = if ($item -match '^([\+\-~\?])') { $Matches[1] } else { '+' }
+        if ($null -eq $allQualifier -or $qualifierRank[$qualifier] -lt $qualifierRank[$allQualifier]) {
+          $allQualifier = $qualifier
+        }
+        continue
+      }
+
+      # The merged record always ends in `all`, which per RFC 7208 6.1 overrides any
+      # `redirect`. Convert it to an include so the authorized senders it pointed at
+      # are preserved rather than silently dropped from the suggestion.
+      if ($bare -match '^(?i)redirect=(.+)$') {
+        $item = 'include:' + ($Matches[1]).Trim()
+      }
+
+      if ($seen.Add($item)) { $terms.Add($item) }
+    }
+  }
+
+  if ($null -eq $allQualifier) { $allQualifier = '~' }
+  $merged = (@('v=spf1') + @($terms) + @("${allQualifier}all")) -join ' '
+
+  $lookupCount = 0
+  foreach ($term in $terms) {
+    if (Get-SpfMechanismType -Token $term) { $lookupCount++ }
+  }
+
+  [pscustomobject]@{
+    merged             = $merged
+    lookupTerms        = $lookupCount
+    exceedsLookupLimit = ($lookupCount -gt 10)
+  }
+}
+
 # Check whether an SPF record string contains a direct "include:spf.protection.outlook.com" token.
 function Test-SpfOutlookIncludeToken {
   param([string]$Text)
@@ -76,6 +152,11 @@ function Test-SpfOutlookIncludeToken {
     if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
 
     $normalized = $normalized -replace '^[\+\-~\?]', ''
+
+    # RFC 7208 5.1: "Mechanisms after 'all' will never be tested." Stop here so an
+    # include appended past `all` is not reported as satisfying the ACS requirement.
+    if ($normalized -match '^(?i)all$') { break }
+
     if ($normalized -notmatch '^(?i)include:') { continue }
 
     $target = ($normalized -replace '^(?i)include:', '')
@@ -141,7 +222,9 @@ function Find-SpfOutlookRequirementMatch {
     if ($childMatch) { return $childMatch }
   }
 
-  if ($Analysis.redirect) {
+  # A redirect that an `all` mechanism overrides is never evaluated by a receiver
+  # (RFC 7208 6.1), so its subtree must not be able to satisfy the Outlook requirement.
+  if ($Analysis.redirect -and $Analysis.redirect.ignoredByAll -ne $true) {
     $redirectDomain = ([string]$Analysis.redirect.domain).Trim().TrimEnd('.').ToLowerInvariant()
     if ($redirectDomain -eq 'spf.protection.outlook.com') {
       return [pscustomobject]@{
@@ -599,8 +682,7 @@ function Find-SpfMacroDelegatedTarget {
 # Determine whether the ACS-required "include:spf.protection.outlook.com" is present
 # in the domain's SPF record (directly or through nested includes/redirects).
 # Returns an object with isPresent, matchType, detail, and error.
-function Get-SpfOutlookRequirementStatus {
-  param(
+function Get-SpfOutlookRequirementStatus {  param(
     [string]$Domain,
     [string]$SpfRecord,
     [object]$SpfAnalysis
@@ -614,6 +696,8 @@ function Get-SpfOutlookRequirementStatus {
       error = 'SPF record is missing, so the required include:spf.protection.outlook.com could not be validated.'
     }
   }
+
+  $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
 
   if (Test-SpfOutlookIncludeToken -Text $SpfRecord) {
     return [pscustomobject]@{
@@ -653,8 +737,6 @@ function Get-SpfOutlookRequirementStatus {
       }
     }
   }
-
-  $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
 
   # Final fallback: SPF-flattening / Dynamic SPF services (OnDMARC, Valimail,
   # Sendmarc, EasyDMARC, Sparkpost, etc.) inline the IP ranges published by
@@ -746,13 +828,39 @@ function Get-SpfNestedAnalysis {
   $macros = New-Object System.Collections.Generic.List[string]
   $warnings = New-Object System.Collections.Generic.List[string]
   $errors = New-Object System.Collections.Generic.List[string]
+  $unreachableTerms = New-Object System.Collections.Generic.List[string]
   $lookupTerms = 0
   $nestedLookupTerms = 0
   $analysisScope = 'full-static'
 
+  # RFC 7208 6.1: "the 'redirect' modifier MUST be ignored if there is an 'all'
+  # mechanism anywhere in the record." `all` can appear AFTER the redirect token, so
+  # this cannot be decided inside the token loop below.
+  $recordHasAll = $false
+  foreach ($token in $tokens) {
+    if (((([string]$token).Trim()) -replace '^[\+\-~\?]', '') -match '^(?i)all$') {
+      $recordHasAll = $true
+      break
+    }
+  }
+
+  $sawAll = $false
+
   foreach ($token in $tokens) {
     $item = ([string]$token).Trim()
     if ([string]::IsNullOrWhiteSpace($item)) { continue }
+
+    $bareToken = $item -replace '^[\+\-~\?]', ''
+    # RFC 7208 5.1: mechanisms after `all` are never tested. Modifiers (`exp=`,
+    # `redirect=`, vendor extensions) are position-independent per 4.6.1, so ONLY
+    # mechanisms are treated as unreachable -- flagging modifiers would fire on
+    # perfectly valid records.
+    $isModifierTerm = ($bareToken -match '^(?i)[a-z0-9_.\-]+=')
+    if ($sawAll -and -not $isModifierTerm) {
+      if (-not $unreachableTerms.Contains($item)) { $unreachableTerms.Add($item) }
+      continue
+    }
+    if ($bareToken -match '^(?i)all$') { $sawAll = $true }
 
     if (Test-SpfMacroText -Text $item) {
       if (-not $macros.Contains($item)) { $macros.Add($item) }
@@ -760,7 +868,10 @@ function Get-SpfNestedAnalysis {
     }
 
     $mechanismType = Get-SpfMechanismType -Token $item
-    if ($mechanismType) {
+    # A redirect overridden by `all` is never evaluated, so it must not consume one of
+    # the 10 permitted DNS lookups either.
+    $redirectIgnored = ($mechanismType -eq 'redirect' -and $recordHasAll)
+    if ($mechanismType -and -not $redirectIgnored) {
       $lookupTerms++
     }
 
@@ -787,18 +898,22 @@ function Get-SpfNestedAnalysis {
         $Visited[$visitedKey] = $true
         try {
           $txtRecords = ResolveSafely $target 'TXT'
-          foreach ($txt in @($txtRecords)) {
-            $joined = ($txt.Strings -join '').Trim()
+          $candidateRecords = @(foreach ($txt in @($txtRecords)) {
+            $joined = (@($txt.Strings) -join '').Trim()
             if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
               $joined = $joined.Substring(1, $joined.Length - 2)
             }
-            if ($joined -match '(?i)^v=spf1\b') {
-              $includeRecord = $joined
-              break
-            }
-          }
+            if ($joined -match '(?i)^v=spf1\b') { $joined }
+          })
 
-          if ($includeRecord) {
+          if ($candidateRecords.Count -gt 1) {
+            # RFC 7208 3.2/4.5: more than one SPF record is a PermError, and an include
+            # that PermErrors makes the ENTIRE evaluation PermError. Taking the first
+            # record here would report a clean chain for a domain that fails every check.
+            $includeError = "Include target $target publishes $($candidateRecords.Count) SPF records. RFC 7208 allows only one, so this include returns PermError and SPF evaluation fails for the whole chain."
+          }
+          elseif ($candidateRecords.Count -eq 1) {
+            $includeRecord = $candidateRecords[0]
             $includeResult = Get-SpfNestedAnalysis -SpfRecord $includeRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
             if ($includeResult -and $null -ne $includeResult.totalLookupTerms) {
               $nestedLookupTerms += [int]$includeResult.totalLookupTerms
@@ -838,7 +953,12 @@ function Get-SpfNestedAnalysis {
       $redirectAnalysis = $null
       $visitedKey = $target.ToLowerInvariant()
 
-      if ($Visited.ContainsKey($visitedKey)) {
+      if ($redirectIgnored) {
+        # RFC 7208 6.1. Do not expand: a receiver never follows this redirect, so
+        # expanding it would let the subtree satisfy checks that can never pass.
+        $redirectError = "redirect=$target is ignored because this record also has an 'all' mechanism (RFC 7208 6.1). Remove 'all' to use the redirect, or replace the redirect with an include."
+      }
+      elseif ($Visited.ContainsKey($visitedKey)) {
         $redirectError = "Redirect loop detected for $target."
       }
       elseif ($MaxDepth -le 0) {
@@ -852,18 +972,20 @@ function Get-SpfNestedAnalysis {
         $Visited[$visitedKey] = $true
         try {
           $txtRecords = ResolveSafely $target 'TXT'
-          foreach ($txt in @($txtRecords)) {
-            $joined = ($txt.Strings -join '').Trim()
+          $candidateRecords = @(foreach ($txt in @($txtRecords)) {
+            $joined = (@($txt.Strings) -join '').Trim()
             if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
               $joined = $joined.Substring(1, $joined.Length - 2)
             }
-            if ($joined -match '(?i)^v=spf1\b') {
-              $redirectRecord = $joined
-              break
-            }
-          }
+            if ($joined -match '(?i)^v=spf1\b') { $joined }
+          })
 
-          if ($redirectRecord) {
+          if ($candidateRecords.Count -gt 1) {
+            # Same PermError rule as the include path above (RFC 7208 3.2/4.5).
+            $redirectError = "Redirect target $target publishes $($candidateRecords.Count) SPF records. RFC 7208 allows only one, so this redirect returns PermError and SPF evaluation fails for the whole chain."
+          }
+          elseif ($candidateRecords.Count -eq 1) {
+            $redirectRecord = $candidateRecords[0]
             $redirectAnalysis = Get-SpfNestedAnalysis -SpfRecord $redirectRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
             if ($redirectAnalysis -and $null -ne $redirectAnalysis.totalLookupTerms) {
               $nestedLookupTerms += [int]$redirectAnalysis.totalLookupTerms
@@ -889,6 +1011,7 @@ function Get-SpfNestedAnalysis {
         domain = $target
         record = $redirectRecord
         error = $redirectError
+        ignoredByAll = $redirectIgnored
         analysis = $redirectAnalysis
       }
       continue
@@ -1052,6 +1175,9 @@ function Get-SpfNestedAnalysis {
   if ($totalLookupTerms -gt 10) {
     $warnings.Add("SPF record for $Domain may exceed the 10-DNS-lookup guidance limit. Detected lookup-style terms across the expanded chain: $totalLookupTerms.")
   }
+  if ($unreachableTerms.Count -gt 0) {
+    $warnings.Add("SPF record for $Domain has $($unreachableTerms.Count) mechanism(s) after the 'all' mechanism, which no receiver ever evaluates (RFC 7208 5.1): $(($unreachableTerms -join ', ')). Move them before 'all'.")
+  }
   if ($analysisScope -eq 'partial-static') {
     $warnings.Add("SPF record for $Domain includes macro-based targets. This tool performs best-effort static analysis, but some nested paths require sender-specific context to expand fully.")
   }
@@ -1077,6 +1203,7 @@ function Get-SpfNestedAnalysis {
     mxTerms = $mxTerms.ToArray()
     ptrTerms = $ptrTerms.ToArray()
     macros = @($macros | Select-Object -Unique)
+    unreachableTerms = @($unreachableTerms)
     lookupTerms = $lookupTerms
     nestedLookupTerms = $nestedLookupTerms
     totalLookupTerms = $totalLookupTerms

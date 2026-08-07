@@ -80,10 +80,11 @@ function Get-AcsDnsStatus {
   # was producing `"spfValue": "v"` in the CLI output. Wrap the entire `if`
   # expression in `@(...)` so the 1-element array survives assignment, then
   # index it normally. Same fix applies to `$effectiveAcs` below.
-  $effectiveSpf = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1 } else { $base.spfValue })
-  $effectiveSpfValue = if ($effectiveSpf.Count -gt 0) { $effectiveSpf[0] } else { $null }
-  $effectiveAcs = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1 } else { $base.acsValue })
-  $effectiveAcsValue = if ($effectiveAcs.Count -gt 0) { $effectiveAcs[0] } else { $null }
+  $effectiveSpfRecords = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' } } else { $base.spfRecords })
+  $effectiveSpfValue = if ($recoveredFromDetailedRecords) { Select-SpfRecordFromSet -Records $effectiveSpfRecords } else { $base.spfValue }
+  $effectiveSpfMultipleRecords = ($effectiveSpfRecords.Count -gt 1)
+  $effectiveAcsValues = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } } else { $base.acsValues })
+  $effectiveAcsValue = if ($effectiveAcsValues.Count -gt 0) { $effectiveAcsValues[0] } else { $null }
   $effectiveSpfPresent = [bool]$effectiveSpfValue
   $effectiveAcsPresent = [bool]$effectiveAcsValue
   $effectiveSpfHasRequiredInclude = if ($recoveredFromDetailedRecords -and $effectiveSpfValue) {
@@ -132,6 +133,11 @@ function Get-AcsDnsStatus {
       foreach ($spfMessage in @($base.spfGuidance)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$spfMessage)) { $guidance.Add([string]$spfMessage) }
       }
+      # The base lookup already emits the duplicate-SPF message; only add it here when the
+      # records came from the detailed-records recovery path instead.
+      if ($effectiveSpfMultipleRecords -and $recoveredFromDetailedRecords) {
+        $guidance.Add("$Domain publishes $($effectiveSpfRecords.Count) SPF records. RFC 7208 allows exactly one, so receivers return PermError and SPF fails for every message from this domain. Merge them into a single TXT record.")
+      }
       if (-not $effectiveAcsPresent -and -not $txtServfail) {
         if ($base.parentAcsPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("ACS ms-domain-verification TXT is missing on $Domain. Parent domain $($base.txtLookupDomain) has an ACS TXT record, but it does not verify the queried subdomain.")
@@ -155,6 +161,11 @@ function Get-AcsDnsStatus {
         }
       }
       if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
+      elseif ($dmarc.dmarcMultipleRecords) {
+        # RFC 7489 6.6.3: a set with more than one qualifying record means policy discovery
+        # terminates -- receivers apply NO DMARC at all, so this is worse than a weak policy.
+        $guidance.Add("_dmarc.$($dmarc.dmarcLookupDomain) publishes $($dmarc.dmarcRecordCount) DMARC records. RFC 7489 allows exactly one, so receivers discard all of them and apply no DMARC policy. Remove the extras until a single v=DMARC1 record remains.")
+      }
       elseif ($dmarc.dmarcInherited -and $dmarc.dmarcLookupDomain -and $dmarc.dmarcLookupDomain -ne $Domain) { $guidance.Add("Effective DMARC policy is inherited from parent domain $($dmarc.dmarcLookupDomain).") }
       $dmarcGuidance = @(Get-DmarcSecurityGuidance -DmarcRecord $dmarc.dmarc -Domain $Domain -LookupDomain $dmarc.dmarcLookupDomain -Inherited $dmarc.dmarcInherited)
       foreach ($dmarcMessage in $dmarcGuidance) {
@@ -226,6 +237,11 @@ function Get-AcsDnsStatus {
 
         spfPresent = $effectiveSpfPresent
         spfValue   = $effectiveSpfValue
+        spfRecords = @($effectiveSpfRecords)
+        spfRecordCount = $effectiveSpfRecords.Count
+        spfMultipleRecords = $effectiveSpfMultipleRecords
+        spfMergedSuggestion = $base.spfMergedSuggestion
+        spfMergedExceedsLookupLimit = $base.spfMergedExceedsLookupLimit
         spfAnalysis = $base.spfAnalysis
         spfExpandedText = $base.spfExpandedText
         spfGuidance = $base.spfGuidance
@@ -238,8 +254,12 @@ function Get-AcsDnsStatus {
         spfRequiredIncludeMacroTarget = $base.spfRequiredIncludeMacroTarget
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
+        parentSpfRecords = @($base.parentSpfRecords)
+        parentSpfMultipleRecords = $base.parentSpfMultipleRecords
         acsPresent = $effectiveAcsPresent
         acsValue   = $effectiveAcsValue
+        acsValues  = @($effectiveAcsValues)
+        acsRecordCount = $effectiveAcsValues.Count
         parentAcsPresent = $base.parentAcsPresent
         parentAcsValue   = $base.parentAcsValue
 
@@ -279,15 +299,20 @@ function Get-AcsDnsStatus {
         dmarc      = $dmarc.dmarc
         dmarcLookupDomain = $dmarc.dmarcLookupDomain
         dmarcInherited = $dmarc.dmarcInherited
+        dmarcRecords = @($dmarc.dmarcRecords)
+        dmarcRecordCount = $dmarc.dmarcRecordCount
+        dmarcMultipleRecords = $dmarc.dmarcMultipleRecords
         dkim1                = $dkim.dkim1
         dkim1CnameTarget     = $dkim.dkim1CnameTarget
         dkim1TxtValue        = $dkim.dkim1TxtValue
+        dkim1TxtValues       = @($dkim.dkim1TxtValues)
         dkim1ExpectedCname   = $dkim.dkim1ExpectedCname
         dkim1AcsConfigured   = $dkim.dkim1AcsConfigured
         dkim1FallbackSelectors = $dkim.dkim1FallbackSelectors
         dkim2                = $dkim.dkim2
         dkim2CnameTarget     = $dkim.dkim2CnameTarget
         dkim2TxtValue        = $dkim.dkim2TxtValue
+        dkim2TxtValues       = @($dkim.dkim2TxtValues)
         dkim2ExpectedCname   = $dkim.dkim2ExpectedCname
         dkim2AcsConfigured   = $dkim.dkim2AcsConfigured
         dkim2FallbackSelectors = $dkim.dkim2FallbackSelectors

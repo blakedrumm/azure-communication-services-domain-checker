@@ -286,7 +286,16 @@ function getDomainQuotaStatus(r) {
   }
 
   // SPF (ACS Outlook include requirement)
-  if (recoveredFromNameservers && effectiveSpfPresent) {
+  if (txt.spfMultipleRecords) {
+    // RFC 7208 3.2/4.5: duplicate SPF records are a PermError -- SPF fails outright,
+    // whatever the individual records happen to contain.
+    quotaFail = true;
+  } else if (recoveredFromNameservers && effectiveSpfPresent) {
+    quotaWarn = true;
+  } else if (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null) {
+    // Macro-delegated / hosted SPF is INDETERMINATE, not failed. The SPF card and the
+    // checklist row already render it WARN; without this branch the overall verdict,
+    // the tab dot and the copied summary all reported FAIL for the same data.
     quotaWarn = true;
   } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) {
     quotaFail = true;
@@ -299,7 +308,9 @@ function getDomainQuotaStatus(r) {
   const dmarcIsMonitoringOnly = !!(r && r.dmarc) && (dmarcPolicyToken === '' || dmarcPolicyToken === 'none');
   const dmarcNeedsEnforcementForTier = dmarcIsMonitoringOnly && dmarcExpectedTierIndex > DMARC_ENFORCEMENT_TIER_INDEX;
   if (loaded.dmarc && !errors.dmarc) {
-    if (!r.dmarc || dmarcNeedsEnforcementForTier) quotaWarn = true;
+    // RFC 7489 6.6.3: duplicates mean receivers apply NO policy, so this is at least as
+    // bad as a missing record.
+    if (!r.dmarc || r.dmarcMultipleRecords || dmarcNeedsEnforcementForTier) quotaWarn = true;
   }
 
   if (quotaFail) return 'fail';
@@ -3447,6 +3458,11 @@ function render(r) {
   const effectiveTxtRecords = Array.isArray(txtRecovery.txtRecords) ? txtRecovery.txtRecords : [];
   const effectiveSpfPresent = !!txtRecovery.spfPresent;
   const effectiveSpfValue = txtRecovery.spfValue || null;
+  // The FULL record set. A domain publishing more than one SPF record is an RFC 7208
+  // PermError, and rendering only the selected record is what made this card disagree
+  // with the DNS records table for a real customer domain.
+  const effectiveSpfRecords = Array.isArray(txtRecovery.spfRecords) ? txtRecovery.spfRecords : [];
+  const effectiveSpfMultipleRecords = !!txtRecovery.spfMultipleRecords;
   const effectiveSpfHasRequiredInclude = txtRecovery.spfHasRequiredInclude;
   // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, ...) resolves the
   // Outlook include dynamically per message, so it can be neither confirmed nor
@@ -3458,6 +3474,10 @@ function render(r) {
     || (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null);
   const effectiveAcsPresent = !!txtRecovery.acsPresent;
   const effectiveAcsValue = txtRecovery.acsValue || null;
+  // Multiple verification records are legal (one per ACS resource/tenant). Readiness is
+  // presence-based, not token-equality-based, so showing only the first removed the
+  // operator's only way to confirm THEIR token is among them.
+  const effectiveAcsValues = Array.isArray(txtRecovery.acsValues) ? txtRecovery.acsValues : [];
   // The SPF/ACS/TXT values were only recoverable by querying the authoritative
   // nameservers directly because the public resolver returned an empty answer
   // for an inconsistent-nameserver zone. When this is set, the SPF/ACS/TXT cards
@@ -3902,10 +3922,14 @@ function render(r) {
     const spfIsNameserverRecovered = effectiveSpfPresent && recoveredFromNameservers;
     const spfExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
     const spfLookupLimitDetail = spfExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
+    const spfMultipleDetail = effectiveSpfMultipleRecords
+      ? t('spfMultipleRecordsDetected', { count: String(effectiveSpfRecords.length) })
+      : '';
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
+      ? ([(effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue), spfMultipleDetail, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
-    const spfState = (spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail');
+    // A duplicate record set is a PermError, so it outranks every other SPF state here.
+    const spfState = effectiveSpfMultipleRecords ? 'fail' : ((spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail'));
     quotaItems.push(quotaRow(t('spfQueried'), spfState, spfDetail, null, 'spf'));
     const spfStateLabel = spfState.toUpperCase();
     quotaLines.push(`**${t('spfQueried')}:** ${spfStateLabel}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
@@ -3932,7 +3956,13 @@ function render(r) {
     const inheritedSuffix = (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain)
       ? `\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`
       : '';
-    if (dmarcNeedsEnforcementForTier) {
+    if (r.dmarcMultipleRecords) {
+      // RFC 7489 6.6.3: receivers discard the whole set, so this is not a working policy.
+      const dupDetail = `${dmarcFirstLine}\n\n${t('dmarcMultipleRecordsDetected', { lookupDomain: r.dmarcLookupDomain || r.domain || '', count: String(r.dmarcRecordCount || 0) })}${inheritedSuffix}`;
+      quotaItems.push(quotaRow(t('dmarc'), 'warn', dupDetail, null, 'dmarc'));
+      quotaLines.push(`**DMARC:** WARN${dupDetail ? ' - ' + dupDetail.replace(/\r?\n/g, ' | ') : ''}`);
+      quotaLinesHtml.push(`<strong>DMARC:</strong> WARN${dupDetail ? ' - ' + escapeHtml(dupDetail).replace(/\r?\n/g, '<br>') : ''}`);
+    } else if (dmarcNeedsEnforcementForTier) {
       // Present but monitor-only (p=none) while the detected expected tier is
       // above the Earth base tier: WARN with the standard, already-localized
       // "move to enforcement" guidance (no tier verbiage).
@@ -4596,12 +4626,21 @@ function render(r) {
   }
 
   // Match card order to the Check Summary.
+  const spfMultipleNoteText = effectiveSpfMultipleRecords
+    ? t('spfMultipleRecordsDetected', { count: String(effectiveSpfRecords.length) })
+    : '';
+  const spfMergedSuggestionText = (effectiveSpfMultipleRecords && txtRecovery.spfMergedSuggestion)
+    ? String(txtRecovery.spfMergedSuggestion)
+    : '';
+  const spfMergedLimitNoteText = (effectiveSpfMultipleRecords && txtRecovery.spfMergedExceedsLookupLimit)
+    ? t('spfMergedExceedsLookupLimitNote')
+    : '';
   const spfCardBaseValue = loaded.base
-    ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
+    ? ((effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue) || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
   const spfLookupLimitCardDetail = spfCardExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
-  const spfCardValue = [spfCardBaseValue, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, spfMultipleNoteText, (spfMergedSuggestionText ? `${t('spfMergedSuggestionLabel')}\n${spfMergedSuggestionText}` : ''), spfMergedLimitNoteText, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -4660,7 +4699,17 @@ function render(r) {
       const spfLookupLimitNote = spfLookupLimitCardDetail
         ? `<div class="spf-explained-requirement" style="border-color:#f59e0b;background:#422006;color:#fde68a;">${escapeHtml(spfLookupLimitCardDetail)}</div>`
         : '';
-      const explainedHtml = spfInheritedNote + spfLookupLimitNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
+      // Duplicate-record PermError leads the card: it invalidates every other SPF
+      // finding below it, so it is rendered above the records themselves.
+      const spfDuplicateNote = spfMultipleNoteText
+        ? `<div class="spf-explained-requirement spf-explained-requirement--fail">${escapeHtml(spfMultipleNoteText)}</div>`
+        : '';
+      const spfMergedBox = spfMergedSuggestionText
+        ? (`<div class="spf-explained-inherited">${escapeHtml(t('spfMergedSuggestionLabel'))}</div>`
+          + `<div class="spf-explained-record">${escapeHtml(spfMergedSuggestionText)}</div>`
+          + (spfMergedLimitNoteText ? `<div class="spf-explained-requirement" style="border-color:#f59e0b;background:#422006;color:#fde68a;">${escapeHtml(spfMergedLimitNoteText)}</div>` : ''))
+        : '';
+      const explainedHtml = spfInheritedNote + spfDuplicateNote + spfMergedBox + spfLookupLimitNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
       spfExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleSpfExplained(this)" title="${escapeHtml(t('spfExplainedTooltip'))}">${escapeHtml(t('spfExplainedShow'))}</button>`;
       spfExplainedAppend = `<div id="spfExplained" class="card-content" style="display:none;">${explainedHtml}</div>`;
 
@@ -4670,12 +4719,14 @@ function render(r) {
       // the table isn't rendered), so a plain pre-formatted green box is
       // sufficient. innerText of #field-spf still reads as clean plain
       // text for the Copy button.
-      const spfRecordBoxHtml = `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
-      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfLookupLimitNote + spfRequirementNote;
+      const spfRecordBoxHtml = effectiveSpfMultipleRecords
+        ? effectiveSpfRecords.map(record => `<div class="spf-explained-record">${escapeHtml(String(record))}</div>`).join('')
+        : `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
+      spfBodyHtml = spfInheritedNote + spfDuplicateNote + spfRecordBoxHtml + spfMergedBox + spfLookupLimitNote + spfRequirementNote;
     }
   }
-  const spfCardTag = basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL")))));
-  const spfCardTagClass = basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail")))));
+  const spfCardTag = basePending ? "LOADING" : (baseError ? "ERROR" : (effectiveSpfMultipleRecords ? "FAIL" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL"))))));
+  const spfCardTagClass = basePending ? "tag-info" : (baseError ? "tag-fail" : (effectiveSpfMultipleRecords ? "tag-fail" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail"))))));
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
@@ -4707,7 +4758,7 @@ function render(r) {
 
   cards.push(card(
     t('acsDomainVerificationTxt'),
-    loaded.base ? ([(effectiveAcsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)), (recoveredFromNameservers && effectiveAcsPresent ? t('acsRecoveredFromNameservers') : '')].filter(Boolean).join("\n\n") || null) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    loaded.base ? ([((effectiveAcsValues.length > 1 ? effectiveAcsValues.join("\n") : effectiveAcsValue) || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)), (recoveredFromNameservers && effectiveAcsPresent ? t('acsRecoveredFromNameservers') : '')].filter(Boolean).join("\n\n") || null) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveAcsPresent && recoveredFromNameservers) ? "WARN" : (effectiveAcsPresent ? "PASS" : "MISSING"))),
     basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveAcsPresent && recoveredFromNameservers) ? "tag-warn" : (effectiveAcsPresent ? "tag-pass" : "tag-fail"))),
     "acsTxt"
@@ -4754,11 +4805,25 @@ function render(r) {
       dmarcExplainedAppend = `<div id="dmarcExplained" class="card-content" style="display:none;">${dmarcExplainedHtml}</div>`;
     }
   }
+  // A duplicate DMARC record set means receivers apply NO policy at all (RFC 7489
+  // 6.6.3), so it must never render as PASS on the strength of the first record.
+  const dmarcMultipleRecords = !!(r && r.dmarcMultipleRecords);
+  const dmarcAllRecords = Array.isArray(r && r.dmarcRecords) ? r.dmarcRecords.filter(Boolean) : [];
+  const dmarcMultipleNote = dmarcMultipleRecords
+    ? t('dmarcMultipleRecordsDetected', { lookupDomain: (r && (r.dmarcLookupDomain || r.domain)) || '', count: String((r && r.dmarcRecordCount) || dmarcAllRecords.length) })
+    : '';
+  const dmarcCardBody = loaded.dmarc
+    ? (r.dmarc
+      ? [(dmarcMultipleRecords && dmarcAllRecords.length > 1) ? dmarcAllRecords.join("\n") : r.dmarc,
+         dmarcMultipleNote,
+         (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) ? t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain }) : ''].filter(Boolean).join("\n\n")
+      : null)
+    : (errors.dmarc ? errors.dmarc : t('loadingValue'));
   cards.push(card(
     t('dmarc'),
-    loaded.dmarc ? (r.dmarc ? (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain ? (`${r.dmarc}\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`) : r.dmarc) : null) : (errors.dmarc ? errors.dmarc : t('loadingValue')),
-    (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (r.dmarc ? "PASS" : "OPTIONAL")),
-    (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info")),
+    dmarcCardBody,
+    (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (dmarcMultipleRecords ? "FAIL" : (r.dmarc ? "PASS" : "OPTIONAL"))),
+    (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (dmarcMultipleRecords ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info"))),
     "dmarc",
     true,
     dmarcExplainedTitleSuffix,
@@ -4947,9 +5012,13 @@ function render(r) {
     }
 
     const statusLabel = percent === null ? t('unknown') : `${rating.toUpperCase()} (${percent}%)`;
-    const statusClass = percent === null ? "tag-info"
+    // Colour on listings first. A domain listed on 1 of 25 zones still scores 96%, so
+    // grading on percentage alone painted this card green while its own body read
+    // "Listed: 1" and the Email Quota row correctly said WARN.
+    const statusClass = listed > 0 ? "tag-warn"
+      : (percent === null ? "tag-info"
       : (percent >= 90 ? "tag-pass"
-      : (percent >= 75 ? "tag-info" : "tag-fail"));
+      : (percent >= 75 ? "tag-info" : "tag-fail")));
 
     // Show only listed entries to avoid noise
     const listedItems = (rep.results || []).filter(x => x && x.listed === true);

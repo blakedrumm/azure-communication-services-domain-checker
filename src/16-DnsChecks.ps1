@@ -8,6 +8,8 @@ function Get-DnsBaseStatus {
 
   $spf        = $null
   $acsTxt     = $null
+  $spfRecords = @()
+  $acsValues  = @()
   $txtRecords = @()
   $dnsFailed  = $false
   $dnsError   = $null
@@ -20,6 +22,7 @@ function Get-DnsBaseStatus {
   $parentTxtRecords = @()
   $parentSpf = $null
   $parentAcsTxt = $null
+  $parentSpfRecords = @()
   $spfAnalysis = $null
   $spfExpandedText = $null
   $spfGuidance = @()
@@ -65,10 +68,14 @@ function Get-DnsBaseStatus {
   }
 
   if (-not $dnsFailed) {
-    foreach ($t in $txtRecords) {
-      if (-not $spf    -and $t -match '(?i)^v=spf1')                { $spf    = $t }
-      if (-not $acsTxt -and $t -match '(?i)ms-domain-verification') { $acsTxt = $t }
-    }
+    # Collect the FULL sets, not the first match. RFC 7208 3.2/4.5: a domain publishing
+    # more than one SPF record is a PermError -- SPF fails for every message it sends --
+    # so picking the first would both hide the real fault and judge the domain on an
+    # arbitrary record (RRset order varies per resolver and per query).
+    $spfRecords = @($txtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
+    $acsValues  = @($txtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' })
+    $spf    = Select-SpfRecordFromSet -Records $spfRecords
+    $acsTxt = $(if ($acsValues.Count -gt 0) { $acsValues[0] } else { $null })
 
     if ($txtRecords.Count -eq 0) {
       foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
@@ -90,15 +97,29 @@ function Get-DnsBaseStatus {
             $txtLookupDomain = $parent
             $txtUsedParent = $true
 
-            foreach ($t in $parentTxtRecords) {
-              if (-not $parentSpf -and $t -match '(?i)^v=spf1') { $parentSpf = $t }
-              if (-not $parentAcsTxt -and $t -match '(?i)ms-domain-verification') { $parentAcsTxt = $t }
-            }
+            $parentSpfRecords = @($parentTxtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
+            $parentSpf = Select-SpfRecordFromSet -Records $parentSpfRecords
+            $parentAcsTxt = @($parentTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1)[0]
             break
           }
         } catch { }
       }
     }
+  }
+
+  # RFC 7208 3.2/4.5 verdict for the queried domain, plus a ready-to-paste replacement so
+  # the operator does not have to merge the records by hand.
+  $spfMultipleRecords = ($spfRecords.Count -gt 1)
+  $spfMergedSuggestion = $null
+  $spfMergedExceedsLookupLimit = $false
+  if ($spfMultipleRecords) {
+    try {
+      $merge = Merge-SpfRecordSet -Records $spfRecords
+      if ($merge) {
+        $spfMergedSuggestion = [string]$merge.merged
+        $spfMergedExceedsLookupLimit = [bool]$merge.exceedsLookupLimit
+      }
+    } catch { }
   }
 
   $spfPresent = -not $dnsFailed -and [bool]$spf
@@ -129,6 +150,19 @@ function Get-DnsBaseStatus {
         $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $null -OutlookRequirementStatus $spfOutlookRequirement)
       } catch { }
     }
+  }
+
+  # Lead the SPF guidance with the duplicate-record PermError: it invalidates every other
+  # SPF finding, so it has to come before the per-mechanism advice.
+  if ($spfMultipleRecords) {
+    $multipleMessage = "$Domain publishes $($spfRecords.Count) SPF records. RFC 7208 allows exactly one, so receivers return PermError and SPF fails for every message from this domain. Merge them into a single TXT record."
+    if ($spfMergedSuggestion) {
+      $multipleMessage += " Suggested replacement: $spfMergedSuggestion"
+    }
+    if ($spfMergedExceedsLookupLimit) {
+      $multipleMessage += " Note: the merged record still exceeds the 10-DNS-lookup limit, so it needs trimming before use."
+    }
+    $spfGuidance = @(@($multipleMessage) + @($spfGuidance))
   }
 
   # Run the DNSSEC anomaly probe once per base lookup, so the incremental UI
@@ -188,6 +222,14 @@ function Get-DnsBaseStatus {
 
     spfPresent = $spfPresent
     spfValue   = $spf
+    # Full record set + duplicate verdict. `spfValue` stays the single analyzed record for
+    # back-compat; `spfRecords` is what the UI renders so the SPF card can never again
+    # contradict the DNS records table.
+    spfRecords = @($spfRecords)
+    spfRecordCount = $spfRecords.Count
+    spfMultipleRecords = $spfMultipleRecords
+    spfMergedSuggestion = $spfMergedSuggestion
+    spfMergedExceedsLookupLimit = $spfMergedExceedsLookupLimit
     spfAnalysis = $spfAnalysis
     spfExpandedText = $spfExpandedText
     spfGuidance = $spfGuidance
@@ -200,9 +242,16 @@ function Get-DnsBaseStatus {
     spfRequiredIncludeMacroTarget = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.macroTarget } else { $null })
     acsPresent = $acsPresent
     acsValue   = $acsTxt
+    # Multiple ms-domain-verification records are legal (one per ACS resource/tenant), but
+    # showing only the first removes the operator's only way to confirm THEIR token is
+    # published -- readiness here is presence-based, not token-equality-based.
+    acsValues  = @($acsValues)
+    acsRecordCount = $acsValues.Count
 
     parentSpfPresent = (-not $dnsFailed) -and [bool]$parentSpf
     parentSpfValue   = $parentSpf
+    parentSpfRecords = @($parentSpfRecords)
+    parentSpfMultipleRecords = ($parentSpfRecords.Count -gt 1)
     parentAcsPresent = (-not $dnsFailed) -and [bool]$parentAcsTxt
     parentAcsValue   = $parentAcsTxt
     parentTxtRecords = $parentTxtRecords
@@ -973,25 +1022,46 @@ function Get-DnsDmarcStatus {
   $dmarc = $null
   $dmarcLookupDomain = $Domain
   $dmarcInherited = $false
+  $dmarcRecords = @()
+  $dmarcRecordCount = 0
   $organizationalDomain = Get-RegistrableDomain -Domain $Domain
 
-  function Get-DmarcRecordValue {
+  function Get-DmarcRecordSet {
     param([string]$LookupDomain)
 
-    $recordValue = $null
+    # RFC 7489 6.6.3: after discarding records that do not start with the v=DMARC1
+    # version tag, "if the remaining set contains multiple records ... policy discovery
+    # terminates and DMARC processing is not applied" -- i.e. duplicates mean NO DMARC,
+    # not the first one. The duplicate count must therefore be taken over STRICTLY
+    # qualified records only; the old loose `^v=dmarc` prefix would count unrelated junk
+    # TXT as a duplicate and raise a false alarm.
+    $qualified = [System.Collections.Generic.List[string]]::new()
+    $malformed = [System.Collections.Generic.List[string]]::new()
+
     if ($dm = ResolveSafely "_dmarc.$LookupDomain" "TXT") {
       foreach ($r in $dm) {
-        $j = ($r.Strings -join "").Trim()
-        if ($j -match '(?i)^v=dmarc') {
-          $recordValue = $j
-          break
-        }
+        $j = (@($r.Strings) -join "").Trim()
+        if ([string]::IsNullOrWhiteSpace($j)) { continue }
+        if ($j -match '(?i)^v\s*=\s*DMARC1\s*;') { $qualified.Add($j) }
+        elseif ($j -match '(?i)^v\s*=\s*dmarc') { $malformed.Add($j) }
       }
     }
-    return $recordValue
+
+    # Keep surfacing a malformed record when nothing qualifies, so the operator still
+    # sees it (and still gets syntax guidance) instead of a bare "DMARC is missing".
+    $records = @(if ($qualified.Count -gt 0) { $qualified } else { $malformed })
+
+    [pscustomobject]@{
+      value   = $(if ($records.Count -gt 0) { $records[0] } else { $null })
+      records = $records
+      count   = $qualified.Count
+    }
   }
 
-  $dmarc = Get-DmarcRecordValue -LookupDomain $Domain
+  $dmarcSet = Get-DmarcRecordSet -LookupDomain $Domain
+  $dmarc = $dmarcSet.value
+  $dmarcRecords = @($dmarcSet.records)
+  $dmarcRecordCount = [int]$dmarcSet.count
   if (-not $dmarc) {
     $orgLabelCount = if ([string]::IsNullOrWhiteSpace($organizationalDomain)) { 0 } else { $organizationalDomain.Trim('.').Split('.').Count }
     foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
@@ -1000,9 +1070,11 @@ function Get-DnsDmarcStatus {
       $parentLabelCount = $parent.Trim('.').Split('.').Count
       if ($orgLabelCount -gt 0 -and $parentLabelCount -lt $orgLabelCount) { continue }
 
-      $candidate = Get-DmarcRecordValue -LookupDomain $parent
-      if ($candidate) {
-        $dmarc = $candidate
+      $candidate = Get-DmarcRecordSet -LookupDomain $parent
+      if ($candidate.value) {
+        $dmarc = $candidate.value
+        $dmarcRecords = @($candidate.records)
+        $dmarcRecordCount = [int]$candidate.count
         $dmarcLookupDomain = $parent
         $dmarcInherited = $true
         break
@@ -1016,6 +1088,9 @@ function Get-DnsDmarcStatus {
     dmarcLookupDomain = $dmarcLookupDomain
     dmarcInherited = $dmarcInherited
     dmarcOrganizationalDomain = $organizationalDomain
+    dmarcRecords = @($dmarcRecords)
+    dmarcRecordCount = $dmarcRecordCount
+    dmarcMultipleRecords = ($dmarcRecordCount -gt 1)
   }
 }
 
@@ -1052,9 +1127,16 @@ function Get-DnsDkimStatus {
     if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
 
     $txtValue = $null
+    $txtValues = @()
     if ($txtRecords = ResolveSafely $LookupName 'TXT') {
-      $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
-      if ($joined) { $txtValue = $joined }
+      # $txtRecords is the whole answer SET. `.Strings` member-enumerates across EVERY
+      # record, so a single `-join ''` splices two rotating DKIM keys into one value
+      # that exists in no record. Join per record instead.
+      $txtValues = @(foreach ($txt in @($txtRecords)) {
+        $joined = ((@($txt.Strings) -join '') -replace '\s+', '').Trim()
+        if ($joined) { $joined }
+      })
+      if ($txtValues.Count -gt 0) { $txtValue = $txtValues[0] }
     }
 
     # Case-insensitive compare; both sides are normalized to no trailing dot.
@@ -1069,13 +1151,14 @@ function Get-DnsDkimStatus {
     # existing UI/test-summary truthy checks still mean "something is published".
     $displayParts = New-Object System.Collections.Generic.List[string]
     if ($cnameTarget) { $displayParts.Add("CNAME -> $cnameTarget") }
-    if ($txtValue)    { $displayParts.Add("TXT: $txtValue") }
+    foreach ($value in $txtValues) { $displayParts.Add("TXT: $value") }
     $display = if ($displayParts.Count -gt 0) { ($displayParts -join "`n") } else { $null }
 
     [pscustomobject]@{
       Display       = $display
       CnameTarget   = $cnameTarget
       TxtValue      = $txtValue
+      TxtValues     = @($txtValues)
       Expected      = $expected
       AcsConfigured = $acsConfigured
     }
@@ -1112,9 +1195,14 @@ function Get-DnsDkimStatus {
       if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
 
       $txtValue = $null
+      $txtValues = @()
       if ($txtRecords = ResolveSafely $name 'TXT') {
-        $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
-        if ($joined) { $txtValue = $joined }
+        # Join per record -- see Invoke-AcsDkimSelectorLookup.
+        $txtValues = @(foreach ($txt in @($txtRecords)) {
+          $joined = ((@($txt.Strings) -join '') -replace '\s+', '').Trim()
+          if ($joined) { $joined }
+        })
+        if ($txtValues.Count -gt 0) { $txtValue = $txtValues[0] }
       }
 
       if (-not $cnameTarget -and -not $txtValue) { continue }
@@ -1124,6 +1212,7 @@ function Get-DnsDkimStatus {
         Selector    = $selector
         CnameTarget = $cnameTarget
         TxtValue    = $txtValue
+        TxtValues   = @($txtValues)
       })
     }
 
@@ -1137,7 +1226,7 @@ function Get-DnsDkimStatus {
     foreach ($row in $rows) {
       $lines.Add($row.Name)
       if ($row.CnameTarget) { $lines.Add("  CNAME -> $($row.CnameTarget)") }
-      if ($row.TxtValue)    { $lines.Add("  TXT: $($row.TxtValue)") }
+      foreach ($value in @($row.TxtValues)) { $lines.Add("  TXT: $value") }
     }
 
     [pscustomobject]@{
@@ -1193,12 +1282,14 @@ function Get-DnsDkimStatus {
     dkim1                     = $dkim1Display
     dkim1CnameTarget          = $dkim1Result.CnameTarget
     dkim1TxtValue             = $dkim1Result.TxtValue
+    dkim1TxtValues            = @($dkim1Result.TxtValues)
     dkim1ExpectedCname        = $dkim1Result.Expected
     dkim1AcsConfigured        = $dkim1Result.AcsConfigured
     dkim1FallbackSelectors    = $dkim1FallbackRows
     dkim2                     = $dkim2Display
     dkim2CnameTarget          = $dkim2Result.CnameTarget
     dkim2TxtValue             = $dkim2Result.TxtValue
+    dkim2TxtValues            = @($dkim2Result.TxtValues)
     dkim2ExpectedCname        = $dkim2Result.Expected
     dkim2AcsConfigured        = $dkim2Result.AcsConfigured
     dkim2FallbackSelectors    = $dkim2FallbackRows

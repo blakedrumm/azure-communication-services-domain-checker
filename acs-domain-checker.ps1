@@ -1665,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.12.0'
+$script:AppVersion = '2.13.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -5430,6 +5430,52 @@ function Write-TextResponse {
   $Context.Response.SendBody($bytes)
 }
 # ===== DNS Resolution Layer =====
+function ConvertFrom-DnsTxtPresentationData {
+  param([string]$Data)
+
+  # A DNS TXT RDATA can hold multiple <character-string>s (RFC 1035 3.3.14), each up
+  # to 255 octets, which DoH returns in presentation form as a space-separated run of
+  # double-quoted strings (`"foo" "bar"`). RFC 7208 3.3 requires concatenating them
+  # with NO separator. Stripping only the OUTER quotes leaves the inner `" "` embedded
+  # and corrupts every record longer than 255 octets -- most visibly a 2048-bit DKIM
+  # public key, which renders as `...50v8r" "RRo9toe...` in the records grid.
+  # Returns one element per character-string so callers can rely on `-join ''`.
+  $text = ([string]$Data).Trim()
+  if ([string]::IsNullOrWhiteSpace($text)) { return @() }
+
+  $strings = New-Object System.Collections.Generic.List[string]
+  $index = 0
+  $length = $text.Length
+  while ($index -lt $length) {
+    # Skip inter-string whitespace.
+    while ($index -lt $length -and [char]::IsWhiteSpace($text[$index])) { $index++ }
+    if ($index -ge $length) { break }
+
+    if ($text[$index] -ne '"') {
+      # Defensive: non-conforming server returned unquoted data -- take the remainder.
+      $strings.Add($text.Substring($index))
+      break
+    }
+
+    # Consume one quoted character-string, honoring backslash escapes for `\\` and `\"`.
+    $index++  # opening quote
+    $builder = New-Object System.Text.StringBuilder
+    while ($index -lt $length -and $text[$index] -ne '"') {
+      if ($text[$index] -eq '\' -and ($index + 1) -lt $length) {
+        [void]$builder.Append($text[$index + 1])
+        $index += 2
+        continue
+      }
+      [void]$builder.Append($text[$index])
+      $index++
+    }
+    if ($index -lt $length -and $text[$index] -eq '"') { $index++ }  # closing quote
+    $strings.Add($builder.ToString())
+  }
+
+  return $strings.ToArray()
+}
+
 function Resolve-DohName {
   param(
     [Parameter(Mandatory = $true)]
@@ -5481,51 +5527,12 @@ function Resolve-DohName {
 
         $data = [string]$a.data
         if ([string]::IsNullOrWhiteSpace($data)) { continue }
-        $data = $data.Trim()
 
-        # A DNS TXT RDATA can hold multiple <character-string>s (RFC 1035 §3.3.14),
-        # each up to 255 octets. Cloudflare DoH returns them in presentation form as a
-        # space-separated sequence of double-quoted strings, e.g. `"foo" "bar"`.
-        # Per RFC 7208 §3.3, SPF parsers MUST concatenate those strings together with
-        # NO separator. Naively stripping only the outer quotes would leave the inner
-        # `" "` literal embedded in the record (e.g.
-        # `include:spf.protection." "outlook.com -all`), which breaks SPF tokenization.
-        # Walk the data string and emit each character-string as a separate element of
-        # `Strings`, mirroring the shape produced by Resolve-DnsName so downstream code
-        # can rely on `($record.Strings -join '')` to reconstruct the canonical TXT value.
-        $strings = New-Object System.Collections.Generic.List[string]
-        $index = 0
-        $length = $data.Length
-        while ($index -lt $length) {
-          # Skip inter-string whitespace.
-          while ($index -lt $length -and [char]::IsWhiteSpace($data[$index])) { $index++ }
-          if ($index -ge $length) { break }
-
-          if ($data[$index] -ne '"') {
-            # Defensive: if the payload isn't quoted (non-conforming server), take the
-            # remainder as a single character-string and stop.
-            $strings.Add($data.Substring($index))
-            break
-          }
-
-          # Consume one quoted character-string, honoring backslash escapes for `\\` and `\"`.
-          $index++  # opening quote
-          $builder = New-Object System.Text.StringBuilder
-          while ($index -lt $length -and $data[$index] -ne '"') {
-            if ($data[$index] -eq '\' -and ($index + 1) -lt $length) {
-              [void]$builder.Append($data[$index + 1])
-              $index += 2
-              continue
-            }
-            [void]$builder.Append($data[$index])
-            $index++
-          }
-          if ($index -lt $length -and $data[$index] -eq '"') { $index++ }  # closing quote
-          $strings.Add($builder.ToString())
-        }
-
+        # Mirrors the shape produced by Resolve-DnsName so downstream code can rely on
+        # `($record.Strings -join '')` to reconstruct the canonical TXT value.
+        $strings = @(ConvertFrom-DnsTxtPresentationData -Data $data)
         if ($strings.Count -eq 0) { continue }
-        [pscustomobject]@{ Strings = $strings.ToArray() }
+        [pscustomobject]@{ Strings = $strings }
       }
     }
     'MX' {
@@ -6557,10 +6564,9 @@ function Resolve-DohRecordsDetailed {
     $rawData = [string]$answer.data
     $data = $rawData
     if ($recordType -eq 'TXT') {
-      if ($data.StartsWith('"') -and $data.EndsWith('"') -and $data.Length -ge 2) {
-        $data = $data.Substring(1, $data.Length - 2)
-      }
-      $data = $data -replace '\\"','"'
+      # Must use the same character-string walker as Resolve-DohName: stripping only the
+      # outer quotes leaves the `" "` separator inside every TXT longer than 255 octets.
+      $data = (@(ConvertFrom-DnsTxtPresentationData -Data $data) -join '')
     }
     elseif ($recordType -eq 'MX') {
       $parts = $data.Trim() -split '\s+', 2
@@ -7137,6 +7143,82 @@ function Get-SpfMechanismType {
   return $null
 }
 
+# Pick which record to analyze when a domain publishes MORE than one SPF record.
+# The set is a PermError either way (RFC 7208 3.2), but for an ACS domain checker the
+# record carrying the Outlook include is the one the customer intended for ACS, so
+# preferring it keeps the requirement verdict truthful while the duplicate-record error
+# stays the headline. Without this the choice would depend on RRset ordering, which
+# varies per resolver and per query.
+function Select-SpfRecordFromSet {
+  param([string[]]$Records)
+
+  $set = @($Records | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($set.Count -eq 0) { return $null }
+
+  foreach ($record in $set) {
+    if (Test-SpfOutlookIncludeToken -Text $record) { return $record }
+  }
+  return $set[0]
+}
+
+# Build one RFC-compliant SPF record out of a set a domain wrongly publishes as several,
+# so the UI can hand the operator a ready-to-paste replacement instead of just an error.
+function Merge-SpfRecordSet {
+  param([string[]]$Records)
+
+  $set = @($Records | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($set.Count -eq 0) { return $null }
+
+  $terms = [System.Collections.Generic.List[string]]::new()
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $allQualifier = $null
+  # Lower rank == more permissive. The merged record keeps the MOST permissive `all`
+  # qualifier found so combining records can never silently tighten policy and start
+  # rejecting mail the operator is currently delivering.
+  $qualifierRank = @{ '+' = 0; '?' = 1; '~' = 2; '-' = 3 }
+
+  foreach ($record in $set) {
+    foreach ($token in @(Get-SpfTokens -SpfRecord $record)) {
+      $item = ([string]$token).Trim()
+      if ([string]::IsNullOrWhiteSpace($item)) { continue }
+      if ($item -match '(?i)^v=spf1$') { continue }
+
+      $bare = $item -replace '^[\+\-~\?]', ''
+
+      if ($bare -match '^(?i)all$') {
+        $qualifier = if ($item -match '^([\+\-~\?])') { $Matches[1] } else { '+' }
+        if ($null -eq $allQualifier -or $qualifierRank[$qualifier] -lt $qualifierRank[$allQualifier]) {
+          $allQualifier = $qualifier
+        }
+        continue
+      }
+
+      # The merged record always ends in `all`, which per RFC 7208 6.1 overrides any
+      # `redirect`. Convert it to an include so the authorized senders it pointed at
+      # are preserved rather than silently dropped from the suggestion.
+      if ($bare -match '^(?i)redirect=(.+)$') {
+        $item = 'include:' + ($Matches[1]).Trim()
+      }
+
+      if ($seen.Add($item)) { $terms.Add($item) }
+    }
+  }
+
+  if ($null -eq $allQualifier) { $allQualifier = '~' }
+  $merged = (@('v=spf1') + @($terms) + @("${allQualifier}all")) -join ' '
+
+  $lookupCount = 0
+  foreach ($term in $terms) {
+    if (Get-SpfMechanismType -Token $term) { $lookupCount++ }
+  }
+
+  [pscustomobject]@{
+    merged             = $merged
+    lookupTerms        = $lookupCount
+    exceedsLookupLimit = ($lookupCount -gt 10)
+  }
+}
+
 # Check whether an SPF record string contains a direct "include:spf.protection.outlook.com" token.
 function Test-SpfOutlookIncludeToken {
   param([string]$Text)
@@ -7148,6 +7230,11 @@ function Test-SpfOutlookIncludeToken {
     if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
 
     $normalized = $normalized -replace '^[\+\-~\?]', ''
+
+    # RFC 7208 5.1: "Mechanisms after 'all' will never be tested." Stop here so an
+    # include appended past `all` is not reported as satisfying the ACS requirement.
+    if ($normalized -match '^(?i)all$') { break }
+
     if ($normalized -notmatch '^(?i)include:') { continue }
 
     $target = ($normalized -replace '^(?i)include:', '')
@@ -7213,7 +7300,9 @@ function Find-SpfOutlookRequirementMatch {
     if ($childMatch) { return $childMatch }
   }
 
-  if ($Analysis.redirect) {
+  # A redirect that an `all` mechanism overrides is never evaluated by a receiver
+  # (RFC 7208 6.1), so its subtree must not be able to satisfy the Outlook requirement.
+  if ($Analysis.redirect -and $Analysis.redirect.ignoredByAll -ne $true) {
     $redirectDomain = ([string]$Analysis.redirect.domain).Trim().TrimEnd('.').ToLowerInvariant()
     if ($redirectDomain -eq 'spf.protection.outlook.com') {
       return [pscustomobject]@{
@@ -7671,8 +7760,7 @@ function Find-SpfMacroDelegatedTarget {
 # Determine whether the ACS-required "include:spf.protection.outlook.com" is present
 # in the domain's SPF record (directly or through nested includes/redirects).
 # Returns an object with isPresent, matchType, detail, and error.
-function Get-SpfOutlookRequirementStatus {
-  param(
+function Get-SpfOutlookRequirementStatus {  param(
     [string]$Domain,
     [string]$SpfRecord,
     [object]$SpfAnalysis
@@ -7686,6 +7774,8 @@ function Get-SpfOutlookRequirementStatus {
       error = 'SPF record is missing, so the required include:spf.protection.outlook.com could not be validated.'
     }
   }
+
+  $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
 
   if (Test-SpfOutlookIncludeToken -Text $SpfRecord) {
     return [pscustomobject]@{
@@ -7725,8 +7815,6 @@ function Get-SpfOutlookRequirementStatus {
       }
     }
   }
-
-  $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
 
   # Final fallback: SPF-flattening / Dynamic SPF services (OnDMARC, Valimail,
   # Sendmarc, EasyDMARC, Sparkpost, etc.) inline the IP ranges published by
@@ -7818,13 +7906,39 @@ function Get-SpfNestedAnalysis {
   $macros = New-Object System.Collections.Generic.List[string]
   $warnings = New-Object System.Collections.Generic.List[string]
   $errors = New-Object System.Collections.Generic.List[string]
+  $unreachableTerms = New-Object System.Collections.Generic.List[string]
   $lookupTerms = 0
   $nestedLookupTerms = 0
   $analysisScope = 'full-static'
 
+  # RFC 7208 6.1: "the 'redirect' modifier MUST be ignored if there is an 'all'
+  # mechanism anywhere in the record." `all` can appear AFTER the redirect token, so
+  # this cannot be decided inside the token loop below.
+  $recordHasAll = $false
+  foreach ($token in $tokens) {
+    if (((([string]$token).Trim()) -replace '^[\+\-~\?]', '') -match '^(?i)all$') {
+      $recordHasAll = $true
+      break
+    }
+  }
+
+  $sawAll = $false
+
   foreach ($token in $tokens) {
     $item = ([string]$token).Trim()
     if ([string]::IsNullOrWhiteSpace($item)) { continue }
+
+    $bareToken = $item -replace '^[\+\-~\?]', ''
+    # RFC 7208 5.1: mechanisms after `all` are never tested. Modifiers (`exp=`,
+    # `redirect=`, vendor extensions) are position-independent per 4.6.1, so ONLY
+    # mechanisms are treated as unreachable -- flagging modifiers would fire on
+    # perfectly valid records.
+    $isModifierTerm = ($bareToken -match '^(?i)[a-z0-9_.\-]+=')
+    if ($sawAll -and -not $isModifierTerm) {
+      if (-not $unreachableTerms.Contains($item)) { $unreachableTerms.Add($item) }
+      continue
+    }
+    if ($bareToken -match '^(?i)all$') { $sawAll = $true }
 
     if (Test-SpfMacroText -Text $item) {
       if (-not $macros.Contains($item)) { $macros.Add($item) }
@@ -7832,7 +7946,10 @@ function Get-SpfNestedAnalysis {
     }
 
     $mechanismType = Get-SpfMechanismType -Token $item
-    if ($mechanismType) {
+    # A redirect overridden by `all` is never evaluated, so it must not consume one of
+    # the 10 permitted DNS lookups either.
+    $redirectIgnored = ($mechanismType -eq 'redirect' -and $recordHasAll)
+    if ($mechanismType -and -not $redirectIgnored) {
       $lookupTerms++
     }
 
@@ -7859,18 +7976,22 @@ function Get-SpfNestedAnalysis {
         $Visited[$visitedKey] = $true
         try {
           $txtRecords = ResolveSafely $target 'TXT'
-          foreach ($txt in @($txtRecords)) {
-            $joined = ($txt.Strings -join '').Trim()
+          $candidateRecords = @(foreach ($txt in @($txtRecords)) {
+            $joined = (@($txt.Strings) -join '').Trim()
             if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
               $joined = $joined.Substring(1, $joined.Length - 2)
             }
-            if ($joined -match '(?i)^v=spf1\b') {
-              $includeRecord = $joined
-              break
-            }
-          }
+            if ($joined -match '(?i)^v=spf1\b') { $joined }
+          })
 
-          if ($includeRecord) {
+          if ($candidateRecords.Count -gt 1) {
+            # RFC 7208 3.2/4.5: more than one SPF record is a PermError, and an include
+            # that PermErrors makes the ENTIRE evaluation PermError. Taking the first
+            # record here would report a clean chain for a domain that fails every check.
+            $includeError = "Include target $target publishes $($candidateRecords.Count) SPF records. RFC 7208 allows only one, so this include returns PermError and SPF evaluation fails for the whole chain."
+          }
+          elseif ($candidateRecords.Count -eq 1) {
+            $includeRecord = $candidateRecords[0]
             $includeResult = Get-SpfNestedAnalysis -SpfRecord $includeRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
             if ($includeResult -and $null -ne $includeResult.totalLookupTerms) {
               $nestedLookupTerms += [int]$includeResult.totalLookupTerms
@@ -7910,7 +8031,12 @@ function Get-SpfNestedAnalysis {
       $redirectAnalysis = $null
       $visitedKey = $target.ToLowerInvariant()
 
-      if ($Visited.ContainsKey($visitedKey)) {
+      if ($redirectIgnored) {
+        # RFC 7208 6.1. Do not expand: a receiver never follows this redirect, so
+        # expanding it would let the subtree satisfy checks that can never pass.
+        $redirectError = "redirect=$target is ignored because this record also has an 'all' mechanism (RFC 7208 6.1). Remove 'all' to use the redirect, or replace the redirect with an include."
+      }
+      elseif ($Visited.ContainsKey($visitedKey)) {
         $redirectError = "Redirect loop detected for $target."
       }
       elseif ($MaxDepth -le 0) {
@@ -7924,18 +8050,20 @@ function Get-SpfNestedAnalysis {
         $Visited[$visitedKey] = $true
         try {
           $txtRecords = ResolveSafely $target 'TXT'
-          foreach ($txt in @($txtRecords)) {
-            $joined = ($txt.Strings -join '').Trim()
+          $candidateRecords = @(foreach ($txt in @($txtRecords)) {
+            $joined = (@($txt.Strings) -join '').Trim()
             if ($joined.StartsWith('"') -and $joined.EndsWith('"') -and $joined.Length -ge 2) {
               $joined = $joined.Substring(1, $joined.Length - 2)
             }
-            if ($joined -match '(?i)^v=spf1\b') {
-              $redirectRecord = $joined
-              break
-            }
-          }
+            if ($joined -match '(?i)^v=spf1\b') { $joined }
+          })
 
-          if ($redirectRecord) {
+          if ($candidateRecords.Count -gt 1) {
+            # Same PermError rule as the include path above (RFC 7208 3.2/4.5).
+            $redirectError = "Redirect target $target publishes $($candidateRecords.Count) SPF records. RFC 7208 allows only one, so this redirect returns PermError and SPF evaluation fails for the whole chain."
+          }
+          elseif ($candidateRecords.Count -eq 1) {
+            $redirectRecord = $candidateRecords[0]
             $redirectAnalysis = Get-SpfNestedAnalysis -SpfRecord $redirectRecord -Domain $target -MaxDepth ($MaxDepth - 1) -Visited $Visited
             if ($redirectAnalysis -and $null -ne $redirectAnalysis.totalLookupTerms) {
               $nestedLookupTerms += [int]$redirectAnalysis.totalLookupTerms
@@ -7961,6 +8089,7 @@ function Get-SpfNestedAnalysis {
         domain = $target
         record = $redirectRecord
         error = $redirectError
+        ignoredByAll = $redirectIgnored
         analysis = $redirectAnalysis
       }
       continue
@@ -8124,6 +8253,9 @@ function Get-SpfNestedAnalysis {
   if ($totalLookupTerms -gt 10) {
     $warnings.Add("SPF record for $Domain may exceed the 10-DNS-lookup guidance limit. Detected lookup-style terms across the expanded chain: $totalLookupTerms.")
   }
+  if ($unreachableTerms.Count -gt 0) {
+    $warnings.Add("SPF record for $Domain has $($unreachableTerms.Count) mechanism(s) after the 'all' mechanism, which no receiver ever evaluates (RFC 7208 5.1): $(($unreachableTerms -join ', ')). Move them before 'all'.")
+  }
   if ($analysisScope -eq 'partial-static') {
     $warnings.Add("SPF record for $Domain includes macro-based targets. This tool performs best-effort static analysis, but some nested paths require sender-specific context to expand fully.")
   }
@@ -8149,6 +8281,7 @@ function Get-SpfNestedAnalysis {
     mxTerms = $mxTerms.ToArray()
     ptrTerms = $ptrTerms.ToArray()
     macros = @($macros | Select-Object -Unique)
+    unreachableTerms = @($unreachableTerms)
     lookupTerms = $lookupTerms
     nestedLookupTerms = $nestedLookupTerms
     totalLookupTerms = $totalLookupTerms
@@ -8767,6 +8900,8 @@ function Get-DnsBaseStatus {
 
   $spf        = $null
   $acsTxt     = $null
+  $spfRecords = @()
+  $acsValues  = @()
   $txtRecords = @()
   $dnsFailed  = $false
   $dnsError   = $null
@@ -8779,6 +8914,7 @@ function Get-DnsBaseStatus {
   $parentTxtRecords = @()
   $parentSpf = $null
   $parentAcsTxt = $null
+  $parentSpfRecords = @()
   $spfAnalysis = $null
   $spfExpandedText = $null
   $spfGuidance = @()
@@ -8824,10 +8960,14 @@ function Get-DnsBaseStatus {
   }
 
   if (-not $dnsFailed) {
-    foreach ($t in $txtRecords) {
-      if (-not $spf    -and $t -match '(?i)^v=spf1')                { $spf    = $t }
-      if (-not $acsTxt -and $t -match '(?i)ms-domain-verification') { $acsTxt = $t }
-    }
+    # Collect the FULL sets, not the first match. RFC 7208 3.2/4.5: a domain publishing
+    # more than one SPF record is a PermError -- SPF fails for every message it sends --
+    # so picking the first would both hide the real fault and judge the domain on an
+    # arbitrary record (RRset order varies per resolver and per query).
+    $spfRecords = @($txtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
+    $acsValues  = @($txtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' })
+    $spf    = Select-SpfRecordFromSet -Records $spfRecords
+    $acsTxt = $(if ($acsValues.Count -gt 0) { $acsValues[0] } else { $null })
 
     if ($txtRecords.Count -eq 0) {
       foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
@@ -8849,15 +8989,29 @@ function Get-DnsBaseStatus {
             $txtLookupDomain = $parent
             $txtUsedParent = $true
 
-            foreach ($t in $parentTxtRecords) {
-              if (-not $parentSpf -and $t -match '(?i)^v=spf1') { $parentSpf = $t }
-              if (-not $parentAcsTxt -and $t -match '(?i)ms-domain-verification') { $parentAcsTxt = $t }
-            }
+            $parentSpfRecords = @($parentTxtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
+            $parentSpf = Select-SpfRecordFromSet -Records $parentSpfRecords
+            $parentAcsTxt = @($parentTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1)[0]
             break
           }
         } catch { }
       }
     }
+  }
+
+  # RFC 7208 3.2/4.5 verdict for the queried domain, plus a ready-to-paste replacement so
+  # the operator does not have to merge the records by hand.
+  $spfMultipleRecords = ($spfRecords.Count -gt 1)
+  $spfMergedSuggestion = $null
+  $spfMergedExceedsLookupLimit = $false
+  if ($spfMultipleRecords) {
+    try {
+      $merge = Merge-SpfRecordSet -Records $spfRecords
+      if ($merge) {
+        $spfMergedSuggestion = [string]$merge.merged
+        $spfMergedExceedsLookupLimit = [bool]$merge.exceedsLookupLimit
+      }
+    } catch { }
   }
 
   $spfPresent = -not $dnsFailed -and [bool]$spf
@@ -8888,6 +9042,19 @@ function Get-DnsBaseStatus {
         $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $null -OutlookRequirementStatus $spfOutlookRequirement)
       } catch { }
     }
+  }
+
+  # Lead the SPF guidance with the duplicate-record PermError: it invalidates every other
+  # SPF finding, so it has to come before the per-mechanism advice.
+  if ($spfMultipleRecords) {
+    $multipleMessage = "$Domain publishes $($spfRecords.Count) SPF records. RFC 7208 allows exactly one, so receivers return PermError and SPF fails for every message from this domain. Merge them into a single TXT record."
+    if ($spfMergedSuggestion) {
+      $multipleMessage += " Suggested replacement: $spfMergedSuggestion"
+    }
+    if ($spfMergedExceedsLookupLimit) {
+      $multipleMessage += " Note: the merged record still exceeds the 10-DNS-lookup limit, so it needs trimming before use."
+    }
+    $spfGuidance = @(@($multipleMessage) + @($spfGuidance))
   }
 
   # Run the DNSSEC anomaly probe once per base lookup, so the incremental UI
@@ -8947,6 +9114,14 @@ function Get-DnsBaseStatus {
 
     spfPresent = $spfPresent
     spfValue   = $spf
+    # Full record set + duplicate verdict. `spfValue` stays the single analyzed record for
+    # back-compat; `spfRecords` is what the UI renders so the SPF card can never again
+    # contradict the DNS records table.
+    spfRecords = @($spfRecords)
+    spfRecordCount = $spfRecords.Count
+    spfMultipleRecords = $spfMultipleRecords
+    spfMergedSuggestion = $spfMergedSuggestion
+    spfMergedExceedsLookupLimit = $spfMergedExceedsLookupLimit
     spfAnalysis = $spfAnalysis
     spfExpandedText = $spfExpandedText
     spfGuidance = $spfGuidance
@@ -8959,9 +9134,16 @@ function Get-DnsBaseStatus {
     spfRequiredIncludeMacroTarget = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.macroTarget } else { $null })
     acsPresent = $acsPresent
     acsValue   = $acsTxt
+    # Multiple ms-domain-verification records are legal (one per ACS resource/tenant), but
+    # showing only the first removes the operator's only way to confirm THEIR token is
+    # published -- readiness here is presence-based, not token-equality-based.
+    acsValues  = @($acsValues)
+    acsRecordCount = $acsValues.Count
 
     parentSpfPresent = (-not $dnsFailed) -and [bool]$parentSpf
     parentSpfValue   = $parentSpf
+    parentSpfRecords = @($parentSpfRecords)
+    parentSpfMultipleRecords = ($parentSpfRecords.Count -gt 1)
     parentAcsPresent = (-not $dnsFailed) -and [bool]$parentAcsTxt
     parentAcsValue   = $parentAcsTxt
     parentTxtRecords = $parentTxtRecords
@@ -9732,25 +9914,46 @@ function Get-DnsDmarcStatus {
   $dmarc = $null
   $dmarcLookupDomain = $Domain
   $dmarcInherited = $false
+  $dmarcRecords = @()
+  $dmarcRecordCount = 0
   $organizationalDomain = Get-RegistrableDomain -Domain $Domain
 
-  function Get-DmarcRecordValue {
+  function Get-DmarcRecordSet {
     param([string]$LookupDomain)
 
-    $recordValue = $null
+    # RFC 7489 6.6.3: after discarding records that do not start with the v=DMARC1
+    # version tag, "if the remaining set contains multiple records ... policy discovery
+    # terminates and DMARC processing is not applied" -- i.e. duplicates mean NO DMARC,
+    # not the first one. The duplicate count must therefore be taken over STRICTLY
+    # qualified records only; the old loose `^v=dmarc` prefix would count unrelated junk
+    # TXT as a duplicate and raise a false alarm.
+    $qualified = [System.Collections.Generic.List[string]]::new()
+    $malformed = [System.Collections.Generic.List[string]]::new()
+
     if ($dm = ResolveSafely "_dmarc.$LookupDomain" "TXT") {
       foreach ($r in $dm) {
-        $j = ($r.Strings -join "").Trim()
-        if ($j -match '(?i)^v=dmarc') {
-          $recordValue = $j
-          break
-        }
+        $j = (@($r.Strings) -join "").Trim()
+        if ([string]::IsNullOrWhiteSpace($j)) { continue }
+        if ($j -match '(?i)^v\s*=\s*DMARC1\s*;') { $qualified.Add($j) }
+        elseif ($j -match '(?i)^v\s*=\s*dmarc') { $malformed.Add($j) }
       }
     }
-    return $recordValue
+
+    # Keep surfacing a malformed record when nothing qualifies, so the operator still
+    # sees it (and still gets syntax guidance) instead of a bare "DMARC is missing".
+    $records = @(if ($qualified.Count -gt 0) { $qualified } else { $malformed })
+
+    [pscustomobject]@{
+      value   = $(if ($records.Count -gt 0) { $records[0] } else { $null })
+      records = $records
+      count   = $qualified.Count
+    }
   }
 
-  $dmarc = Get-DmarcRecordValue -LookupDomain $Domain
+  $dmarcSet = Get-DmarcRecordSet -LookupDomain $Domain
+  $dmarc = $dmarcSet.value
+  $dmarcRecords = @($dmarcSet.records)
+  $dmarcRecordCount = [int]$dmarcSet.count
   if (-not $dmarc) {
     $orgLabelCount = if ([string]::IsNullOrWhiteSpace($organizationalDomain)) { 0 } else { $organizationalDomain.Trim('.').Split('.').Count }
     foreach ($parent in @(Get-ParentDomains -Domain $Domain)) {
@@ -9759,9 +9962,11 @@ function Get-DnsDmarcStatus {
       $parentLabelCount = $parent.Trim('.').Split('.').Count
       if ($orgLabelCount -gt 0 -and $parentLabelCount -lt $orgLabelCount) { continue }
 
-      $candidate = Get-DmarcRecordValue -LookupDomain $parent
-      if ($candidate) {
-        $dmarc = $candidate
+      $candidate = Get-DmarcRecordSet -LookupDomain $parent
+      if ($candidate.value) {
+        $dmarc = $candidate.value
+        $dmarcRecords = @($candidate.records)
+        $dmarcRecordCount = [int]$candidate.count
         $dmarcLookupDomain = $parent
         $dmarcInherited = $true
         break
@@ -9775,6 +9980,9 @@ function Get-DnsDmarcStatus {
     dmarcLookupDomain = $dmarcLookupDomain
     dmarcInherited = $dmarcInherited
     dmarcOrganizationalDomain = $organizationalDomain
+    dmarcRecords = @($dmarcRecords)
+    dmarcRecordCount = $dmarcRecordCount
+    dmarcMultipleRecords = ($dmarcRecordCount -gt 1)
   }
 }
 
@@ -9811,9 +10019,16 @@ function Get-DnsDkimStatus {
     if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
 
     $txtValue = $null
+    $txtValues = @()
     if ($txtRecords = ResolveSafely $LookupName 'TXT') {
-      $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
-      if ($joined) { $txtValue = $joined }
+      # $txtRecords is the whole answer SET. `.Strings` member-enumerates across EVERY
+      # record, so a single `-join ''` splices two rotating DKIM keys into one value
+      # that exists in no record. Join per record instead.
+      $txtValues = @(foreach ($txt in @($txtRecords)) {
+        $joined = ((@($txt.Strings) -join '') -replace '\s+', '').Trim()
+        if ($joined) { $joined }
+      })
+      if ($txtValues.Count -gt 0) { $txtValue = $txtValues[0] }
     }
 
     # Case-insensitive compare; both sides are normalized to no trailing dot.
@@ -9828,13 +10043,14 @@ function Get-DnsDkimStatus {
     # existing UI/test-summary truthy checks still mean "something is published".
     $displayParts = New-Object System.Collections.Generic.List[string]
     if ($cnameTarget) { $displayParts.Add("CNAME -> $cnameTarget") }
-    if ($txtValue)    { $displayParts.Add("TXT: $txtValue") }
+    foreach ($value in $txtValues) { $displayParts.Add("TXT: $value") }
     $display = if ($displayParts.Count -gt 0) { ($displayParts -join "`n") } else { $null }
 
     [pscustomobject]@{
       Display       = $display
       CnameTarget   = $cnameTarget
       TxtValue      = $txtValue
+      TxtValues     = @($txtValues)
       Expected      = $expected
       AcsConfigured = $acsConfigured
     }
@@ -9871,9 +10087,14 @@ function Get-DnsDkimStatus {
       if ($cnameTarget) { $cnameTarget = $cnameTarget.Trim().TrimEnd('.') }
 
       $txtValue = $null
+      $txtValues = @()
       if ($txtRecords = ResolveSafely $name 'TXT') {
-        $joined = (($txtRecords.Strings -join '') -replace '\s+', '').Trim()
-        if ($joined) { $txtValue = $joined }
+        # Join per record -- see Invoke-AcsDkimSelectorLookup.
+        $txtValues = @(foreach ($txt in @($txtRecords)) {
+          $joined = ((@($txt.Strings) -join '') -replace '\s+', '').Trim()
+          if ($joined) { $joined }
+        })
+        if ($txtValues.Count -gt 0) { $txtValue = $txtValues[0] }
       }
 
       if (-not $cnameTarget -and -not $txtValue) { continue }
@@ -9883,6 +10104,7 @@ function Get-DnsDkimStatus {
         Selector    = $selector
         CnameTarget = $cnameTarget
         TxtValue    = $txtValue
+        TxtValues   = @($txtValues)
       })
     }
 
@@ -9896,7 +10118,7 @@ function Get-DnsDkimStatus {
     foreach ($row in $rows) {
       $lines.Add($row.Name)
       if ($row.CnameTarget) { $lines.Add("  CNAME -> $($row.CnameTarget)") }
-      if ($row.TxtValue)    { $lines.Add("  TXT: $($row.TxtValue)") }
+      foreach ($value in @($row.TxtValues)) { $lines.Add("  TXT: $value") }
     }
 
     [pscustomobject]@{
@@ -9952,12 +10174,14 @@ function Get-DnsDkimStatus {
     dkim1                     = $dkim1Display
     dkim1CnameTarget          = $dkim1Result.CnameTarget
     dkim1TxtValue             = $dkim1Result.TxtValue
+    dkim1TxtValues            = @($dkim1Result.TxtValues)
     dkim1ExpectedCname        = $dkim1Result.Expected
     dkim1AcsConfigured        = $dkim1Result.AcsConfigured
     dkim1FallbackSelectors    = $dkim1FallbackRows
     dkim2                     = $dkim2Display
     dkim2CnameTarget          = $dkim2Result.CnameTarget
     dkim2TxtValue             = $dkim2Result.TxtValue
+    dkim2TxtValues            = @($dkim2Result.TxtValues)
     dkim2ExpectedCname        = $dkim2Result.Expected
     dkim2AcsConfigured        = $dkim2Result.AcsConfigured
     dkim2FallbackSelectors    = $dkim2FallbackRows
@@ -13390,10 +13614,11 @@ function Get-AcsDnsStatus {
   # was producing `"spfValue": "v"` in the CLI output. Wrap the entire `if`
   # expression in `@(...)` so the 1-element array survives assignment, then
   # index it normally. Same fix applies to `$effectiveAcs` below.
-  $effectiveSpf = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1' } | Select-Object -First 1 } else { $base.spfValue })
-  $effectiveSpfValue = if ($effectiveSpf.Count -gt 0) { $effectiveSpf[0] } else { $null }
-  $effectiveAcs = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1 } else { $base.acsValue })
-  $effectiveAcsValue = if ($effectiveAcs.Count -gt 0) { $effectiveAcs[0] } else { $null }
+  $effectiveSpfRecords = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' } } else { $base.spfRecords })
+  $effectiveSpfValue = if ($recoveredFromDetailedRecords) { Select-SpfRecordFromSet -Records $effectiveSpfRecords } else { $base.spfValue }
+  $effectiveSpfMultipleRecords = ($effectiveSpfRecords.Count -gt 1)
+  $effectiveAcsValues = @(if ($recoveredFromDetailedRecords) { $effectiveTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } } else { $base.acsValues })
+  $effectiveAcsValue = if ($effectiveAcsValues.Count -gt 0) { $effectiveAcsValues[0] } else { $null }
   $effectiveSpfPresent = [bool]$effectiveSpfValue
   $effectiveAcsPresent = [bool]$effectiveAcsValue
   $effectiveSpfHasRequiredInclude = if ($recoveredFromDetailedRecords -and $effectiveSpfValue) {
@@ -13442,6 +13667,11 @@ function Get-AcsDnsStatus {
       foreach ($spfMessage in @($base.spfGuidance)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$spfMessage)) { $guidance.Add([string]$spfMessage) }
       }
+      # The base lookup already emits the duplicate-SPF message; only add it here when the
+      # records came from the detailed-records recovery path instead.
+      if ($effectiveSpfMultipleRecords -and $recoveredFromDetailedRecords) {
+        $guidance.Add("$Domain publishes $($effectiveSpfRecords.Count) SPF records. RFC 7208 allows exactly one, so receivers return PermError and SPF fails for every message from this domain. Merge them into a single TXT record.")
+      }
       if (-not $effectiveAcsPresent -and -not $txtServfail) {
         if ($base.parentAcsPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("ACS ms-domain-verification TXT is missing on $Domain. Parent domain $($base.txtLookupDomain) has an ACS TXT record, but it does not verify the queried subdomain.")
@@ -13465,6 +13695,11 @@ function Get-AcsDnsStatus {
         }
       }
       if (-not $dmarc.dmarc)     { $guidance.Add("DMARC is missing. Add a _dmarc.$Domain TXT record to reduce spoofing risk.") }
+      elseif ($dmarc.dmarcMultipleRecords) {
+        # RFC 7489 6.6.3: a set with more than one qualifying record means policy discovery
+        # terminates -- receivers apply NO DMARC at all, so this is worse than a weak policy.
+        $guidance.Add("_dmarc.$($dmarc.dmarcLookupDomain) publishes $($dmarc.dmarcRecordCount) DMARC records. RFC 7489 allows exactly one, so receivers discard all of them and apply no DMARC policy. Remove the extras until a single v=DMARC1 record remains.")
+      }
       elseif ($dmarc.dmarcInherited -and $dmarc.dmarcLookupDomain -and $dmarc.dmarcLookupDomain -ne $Domain) { $guidance.Add("Effective DMARC policy is inherited from parent domain $($dmarc.dmarcLookupDomain).") }
       $dmarcGuidance = @(Get-DmarcSecurityGuidance -DmarcRecord $dmarc.dmarc -Domain $Domain -LookupDomain $dmarc.dmarcLookupDomain -Inherited $dmarc.dmarcInherited)
       foreach ($dmarcMessage in $dmarcGuidance) {
@@ -13536,6 +13771,11 @@ function Get-AcsDnsStatus {
 
         spfPresent = $effectiveSpfPresent
         spfValue   = $effectiveSpfValue
+        spfRecords = @($effectiveSpfRecords)
+        spfRecordCount = $effectiveSpfRecords.Count
+        spfMultipleRecords = $effectiveSpfMultipleRecords
+        spfMergedSuggestion = $base.spfMergedSuggestion
+        spfMergedExceedsLookupLimit = $base.spfMergedExceedsLookupLimit
         spfAnalysis = $base.spfAnalysis
         spfExpandedText = $base.spfExpandedText
         spfGuidance = $base.spfGuidance
@@ -13548,8 +13788,12 @@ function Get-AcsDnsStatus {
         spfRequiredIncludeMacroTarget = $base.spfRequiredIncludeMacroTarget
         parentSpfPresent = $base.parentSpfPresent
         parentSpfValue   = $base.parentSpfValue
+        parentSpfRecords = @($base.parentSpfRecords)
+        parentSpfMultipleRecords = $base.parentSpfMultipleRecords
         acsPresent = $effectiveAcsPresent
         acsValue   = $effectiveAcsValue
+        acsValues  = @($effectiveAcsValues)
+        acsRecordCount = $effectiveAcsValues.Count
         parentAcsPresent = $base.parentAcsPresent
         parentAcsValue   = $base.parentAcsValue
 
@@ -13589,15 +13833,20 @@ function Get-AcsDnsStatus {
         dmarc      = $dmarc.dmarc
         dmarcLookupDomain = $dmarc.dmarcLookupDomain
         dmarcInherited = $dmarc.dmarcInherited
+        dmarcRecords = @($dmarc.dmarcRecords)
+        dmarcRecordCount = $dmarc.dmarcRecordCount
+        dmarcMultipleRecords = $dmarc.dmarcMultipleRecords
         dkim1                = $dkim.dkim1
         dkim1CnameTarget     = $dkim.dkim1CnameTarget
         dkim1TxtValue        = $dkim.dkim1TxtValue
+        dkim1TxtValues       = @($dkim.dkim1TxtValues)
         dkim1ExpectedCname   = $dkim.dkim1ExpectedCname
         dkim1AcsConfigured   = $dkim.dkim1AcsConfigured
         dkim1FallbackSelectors = $dkim.dkim1FallbackSelectors
         dkim2                = $dkim.dkim2
         dkim2CnameTarget     = $dkim.dkim2CnameTarget
         dkim2TxtValue        = $dkim.dkim2TxtValue
+        dkim2TxtValues       = @($dkim.dkim2TxtValues)
         dkim2ExpectedCname   = $dkim.dkim2ExpectedCname
         dkim2AcsConfigured   = $dkim.dkim2AcsConfigured
         dkim2FallbackSelectors = $dkim.dkim2FallbackSelectors
@@ -21609,6 +21858,85 @@ Object.keys(MULTI_DOMAIN_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, MULTI_DOMAIN_TRANSLATION_OVERRIDES[code]);
 });
 
+// Duplicate-record (RFC 7208 / RFC 7489) strings. Publishing more than one SPF or DMARC
+// record is a PermError: receivers reject the whole set, so these are hard failures, not
+// cosmetic warnings.
+//
+// Per repo convention the Latin-script locales carry the full set; the non-Latin-script
+// locales carry the short, user-visible labels and let the longer explanatory sentences
+// fall back to English through t().
+const RECORD_MULTIPLICITY_TRANSLATION_OVERRIDES = {
+  en: {
+    spfMultipleRecordsDetected: 'This domain publishes {count} SPF records. RFC 7208 allows exactly one \u2014 receiving mail servers return a permanent error (PermError) and SPF fails for every message sent from this domain. Merge them into a single TXT record.',
+    spfMergedSuggestionLabel: 'Suggested single replacement record:',
+    spfMergedExceedsLookupLimitNote: 'The merged record still exceeds the SPF 10-DNS-lookup limit, so trim it before publishing.',
+    guidanceSpfMultipleRecords: '{domain} publishes {count} SPF records. RFC 7208 allows exactly one, so receivers return PermError and SPF fails for every message from this domain. Merge them into a single TXT record.',
+    guidanceSpfMergedSuggestion: 'Suggested single replacement SPF record: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'The merged SPF record still exceeds the 10-DNS-lookup limit. Remove unused includes or use a provider that flattens the record.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publishes {count} DMARC records. RFC 7489 allows exactly one \u2014 receiving mail servers discard all of them and apply no DMARC policy at all. Remove the extras until a single v=DMARC1 record remains.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publishes {count} DMARC records. RFC 7489 allows exactly one, so receivers discard all of them and apply no DMARC policy. Remove the extras until a single v=DMARC1 record remains.'
+  },
+  es: {
+    spfMultipleRecordsDetected: 'Este dominio publica {count} registros SPF. RFC 7208 permite exactamente uno: los servidores de correo receptores devuelven un error permanente (PermError) y SPF falla en todos los mensajes enviados desde este dominio. Comb\u00EDnelos en un \u00FAnico registro TXT.',
+    spfMergedSuggestionLabel: 'Registro \u00FAnico de reemplazo sugerido:',
+    spfMergedExceedsLookupLimitNote: 'El registro combinado sigue superando el l\u00EDmite de 10 b\u00FAsquedas DNS de SPF, as\u00ED que red\u00FAzcalo antes de publicarlo.',
+    guidanceSpfMultipleRecords: '{domain} publica {count} registros SPF. RFC 7208 permite exactamente uno, por lo que los receptores devuelven PermError y SPF falla en todos los mensajes de este dominio. Comb\u00EDnelos en un \u00FAnico registro TXT.',
+    guidanceSpfMergedSuggestion: 'Registro SPF \u00FAnico de reemplazo sugerido: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'El registro SPF combinado sigue superando el l\u00EDmite de 10 b\u00FAsquedas DNS. Elimine los includes no utilizados o use un proveedor que aplane el registro.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publica {count} registros DMARC. RFC 7489 permite exactamente uno: los servidores receptores los descartan todos y no aplican ninguna pol\u00EDtica DMARC. Elimine los sobrantes hasta que quede un \u00FAnico registro v=DMARC1.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publica {count} registros DMARC. RFC 7489 permite exactamente uno, por lo que los receptores los descartan todos y no aplican ninguna pol\u00EDtica DMARC. Elimine los sobrantes hasta que quede un \u00FAnico registro v=DMARC1.'
+  },
+  'fr': {
+    spfMultipleRecordsDetected: 'Ce domaine publie {count} enregistrements SPF. La RFC 7208 n\u2019en autorise qu\u2019un seul : les serveurs de messagerie destinataires renvoient une erreur permanente (PermError) et SPF \u00E9choue pour tous les messages envoy\u00E9s depuis ce domaine. Fusionnez-les en un seul enregistrement TXT.',
+    spfMergedSuggestionLabel: 'Enregistrement unique de remplacement sugg\u00E9r\u00E9 :',
+    spfMergedExceedsLookupLimitNote: 'L\u2019enregistrement fusionn\u00E9 d\u00E9passe encore la limite SPF de 10 recherches DNS ; r\u00E9duisez-le avant de le publier.',
+    guidanceSpfMultipleRecords: '{domain} publie {count} enregistrements SPF. La RFC 7208 n\u2019en autorise qu\u2019un seul, les destinataires renvoient donc PermError et SPF \u00E9choue pour tous les messages de ce domaine. Fusionnez-les en un seul enregistrement TXT.',
+    guidanceSpfMergedSuggestion: 'Enregistrement SPF unique de remplacement sugg\u00E9r\u00E9 : {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'L\u2019enregistrement SPF fusionn\u00E9 d\u00E9passe encore la limite de 10 recherches DNS. Supprimez les includes inutilis\u00E9s ou utilisez un fournisseur qui aplatit l\u2019enregistrement.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publie {count} enregistrements DMARC. La RFC 7489 n\u2019en autorise qu\u2019un seul : les serveurs destinataires les ignorent tous et n\u2019appliquent aucune politique DMARC. Supprimez les enregistrements superflus jusqu\u2019\u00E0 n\u2019en garder qu\u2019un seul v=DMARC1.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publie {count} enregistrements DMARC. La RFC 7489 n\u2019en autorise qu\u2019un seul, les destinataires les ignorent donc tous et n\u2019appliquent aucune politique DMARC. Supprimez les enregistrements superflus jusqu\u2019\u00E0 n\u2019en garder qu\u2019un seul v=DMARC1.'
+  },
+  'de': {
+    spfMultipleRecordsDetected: 'Diese Dom\u00E4ne ver\u00F6ffentlicht {count} SPF-Eintr\u00E4ge. RFC 7208 erlaubt genau einen \u2014 empfangende Mailserver geben einen permanenten Fehler (PermError) zur\u00FCck und SPF schl\u00E4gt f\u00FCr jede von dieser Dom\u00E4ne gesendete Nachricht fehl. F\u00FChren Sie sie zu einem einzigen TXT-Eintrag zusammen.',
+    spfMergedSuggestionLabel: 'Vorgeschlagener einzelner Ersatzeintrag:',
+    spfMergedExceedsLookupLimitNote: 'Der zusammengef\u00FChrte Eintrag \u00FCberschreitet weiterhin das SPF-Limit von 10 DNS-Abfragen; k\u00FCrzen Sie ihn vor der Ver\u00F6ffentlichung.',
+    guidanceSpfMultipleRecords: '{domain} ver\u00F6ffentlicht {count} SPF-Eintr\u00E4ge. RFC 7208 erlaubt genau einen, daher geben Empf\u00E4nger PermError zur\u00FCck und SPF schl\u00E4gt f\u00FCr jede Nachricht dieser Dom\u00E4ne fehl. F\u00FChren Sie sie zu einem einzigen TXT-Eintrag zusammen.',
+    guidanceSpfMergedSuggestion: 'Vorgeschlagener einzelner SPF-Ersatzeintrag: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'Der zusammengef\u00FChrte SPF-Eintrag \u00FCberschreitet weiterhin das Limit von 10 DNS-Abfragen. Entfernen Sie ungenutzte Includes oder verwenden Sie einen Anbieter, der den Eintrag abflacht.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} ver\u00F6ffentlicht {count} DMARC-Eintr\u00E4ge. RFC 7489 erlaubt genau einen \u2014 empfangende Server verwerfen alle und wenden \u00FCberhaupt keine DMARC-Richtlinie an. Entfernen Sie die \u00FCbersch\u00FCssigen Eintr\u00E4ge, bis ein einziger v=DMARC1-Eintrag \u00FCbrig bleibt.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} ver\u00F6ffentlicht {count} DMARC-Eintr\u00E4ge. RFC 7489 erlaubt genau einen, daher verwerfen Empf\u00E4nger alle und wenden keine DMARC-Richtlinie an. Entfernen Sie die \u00FCbersch\u00FCssigen Eintr\u00E4ge, bis ein einziger v=DMARC1-Eintrag \u00FCbrig bleibt.'
+  },
+  'pt-BR': {
+    spfMultipleRecordsDetected: 'Este dom\u00EDnio publica {count} registros SPF. A RFC 7208 permite exatamente um \u2014 os servidores de e-mail receptores retornam erro permanente (PermError) e o SPF falha em todas as mensagens enviadas deste dom\u00EDnio. Combine-os em um \u00FAnico registro TXT.',
+    spfMergedSuggestionLabel: 'Registro \u00FAnico de substitui\u00E7\u00E3o sugerido:',
+    spfMergedExceedsLookupLimitNote: 'O registro combinado ainda excede o limite de 10 consultas DNS do SPF; reduza-o antes de publicar.',
+    guidanceSpfMultipleRecords: '{domain} publica {count} registros SPF. A RFC 7208 permite exatamente um, portanto os receptores retornam PermError e o SPF falha em todas as mensagens deste dom\u00EDnio. Combine-os em um \u00FAnico registro TXT.',
+    guidanceSpfMergedSuggestion: 'Registro SPF \u00FAnico de substitui\u00E7\u00E3o sugerido: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'O registro SPF combinado ainda excede o limite de 10 consultas DNS. Remova includes n\u00E3o utilizados ou use um provedor que achate o registro.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publica {count} registros DMARC. A RFC 7489 permite exatamente um \u2014 os servidores receptores descartam todos eles e n\u00E3o aplicam nenhuma pol\u00EDtica DMARC. Remova os excedentes at\u00E9 restar um \u00FAnico registro v=DMARC1.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publica {count} registros DMARC. A RFC 7489 permite exatamente um, portanto os receptores descartam todos eles e n\u00E3o aplicam nenhuma pol\u00EDtica DMARC. Remova os excedentes at\u00E9 restar um \u00FAnico registro v=DMARC1.'
+  },
+  'ar': {
+    spfMergedSuggestionLabel: '\u0633\u062C\u0644 \u0628\u062F\u064A\u0644 \u0648\u0627\u062D\u062F \u0645\u0642\u062A\u0631\u062D:'
+  },
+  'zh-CN': {
+    spfMergedSuggestionLabel: '\u5EFA\u8BAE\u7684\u5355\u4E00\u66FF\u4EE3\u8BB0\u5F55\uFF1A'
+  },
+  'hi-IN': {
+    spfMergedSuggestionLabel: '\u0938\u0941\u091D\u093E\u092F\u093E \u0917\u092F\u093E \u090F\u0915\u0932 \u092A\u094D\u0930\u0924\u093F\u0938\u094D\u0925\u093E\u092A\u0928 \u0930\u093F\u0915\u0949\u0930\u094D\u0921:'
+  },
+  'ja-JP': {
+    spfMergedSuggestionLabel: '\u63A8\u5968\u3055\u308C\u308B\u5358\u4E00\u306E\u7F6E\u63DB\u30EC\u30B3\u30FC\u30C9:'
+  },
+  'ru-RU': {
+    spfMergedSuggestionLabel: '\u0420\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0443\u0435\u043C\u0430\u044F \u0435\u0434\u0438\u043D\u0430\u044F \u0437\u0430\u043C\u0435\u043D\u044F\u044E\u0449\u0430\u044F \u0437\u0430\u043F\u0438\u0441\u044C:'
+  }
+};
+
+Object.keys(RECORD_MULTIPLICITY_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, RECORD_MULTIPLICITY_TRANSLATION_OVERRIDES[code]);
+});
+
 // DNS Propagation card strings (card body, mini map, per-card settings panel and
 // the propagation guidance sentences). Applied as an override layer so the base
 // 'en' keys always exist for the t() English fallback.
@@ -25408,11 +25736,28 @@ function getDnsTxtRecoveryState(r) {
   const ipv6Addresses = recoveredAddressesFromDetailedRecords
     ? detailedAaaaRecords
     : asStringArray(r && r.ipv6Addresses);
+  // Full record SETS, never a single first match. RFC 7208 3.2/4.5: publishing more
+  // than one SPF record is a PermError, so the card must show every record and say so.
+  // Picking one silently is what made the SPF card contradict the DNS records table
+  // on the same page for a real customer domain.
+  const spfRecords = (recoveredFromDetailedRecords || recoveredFromNameservers)
+    ? txtRecords.filter(value => /^v=spf1\b/i.test(String(value || '').trim()))
+    : (Array.isArray(r && r.spfRecords)
+      ? r.spfRecords.filter(Boolean)
+      : ((r && r.spfValue) ? [r.spfValue] : []));
+  const spfMultipleRecords = spfRecords.length > 1;
+  // Mirror Select-SpfRecordFromSet on the server: prefer the record carrying the
+  // Outlook include so the requirement verdict never depends on RRset ordering.
   const spfValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
-    ? (txtRecords.find(value => /^v=spf1/i.test(String(value || '').trim())) || null)
+    ? (spfRecords.find(value => /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(value || ''))) || spfRecords[0] || null)
     : (r ? r.spfValue : null);
+  const acsValues = (recoveredFromDetailedRecords || recoveredFromNameservers)
+    ? txtRecords.filter(value => /ms-domain-verification/i.test(String(value || '').trim()))
+    : (Array.isArray(r && r.acsValues)
+      ? r.acsValues.filter(Boolean)
+      : ((r && r.acsValue) ? [r.acsValue] : []));
   const acsValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
-    ? (txtRecords.find(value => /ms-domain-verification/i.test(String(value || '').trim())) || null)
+    ? (acsValues[0] || null)
     : (r ? r.acsValue : null);
   const spfHasRequiredInclude = (recoveredFromDetailedRecords || recoveredFromNameservers) && spfValue
     ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
@@ -25447,11 +25792,17 @@ function getDnsTxtRecoveryState(r) {
     ipUsedParent: recoveredAddressesFromDetailedRecords ? false : !!(r && r.ipUsedParent),
     spfValue,
     spfPresent: !!spfValue,
+    spfRecords,
+    spfRecordCount: spfRecords.length,
+    spfMultipleRecords,
+    spfMergedSuggestion: (r && r.spfMergedSuggestion) ? String(r.spfMergedSuggestion) : null,
+    spfMergedExceedsLookupLimit: !!(r && r.spfMergedExceedsLookupLimit),
     spfHasRequiredInclude: spfHasRequiredIncludeEffective,
     spfRequiredIncludeMatchType,
     spfRequiredIncludeProvider: r ? r.spfRequiredIncludeProvider : null,
     spfRequiredIncludeMacroTarget: r ? r.spfRequiredIncludeMacroTarget : null,
     acsValue,
+    acsValues,
     acsPresent: !!acsValue
   };
 }
@@ -25725,6 +26076,10 @@ function buildPropagationLegendHtml() {
 function buildGuidance(r) {
   const guidance = [];
   const loaded = r && r._loaded ? r._loaded : {};
+  // A failed fetch sets BOTH loaded and errors for that key, so every "this record is
+  // missing, add it" branch below must check errors too -- otherwise an endpoint that
+  // errored produces advice to create records we never managed to read.
+  const errors = r && r._errors ? r._errors : {};
   const dmarcHelpUrl = 'https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure#syntax-for-dmarc-txt-records';
   const txtRecovery = getDnsTxtRecoveryState(r);
   const guidanceWorkflowComplete = ['base', 'mx', 'records', 'whois', 'dmarc', 'dkim', 'cname', 'reputation'].every(key => loaded[key] === true);
@@ -25780,6 +26135,20 @@ function buildGuidance(r) {
   }
 
   if (loaded.base && txtRecovery.txtLookupResolved) {
+    // A duplicate SPF record set is a PermError (RFC 7208 3.2/4.5) that invalidates every
+    // other SPF finding, so it leads the SPF guidance.
+    if (txtRecovery.spfMultipleRecords) {
+      guidance.push({
+        type: 'error',
+        text: t('guidanceSpfMultipleRecords', { domain: r.domain || '', count: String(txtRecovery.spfRecordCount || 0) })
+      });
+      if (txtRecovery.spfMergedSuggestion) {
+        guidance.push({ type: 'attention', text: t('guidanceSpfMergedSuggestion', { suggestion: txtRecovery.spfMergedSuggestion }) });
+      }
+      if (txtRecovery.spfMergedExceedsLookupLimit) {
+        guidance.push({ type: 'attention', text: t('guidanceSpfMergedExceedsLookupLimit') });
+      }
+    }
     if (!txtRecovery.spfPresent) {
       if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
@@ -25815,7 +26184,7 @@ function buildGuidance(r) {
     }
   }
 
-  if (loaded.mx) {
+  if (loaded.mx && !errors.mx) {
     const mxList = r.mxRecords || [];
     const hasMx = Array.isArray(mxList) && mxList.length > 0;
     if (!hasMx) {
@@ -25845,14 +26214,25 @@ function buildGuidance(r) {
     }
   }
 
-  if (loaded.dmarc && !r.dmarc) {
+  // Gate on `!errors.dmarc` too: a failed /api/dmarc fetch sets loaded AND errors, and
+  // telling the operator to add a record we never managed to read is worse than silence.
+  if (loaded.dmarc && !errors.dmarc && !r.dmarc) {
     guidance.push({ type: 'attention', text: t('guidanceDmarcMissing', { domain: r.domain || '' }) });
     // Bulk-sender callout: missing DMARC is the worst case for high-volume
     // senders since Google/Yahoo/Microsoft now require an enforced policy
     // above ~5,000 messages/day. Surface it next to the missing-DMARC line
     // so the operator immediately understands the deliverability impact.
     guidance.push({ type: 'attention', text: t('dmarcBulkSenderThreshold') });
-  } else if (loaded.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
+  } else if (loaded.dmarc && !errors.dmarc && r.dmarc && r.dmarcMultipleRecords) {
+    // RFC 7489 6.6.3: more than one qualifying record means receivers apply NO policy.
+    guidance.push({
+      type: 'error',
+      text: t('guidanceDmarcMultipleRecords', {
+        lookupDomain: r.dmarcLookupDomain || r.domain || '',
+        count: String(r.dmarcRecordCount || 0)
+      })
+    });
+  } else if (loaded.dmarc && !errors.dmarc && r.dmarc && r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) {
     guidance.push({ type: 'info', text: t('guidanceDmarcInherited', { lookupDomain: r.dmarcLookupDomain }) });
   }
 
@@ -25867,7 +26247,7 @@ function buildGuidance(r) {
     guidance.push({ type: 'info', text: t('guidanceDmarcMoreInfo', { url: dmarcHelpUrl }) });
   }
 
-  if (loaded.dkim) {
+  if (loaded.dkim && !errors.dkim) {
     // The "missing" message is suppressed when something is published at the
     // ACS selector hostname (even if pointed at the wrong target) AND when
     // only a fallback selector was detected. The "wrong CNAME" warning is
@@ -25895,7 +26275,7 @@ function buildGuidance(r) {
     }
   }
 
-  if (loaded.cname && !r.cname) {
+  if (loaded.cname && !errors.cname && !r.cname) {
     guidance.push({ type: 'attention', text: t('guidanceCnameMissing') });
   }
 
@@ -26771,7 +27151,16 @@ function getDomainQuotaStatus(r) {
   }
 
   // SPF (ACS Outlook include requirement)
-  if (recoveredFromNameservers && effectiveSpfPresent) {
+  if (txt.spfMultipleRecords) {
+    // RFC 7208 3.2/4.5: duplicate SPF records are a PermError -- SPF fails outright,
+    // whatever the individual records happen to contain.
+    quotaFail = true;
+  } else if (recoveredFromNameservers && effectiveSpfPresent) {
+    quotaWarn = true;
+  } else if (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null) {
+    // Macro-delegated / hosted SPF is INDETERMINATE, not failed. The SPF card and the
+    // checklist row already render it WARN; without this branch the overall verdict,
+    // the tab dot and the copied summary all reported FAIL for the same data.
     quotaWarn = true;
   } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) {
     quotaFail = true;
@@ -26784,7 +27173,9 @@ function getDomainQuotaStatus(r) {
   const dmarcIsMonitoringOnly = !!(r && r.dmarc) && (dmarcPolicyToken === '' || dmarcPolicyToken === 'none');
   const dmarcNeedsEnforcementForTier = dmarcIsMonitoringOnly && dmarcExpectedTierIndex > DMARC_ENFORCEMENT_TIER_INDEX;
   if (loaded.dmarc && !errors.dmarc) {
-    if (!r.dmarc || dmarcNeedsEnforcementForTier) quotaWarn = true;
+    // RFC 7489 6.6.3: duplicates mean receivers apply NO policy, so this is at least as
+    // bad as a missing record.
+    if (!r.dmarc || r.dmarcMultipleRecords || dmarcNeedsEnforcementForTier) quotaWarn = true;
   }
 
   if (quotaFail) return 'fail';
@@ -29932,6 +30323,11 @@ function render(r) {
   const effectiveTxtRecords = Array.isArray(txtRecovery.txtRecords) ? txtRecovery.txtRecords : [];
   const effectiveSpfPresent = !!txtRecovery.spfPresent;
   const effectiveSpfValue = txtRecovery.spfValue || null;
+  // The FULL record set. A domain publishing more than one SPF record is an RFC 7208
+  // PermError, and rendering only the selected record is what made this card disagree
+  // with the DNS records table for a real customer domain.
+  const effectiveSpfRecords = Array.isArray(txtRecovery.spfRecords) ? txtRecovery.spfRecords : [];
+  const effectiveSpfMultipleRecords = !!txtRecovery.spfMultipleRecords;
   const effectiveSpfHasRequiredInclude = txtRecovery.spfHasRequiredInclude;
   // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, ...) resolves the
   // Outlook include dynamically per message, so it can be neither confirmed nor
@@ -29943,6 +30339,10 @@ function render(r) {
     || (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null);
   const effectiveAcsPresent = !!txtRecovery.acsPresent;
   const effectiveAcsValue = txtRecovery.acsValue || null;
+  // Multiple verification records are legal (one per ACS resource/tenant). Readiness is
+  // presence-based, not token-equality-based, so showing only the first removed the
+  // operator's only way to confirm THEIR token is among them.
+  const effectiveAcsValues = Array.isArray(txtRecovery.acsValues) ? txtRecovery.acsValues : [];
   // The SPF/ACS/TXT values were only recoverable by querying the authoritative
   // nameservers directly because the public resolver returned an empty answer
   // for an inconsistent-nameserver zone. When this is set, the SPF/ACS/TXT cards
@@ -30387,10 +30787,14 @@ function render(r) {
     const spfIsNameserverRecovered = effectiveSpfPresent && recoveredFromNameservers;
     const spfExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
     const spfLookupLimitDetail = spfExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
+    const spfMultipleDetail = effectiveSpfMultipleRecords
+      ? t('spfMultipleRecordsDetected', { count: String(effectiveSpfRecords.length) })
+      : '';
     const spfDetail = effectiveSpfPresent
-      ? ([effectiveSpfValue, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
+      ? ([(effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue), spfMultipleDetail, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
-    const spfState = (spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail');
+    // A duplicate record set is a PermError, so it outranks every other SPF state here.
+    const spfState = effectiveSpfMultipleRecords ? 'fail' : ((spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail'));
     quotaItems.push(quotaRow(t('spfQueried'), spfState, spfDetail, null, 'spf'));
     const spfStateLabel = spfState.toUpperCase();
     quotaLines.push(`**${t('spfQueried')}:** ${spfStateLabel}${spfDetail ? ' - ' + spfDetail.replace(/\r?\n/g, ' | ') : ''}`);
@@ -30417,7 +30821,13 @@ function render(r) {
     const inheritedSuffix = (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain)
       ? `\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`
       : '';
-    if (dmarcNeedsEnforcementForTier) {
+    if (r.dmarcMultipleRecords) {
+      // RFC 7489 6.6.3: receivers discard the whole set, so this is not a working policy.
+      const dupDetail = `${dmarcFirstLine}\n\n${t('dmarcMultipleRecordsDetected', { lookupDomain: r.dmarcLookupDomain || r.domain || '', count: String(r.dmarcRecordCount || 0) })}${inheritedSuffix}`;
+      quotaItems.push(quotaRow(t('dmarc'), 'warn', dupDetail, null, 'dmarc'));
+      quotaLines.push(`**DMARC:** WARN${dupDetail ? ' - ' + dupDetail.replace(/\r?\n/g, ' | ') : ''}`);
+      quotaLinesHtml.push(`<strong>DMARC:</strong> WARN${dupDetail ? ' - ' + escapeHtml(dupDetail).replace(/\r?\n/g, '<br>') : ''}`);
+    } else if (dmarcNeedsEnforcementForTier) {
       // Present but monitor-only (p=none) while the detected expected tier is
       // above the Earth base tier: WARN with the standard, already-localized
       // "move to enforcement" guidance (no tier verbiage).
@@ -31081,12 +31491,21 @@ function render(r) {
   }
 
   // Match card order to the Check Summary.
+  const spfMultipleNoteText = effectiveSpfMultipleRecords
+    ? t('spfMultipleRecordsDetected', { count: String(effectiveSpfRecords.length) })
+    : '';
+  const spfMergedSuggestionText = (effectiveSpfMultipleRecords && txtRecovery.spfMergedSuggestion)
+    ? String(txtRecovery.spfMergedSuggestion)
+    : '';
+  const spfMergedLimitNoteText = (effectiveSpfMultipleRecords && txtRecovery.spfMergedExceedsLookupLimit)
+    ? t('spfMergedExceedsLookupLimitNote')
+    : '';
   const spfCardBaseValue = loaded.base
-    ? (effectiveSpfValue || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
+    ? ((effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue) || ((r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('none')}: ${r.domain}\n\n${t('resolvedUsingGuidance', { lookupDomain: r.txtLookupDomain })}\n${r.parentSpfValue || ''}`) : (txtServfailDetected ? t('spfServfailDetected') : null)))
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
   const spfLookupLimitCardDetail = spfCardExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
-  const spfCardValue = [spfCardBaseValue, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, spfMultipleNoteText, (spfMergedSuggestionText ? `${t('spfMergedSuggestionLabel')}\n${spfMergedSuggestionText}` : ''), spfMergedLimitNoteText, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -31145,7 +31564,17 @@ function render(r) {
       const spfLookupLimitNote = spfLookupLimitCardDetail
         ? `<div class="spf-explained-requirement" style="border-color:#f59e0b;background:#422006;color:#fde68a;">${escapeHtml(spfLookupLimitCardDetail)}</div>`
         : '';
-      const explainedHtml = spfInheritedNote + spfLookupLimitNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
+      // Duplicate-record PermError leads the card: it invalidates every other SPF
+      // finding below it, so it is rendered above the records themselves.
+      const spfDuplicateNote = spfMultipleNoteText
+        ? `<div class="spf-explained-requirement spf-explained-requirement--fail">${escapeHtml(spfMultipleNoteText)}</div>`
+        : '';
+      const spfMergedBox = spfMergedSuggestionText
+        ? (`<div class="spf-explained-inherited">${escapeHtml(t('spfMergedSuggestionLabel'))}</div>`
+          + `<div class="spf-explained-record">${escapeHtml(spfMergedSuggestionText)}</div>`
+          + (spfMergedLimitNoteText ? `<div class="spf-explained-requirement" style="border-color:#f59e0b;background:#422006;color:#fde68a;">${escapeHtml(spfMergedLimitNoteText)}</div>` : ''))
+        : '';
+      const explainedHtml = spfInheritedNote + spfDuplicateNote + spfMergedBox + spfLookupLimitNote + spfRequirementNote + buildSpfExplainedHtml(spfRawForParse);
       spfExplainedTitleSuffix = `<button type="button" class="copy-btn hide-on-screenshot" onclick="event.stopPropagation(); toggleSpfExplained(this)" title="${escapeHtml(t('spfExplainedTooltip'))}">${escapeHtml(t('spfExplainedShow'))}</button>`;
       spfExplainedAppend = `<div id="spfExplained" class="card-content" style="display:none;">${explainedHtml}</div>`;
 
@@ -31155,12 +31584,14 @@ function render(r) {
       // the table isn't rendered), so a plain pre-formatted green box is
       // sufficient. innerText of #field-spf still reads as clean plain
       // text for the Copy button.
-      const spfRecordBoxHtml = `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
-      spfBodyHtml = spfInheritedNote + spfRecordBoxHtml + spfLookupLimitNote + spfRequirementNote;
+      const spfRecordBoxHtml = effectiveSpfMultipleRecords
+        ? effectiveSpfRecords.map(record => `<div class="spf-explained-record">${escapeHtml(String(record))}</div>`).join('')
+        : `<div class="spf-explained-record">${escapeHtml(spfRawForParse)}</div>`;
+      spfBodyHtml = spfInheritedNote + spfDuplicateNote + spfRecordBoxHtml + spfMergedBox + spfLookupLimitNote + spfRequirementNote;
     }
   }
-  const spfCardTag = basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL")))));
-  const spfCardTagClass = basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail")))));
+  const spfCardTag = basePending ? "LOADING" : (baseError ? "ERROR" : (effectiveSpfMultipleRecords ? "FAIL" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "WARN" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "PASS" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "WARN" : (txtServfailDetected ? "WARN" : "FAIL"))))));
+  const spfCardTagClass = basePending ? "tag-info" : (baseError ? "tag-fail" : (effectiveSpfMultipleRecords ? "tag-fail" : ((effectiveSpfPresent && (recoveredFromNameservers || spfCardExceedsLookupLimit)) ? "tag-warn" : ((effectiveSpfPresent && effectiveSpfHasRequiredInclude === true) ? "tag-pass" : ((effectiveSpfPresent && effectiveSpfIsMacroDelegated) ? "tag-warn" : (txtServfailDetected ? "tag-warn" : "tag-fail"))))));
   cards.push(card(
     t('spfQueried'),
     (spfCardValue || t('noRecordsAvailable')),
@@ -31192,7 +31623,7 @@ function render(r) {
 
   cards.push(card(
     t('acsDomainVerificationTxt'),
-    loaded.base ? ([(effectiveAcsValue || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)), (recoveredFromNameservers && effectiveAcsPresent ? t('acsRecoveredFromNameservers') : '')].filter(Boolean).join("\n\n") || null) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
+    loaded.base ? ([((effectiveAcsValues.length > 1 ? effectiveAcsValues.join("\n") : effectiveAcsValue) || ((r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) ? (`${t('noRecordOnDomain', { domain: r.domain || '' })}\n\n${t('parentDomainAcsTxtInfo', { lookupDomain: r.txtLookupDomain })}\n${r.parentAcsValue || ''}`) : null)), (recoveredFromNameservers && effectiveAcsPresent ? t('acsRecoveredFromNameservers') : '')].filter(Boolean).join("\n\n") || null) : (baseError ? (errors.base || t('error')) : t('loadingValue')),
     basePending ? "LOADING" : (baseError ? "ERROR" : ((effectiveAcsPresent && recoveredFromNameservers) ? "WARN" : (effectiveAcsPresent ? "PASS" : "MISSING"))),
     basePending ? "tag-info" : (baseError ? "tag-fail" : ((effectiveAcsPresent && recoveredFromNameservers) ? "tag-warn" : (effectiveAcsPresent ? "tag-pass" : "tag-fail"))),
     "acsTxt"
@@ -31239,11 +31670,25 @@ function render(r) {
       dmarcExplainedAppend = `<div id="dmarcExplained" class="card-content" style="display:none;">${dmarcExplainedHtml}</div>`;
     }
   }
+  // A duplicate DMARC record set means receivers apply NO policy at all (RFC 7489
+  // 6.6.3), so it must never render as PASS on the strength of the first record.
+  const dmarcMultipleRecords = !!(r && r.dmarcMultipleRecords);
+  const dmarcAllRecords = Array.isArray(r && r.dmarcRecords) ? r.dmarcRecords.filter(Boolean) : [];
+  const dmarcMultipleNote = dmarcMultipleRecords
+    ? t('dmarcMultipleRecordsDetected', { lookupDomain: (r && (r.dmarcLookupDomain || r.domain)) || '', count: String((r && r.dmarcRecordCount) || dmarcAllRecords.length) })
+    : '';
+  const dmarcCardBody = loaded.dmarc
+    ? (r.dmarc
+      ? [(dmarcMultipleRecords && dmarcAllRecords.length > 1) ? dmarcAllRecords.join("\n") : r.dmarc,
+         dmarcMultipleNote,
+         (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain) ? t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain }) : ''].filter(Boolean).join("\n\n")
+      : null)
+    : (errors.dmarc ? errors.dmarc : t('loadingValue'));
   cards.push(card(
     t('dmarc'),
-    loaded.dmarc ? (r.dmarc ? (r.dmarcInherited && r.dmarcLookupDomain && r.dmarcLookupDomain !== r.domain ? (`${r.dmarc}\n\n${t('effectivePolicyInherited', { lookupDomain: r.dmarcLookupDomain })}`) : r.dmarc) : null) : (errors.dmarc ? errors.dmarc : t('loadingValue')),
-    (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (r.dmarc ? "PASS" : "OPTIONAL")),
-    (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info")),
+    dmarcCardBody,
+    (!loaded.dmarc && !errors.dmarc) ? "LOADING" : (errors.dmarc ? "ERROR" : (dmarcMultipleRecords ? "FAIL" : (r.dmarc ? "PASS" : "OPTIONAL"))),
+    (!loaded.dmarc && !errors.dmarc) ? "tag-info" : (errors.dmarc ? "tag-fail" : (dmarcMultipleRecords ? "tag-fail" : (r.dmarc ? "tag-pass" : "tag-info"))),
     "dmarc",
     true,
     dmarcExplainedTitleSuffix,
@@ -31432,9 +31877,13 @@ function render(r) {
     }
 
     const statusLabel = percent === null ? t('unknown') : `${rating.toUpperCase()} (${percent}%)`;
-    const statusClass = percent === null ? "tag-info"
+    // Colour on listings first. A domain listed on 1 of 25 zones still scores 96%, so
+    // grading on percentage alone painted this card green while its own body read
+    // "Listed: 1" and the Email Quota row correctly said WARN.
+    const statusClass = listed > 0 ? "tag-warn"
+      : (percent === null ? "tag-info"
       : (percent >= 90 ? "tag-pass"
-      : (percent >= 75 ? "tag-info" : "tag-fail"));
+      : (percent >= 75 ? "tag-info" : "tag-fail")));
 
     // Show only listed entries to avoid noise
     const listedItems = (rep.results || []).filter(x => x && x.listed === true);
@@ -35255,8 +35704,8 @@ $functionNames = @(
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
   'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
-  'Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
-  'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
+  'ConvertFrom-DnsTxtPresentationData','Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
+  'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Select-SpfRecordFromSet','Merge-SpfRecordSet','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',

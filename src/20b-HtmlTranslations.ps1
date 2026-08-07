@@ -3830,6 +3830,85 @@ Object.keys(MULTI_DOMAIN_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, MULTI_DOMAIN_TRANSLATION_OVERRIDES[code]);
 });
 
+// Duplicate-record (RFC 7208 / RFC 7489) strings. Publishing more than one SPF or DMARC
+// record is a PermError: receivers reject the whole set, so these are hard failures, not
+// cosmetic warnings.
+//
+// Per repo convention the Latin-script locales carry the full set; the non-Latin-script
+// locales carry the short, user-visible labels and let the longer explanatory sentences
+// fall back to English through t().
+const RECORD_MULTIPLICITY_TRANSLATION_OVERRIDES = {
+  en: {
+    spfMultipleRecordsDetected: 'This domain publishes {count} SPF records. RFC 7208 allows exactly one \u2014 receiving mail servers return a permanent error (PermError) and SPF fails for every message sent from this domain. Merge them into a single TXT record.',
+    spfMergedSuggestionLabel: 'Suggested single replacement record:',
+    spfMergedExceedsLookupLimitNote: 'The merged record still exceeds the SPF 10-DNS-lookup limit, so trim it before publishing.',
+    guidanceSpfMultipleRecords: '{domain} publishes {count} SPF records. RFC 7208 allows exactly one, so receivers return PermError and SPF fails for every message from this domain. Merge them into a single TXT record.',
+    guidanceSpfMergedSuggestion: 'Suggested single replacement SPF record: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'The merged SPF record still exceeds the 10-DNS-lookup limit. Remove unused includes or use a provider that flattens the record.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publishes {count} DMARC records. RFC 7489 allows exactly one \u2014 receiving mail servers discard all of them and apply no DMARC policy at all. Remove the extras until a single v=DMARC1 record remains.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publishes {count} DMARC records. RFC 7489 allows exactly one, so receivers discard all of them and apply no DMARC policy. Remove the extras until a single v=DMARC1 record remains.'
+  },
+  es: {
+    spfMultipleRecordsDetected: 'Este dominio publica {count} registros SPF. RFC 7208 permite exactamente uno: los servidores de correo receptores devuelven un error permanente (PermError) y SPF falla en todos los mensajes enviados desde este dominio. Comb\u00EDnelos en un \u00FAnico registro TXT.',
+    spfMergedSuggestionLabel: 'Registro \u00FAnico de reemplazo sugerido:',
+    spfMergedExceedsLookupLimitNote: 'El registro combinado sigue superando el l\u00EDmite de 10 b\u00FAsquedas DNS de SPF, as\u00ED que red\u00FAzcalo antes de publicarlo.',
+    guidanceSpfMultipleRecords: '{domain} publica {count} registros SPF. RFC 7208 permite exactamente uno, por lo que los receptores devuelven PermError y SPF falla en todos los mensajes de este dominio. Comb\u00EDnelos en un \u00FAnico registro TXT.',
+    guidanceSpfMergedSuggestion: 'Registro SPF \u00FAnico de reemplazo sugerido: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'El registro SPF combinado sigue superando el l\u00EDmite de 10 b\u00FAsquedas DNS. Elimine los includes no utilizados o use un proveedor que aplane el registro.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publica {count} registros DMARC. RFC 7489 permite exactamente uno: los servidores receptores los descartan todos y no aplican ninguna pol\u00EDtica DMARC. Elimine los sobrantes hasta que quede un \u00FAnico registro v=DMARC1.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publica {count} registros DMARC. RFC 7489 permite exactamente uno, por lo que los receptores los descartan todos y no aplican ninguna pol\u00EDtica DMARC. Elimine los sobrantes hasta que quede un \u00FAnico registro v=DMARC1.'
+  },
+  'fr': {
+    spfMultipleRecordsDetected: 'Ce domaine publie {count} enregistrements SPF. La RFC 7208 n\u2019en autorise qu\u2019un seul : les serveurs de messagerie destinataires renvoient une erreur permanente (PermError) et SPF \u00E9choue pour tous les messages envoy\u00E9s depuis ce domaine. Fusionnez-les en un seul enregistrement TXT.',
+    spfMergedSuggestionLabel: 'Enregistrement unique de remplacement sugg\u00E9r\u00E9 :',
+    spfMergedExceedsLookupLimitNote: 'L\u2019enregistrement fusionn\u00E9 d\u00E9passe encore la limite SPF de 10 recherches DNS ; r\u00E9duisez-le avant de le publier.',
+    guidanceSpfMultipleRecords: '{domain} publie {count} enregistrements SPF. La RFC 7208 n\u2019en autorise qu\u2019un seul, les destinataires renvoient donc PermError et SPF \u00E9choue pour tous les messages de ce domaine. Fusionnez-les en un seul enregistrement TXT.',
+    guidanceSpfMergedSuggestion: 'Enregistrement SPF unique de remplacement sugg\u00E9r\u00E9 : {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'L\u2019enregistrement SPF fusionn\u00E9 d\u00E9passe encore la limite de 10 recherches DNS. Supprimez les includes inutilis\u00E9s ou utilisez un fournisseur qui aplatit l\u2019enregistrement.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publie {count} enregistrements DMARC. La RFC 7489 n\u2019en autorise qu\u2019un seul : les serveurs destinataires les ignorent tous et n\u2019appliquent aucune politique DMARC. Supprimez les enregistrements superflus jusqu\u2019\u00E0 n\u2019en garder qu\u2019un seul v=DMARC1.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publie {count} enregistrements DMARC. La RFC 7489 n\u2019en autorise qu\u2019un seul, les destinataires les ignorent donc tous et n\u2019appliquent aucune politique DMARC. Supprimez les enregistrements superflus jusqu\u2019\u00E0 n\u2019en garder qu\u2019un seul v=DMARC1.'
+  },
+  'de': {
+    spfMultipleRecordsDetected: 'Diese Dom\u00E4ne ver\u00F6ffentlicht {count} SPF-Eintr\u00E4ge. RFC 7208 erlaubt genau einen \u2014 empfangende Mailserver geben einen permanenten Fehler (PermError) zur\u00FCck und SPF schl\u00E4gt f\u00FCr jede von dieser Dom\u00E4ne gesendete Nachricht fehl. F\u00FChren Sie sie zu einem einzigen TXT-Eintrag zusammen.',
+    spfMergedSuggestionLabel: 'Vorgeschlagener einzelner Ersatzeintrag:',
+    spfMergedExceedsLookupLimitNote: 'Der zusammengef\u00FChrte Eintrag \u00FCberschreitet weiterhin das SPF-Limit von 10 DNS-Abfragen; k\u00FCrzen Sie ihn vor der Ver\u00F6ffentlichung.',
+    guidanceSpfMultipleRecords: '{domain} ver\u00F6ffentlicht {count} SPF-Eintr\u00E4ge. RFC 7208 erlaubt genau einen, daher geben Empf\u00E4nger PermError zur\u00FCck und SPF schl\u00E4gt f\u00FCr jede Nachricht dieser Dom\u00E4ne fehl. F\u00FChren Sie sie zu einem einzigen TXT-Eintrag zusammen.',
+    guidanceSpfMergedSuggestion: 'Vorgeschlagener einzelner SPF-Ersatzeintrag: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'Der zusammengef\u00FChrte SPF-Eintrag \u00FCberschreitet weiterhin das Limit von 10 DNS-Abfragen. Entfernen Sie ungenutzte Includes oder verwenden Sie einen Anbieter, der den Eintrag abflacht.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} ver\u00F6ffentlicht {count} DMARC-Eintr\u00E4ge. RFC 7489 erlaubt genau einen \u2014 empfangende Server verwerfen alle und wenden \u00FCberhaupt keine DMARC-Richtlinie an. Entfernen Sie die \u00FCbersch\u00FCssigen Eintr\u00E4ge, bis ein einziger v=DMARC1-Eintrag \u00FCbrig bleibt.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} ver\u00F6ffentlicht {count} DMARC-Eintr\u00E4ge. RFC 7489 erlaubt genau einen, daher verwerfen Empf\u00E4nger alle und wenden keine DMARC-Richtlinie an. Entfernen Sie die \u00FCbersch\u00FCssigen Eintr\u00E4ge, bis ein einziger v=DMARC1-Eintrag \u00FCbrig bleibt.'
+  },
+  'pt-BR': {
+    spfMultipleRecordsDetected: 'Este dom\u00EDnio publica {count} registros SPF. A RFC 7208 permite exatamente um \u2014 os servidores de e-mail receptores retornam erro permanente (PermError) e o SPF falha em todas as mensagens enviadas deste dom\u00EDnio. Combine-os em um \u00FAnico registro TXT.',
+    spfMergedSuggestionLabel: 'Registro \u00FAnico de substitui\u00E7\u00E3o sugerido:',
+    spfMergedExceedsLookupLimitNote: 'O registro combinado ainda excede o limite de 10 consultas DNS do SPF; reduza-o antes de publicar.',
+    guidanceSpfMultipleRecords: '{domain} publica {count} registros SPF. A RFC 7208 permite exatamente um, portanto os receptores retornam PermError e o SPF falha em todas as mensagens deste dom\u00EDnio. Combine-os em um \u00FAnico registro TXT.',
+    guidanceSpfMergedSuggestion: 'Registro SPF \u00FAnico de substitui\u00E7\u00E3o sugerido: {suggestion}',
+    guidanceSpfMergedExceedsLookupLimit: 'O registro SPF combinado ainda excede o limite de 10 consultas DNS. Remova includes n\u00E3o utilizados ou use um provedor que achate o registro.',
+    dmarcMultipleRecordsDetected: '_dmarc.{lookupDomain} publica {count} registros DMARC. A RFC 7489 permite exatamente um \u2014 os servidores receptores descartam todos eles e n\u00E3o aplicam nenhuma pol\u00EDtica DMARC. Remova os excedentes at\u00E9 restar um \u00FAnico registro v=DMARC1.',
+    guidanceDmarcMultipleRecords: '_dmarc.{lookupDomain} publica {count} registros DMARC. A RFC 7489 permite exatamente um, portanto os receptores descartam todos eles e n\u00E3o aplicam nenhuma pol\u00EDtica DMARC. Remova os excedentes at\u00E9 restar um \u00FAnico registro v=DMARC1.'
+  },
+  'ar': {
+    spfMergedSuggestionLabel: '\u0633\u062C\u0644 \u0628\u062F\u064A\u0644 \u0648\u0627\u062D\u062F \u0645\u0642\u062A\u0631\u062D:'
+  },
+  'zh-CN': {
+    spfMergedSuggestionLabel: '\u5EFA\u8BAE\u7684\u5355\u4E00\u66FF\u4EE3\u8BB0\u5F55\uFF1A'
+  },
+  'hi-IN': {
+    spfMergedSuggestionLabel: '\u0938\u0941\u091D\u093E\u092F\u093E \u0917\u092F\u093E \u090F\u0915\u0932 \u092A\u094D\u0930\u0924\u093F\u0938\u094D\u0925\u093E\u092A\u0928 \u0930\u093F\u0915\u0949\u0930\u094D\u0921:'
+  },
+  'ja-JP': {
+    spfMergedSuggestionLabel: '\u63A8\u5968\u3055\u308C\u308B\u5358\u4E00\u306E\u7F6E\u63DB\u30EC\u30B3\u30FC\u30C9:'
+  },
+  'ru-RU': {
+    spfMergedSuggestionLabel: '\u0420\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0443\u0435\u043C\u0430\u044F \u0435\u0434\u0438\u043D\u0430\u044F \u0437\u0430\u043C\u0435\u043D\u044F\u044E\u0449\u0430\u044F \u0437\u0430\u043F\u0438\u0441\u044C:'
+  }
+};
+
+Object.keys(RECORD_MULTIPLICITY_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, RECORD_MULTIPLICITY_TRANSLATION_OVERRIDES[code]);
+});
+
 // DNS Propagation card strings (card body, mini map, per-card settings panel and
 // the propagation guidance sentences). Applied as an override layer so the base
 // 'en' keys always exist for the t() English fallback.
