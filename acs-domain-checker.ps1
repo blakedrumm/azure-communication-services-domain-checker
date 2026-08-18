@@ -1665,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.13.0'
+$script:AppVersion = '2.13.1'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -33139,8 +33139,9 @@ const INTAKE_LOCALIZED_MARKERS = [];
 let intakeExtractedOverrides = {};
 
 // ACS Email throttling tiers. Each entry: { name, perMinute, perHour }.
-// "Expected tier level" is computed as the smallest tier whose per-minute
-// AND per-hour caps both meet or exceed the customer's requested rates.
+// "Expected tier level" is computed from the minute burst plus the customer's
+// sustained volume. A stated daily total is authoritative for sustained volume;
+// the hourly figure is used as the fallback when no daily total is supplied.
 //
 // Tier names are stored base64-encoded (and decoded once at runtime) so
 // they are not trivially greppable in the bundled source. This is light
@@ -33188,13 +33189,18 @@ const DMARC_ENFORCEMENT_TIER_INDEX = (function () {
 // Reads the reviewer's detected/entered "Expected tier level" out of the
 // Customer Intake table and maps it back to an INTAKE_TIERS index. Returns -1
 // when the intake form has not been processed yet (so DMARC policy-strength
-// evaluation stays neutral until a tier is actually known). A longest-name
-// match is used so "EarthStandard" wins over the shorter "Earth" substring.
+// evaluation stays neutral until a tier is actually known). An inferred tier
+// prefix wins over tier names in the preserved customer text; otherwise a
+// longest-name match keeps "EarthStandard" ahead of the shorter "Earth".
 function getExpectedTierIndexFromIntake() {
   try {
     const map = (typeof getExtractedIntakeMap === 'function') ? getExtractedIntakeMap() : null;
-    const raw = map ? String(map.expectedVolume || '').toLowerCase() : '';
+    const raw = map ? String(map.expectedVolume || '').trim().toLowerCase() : '';
     if (!raw) return -1;
+    for (let i = 0; i < INTAKE_TIERS.length; i++) {
+      const name = String(INTAKE_TIERS[i].name || '').toLowerCase();
+      if (name && (raw === name || raw.indexOf(name + ' \u2014 ') === 0)) return i;
+    }
     let bestIdx = -1;
     let bestLen = -1;
     for (let i = 0; i < INTAKE_TIERS.length; i++) {
@@ -33242,19 +33248,20 @@ function parseIntakeNumeric(text) {
 }
 
 function inferExpectedTierIndex(perMinute, perHour, perDay) {
-  // Returns the index of the smallest tier that meets ALL provided rates, or -1
-  // when the customer's request exceeds every published tier. Each rate is
-  // optional (null = "not stated"); a null rate simply imposes no constraint.
-  // The per-day ceiling is derived as the tier's perHour * 24, so a customer's
-  // stated daily volume is matched against the same tier model as minute/hour.
+  // Returns the smallest tier meeting the minute burst and sustained-volume
+  // requirements, or -1 when the request exceeds every published tier. The
+  // daily total supersedes the hourly peak when both are present: perDay is
+  // derived from perHour * 24, so enforcing both would incorrectly price a
+  // short hourly burst as though it were sustained for the entire day.
   const wantMin = parseIntakeNumeric(perMinute);
   const wantHour = parseIntakeNumeric(perHour);
   const wantDay = parseIntakeNumeric(perDay);
   if (wantMin === null && wantHour === null && wantDay === null) return -1;
+  const useHourlyConstraint = wantHour !== null && wantDay === null;
   for (let i = 0; i < INTAKE_TIERS.length; i++) {
     const t = INTAKE_TIERS[i];
     const okMin  = (wantMin  === null) || (t.perMinute >= wantMin);
-    const okHour = (wantHour === null) || (t.perHour   >= wantHour);
+    const okHour = !useHourlyConstraint || (t.perHour >= wantHour);
     const okDay  = (wantDay  === null) || (t.perDay    >= wantDay);
     if (okMin && okHour && okDay) return i;
   }
@@ -33278,8 +33285,11 @@ function formatExpectedTierValue(existingValue, perMinute, perHour, perDay) {
   const existing = (existingValue || '').trim();
   if (!tier) return existing;
   if (!existing) return tier;
-  // Avoid double-prefixing if the tier name is already in the text.
-  if (existing.toLowerCase().indexOf(tier.toLowerCase()) !== -1) return existing;
+  // Only an exact inferred prefix counts. A higher current tier preserved in
+  // the customer's text (for example, EarthPremium) must not suppress Earth.
+  const existingLower = existing.toLowerCase();
+  const tierLower = tier.toLowerCase();
+  if (existingLower === tierLower || existingLower.indexOf(tierLower + ' \u2014 ') === 0) return existing;
   return tier + ' \u2014 ' + existing;
 }
 

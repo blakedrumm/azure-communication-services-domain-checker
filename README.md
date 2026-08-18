@@ -248,6 +248,7 @@ The **Customer Intake Information** form (shown to signed-in users) is language-
 - **Insert template** generates the ACS "email quota increase" questionnaire in whatever language the app is currently set to, so the template matches the customer's language.
 - **Process Data** extraction recognizes the questionnaire in all 10 supported languages, mapping each answer to the canonical English field labels reviewers expect. The extracted-field table and the **Copy Email Quota** payload remain in English (the canonical ACS questionnaire), while the customer's own answer values are preserved verbatim.
 - Numeric answers written in non-Western numerals (Arabic-Indic, Eastern Arabic-Indic/Persian, Devanagari, and full-width digits) are normalized so the throttling-tier inference still works.
+- Tier inference uses the per-minute value as the burst requirement and a stated daily total as the authoritative sustained-volume requirement. The hourly value is the sustained-volume fallback only when no daily total is provided, so a short hourly peak is not projected across all 24 hours. The customer's current tier never influences the recommended expected tier.
 - The extracted **Type of emails sent**, **Current tier level**, and **Expected tier level** rows provide dropdown suggestions when empty while keeping the cell editable for any custom text. Tier rows include an info button that expands a reference table of ACS tier names with per-minute and per-hour limits.
 - When the intake form contains one or more current sending domains that differ from the active lookup, the checker automatically runs against **every** listed domain (multi-domain lookup with a tab per domain) and clears the temporary "Running checker..." status once the sweep completes.
 
@@ -824,7 +825,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.13.0`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.13.1`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -847,8 +848,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.13.0
-git push origin v2.13.0
+git tag v2.13.1
+git push origin v2.13.1
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -859,7 +860,7 @@ git push origin v2.13.0
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.13.0`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.13.1`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -876,11 +877,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.13.0
+docker pull limitlessworlds/acs-domain-checker:2.13.1
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.13.0
-docker pull limitlessworlds/acs-domain-checker:windows-2.13.0
+docker pull limitlessworlds/acs-domain-checker:linux-2.13.1
+docker pull limitlessworlds/acs-domain-checker:windows-2.13.1
 ```
 
 ### 🛠️ Manual Build Script
@@ -895,7 +896,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.13.0
+./acs-domain-checker-dockerhub.ps1 -Version 2.13.1
 ```
 
 **📋 Requirements for manual script:**
