@@ -2314,12 +2314,12 @@ function buildPropagationSettingsHtml(prop) {
   const selected = (Array.isArray(s.regions) && s.regions.length > 0) ? s.regions : available;
 
   // Cap the input at how many resolvers the server catalog actually holds so a
-  // value above that cannot silently do nothing. The server allows up to 100,
+  // value above that cannot silently do nothing. The server allows up to 1000,
   // which an operator reaches by extending the catalog via ACS_PROPAGATION_RESOLVERS.
   const catalogTotal = (prop && Array.isArray(prop.availableRegions))
     ? prop.availableRegions.reduce((sum, x) => sum + (Number(x && x.resolverCount) || 0), 0)
     : 0;
-  const maxAllowed = catalogTotal > 0 ? Math.min(100, catalogTotal) : 100;
+  const maxAllowed = catalogTotal > 0 ? Math.min(1000, catalogTotal) : 1000;
 
   const typeOptions = PROPAGATION_RECORD_TYPES.map(type =>
     `<option value="${escapeHtml(type)}"${type === s.recordType ? ' selected' : ''}>${escapeHtml(type)}</option>`
@@ -6274,9 +6274,9 @@ const INTAKE_LOCALIZED_MARKERS = [];
 let intakeExtractedOverrides = {};
 
 // ACS Email throttling tiers. Each entry: { name, perMinute, perHour }.
-// "Expected tier level" is computed from the minute burst plus the customer's
-// sustained volume. A stated daily total is authoritative for sustained volume;
-// the hourly figure is used as the fallback when no daily total is supplied.
+// "Expected tier level" is the smallest tier that satisfies every stated rate.
+// Minute and hour values map directly to the published ACS limits; daily
+// capacity is derived from the hourly limit sustained across 24 hours.
 //
 // Tier names are stored base64-encoded (and decoded once at runtime) so
 // they are not trivially greppable in the bundled source. This is light
@@ -6383,20 +6383,18 @@ function parseIntakeNumeric(text) {
 }
 
 function inferExpectedTierIndex(perMinute, perHour, perDay) {
-  // Returns the smallest tier meeting the minute burst and sustained-volume
-  // requirements, or -1 when the request exceeds every published tier. The
-  // daily total supersedes the hourly peak when both are present: perDay is
-  // derived from perHour * 24, so enforcing both would incorrectly price a
-  // short hourly burst as though it were sustained for the entire day.
+  // Returns the smallest tier meeting every supplied rate requirement, or -1
+  // when the request exceeds every published tier. Hourly and daily maxima are
+  // independent constraints: a low daily total does not make a stated hourly
+  // burst disappear.
   const wantMin = parseIntakeNumeric(perMinute);
   const wantHour = parseIntakeNumeric(perHour);
   const wantDay = parseIntakeNumeric(perDay);
   if (wantMin === null && wantHour === null && wantDay === null) return -1;
-  const useHourlyConstraint = wantHour !== null && wantDay === null;
   for (let i = 0; i < INTAKE_TIERS.length; i++) {
     const t = INTAKE_TIERS[i];
     const okMin  = (wantMin  === null) || (t.perMinute >= wantMin);
-    const okHour = !useHourlyConstraint || (t.perHour >= wantHour);
+    const okHour = (wantHour === null) || (t.perHour   >= wantHour);
     const okDay  = (wantDay  === null) || (t.perDay    >= wantDay);
     if (okMin && okHour && okDay) return i;
   }

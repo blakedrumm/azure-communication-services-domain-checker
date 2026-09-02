@@ -309,10 +309,11 @@ Version: __ACS_VERSION__
 
 `__ACS_ROOT__/api/propagation` additionally accepts:
 `type` (A, AAAA, CNAME, MX, NS, TXT, SOA, CAA), `regions` (comma separated:
-global, namer, samer, europe, asia, africa, oceania), `max` (1-100 resolvers),
+global, namer, samer, europe, asia, africa, oceania), `max` (1-1000 resolvers),
 `timeout` (milliseconds), `expected` (substring that must appear in the answer),
 `custom` (comma separated public IPv4 resolver addresses) and `validate` (0 to skip
-resolver health pre-selection).
+resolver health pre-selection). The active server catalog can contain up to 1000
+resolvers; URL-supplied custom lists are limited to 100 addresses.
 
 ## Reading a verdict
 
@@ -405,10 +406,10 @@ function Get-AcsOpenApiJson {
       [void]$sb.AppendLine(',')
       [void]$sb.AppendLine('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } },')
       [void]$sb.AppendLine('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } },')
-      [void]$sb.AppendLine('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 } },')
+      [void]$sb.AppendLine('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 25 } },')
       [void]$sb.AppendLine('        { "name": "timeout", "in": "query", "description": "Per-resolver timeout in milliseconds.", "schema": { "type": "integer", "minimum": 1, "maximum": 15000, "default": 4000 } },')
       [void]$sb.AppendLine('        { "name": "expected", "in": "query", "description": "Substring the answer must contain to count as a match.", "schema": { "type": "string", "maxLength": 255 } },')
-      [void]$sb.AppendLine('        { "name": "custom", "in": "query", "description": "Comma-separated public IPv4 resolver addresses to query instead of the built-in catalog.", "schema": { "type": "string", "maxLength": 4000 } },')
+      [void]$sb.AppendLine('        { "name": "custom", "in": "query", "description": "Up to 100 comma-separated public IPv4 resolver addresses to query instead of the server catalog.", "schema": { "type": "string", "maxLength": 4000 } },')
       [void]$sb.AppendLine('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
     } else {
       [void]$sb.AppendLine()

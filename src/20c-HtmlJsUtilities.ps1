@@ -1411,7 +1411,7 @@ function normalizePropagationSettings(raw) {
   return {
     recordType: PROPAGATION_RECORD_TYPES.indexOf(type) !== -1 ? type : PROPAGATION_DEFAULTS.recordType,
     regions: regions,
-    maxResolvers: Number.isFinite(max) ? Math.min(100, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
+    maxResolvers: Number.isFinite(max) ? Math.min(1000, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
     timeoutMs: Number.isFinite(timeout) ? Math.min(15000, Math.max(1000, Math.round(timeout))) : PROPAGATION_DEFAULTS.timeoutMs,
     expected: String(src.expected || '').slice(0, 255),
     // Free text: normalized to one entry per line for the textarea, but sent to

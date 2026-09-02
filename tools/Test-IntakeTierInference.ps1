@@ -52,6 +52,7 @@ extractedIntakeMap = {
 };
 
 process.stdout.write(JSON.stringify({
+    reportedIntake: inferExpectedTier('1,000', '10,000', '50,000'),
   sample: inferExpectedTier('2,000', '90,000', '150,000'),
   hourOnly: inferExpectedTier('2,000', '90,000', null),
   dayOnly: inferExpectedTier(null, null, '150,000'),
@@ -60,7 +61,7 @@ process.stdout.write(JSON.stringify({
   minuteAboveEarth: inferExpectedTier('5,001', '20,000', '480,000'),
   localizedDigits: inferExpectedTier('\u0662,\u0660\u0660\u0660', '90 000', '\u0661\u0665\u0660,\u0660\u0660\u0660'),
   noRates: inferExpectedTier(null, null, null),
-    staleCurrentTextUsesEarth: formatExpectedTierValue('EarthPremium is the current tier', '2,000', '90,000', '150,000') === 'Earth \u2014 EarthPremium is the current tier',
+    staleCurrentTextUsesEarth: formatExpectedTierValue('EarthPremium is the current tier', '1,000', '10,000', '50,000') === 'Earth \u2014 EarthPremium is the current tier',
   expectedTierFromMixedText: tierNameAt(getExpectedTierIndexFromIntake())
 }));
 "@
@@ -77,13 +78,14 @@ try {
     Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 }
 
-Assert-Equal 'daily total governs sustained tier selection' 'Earth' $result.sample
+Assert-Equal 'all reported rate limits select Earth' 'Earth' $result.reportedIntake
+Assert-Equal 'hourly peak remains binding alongside daily total' 'EarthPremium' $result.sample
 Assert-Equal 'hour remains binding when no daily total is supplied' 'EarthPremium' $result.hourOnly
 Assert-Equal 'daily-only volume selects Earth' 'Earth' $result.dayOnly
 Assert-Equal 'minute-only volume preserves the existing tier boundary' 'VenusPremium' $result.minuteOnly
 Assert-Equal 'Earth exact boundary remains Earth' 'Earth' $result.earthBoundary
 Assert-Equal 'minute burst above Earth advances to EarthStandard' 'EarthStandard' $result.minuteAboveEarth
-Assert-Equal 'localized and spaced digits use the same policy' 'Earth' $result.localizedDigits
+Assert-Equal 'localized and spaced digits use the same policy' 'EarthPremium' $result.localizedDigits
 Assert-Equal 'missing rates do not invent a tier' $null $result.noRates
 Assert-Equal 'current-tier text cannot suppress the inferred prefix' $true $result.staleCurrentTextUsesEarth
 Assert-Equal 'inferred prefix wins over stale current-tier text downstream' 'Earth' $result.expectedTierFromMixedText

@@ -248,7 +248,7 @@ The **Customer Intake Information** form (shown to signed-in users) is language-
 - **Insert template** generates the ACS "email quota increase" questionnaire in whatever language the app is currently set to, so the template matches the customer's language.
 - **Process Data** extraction recognizes the questionnaire in all 10 supported languages, mapping each answer to the canonical English field labels reviewers expect. The extracted-field table and the **Copy Email Quota** payload remain in English (the canonical ACS questionnaire), while the customer's own answer values are preserved verbatim.
 - Numeric answers written in non-Western numerals (Arabic-Indic, Eastern Arabic-Indic/Persian, Devanagari, and full-width digits) are normalized so the throttling-tier inference still works.
-- Tier inference uses the per-minute value as the burst requirement and a stated daily total as the authoritative sustained-volume requirement. The hourly value is the sustained-volume fallback only when no daily total is provided, so a short hourly peak is not projected across all 24 hours. The customer's current tier never influences the recommended expected tier.
+- Tier inference selects the smallest tier that satisfies every supplied maximum. Per-minute and per-hour values are checked against the published ACS limits, while daily capacity is derived from the hourly limit sustained across 24 hours. A lower daily total does not erase a stated hourly peak, and the customer's current tier never influences the recommended expected tier.
 - The extracted **Type of emails sent**, **Current tier level**, and **Expected tier level** rows provide dropdown suggestions when empty while keeping the cell editable for any custom text. Tier rows include an info button that expands a reference table of ACS tier names with per-minute and per-hour limits.
 - When the intake form contains one or more current sending domains that differ from the active lookup, the checker automatically runs against **every** listed domain (multi-domain lookup with a tab per domain) and clears the temporary "Running checker..." status once the sweep completes.
 
@@ -390,11 +390,11 @@ Regions: `global`, `namer`, `samer`, `europe`, `asia`, `africa`, `oceania`.
 
 The standalone tool keeps a background "vetting" job that probes every resolver and caches the healthy ones, so a check never wastes a slot on a dead server. The same guarantee is provided here without a state file:
 
-- **Over-selection** — asking for *N* resolvers builds a candidate pool of up to *3N* (capped at 300), balanced across regions.
+- **Over-selection** — asking for *N* resolvers builds a candidate pool of up to *3N*, with a hard cap of 1,000 concurrent candidates, balanced across regions.
 - **Validation with the real query** — the whole pool is queried in a single concurrent fan-out, and the first *N* that returned a **usable** answer are kept. Validating with the actual question (rather than a stand-in like `example.com`) matters: a resolver can happily answer a tiny A record and then fail on a domain with 60+ TXT records that needs TCP fallback.
 - **Health cache** — every resolver contacted is recorded in a process-wide, TTL'd cache (`ACS_PROPAGATION_HEALTH_TTL_MIN`, default 30 min) shared across request runspaces, so later selections skip servers that just failed.
 
-Net effect: **requesting 100 resolvers returns 100 responding resolvers**, and the check is usually *faster* with validation on, because dead servers are dropped instead of holding the fan-out open until timeout. Untick **Skip resolvers that are not answering** to query exactly *N* with no over-selection.
+For requests below the candidate ceiling, validation usually returns the requested number of responding resolvers and makes the check faster because dead servers are dropped instead of holding the fan-out open until timeout. At the 1,000-resolver ceiling there is no extra candidate headroom, so failed candidates can reduce the final responder count. Untick **Skip resolvers that are not answering** to query exactly *N* with no over-selection.
 
 The **DNS Propagation** card shows:
 
@@ -424,17 +424,17 @@ The gear button opens a per-card settings panel (persisted in browser storage un
 
 - **Record type** — `TXT` (default), `A`, `AAAA`, `CNAME`, `MX`, `NS`, `SOA`, `CAA`
 - **Resolver locations** — global anycast, North America, South America, Europe, Asia, Oceania, Africa (the list is built from the server's live resolver catalog)
-- **Max resolvers** — 4–100
+- **Max resolvers** — 4–1,000, limited to the number of entries in the active server catalog. The built-in catalog therefore offers up to 283; an operator can provide a larger catalog through `ACS_PROPAGATION_RESOLVERS`.
 - **Timeout** — 1000–15000 ms
 - **Skip resolvers that are not answering** — the over-select + validate behaviour described above (on by default)
-- **Custom resolvers** — your own resolver IPv4 addresses, one per line, optionally followed by a label (`10.20.30.40 Branch office` or `9.9.9.9|Quad9`). When set, **only** these are queried and the location picker is ignored. Private, loopback, link-local and CGNAT addresses are rejected, and hostnames are refused outright so nothing is resolved on your behalf. Custom resolvers are not plotted on the map because arbitrary addresses cannot be geolocated.
+- **Custom resolvers** — up to 100 resolver IPv4 addresses, one per line, optionally followed by a label (`10.20.30.40 Branch office` or `9.9.9.9|Quad9`). When set, **only** these are queried and the location picker is ignored. Private, loopback, link-local and CGNAT addresses are rejected, and hostnames are refused outright so nothing is resolved on your behalf. Custom resolvers are not plotted on the map because arbitrary addresses cannot be geolocated. The 100-entry bound keeps the encoded GET request within the fallback listener's request-line limit; use `ACS_PROPAGATION_RESOLVERS` for catalogs up to 1,000 entries.
 - **Expected value contains** — optional substring to assert instead of comparing resolvers against each other
 
 Applying settings re-runs only the propagation check. While it is in flight every value derived from the previous answer (chips, coverage bar, consensus answer, summary, per-resolver rows) is removed rather than left looking current; the map stays in place, dimmed under a spinner, so the card does not collapse.
 
 ### How the queries run
 
-All resolvers are queried concurrently from a **single thread**: one non-blocking UDP socket per resolver, every query sent up front, then all sockets awaited together with `Socket.Select`. Total wall time is roughly one timeout window regardless of resolver count, and no PowerShell state is ever touched from more than one thread. Queries advertise an EDNS0 4096-byte UDP payload; truncated answers get a concurrent TCP recovery pass using the same pattern.
+All resolvers are queried concurrently from a **single thread**: one non-blocking UDP socket per resolver, every query sent up front, then all sockets awaited together with `Socket.Select`. Each fan-out is capped at 1,000 sockets. Total wall time is roughly one timeout window regardless of resolver count, and no PowerShell state is ever touched from more than one thread. Queries advertise an EDNS0 4096-byte UDP payload; truncated answers get a concurrent TCP recovery pass using the same pattern.
 
 ### Security guards (SSRF protection)
 
@@ -448,10 +448,10 @@ All resolvers are queried concurrently from a **single thread**: one non-blockin
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ACS_DISABLE_PROPAGATION_PROBE` | _(unset)_ | Set to `1` to disable the probe entirely (the card renders a neutral "disabled" note) |
-| `ACS_PROPAGATION_MAX_RESOLVERS` | `25` | Default number of resolvers to query (max 100) |
+| `ACS_PROPAGATION_MAX_RESOLVERS` | `25` | Default number of resolvers to query (max 1,000; the active catalog must contain that many entries) |
 | `ACS_PROPAGATION_TIMEOUT_MS` | `4000` | Per-resolver query timeout in milliseconds (500–15000) |
 | `ACS_PROPAGATION_HEALTH_TTL_MIN` | `30` | How long a resolver's success/failure is remembered before it is retried (max 1440) |
-| `ACS_PROPAGATION_RESOLVERS` | _(unset)_ | Replace the built-in resolver catalog. Semicolon-separated entries of `ip\|provider\|countryCode\|city\|lat\|lon\|region\|anycast(0\|1)`. Invalid entries are skipped; if nothing valid parses the built-in catalog is used. |
+| `ACS_PROPAGATION_RESOLVERS` | _(unset)_ | Replace the built-in resolver catalog with up to 1,000 entries. Semicolon-separated entries of `ip\|provider\|countryCode\|city\|lat\|lon\|region\|anycast(0\|1)`. Invalid entries are skipped; if nothing valid parses the built-in catalog is used. |
 
 ## 🌍 WHOIS / RDAP Diagnostics
 
@@ -825,7 +825,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.13.1`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.13.2`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -848,8 +848,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.13.1
-git push origin v2.13.1
+git tag v2.13.2
+git push origin v2.13.2
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -860,7 +860,7 @@ git push origin v2.13.1
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.13.1`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.13.2`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -877,11 +877,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.13.1
+docker pull limitlessworlds/acs-domain-checker:2.13.2
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.13.1
-docker pull limitlessworlds/acs-domain-checker:windows-2.13.1
+docker pull limitlessworlds/acs-domain-checker:linux-2.13.2
+docker pull limitlessworlds/acs-domain-checker:windows-2.13.2
 ```
 
 ### 🛠️ Manual Build Script
@@ -896,7 +896,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.13.1
+./acs-domain-checker-dockerhub.ps1 -Version 2.13.2
 ```
 
 **📋 Requirements for manual script:**

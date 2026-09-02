@@ -126,7 +126,7 @@ function Get-DnsPropagationResolverCatalog {
     # before being committed here. Coordinates are the operator country reference
     # point, not a per-IP geolocation, so the map shows "a resolver in this
     # country" rather than claiming street-level accuracy. These exist so a
-    # 100-resolver request has enough real vantage points to draw from; dead
+    # large resolver request has enough real vantage points to draw from; dead
     # entries are filtered out at request time by the health pre-check.
     [pscustomobject]@{ ip = '194.158.78.137'; provider = 'Andorra Telecom S.a.u.'; countryCode = 'AD'; city = 'Andorra la Vella'; latitude = 42.5; longitude = 1.5; region = 'europe'; anycast = $false }
     [pscustomobject]@{ ip = '138.219.249.221'; provider = 'Coop de Prov.Serv.Telef.Obras'; countryCode = 'AR'; city = 'Rafael Castillo'; latitude = -34.6; longitude = -58.4; region = 'samer'; anycast = $false }
@@ -391,6 +391,7 @@ function Get-DnsPropagationResolverCatalog {
   # "Argument types do not match" the moment it is wrapped in @( ... ).
   $custom = [System.Collections.Generic.List[object]]::new()
   foreach ($entry in ($override -split ';')) {
+    if ($custom.Count -ge 1000) { break }
     $parts = ($entry -split '\|')
     if ($parts.Count -lt 1) { continue }
     $ip = ([string]$parts[0]).Trim()
@@ -1303,9 +1304,9 @@ function Get-DnsPropagationStatus {
   $defaultMax = 25
   $parsed = 0
   if ([int]::TryParse([string]$env:ACS_PROPAGATION_MAX_RESOLVERS, [ref]$parsed) -and $parsed -gt 0) {
-    $defaultMax = [Math]::Min(100, $parsed)
+    $defaultMax = [Math]::Min(1000, $parsed)
   }
-  $effectiveMax = if ($MaxResolvers -gt 0) { [Math]::Min(100, $MaxResolvers) } else { $defaultMax }
+  $effectiveMax = if ($MaxResolvers -gt 0) { [Math]::Min(1000, $MaxResolvers) } else { $defaultMax }
 
   $defaultTimeout = 4000
   $parsed = 0
@@ -1337,6 +1338,9 @@ function Get-DnsPropagationStatus {
   # A user-supplied list replaces the catalog entirely: "check these servers" is
   # an unambiguous instruction, and silently blending in 25 public resolvers would
   # make the verdict about something other than what was asked.
+  # Browser-supplied custom lists remain capped at 100 because this GET route
+  # must fit the fallback listener's bounded 8 KB request line. Catalog-backed
+  # checks can use the full 1000-entry ceiling without placing IPs in the URL.
   $customList = @(ConvertFrom-DnsPropagationResolverInput -Text $CustomResolvers -MaxEntries 100)
   $selected = @()
   $outcomes = @{}
@@ -1359,7 +1363,9 @@ function Get-DnsPropagationStatus {
     # actual query removes both problems: one fan-out instead of two, and
     # "usable" means usable for THIS lookup. Because the fan-out is concurrent,
     # probing 3x the candidates costs the same wall time as probing N.
-    $candidateTarget = [Math]::Min(300, [Math]::Max($effectiveMax * 3, $effectiveMax + 12))
+    # Never open more than 1000 sockets in one fan-out. Over-selection still
+    # improves yield for smaller requests, then converges on the hard ceiling.
+    $candidateTarget = [Math]::Min(1000, [Math]::Max($effectiveMax * 3, $effectiveMax + 12))
     $candidates = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $candidateTarget)
     $status.candidateCount = $candidates.Count
 

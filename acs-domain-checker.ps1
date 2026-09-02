@@ -1665,7 +1665,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.13.1'
+$script:AppVersion = '2.13.2'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   $script:AppVersion = $env:ACS_APP_VERSION
 }
@@ -5258,10 +5258,11 @@ Version: __ACS_VERSION__
 
 `__ACS_ROOT__/api/propagation` additionally accepts:
 `type` (A, AAAA, CNAME, MX, NS, TXT, SOA, CAA), `regions` (comma separated:
-global, namer, samer, europe, asia, africa, oceania), `max` (1-100 resolvers),
+global, namer, samer, europe, asia, africa, oceania), `max` (1-1000 resolvers),
 `timeout` (milliseconds), `expected` (substring that must appear in the answer),
 `custom` (comma separated public IPv4 resolver addresses) and `validate` (0 to skip
-resolver health pre-selection).
+resolver health pre-selection). The active server catalog can contain up to 1000
+resolvers; URL-supplied custom lists are limited to 100 addresses.
 
 ## Reading a verdict
 
@@ -5354,10 +5355,10 @@ function Get-AcsOpenApiJson {
       [void]$sb.AppendLine(',')
       [void]$sb.AppendLine('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } },')
       [void]$sb.AppendLine('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } },')
-      [void]$sb.AppendLine('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 } },')
+      [void]$sb.AppendLine('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 25 } },')
       [void]$sb.AppendLine('        { "name": "timeout", "in": "query", "description": "Per-resolver timeout in milliseconds.", "schema": { "type": "integer", "minimum": 1, "maximum": 15000, "default": 4000 } },')
       [void]$sb.AppendLine('        { "name": "expected", "in": "query", "description": "Substring the answer must contain to count as a match.", "schema": { "type": "string", "maxLength": 255 } },')
-      [void]$sb.AppendLine('        { "name": "custom", "in": "query", "description": "Comma-separated public IPv4 resolver addresses to query instead of the built-in catalog.", "schema": { "type": "string", "maxLength": 4000 } },')
+      [void]$sb.AppendLine('        { "name": "custom", "in": "query", "description": "Up to 100 comma-separated public IPv4 resolver addresses to query instead of the server catalog.", "schema": { "type": "string", "maxLength": 4000 } },')
       [void]$sb.AppendLine('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
     } else {
       [void]$sb.AppendLine()
@@ -11581,7 +11582,7 @@ function Get-DnsPropagationResolverCatalog {
     # before being committed here. Coordinates are the operator country reference
     # point, not a per-IP geolocation, so the map shows "a resolver in this
     # country" rather than claiming street-level accuracy. These exist so a
-    # 100-resolver request has enough real vantage points to draw from; dead
+    # large resolver request has enough real vantage points to draw from; dead
     # entries are filtered out at request time by the health pre-check.
     [pscustomobject]@{ ip = '194.158.78.137'; provider = 'Andorra Telecom S.a.u.'; countryCode = 'AD'; city = 'Andorra la Vella'; latitude = 42.5; longitude = 1.5; region = 'europe'; anycast = $false }
     [pscustomobject]@{ ip = '138.219.249.221'; provider = 'Coop de Prov.Serv.Telef.Obras'; countryCode = 'AR'; city = 'Rafael Castillo'; latitude = -34.6; longitude = -58.4; region = 'samer'; anycast = $false }
@@ -11846,6 +11847,7 @@ function Get-DnsPropagationResolverCatalog {
   # "Argument types do not match" the moment it is wrapped in @( ... ).
   $custom = [System.Collections.Generic.List[object]]::new()
   foreach ($entry in ($override -split ';')) {
+    if ($custom.Count -ge 1000) { break }
     $parts = ($entry -split '\|')
     if ($parts.Count -lt 1) { continue }
     $ip = ([string]$parts[0]).Trim()
@@ -12758,9 +12760,9 @@ function Get-DnsPropagationStatus {
   $defaultMax = 25
   $parsed = 0
   if ([int]::TryParse([string]$env:ACS_PROPAGATION_MAX_RESOLVERS, [ref]$parsed) -and $parsed -gt 0) {
-    $defaultMax = [Math]::Min(100, $parsed)
+    $defaultMax = [Math]::Min(1000, $parsed)
   }
-  $effectiveMax = if ($MaxResolvers -gt 0) { [Math]::Min(100, $MaxResolvers) } else { $defaultMax }
+  $effectiveMax = if ($MaxResolvers -gt 0) { [Math]::Min(1000, $MaxResolvers) } else { $defaultMax }
 
   $defaultTimeout = 4000
   $parsed = 0
@@ -12792,6 +12794,9 @@ function Get-DnsPropagationStatus {
   # A user-supplied list replaces the catalog entirely: "check these servers" is
   # an unambiguous instruction, and silently blending in 25 public resolvers would
   # make the verdict about something other than what was asked.
+  # Browser-supplied custom lists remain capped at 100 because this GET route
+  # must fit the fallback listener's bounded 8 KB request line. Catalog-backed
+  # checks can use the full 1000-entry ceiling without placing IPs in the URL.
   $customList = @(ConvertFrom-DnsPropagationResolverInput -Text $CustomResolvers -MaxEntries 100)
   $selected = @()
   $outcomes = @{}
@@ -12814,7 +12819,9 @@ function Get-DnsPropagationStatus {
     # actual query removes both problems: one fan-out instead of two, and
     # "usable" means usable for THIS lookup. Because the fan-out is concurrent,
     # probing 3x the candidates costs the same wall time as probing N.
-    $candidateTarget = [Math]::Min(300, [Math]::Max($effectiveMax * 3, $effectiveMax + 12))
+    # Never open more than 1000 sockets in one fan-out. Over-selection still
+    # improves yield for smaller requests, then converges on the hard ceiling.
+    $candidateTarget = [Math]::Min(1000, [Math]::Max($effectiveMax * 3, $effectiveMax + 12))
     $candidates = @(Select-DnsPropagationResolvers -Regions $Regions -MaxResolvers $candidateTarget)
     $status.candidateCount = $candidates.Count
 
@@ -25851,7 +25858,7 @@ function normalizePropagationSettings(raw) {
   return {
     recordType: PROPAGATION_RECORD_TYPES.indexOf(type) !== -1 ? type : PROPAGATION_DEFAULTS.recordType,
     regions: regions,
-    maxResolvers: Number.isFinite(max) ? Math.min(100, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
+    maxResolvers: Number.isFinite(max) ? Math.min(1000, Math.max(4, Math.round(max))) : PROPAGATION_DEFAULTS.maxResolvers,
     timeoutMs: Number.isFinite(timeout) ? Math.min(15000, Math.max(1000, Math.round(timeout))) : PROPAGATION_DEFAULTS.timeoutMs,
     expected: String(src.expected || '').slice(0, 255),
     // Free text: normalized to one entry per line for the textarea, but sent to
@@ -29179,12 +29186,12 @@ function buildPropagationSettingsHtml(prop) {
   const selected = (Array.isArray(s.regions) && s.regions.length > 0) ? s.regions : available;
 
   // Cap the input at how many resolvers the server catalog actually holds so a
-  // value above that cannot silently do nothing. The server allows up to 100,
+  // value above that cannot silently do nothing. The server allows up to 1000,
   // which an operator reaches by extending the catalog via ACS_PROPAGATION_RESOLVERS.
   const catalogTotal = (prop && Array.isArray(prop.availableRegions))
     ? prop.availableRegions.reduce((sum, x) => sum + (Number(x && x.resolverCount) || 0), 0)
     : 0;
-  const maxAllowed = catalogTotal > 0 ? Math.min(100, catalogTotal) : 100;
+  const maxAllowed = catalogTotal > 0 ? Math.min(1000, catalogTotal) : 1000;
 
   const typeOptions = PROPAGATION_RECORD_TYPES.map(type =>
     `<option value="${escapeHtml(type)}"${type === s.recordType ? ' selected' : ''}>${escapeHtml(type)}</option>`
@@ -33139,9 +33146,9 @@ const INTAKE_LOCALIZED_MARKERS = [];
 let intakeExtractedOverrides = {};
 
 // ACS Email throttling tiers. Each entry: { name, perMinute, perHour }.
-// "Expected tier level" is computed from the minute burst plus the customer's
-// sustained volume. A stated daily total is authoritative for sustained volume;
-// the hourly figure is used as the fallback when no daily total is supplied.
+// "Expected tier level" is the smallest tier that satisfies every stated rate.
+// Minute and hour values map directly to the published ACS limits; daily
+// capacity is derived from the hourly limit sustained across 24 hours.
 //
 // Tier names are stored base64-encoded (and decoded once at runtime) so
 // they are not trivially greppable in the bundled source. This is light
@@ -33248,20 +33255,18 @@ function parseIntakeNumeric(text) {
 }
 
 function inferExpectedTierIndex(perMinute, perHour, perDay) {
-  // Returns the smallest tier meeting the minute burst and sustained-volume
-  // requirements, or -1 when the request exceeds every published tier. The
-  // daily total supersedes the hourly peak when both are present: perDay is
-  // derived from perHour * 24, so enforcing both would incorrectly price a
-  // short hourly burst as though it were sustained for the entire day.
+  // Returns the smallest tier meeting every supplied rate requirement, or -1
+  // when the request exceeds every published tier. Hourly and daily maxima are
+  // independent constraints: a low daily total does not make a stated hourly
+  // burst disappear.
   const wantMin = parseIntakeNumeric(perMinute);
   const wantHour = parseIntakeNumeric(perHour);
   const wantDay = parseIntakeNumeric(perDay);
   if (wantMin === null && wantHour === null && wantDay === null) return -1;
-  const useHourlyConstraint = wantHour !== null && wantDay === null;
   for (let i = 0; i < INTAKE_TIERS.length; i++) {
     const t = INTAKE_TIERS[i];
     const okMin  = (wantMin  === null) || (t.perMinute >= wantMin);
-    const okHour = !useHourlyConstraint || (t.perHour >= wantHour);
+    const okHour = (wantHour === null) || (t.perHour   >= wantHour);
     const okDay  = (wantDay  === null) || (t.perDay    >= wantDay);
     if (okMin && okHour && okDay) return i;
   }
@@ -36236,7 +36241,7 @@ if ($metricsEnabled) {
 
         # Numeric knobs: clamped here AND again inside Get-DnsPropagationStatus.
         $parsedInt = 0
-        if ([int]::TryParse([string]$qs['max'], [ref]$parsedInt)) { $propMax = [Math]::Min(100, [Math]::Max(0, $parsedInt)) }
+        if ([int]::TryParse([string]$qs['max'], [ref]$parsedInt)) { $propMax = [Math]::Min(1000, [Math]::Max(0, $parsedInt)) }
         $parsedInt = 0
         if ([int]::TryParse([string]$qs['timeout'], [ref]$parsedInt)) { $propTimeout = [Math]::Min(15000, [Math]::Max(0, $parsedInt)) }
 

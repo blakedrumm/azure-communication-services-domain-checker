@@ -374,7 +374,7 @@ if ($metricsEnabled) {
 
         # Numeric knobs: clamped here AND again inside Get-DnsPropagationStatus.
         $parsedInt = 0
-        if ([int]::TryParse([string]$qs['max'], [ref]$parsedInt)) { $propMax = [Math]::Min(100, [Math]::Max(0, $parsedInt)) }
+        if ([int]::TryParse([string]$qs['max'], [ref]$parsedInt)) { $propMax = [Math]::Min(1000, [Math]::Max(0, $parsedInt)) }
         $parsedInt = 0
         if ([int]::TryParse([string]$qs['timeout'], [ref]$parsedInt)) { $propTimeout = [Math]::Min(15000, [Math]::Max(0, $parsedInt)) }
 
