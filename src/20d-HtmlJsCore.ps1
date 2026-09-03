@@ -270,10 +270,8 @@ function getDomainQuotaStatus(r) {
 
   // Reputation
   if (r.reputation) {
-    const repSum = r.reputation.summary || {};
-    const repValid = (repSum.totalQueries || 0) - (repSum.errorCount || 0);
-    const repPercent = (repValid > 0) ? ((repSum.notListedCount || 0) / repValid * 100) : null;
-    if ((repSum.listedCount > 0) || (repPercent !== null && repPercent < 75)) quotaWarn = true;
+    const reputationView = getReputationViewModel(r.reputation);
+    if (reputationView.quotaState === 'warn') quotaWarn = true;
   }
 
   // Registration (WHOIS/RDAP)
@@ -3570,14 +3568,11 @@ function render(r) {
     if (!hasUsableMxForQuota) { quotaFail = true; }
 
     // 2. Reputation
-    // Logic from card: state is 'warn' if listed or poor reputation.
+    // One shared view model keeps this status aligned with the card, quota row,
+    // domain-tab dot and copied report across both reputation scopes.
     if (r.reputation) {
-        const repSum = r.reputation.summary || {};
-        const repValid = (repSum.totalQueries || 0) - (repSum.errorCount || 0);
-        const repPercent = (repValid > 0) ? ((repSum.notListedCount || 0) / repValid * 100) : null;
-        if ((repSum.listedCount > 0) || (repPercent !== null && repPercent < 75)) {
-            quotaWarn = true;
-        }
+      const reputationView = getReputationViewModel(r.reputation);
+      if (reputationView.quotaState === 'warn') quotaWarn = true;
     }
 
     // 3. Registration
@@ -3656,12 +3651,14 @@ function render(r) {
       case 'fail':
       case 'error': return 'tag-fail';
       case 'warn': return 'tag-warn';
+      case 'info':
+      case 'notApplicable':
       case 'pending':
       default: return 'tag-info';
     }
   };
   const quotaRow = (name, state, detail, infoTitle = null, targetId = null, extraHtml = '') => {
-    const stateKeyMap = { pass: 'pass', fail: 'fail', error: 'error', warn: 'warn', pending: 'pending' };
+    const stateKeyMap = { pass: 'pass', fail: 'fail', error: 'error', warn: 'warn', info: 'info', notApplicable: 'reputationNotApplicable', pending: 'pending' };
     const badge = `<span class="tag ${quotaStateClass(state)} status-pill">${escapeHtml(t(stateKeyMap[state] || String(state || '').toLowerCase()))}</span>`;
     const nameHtml = escapeHtml(name)
       + (infoTitle ? ` <button type="button" class="info-dot" aria-label="${escapeHtml(infoTitle)}" data-info="${escapeHtml(infoTitle)}">i</button>` : "")
@@ -3766,38 +3763,39 @@ function render(r) {
     repStateForCopy = 'ERROR';
   } else {
     const rep = r.reputation || {};
-    const summary = rep.summary || {};
-    const listed = summary.listedCount || 0;
-    const notListed = summary.notListedCount || 0;
-    const errorCount = summary.errorCount || 0;
-    const total = summary.totalQueries || 0;
+    const reputationView = getReputationViewModel(rep);
+    const ratingLabel = t(reputationView.ratingKey);
+    const repUsedApex = Array.isArray(rep.targets) && rep.targets.some(target => target && target.source === 'apex');
     const repUsedParent = rep.lookupUsedParent === true && rep.lookupDomain && rep.lookupDomain !== (r.domain || '');
-    const valid = Math.max(0, total - errorCount);
-    const percent = (valid > 0) ? Math.max(0, Math.min(100, Math.round((notListed / valid) * 100))) : null;
-    const rating = percent === null ? 'unknown' : (percent >= 99 ? 'excellent' : percent >= 90 ? 'great' : percent >= 75 ? 'good' : percent >= 50 ? 'fair' : 'poor');
-      const ratingMap = { excellent: t('excellent'), great: t('great'), good: t('good'), fair: t('fair'), poor: t('poor'), unknown: t('unknown') };
-      const ratingLabel = ratingMap[rating] || rating;
-    const state = listed > 0 ? 'warn' : (percent === null ? 'warn' : (percent >= 75 ? 'pass' : 'warn'));
-      const riskSummary = (summary.riskSummary || 'Clean') === 'Clean' ? t('clean') : (summary.riskSummary || 'Clean');
-    const baseDetail = percent === null
-      ? `${t('riskLabel')}: ${riskSummary} | ${t('totalQueries')}: ${total}, ${t('notListed')}: ${notListed}`
-      : `${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${ratingLabel} (${percent}%) | ${t('listed')}: ${listed}, ${t('notListed')}: ${notListed}`;
-      const parentNote = repUsedParent ? t('usingIpParent', { domain: rep.lookupDomain, queryDomain: r.domain || '' }) : '';
-    const detail = parentNote ? `${baseDetail} | ${parentNote}` : baseDetail;
+    const riskSummary = localizeRiskSummary(rep.overallRiskSummary || rep.summary?.riskSummary || 'Unknown');
+    const mailDetail = reputationView.ipNotApplicable
+      ? t('reputationNullMxNote')
+      : (reputationView.percent === null
+        ? `${t('riskLabel')}: ${riskSummary} | ${t('totalQueries')}: ${reputationView.total}, ${t('notListed')}: ${reputationView.notListed}`
+        : `${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${ratingLabel} (${reputationView.percent}%) | ${t('listed')}: ${reputationView.listed}, ${t('notListed')}: ${reputationView.notListed}`);
+    const sourceNote = repUsedApex
+      ? t('reputationApexFallbackNote')
+      : (repUsedParent ? t('usingIpParent', { domain: rep.lookupDomain, queryDomain: r.domain || '' }) : '');
+    const domainDetail = getDomainReputationSummaryText(reputationView);
+    const providerDetails = reputationView.domainResults.map(getDomainReputationProviderText);
+    const detail = [mailDetail, sourceNote, domainDetail].concat(providerDetails).filter(Boolean).join(' | ');
     repCopyDetail = detail;
-    repStats = {
+    repStats = reputationView.ipNotApplicable ? null : {
       zones: Array.isArray(rep.rblZones) ? rep.rblZones.length : 0,
-      total,
-      errors: errorCount,
-      percent,
+      total: reputationView.total,
+      errors: reputationView.errors,
+      percent: reputationView.percent,
       rating: ratingLabel,
-      listed,
-      notListed: summary.notListedCount || 0
+      listed: reputationView.listed,
+      notListed: reputationView.notListed
     };
-    quotaItems.push(quotaRow(t('reputationDnsbl'), state, detail, reputationInfo, 'reputation', multiRblHtml));
-    quotaLines.push(`**Reputation (DNSBL):** ${state.toUpperCase()}${detail ? ' - ' + detail : ''}`);
-    quotaLinesHtml.push(`<strong>Reputation (DNSBL):</strong> ${escapeHtml(state.toUpperCase())}${detail ? ' - ' + escapeHtml(detail) : ''}`);
-    repStateForCopy = state.toUpperCase();
+    quotaItems.push(quotaRow(t('reputationDnsbl'), reputationView.quotaState, detail, reputationInfo, 'reputation', multiRblHtml));
+    const stateText = reputationView.quotaState === 'notApplicable'
+      ? t('reputationNotApplicable').toUpperCase()
+      : reputationView.quotaState.toUpperCase();
+    quotaLines.push(`**Reputation (DNSBL):** ${stateText}${detail ? ' - ' + detail : ''}`);
+    quotaLinesHtml.push(`<strong>Reputation (DNSBL):</strong> ${escapeHtml(stateText)}${detail ? ' - ' + escapeHtml(detail) : ''}`);
+    repStateForCopy = stateText;
   }
 
   // 3) Domain Registration
@@ -4989,51 +4987,32 @@ function render(r) {
     ));
   } else {
     const rep = r.reputation || {};
-    const summary = rep.summary || {};
-    const listed = summary.listedCount || 0;
-    const errorCount = summary.errorCount || 0;
-    const notListed = summary.notListedCount || 0;
-    const total = summary.totalQueries || 0;
-    const repUsedParent = rep.lookupUsedParent === true && rep.lookupDomain && rep.lookupDomain !== (r.domain || '');
-    const validQueries = Math.max(0, total - errorCount);
-
-    let percent = null;
-    if (validQueries > 0) {
-      percent = Math.max(0, Math.min(100, Math.round((notListed / validQueries) * 100)));
-    }
-
-    let rating = t('unknown');
-    if (percent !== null) {
-      if (percent >= 99) rating = t('excellent');
-      else if (percent >= 90) rating = t('great');
-      else if (percent >= 75) rating = t('good');
-      else if (percent >= 50) rating = t('fair');
-      else rating = t('poor');
-    }
-
-    const statusLabel = percent === null ? t('unknown') : `${rating.toUpperCase()} (${percent}%)`;
-    // Colour on listings first. A domain listed on 1 of 25 zones still scores 96%, so
-    // grading on percentage alone painted this card green while its own body read
-    // "Listed: 1" and the Email Quota row correctly said WARN.
-    const statusClass = listed > 0 ? "tag-warn"
-      : (percent === null ? "tag-info"
-      : (percent >= 90 ? "tag-pass"
-      : (percent >= 75 ? "tag-info" : "tag-fail")));
+    const reputationView = getReputationViewModel(rep);
+    const repUsedApex = Array.isArray(rep.targets) && rep.targets.some(target => target && target.source === 'apex');
+    const rating = t(reputationView.ratingKey);
+    const statusLabel = reputationView.combinedState === 'clean' ? t('clean').toUpperCase()
+      : (reputationView.combinedState === 'notApplicable' ? t('reputationNotApplicable')
+      : (reputationView.combinedState === 'unknown' ? t('unknown').toUpperCase() : t('warningState').toUpperCase()));
 
     // Show only listed entries to avoid noise
     const listedItems = (rep.results || []).filter(x => x && x.listed === true);
-    let body = `${t('zonesQueried')}: ${rep.rblZones ? rep.rblZones.length : 0}\n` +
-               `${t('totalQueries')}: ${total}\n` +
-               `${t('errorsCount')}: ${errorCount}`;
-    if (percent !== null) {
-    const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
-      body += `\n${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${rating} (${percent}%)`;
-      body += `\n${t('listed')}: ${listed}\n${t('notListed')}: ${notListed}`;
+    let body = `${t('reputationMailIpScope')}: `;
+    if (reputationView.ipNotApplicable) {
+      body += `${t('reputationNotApplicable')}\n${t('reputationNullMxNote')}`;
     } else {
-      const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
+      body += `\n${t('zonesQueried')}: ${rep.rblZones ? rep.rblZones.length : 0}\n` +
+        `${t('totalQueries')}: ${reputationView.total}\n` +
+        `${t('errorsCount')}: ${reputationView.errors}`;
+      const riskSummary = localizeRiskSummary(rep.summary?.riskSummary || 'Unknown');
+      if (reputationView.percent !== null) {
+        body += `\n${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${rating} (${reputationView.percent}%)`;
+        body += `\n${t('listed')}: ${reputationView.listed}\n${t('notListed')}: ${reputationView.notListed}`;
+      } else {
       body += `\n${t('riskLabel')}: ${riskSummary}`;
-      body += `\n${t('reputationWord')}: ${t('noSuccessfulQueries')}`;
+      body += `\n${t('reputationWord')}: ${rep.ipCheckReason === 'noAddresses' ? t('reputationNoMailIpsNote') : t('noSuccessfulQueries')}`;
+      }
     }
+    if (repUsedApex) body += `\n${t('reputationApexFallbackNote')}`;
     if (listedItems.length > 0) {
       const lines = listedItems.map(x => t('listedOnZone', {
         ip: x.ip,
@@ -5043,11 +5022,21 @@ function render(r) {
       body += `\n\n${t('listingsLabel')}:\n` + lines.join("\n");
     }
 
+    if (reputationView.domain) {
+      body += `\n\n${t('reputationDomainScope')}: ${getDomainReputationSummaryText(reputationView)}`;
+      if (reputationView.domain.queryDomain) {
+        body += `\n${t('reputationDomainQueried')}: ${reputationView.domain.queryDomain}`;
+      }
+      if (reputationView.domainResults.length > 0) {
+        body += `\n` + reputationView.domainResults.map(getDomainReputationProviderText).join('\n');
+      }
+    }
+
     cards.push(card(
       t('reputationDnsbl'),
       body,
       statusLabel,
-      statusClass,
+      reputationView.badgeClass,
       "reputation",
       false,
       `<button type="button" class="info-dot" aria-label="${escapeHtml(reputationInfo)}" data-info="${escapeHtml(reputationInfo)}">i</button> ${multiRblHtml}`

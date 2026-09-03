@@ -634,6 +634,18 @@ function normalizeDomain(raw) {
   raw = raw.replace(/^\*\./, "");
   raw = raw.replace(/^\.+/, "").replace(/\.+$/, "");
 
+  // IDN to A-label. The browser's URL parser performs IDNA conversion, which is
+  // what makes a Unicode domain pass the ASCII-only validator below and match
+  // what the server computes. Skipped when the value still carries URL syntax.
+  if (/[^\x00-\x7F]/.test(raw) && !/[\/\\?#\s]/.test(raw)) {
+    try {
+      const asciiHost = new URL("http://" + raw).hostname;
+      if (asciiHost) { raw = asciiHost; }
+    } catch {
+      // leave unchanged; isValidDomain rejects it
+    }
+  }
+
   return raw.toLowerCase();
 }
 
@@ -1020,7 +1032,118 @@ function localizeRiskSummary(value) {
   if (normalized === 'clean') return t('riskClean');
   if (normalized === 'warning') return t('riskWarning');
   if (normalized === 'elevatedrisk') return t('riskElevated');
+  if (normalized === 'notapplicable') return t('reputationNotApplicable');
   return value || t('unknown');
+}
+
+// Build one canonical reputation view for the card, quota row, overall quota
+// verdict, domain-tab dot, and copied report. Older API payloads without the
+// literal-domain branch retain their previous mail-IP-only behavior.
+function getReputationViewModel(rep) {
+  const value = (rep && typeof rep === 'object' && !Array.isArray(rep)) ? rep : {};
+  const ipSummary = value.summary || {};
+  const total = Number(ipSummary.totalQueries) || 0;
+  const errors = Number(ipSummary.errorCount) || 0;
+  const listed = Number(ipSummary.listedCount) || 0;
+  const notListed = Number(ipSummary.notListedCount) || 0;
+  const valid = Math.max(0, total - errors);
+  const percent = valid > 0 ? Math.max(0, Math.min(100, Math.round((notListed / valid) * 100))) : null;
+  const ipNotApplicable = value.ipCheckState === 'notApplicable';
+  const ipState = ipNotApplicable ? 'notApplicable'
+    : (listed > 0 ? 'listed' : (valid > 0 ? 'clean' : 'unknown'));
+  const ratingKey = percent === null ? 'unknown'
+    : (percent >= 99 ? 'excellent'
+    : (percent >= 90 ? 'great'
+    : (percent >= 75 ? 'good'
+    : (percent >= 50 ? 'fair' : 'poor'))));
+
+  const domain = (value.domainReputation && typeof value.domainReputation === 'object')
+    ? value.domainReputation
+    : null;
+  const domainSummary = domain && domain.summary ? domain.summary : {};
+  const domainResults = domain && Array.isArray(domain.results) ? domain.results : [];
+  const domainState = domain ? String(domain.state || 'unknown') : 'disabled';
+
+  let combinedState = String(value.overallReputationState || '');
+  if (!combinedState) {
+    if (ipState === 'listed') combinedState = 'listed';
+    else if (!domain) combinedState = ipState;
+    else if (domainState === 'listed') combinedState = 'listed';
+    else if (domainState === 'clean' && (ipState === 'clean' || ipState === 'notApplicable')) combinedState = 'clean';
+    else if (domainState === 'disabled' && ipState === 'clean') combinedState = 'clean';
+    else if (domainState === 'disabled' && ipState === 'notApplicable') combinedState = 'notApplicable';
+    else if (domainState === 'partial' || ipState === 'clean') combinedState = 'partial';
+    else combinedState = 'unknown';
+  }
+
+  const quotaState = combinedState === 'clean' ? 'pass'
+    : (combinedState === 'notApplicable' ? 'notApplicable' : 'warn');
+  const badgeClass = combinedState === 'clean' ? 'tag-pass'
+    : (combinedState === 'notApplicable' ? 'tag-info' : 'tag-warn');
+
+  return {
+    ipSummary,
+    total,
+    errors,
+    listed,
+    notListed,
+    valid,
+    percent,
+    ratingKey,
+    ipState,
+    ipNotApplicable,
+    domain,
+    domainSummary,
+    domainResults,
+    domainState,
+    combinedState,
+    quotaState,
+    badgeClass
+  };
+}
+
+function getDomainReputationProviderText(result) {
+  const item = result || {};
+  const stateKey = {
+    listed: 'reputationDomainProviderListed',
+    notListed: 'reputationDomainProviderNotListed',
+    blocked: 'reputationDomainProviderBlocked',
+    invalid: 'reputationDomainProviderInvalid',
+    unavailable: 'reputationDomainProviderUnavailable'
+  }[String(item.state || '')] || 'reputationDomainProviderUnavailable';
+  const categories = Array.isArray(item.categories) && item.categories.length > 0
+    ? ` (${t('reputationDomainCategories')}: ${item.categories.join(', ')})`
+    : '';
+  let text = `${String(item.providerName || item.providerId || t('unknown'))}: ${t(stateKey)}${categories}`;
+  // Opt-in lists require operator eligibility and are not exercised against the
+  // live service by default, so a failure here says nothing about the domain.
+  // SERVFAIL, timeout and refusal are indistinguishable on the wire, so the copy
+  // must not claim a specific cause.
+  const optInProvider = item.providerId === 'surbl' || item.providerId === 'spamhaus';
+  const unusable = item.state === 'unavailable' || item.state === 'invalid' || item.state === 'blocked';
+  if (optInProvider && unusable) {
+    text += ` ${t('reputationDomainProviderOptInHint')}`;
+    if (item.policyUrl) { text += ` ${item.policyUrl}`; }
+  }
+  return text;
+}
+
+function getDomainReputationSummaryText(view) {
+  const model = view || {};
+  if (!model.domain) return '';
+  const summary = model.domainSummary || {};
+  switch (model.domainState) {
+    case 'clean':
+      return t('reputationDomainClean', { count: String(summary.validatedCount || 0) });
+    case 'listed':
+      return t('reputationDomainListed', { count: String(summary.listedCount || 0) });
+    case 'partial':
+      return t('reputationDomainPartial', { count: String(summary.validatedCount || 0) });
+    case 'disabled':
+      return t('reputationDomainDisabled');
+    default:
+      return t('reputationDomainUnknown');
+  }
 }
 
 function localizeWhoisStatus(status) {

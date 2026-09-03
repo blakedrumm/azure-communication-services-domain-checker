@@ -86,24 +86,67 @@ function ConvertFrom-PublicSuffixListFile {
     # A rule ends at the first whitespace (the PSL format keeps one rule per line).
     $rule = ($line -split '\s+')[0]
     if ([string]::IsNullOrWhiteSpace($rule)) { continue }
-    $rule = $rule.ToLowerInvariant()
 
-    if ($rule.StartsWith('!')) {
-      # Exception rule: the labels after '!' are NOT a public suffix.
-      $null = $exceptions.Add($rule.Substring(1))
+    # The PSL publishes IDN suffixes ONLY in Unicode form (the xn-- spelling appears
+    # only inside comments), but queries always arrive as A-labels. Store BOTH forms,
+    # or an IDN suffix never matches and Get-RegistrableDomain silently returns the
+    # public suffix itself. Lowercasing happens after the mapper, not before.
+    $prefix = ''
+    $body = $rule
+    if ($body.StartsWith('!')) { $prefix = '!'; $body = $body.Substring(1) }
+    elseif ($body.StartsWith('*.')) { $prefix = '*.'; $body = $body.Substring(2) }
+
+    $bodyLower = $body.ToLowerInvariant()
+    $bodyAscii = (ConvertTo-AsciiDomainName -Name $body).ToLowerInvariant()
+
+    if ($prefix -eq '!') {
+      $null = $exceptions.Add($bodyLower)
+      if ($bodyAscii -ne $bodyLower) { $null = $exceptions.Add($bodyAscii) }
     }
-    elseif ($rule.StartsWith('*.')) {
-      # Wildcard rule: store only the fixed remainder after '*.'.
-      $null = $wildcards.Add($rule.Substring(2))
+    elseif ($prefix -eq '*.') {
+      $null = $wildcards.Add($bodyLower)
+      if ($bodyAscii -ne $bodyLower) { $null = $wildcards.Add($bodyAscii) }
     }
     else {
-      $null = $exact.Add($rule)
+      $null = $exact.Add($bodyLower)
+      if ($bodyAscii -ne $bodyLower) { $null = $exact.Add($bodyAscii) }
     }
   }
 
   if ($exact.Count -eq 0 -and $wildcards.Count -eq 0) { return $null }
 
   return @{ exact = $exact; wildcards = $wildcards; exceptions = $exceptions }
+}
+
+# Convert a possibly-internationalized (Unicode) domain to its IDNA A-label
+# ("punycode") form. Everything downstream is ASCII-only: the raw DNS packet
+# builders, the port-43 WHOIS writer, RDAP/DoH URLs, PSL matching and the metrics
+# HMAC. This is the single place the conversion is allowed to happen.
+function ConvertTo-AsciiDomainName {
+  param([string]$Name)
+
+  if ([string]::IsNullOrWhiteSpace($Name)) { return $Name }
+
+  # Fast path for input that is already ASCII (including existing xn-- input).
+  # Skipping the mapper guarantees a byte-identical result for every domain the
+  # tool accepted before IDN support existed.
+  $isAscii = $true
+  foreach ($ch in $Name.ToCharArray()) {
+    if ([int]$ch -gt 127) { $isAscii = $false; break }
+  }
+  if ($isAscii) { return $Name }
+
+  try {
+    # Defaults are deliberate: Test-DomainName already enforces a stricter LDH rule
+    # on the RESULT, and AllowUnassigned stays false so unknown code points fail closed.
+    $idn = [System.Globalization.IdnMapping]::new()
+    return $idn.GetAscii($Name)
+  } catch {
+    # Malformed IDN. Return the input unchanged so Test-DomainName rejects it
+    # normally instead of this surfacing as an HTTP 500.
+    $null = $_
+    return $Name
+  }
 }
 
 # Load (and lazily refresh) the parsed PSL rule sets, caching in-process. Returns

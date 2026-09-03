@@ -276,7 +276,36 @@ A separate **SPF Expansion Records** card sits directly below the SPF card and l
 
 ## 🛡️ DNSBL Reputation Checks
 
-The `/api/reputation` endpoint queries multiple DNS-based Block Lists (DNSBLs) to assess the sending reputation of IP addresses associated with a domain's MX records.
+The `/api/reputation` endpoint performs two independent checks:
+
+- **Mail-server IPv4 reputation** queries public IPv4 addresses associated with the domain's mail targets against IP DNSBLs.
+- **Literal-domain reputation** queries the ICANN registrable domain against control-validated URI/domain reputation providers (the opt-in Spamhaus DBL profile instead queries the exact normalized hostname; every provider result reports the name category it used). URIBL Multi, NordSpam DBL, and Spam Eating Monkey URI are enabled by default. Before an endpoint receives a customer domain, its documented positive test point must pass or have a fresh health-cache entry. Every target stage also sends the provider's documented negative test point, and when the positive control came from the health cache it is re-sent in that same stage, so no verdict rests on an access probe older than the current request. NXDOMAIN/NODATA counts as "not listed" only when both controls pass in that request and the negative response is authoritative with an in-zone SOA proof.
+
+MultiRBL checks many more third-party lists, so its totals will remain larger. The built-in MultiRBL link remains available for that broader comparison; this checker reports only providers it queried and validated itself.
+
+RFC 7505 Null MX (`MX 0 .`) is handled explicitly. It declares that the domain operates no mail server, so the API returns `nullMx: true`, `ipCheckState: "notApplicable"`, and `ipCheckReason: "nullMx"` without checking the domain's website/CDN addresses as if they sent mail. If a domain publishes no MX record at all, the legacy apex-A fallback remains available, but every target is tagged with `source: "apex"` and the UI warns that the addresses may belong to a website or shared host rather than a mail sender. A non-Null-MX lookup that resolves no public mail IPv4 addresses is `Unknown`, never `Clean`.
+
+Null MX applies only to the mail-IP scope. Literal-domain reputation still runs, so a domain such as `ohiodnr.gov` can report `Mail-server IP reputation: Not applicable` while all three default literal-domain providers return independently validated results in the same card.
+
+### Domain Reputation Providers
+
+| Provider ID | Default | Query | Access policy |
+|-------------|---------|-------|---------------|
+| `uribl` | Enabled | `multi.uribl.com` | Public DNS for low-volume use; bit `1` and access-control responses are treated as blocked, never listed |
+| `nordspam` | Enabled | `dbl.nordspam.com` | Free for commercial and noncommercial use below 10,000 queries/day; one process refills at 6 queries/minute (8,640/day) with a 36-query burst, while multi-instance operators must coordinate total volume |
+| `sem-uri` | Enabled | `uribl.spameatingmonkey.net` | Active URI list with documented two-sided test points; its SpamAssassin example assigns a modest 0.5 score |
+| `surbl` | Opt-in | `multi.surbl.org` | SURBL states products/services using its intelligence require an SDS agreement |
+| `spamhaus` | Opt-in | `dbl.spamhaus.org` | Spamhaus fair-use eligibility depends on deployment, volume, resolver identity, and commercial use |
+
+Provider IDs are compiled and allowlisted; operators cannot inject arbitrary DNS destinations or response decoders. Enable an eligible opt-in profile with, for example, `$env:ACS_DOMAIN_REPUTATION_PROVIDERS = "uribl,nordspam,sem-uri,surbl"`. By enabling a provider, the operator accepts responsibility for complying with its current terms. Provider controls that are blocked, wildcarded, unexpected, unavailable, or malformed produce `Unknown`/`WARN`, never a false listing or clean result. API selection counts (`requestedCount`, `configuredCount`, and `droppedCount`) make ignored or unsupported provider IDs visible.
+
+> **Validating an opt-in provider.** The opt-in lists refuse service to clients that have not registered with them, and a refusal is indistinguishable on the wire from an outage or a blocked network. Before relying on one, validate it from a network whose access is already established:
+>
+> ```powershell
+> pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-ProviderControls.ps1 -ProviderId surbl
+> ```
+>
+> This sends only the provider's own documented positive and negative control probes, never a customer domain, and never changes a profile value. It reports the discovered authoritative nameservers, both control answers, and whether the negative answer carries an SOA owned by exactly the configured query zone, which is what a "not listed" verdict requires. A provider that fails here fails closed in the app and can never report a clean verdict.
 
 ### Default DNSBL Zones
 
@@ -307,6 +336,8 @@ $env:ACS_RBL_ZONES = "zen.spamhaus.org,bl.spamcop.net"
 | 🟡 **Good** | ≥ 75 % clean | 1 (Warning) |
 | 🟠 **Fair** | ≥ 50 % clean | 2+ (Elevated Risk) |
 | 🔴 **Poor** | < 50 % clean | 2+ (Elevated Risk) |
+
+The percentage applies only to mail-IP DNSBL queries. Domain providers are not treated as statistically independent votes: any confirmed domain listing produces `WARN`; all enabled providers must return validated negatives for the domain scope to be `Clean`; partial or blocked coverage remains `WARN`/`Unknown`.
 
 ## 🌐 Website Reachability Snapshot
 
@@ -648,8 +679,13 @@ When automatic Entra sign-in is enabled, the SPA only calls MSAL `ssoSilent()` w
 | `ACS_RBL_MAX_ZONES` | `20` | Maximum DNSBL zones to query from `ACS_RBL_ZONES` or explicit API input (capped at 50) |
 | `ACS_RBL_MAX_IPS` | `10` | Maximum public IPv4 targets to check per reputation lookup (capped at 50) |
 | `ACS_RBL_MAX_PARALLELISM` | auto | Maximum concurrent DNSBL queries per reputation lookup (capped at 16) |
+| `ACS_DISABLE_DOMAIN_REPUTATION` | `0` | Set to `1` to disable the literal-domain provider scope |
+| `ACS_DOMAIN_REPUTATION_PROVIDERS` | `uribl,nordspam,sem-uri` | Comma/semicolon/space-delimited allowlisted provider IDs: `uribl`, `nordspam`, `sem-uri`, `surbl`, `spamhaus` |
+| `ACS_DOMAIN_REPUTATION_TIMEOUT_MS` | `2500` | Direct authoritative provider timeout in milliseconds (clamped to 500-5000) |
+| `ACS_DOMAIN_REPUTATION_MAX_ENDPOINTS` | `1` | Maximum authoritative IPv4 endpoints queried per provider (clamped to 1-2) |
+| `ACS_DOMAIN_REPUTATION_QUERIES_PER_MIN` | `120` | Process-wide uncached provider-query budget (clamped to 10-600); stricter code-owned per-provider budgets still apply |
 
-The reputation checker only queries public IPv4 addresses and validates DNSBL zone names before use. DNSBL policy-block responses are counted as errors rather than listings, and positive listings also attempt to collect DNSBL TXT reason text when the provider publishes it.
+The reputation checker only opens DNS sockets to validated public IPv4 addresses. Domain-provider authority endpoints are discovered dynamically, cached in memory, and queried directly with non-recursive DNS, which requires outbound UDP port 53. Results and provider controls are cached in process memory for short bounded periods; they are never written to disk. DNSBL/provider policy-block responses are counted as errors rather than listings.
 
 ### 🧾 Secure Diagnostics & Logging
 | Variable | Default | Description |
@@ -825,7 +861,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.13.2`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.16.0`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -848,8 +884,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.13.2
-git push origin v2.13.2
+git tag v2.16.0
+git push origin v2.16.0
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -860,7 +896,7 @@ git push origin v2.13.2
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.13.2`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.16.0`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -877,11 +913,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.13.2
+docker pull limitlessworlds/acs-domain-checker:2.16.0
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.13.2
-docker pull limitlessworlds/acs-domain-checker:windows-2.13.2
+docker pull limitlessworlds/acs-domain-checker:linux-2.16.0
+docker pull limitlessworlds/acs-domain-checker:windows-2.16.0
 ```
 
 ### 🛠️ Manual Build Script
@@ -896,7 +932,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.13.2
+./acs-domain-checker-dockerhub.ps1 -Version 2.16.0
 ```
 
 **📋 Requirements for manual script:**

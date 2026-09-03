@@ -32,9 +32,15 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.13.2'
+$script:AppVersion = '2.16.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
-  $script:AppVersion = $env:ACS_APP_VERSION
+  # Validate at the boundary: this value is interpolated into generated JSON
+  # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
+  # emit a malformed document. Accept only version-shaped characters.
+  $candidateVersion = ([string]$env:ACS_APP_VERSION).Trim()
+  if ($candidateVersion.Length -le 64 -and $candidateVersion -match '^[0-9A-Za-z][0-9A-Za-z.\-+_]*$') {
+    $script:AppVersion = $candidateVersion
+  }
 }
 
 # Acquire a cross-process mutex to protect the metrics JSON file from concurrent writes.

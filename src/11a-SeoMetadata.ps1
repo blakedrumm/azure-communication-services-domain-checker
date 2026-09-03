@@ -300,7 +300,7 @@ Version: __ACS_VERSION__
 - [DKIM](__ACS_ROOT__/api/dkim?domain=example.com): ACS `selector1`/`selector2` DKIM keys.
 - [CNAME](__ACS_ROOT__/api/cname?domain=example.com): CNAME chain resolution.
 - [WHOIS / RDAP](__ACS_ROOT__/api/whois?domain=example.com): registrar, creation and expiry dates, domain age.
-- [Blocklist reputation](__ACS_ROOT__/api/reputation?domain=example.com): DNSBL/RBL listing status for the domain's mail IPs.
+- [Blocklist reputation](__ACS_ROOT__/api/reputation?domain=example.com): separate mail-target IPv4 DNSBL and control-validated literal-domain reputation results. URIBL Multi, NordSpam DBL, and Spam Eating Monkey URI are enabled by default; control failures never become clean results.
 - [Website probe](__ACS_ROOT__/api/website?domain=example.com): HTTP reachability and page title/description.
 - [Nameserver consistency](__ACS_ROOT__/api/nameservers?domain=example.com): queries each authoritative nameserver directly and reports whether they serve identical TXT records.
 - [Global DNS propagation](__ACS_ROOT__/api/propagation?domain=example.com&type=TXT&max=25): queries public recursive resolvers worldwide and reports what percentage see the record.
@@ -385,7 +385,7 @@ function Get-AcsOpenApiJson {
     '/api/dkim'         = 'ACS selector1/selector2 DKIM public keys.'
     '/api/cname'        = 'CNAME chain resolution.'
     '/api/whois'        = 'Registrar, creation/expiry dates and domain age via RDAP or WHOIS.'
-    '/api/reputation'   = 'DNSBL/RBL blocklist listing status for the domain mail IPs.'
+    '/api/reputation'   = 'Separate mail-target IPv4 DNSBL and control-validated literal-domain reputation results.'
     '/api/website'      = 'HTTP reachability probe with page title and description.'
     '/api/nameservers'  = 'Queries each authoritative nameserver directly and compares their TXT records.'
     '/api/propagation'  = 'Queries public recursive resolvers worldwide and reports propagation coverage.'

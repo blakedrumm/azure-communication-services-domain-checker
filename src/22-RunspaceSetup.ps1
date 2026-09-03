@@ -26,12 +26,13 @@ $functionNames = @(
   'Get-AnonymousMetricsPersistPath','Import-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions','ConvertTo-Iso8601Utc',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
+  'Get-RegistrableDomain','ConvertTo-AsciiDomainName','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
   'ConvertFrom-DnsTxtPresentationData','Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Select-SpfRecordFromSet','Merge-SpfRecordSet','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
+  'Get-DomainReputationProviderCatalog','Get-DomainReputationCacheKey','Get-DomainReputationCacheEntry','Set-DomainReputationCacheEntry','Remove-DomainReputationCacheEntry','Get-DomainReputationHealthEntry','Set-DomainReputationHealthEntry','Test-DomainReputationQueryBudget','Test-DomainReputationProviderBudget','Get-DomainReputationAuthorityHosts','New-DomainReputationDnsQueryPacket','Read-DomainReputationDnsResponse','Invoke-DomainReputationDnsFanout','Test-DomainReputationPositiveControl','Test-DomainReputationProviderControl','ConvertFrom-DomainReputationProviderOutcome','Get-DomainReputationProviderEndpoints','Get-DomainReputationStatus','Get-CombinedReputationState',
   'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
   'Invoke-RawDnsTxtQuery','Get-AuthoritativeNameserverHosts','Resolve-NameserverPublicIps','Get-NameserverTxtStatus',
   'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Get-DnsPropagationHealthTtlMinutes','Get-DnsPropagationHealthState','Set-DnsPropagationHealthState','ConvertFrom-DnsPropagationResolverInput','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
@@ -80,6 +81,30 @@ if ($global:AcsWhoisServerCooldown) {
 # health pre-check could never learn across requests.
 if ($global:AcsPropagationHealth) {
   $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsPropagationHealth', $global:AcsPropagationHealth, 'Shared DNS propagation resolver health cache'))
+}
+
+# Share domain-reputation state so provider controls, answer caches and traffic
+# budgets apply process-wide rather than once per request worker.
+if ($global:AcsDomainReputationCache) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationCache', $global:AcsDomainReputationCache, 'Shared literal-domain reputation cache'))
+}
+if ($global:AcsDomainReputationHealth) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationHealth', $global:AcsDomainReputationHealth, 'Shared literal-domain provider health cache'))
+}
+if ($global:AcsDomainReputationProviderBudgets) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationProviderBudgets', $global:AcsDomainReputationProviderBudgets, 'Shared per-provider query budgets'))
+}
+if ($global:AcsDomainReputationGate) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationGate', $global:AcsDomainReputationGate, 'Shared literal-domain reputation concurrency gate'))
+}
+if ($global:AcsDomainReputationBudgetLock) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationBudgetLock', $global:AcsDomainReputationBudgetLock, 'Shared literal-domain provider budget lock'))
+}
+if ($global:AcsDomainReputationBudgetState) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationBudgetState', $global:AcsDomainReputationBudgetState, 'Shared literal-domain provider budget state'))
+}
+if ($global:AcsDomainReputationCacheKey) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationCacheKey', $global:AcsDomainReputationCacheKey, 'Process-random literal-domain cache key'))
 }
 
 foreach ($name in $functionNames) {

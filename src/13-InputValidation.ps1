@@ -30,6 +30,10 @@ function ConvertTo-NormalizedDomain {
   $domain = $domain -replace '^\*\.', ''
   $domain = $domain.Trim().Trim('.')
 
+  # IDN to A-label BEFORE lowercasing: IDNA case-folds non-ASCII scripts correctly,
+  # which ToLowerInvariant does not. Test-DomainName then validates the FINAL value.
+  $domain = ConvertTo-AsciiDomainName -Name $domain
+
   return $domain.ToLowerInvariant()
 }
 

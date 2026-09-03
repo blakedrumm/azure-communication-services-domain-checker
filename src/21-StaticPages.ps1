@@ -325,7 +325,7 @@ $script:PrivacyPageHtml = @'
 <ul>
   <li id="privacySection2Item1"><strong>No personal information</strong> &mdash; the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.</li>
   <li id="privacySection2Item2"><strong>No tracking cookies</strong> &mdash; the Tool does not use advertising or analytics tracking cookies.</li>
-  <li id="privacySection2Item3"><strong>No query logging</strong> &mdash; domain names you look up are not stored on the server.</li>
+  <li id="privacySection2Item3"><strong>No query logging</strong> &mdash; domain names you look up are never written to logs or saved to disk.</li>
 </ul>
 
 <h2 id="privacySection3Title">3. Anonymous Usage Metrics (Optional)</h2>
@@ -344,7 +344,7 @@ $script:PrivacyPageHtml = @'
 <p id="privacySection5Body">When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool&rsquo;s server does not proxy, log, or store any Azure data.</p>
 
 <h2 id="privacySection6Title">6. DNS Lookups</h2>
-<p id="privacySection6Body">DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.</p>
+<p id="privacySection6Body">DNS queries are performed server-side using the configured resolver or selected reputation provider. Queried domain names are sent to those services. Results may be cached briefly in process memory to limit provider traffic, but are not persisted to disk.</p>
 
 <h2 id="privacySection7Title">7. Browser Storage and Cookie Consent</h2>
 <p id="privacySection7Body">The Tool uses your browser&rsquo;s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.</p>
@@ -356,7 +356,7 @@ $script:PrivacyPageHtml = @'
 <p><a id="privacyManageCookiesLink" href="/?openCookieSettings=1">Manage cookie settings</a></p>
 
 <h2 id="privacySection8Title">8. Third-Party Services</h2>
-<p id="privacySection8Body">The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.</p>
+<p id="privacySection8Body">The Tool may use third-party services for DNS resolution, WHOIS lookups, IP blocklists, and literal-domain reputation checks. Selected providers receive the domain being checked and have their own privacy policies and usage terms.</p>
 
 <h2 id="privacySection9Title">9. Changes to This Statement</h2>
 <p id="privacySection9Body">This privacy statement may be updated from time to time. Changes take effect when published in the Tool.</p>
@@ -369,7 +369,7 @@ $script:PrivacyPageHtml = @'
     en: {
       pageTitle: 'Privacy Statement - ACS Email Domain Checker', back: '\u2190 Back to ACS Email Domain Checker', title: 'Privacy Statement', updatedLabel: 'Last updated:', updatedValue: 'March 2026',
       s1t: '1. Overview', s1b: 'The ACS Email Domain Checker (\u201Cthe Tool\u201D) is designed with privacy in mind. This statement explains what data the Tool does and does not collect.',
-      s2t: '2. Data We Do Not Collect', s2l1: '<strong>No personal information</strong> \u2014 the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.', s2l2: '<strong>No tracking cookies</strong> \u2014 the Tool does not use advertising or analytics tracking cookies.', s2l3: '<strong>No query logging</strong> \u2014 domain names you look up are not stored on the server.',
+      s2t: '2. Data We Do Not Collect', s2l1: '<strong>No personal information</strong> \u2014 the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.', s2l2: '<strong>No tracking cookies</strong> \u2014 the Tool does not use advertising or analytics tracking cookies.', s2l3: '<strong>No query logging</strong> \u2014 domain names you look up are never written to logs or saved to disk.',
       s3t: '3. Anonymous Usage Metrics (Optional)', s3i: 'When anonymous metrics are enabled, the Tool collects:', s3l1: 'HMAC-hashed domain names (irreversible; the original domain cannot be recovered).', s3l2: 'Aggregate lookup counters and first-seen timestamps.', s3l3: 'A random session identifier (not persisted across restarts).', s3b: 'Anonymous metrics can be disabled entirely with the <code>-DisableAnonymousMetrics</code> flag.',
       s4t: '4. Microsoft Entra ID Authentication', s4b: 'If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser\u2019s session storage and are never sent to the Tool\u2019s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.',
       s5t: '5. Azure Resource Queries', s5b: 'When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool\u2019s server does not proxy, log, or store any Azure data.',
@@ -491,6 +491,34 @@ $script:PrivacyPageHtml = @'
     if (value === 'ru' || value.startsWith('ru-ru') || value.startsWith('ru_ru')) return 'ru-RU';
     return 'en';
   }
+
+  const PRIVACY_DNS_OVERRIDES = {
+    en: {
+      s6b: 'DNS queries are performed server-side using the configured resolver or selected reputation provider. Queried domain names are sent to those services. Results may be cached briefly in process memory to limit provider traffic, but are not persisted to disk.',
+      s8b: 'The Tool may use third-party services for DNS resolution, WHOIS lookups, IP blocklists, and literal-domain reputation checks. Selected providers receive the domain being checked and have their own privacy policies and usage terms.'
+    },
+    es: {
+      s6b: 'Las consultas DNS se realizan en el servidor mediante el solucionador configurado o el proveedor de reputaci\u00F3n seleccionado. Los nombres de dominio consultados se env\u00EDan a esos servicios. Los resultados pueden almacenarse brevemente en la memoria del proceso, pero no se guardan en disco.',
+      s8b: 'La Herramienta puede usar servicios de terceros para resoluci\u00F3n DNS, consultas WHOIS, listas de bloqueo de IP y reputaci\u00F3n de dominios. Los proveedores seleccionados reciben el dominio consultado y tienen sus propias pol\u00EDticas y condiciones.'
+    },
+    fr: {
+      s6b: 'Les requ\u00EAtes DNS sont effectu\u00E9es c\u00F4t\u00E9 serveur avec le r\u00E9solveur configur\u00E9 ou le fournisseur de r\u00E9putation s\u00E9lectionn\u00E9. Les domaines interrog\u00E9s sont envoy\u00E9s \u00E0 ces services. Les r\u00E9sultats peuvent \u00EAtre bri\u00E8vement mis en cache en m\u00E9moire, mais ne sont pas persist\u00E9s sur disque.',
+      s8b: 'L\u2019Outil peut utiliser des services tiers pour la r\u00E9solution DNS, WHOIS, les listes de blocage IP et la r\u00E9putation de domaines. Les fournisseurs s\u00E9lectionn\u00E9s re\u00E7oivent le domaine interrog\u00E9 et appliquent leurs propres politiques et conditions.'
+    },
+    de: {
+      s6b: 'DNS-Abfragen werden serverseitig mit dem konfigurierten Resolver oder ausgew\u00E4hlten Reputationsanbieter ausgef\u00FChrt. Abgefragte Dom\u00E4nen werden an diese Dienste gesendet. Ergebnisse k\u00F6nnen kurzzeitig im Prozessspeicher zwischengespeichert, aber nicht auf Datentr\u00E4gern persistiert werden.',
+      s8b: 'Das Tool kann Drittanbieter f\u00FCr DNS-Aufl\u00F6sung, WHOIS, IP-Sperrlisten und Dom\u00E4nen-Reputation verwenden. Ausgew\u00E4hlte Anbieter erhalten die abgefragte Dom\u00E4ne und haben eigene Datenschutzrichtlinien und Nutzungsbedingungen.'
+    },
+    'pt-BR': {
+      s6b: 'As consultas DNS s\u00E3o realizadas no servidor usando o resolvedor configurado ou o provedor de reputa\u00E7\u00E3o selecionado. Os dom\u00EDnios consultados s\u00E3o enviados a esses servi\u00E7os. Os resultados podem ser armazenados brevemente na mem\u00F3ria do processo, mas n\u00E3o s\u00E3o persistidos em disco.',
+      s8b: 'A Ferramenta pode usar servi\u00E7os de terceiros para DNS, WHOIS, listas de bloqueio de IP e reputa\u00E7\u00E3o de dom\u00EDnios. Os provedores selecionados recebem o dom\u00EDnio consultado e t\u00EAm suas pr\u00F3prias pol\u00EDticas e termos.'
+    }
+  };
+  Object.keys(TRANSLATIONS).forEach(code => {
+    const override = PRIVACY_DNS_OVERRIDES[code] || PRIVACY_DNS_OVERRIDES.en;
+    TRANSLATIONS[code].s6b = override.s6b;
+    TRANSLATIONS[code].s8b = override.s8b;
+  });
 
   const params = new URLSearchParams(window.location.search);
   const lang = normalizeLanguageCode(params.get('lang') || navigator.language || 'en');

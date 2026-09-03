@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 2.13.2). Leave empty to extract from acs-domain-checker.ps1'
+        description: 'Version to publish (e.g., 2.16.0). Leave empty to extract from acs-domain-checker.ps1'
         required: false
         default: ''
 
@@ -21,6 +21,7 @@ jobs:
     outputs:
       version: ${{ steps.get-version.outputs.version }}
       linux-tag: ${{ steps.get-version.outputs.linux-tag }}
+      artifact-sha: ${{ steps.verify-artifact.outputs.artifact-sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -47,6 +48,70 @@ jobs:
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "linux-tag=linux-$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Verify release artifact matches source
+        id: verify-artifact
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.get-version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # acs-domain-checker.ps1 is GENERATED from src/ and is what ships inside the
+          # image, so publishing without checking it can ship code that is not in src/.
+          function Get-NormalizedSha([string]$Path) {
+            # Compare newline-normalized text rather than raw bytes: the repo has no
+            # .gitattributes, so a runner checkout could differ only in line endings.
+            $text = [System.IO.File]::ReadAllText($Path) -replace "`r`n", "`n"
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+              return (-join ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') }))
+            } finally { $sha.Dispose() }
+          }
+
+          $artifactPath = Join-Path $env:GITHUB_WORKSPACE 'acs-domain-checker.ps1'
+          $rebuiltPath = Join-Path $env:RUNNER_TEMP 'acs-domain-checker.rebuilt.ps1'
+          if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) { throw "Release artifact not found: $artifactPath" }
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_VERSION)) { throw 'Resolved release version is empty.' }
+
+          # -SkipUiAssetDownload keeps the gate off the network so a CDN hiccup cannot
+          # fail a release for a reason unrelated to correctness.
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./Build-Release.ps1 -OutputPath $rebuiltPath -Force -SkipUiAssetDownload
+          if ($LASTEXITCODE -ne 0) { throw "Artifact rebuild failed with exit code $LASTEXITCODE." }
+
+          $failed = $false
+          $committedSha = Get-NormalizedSha $artifactPath
+          $rebuiltSha = Get-NormalizedSha $rebuiltPath
+
+          if ($committedSha -cne $rebuiltSha) {
+            Write-Output "::error file=acs-domain-checker.ps1::Committed acs-domain-checker.ps1 does not match a rebuild from src/. Run: pwsh -NoProfile -File ./Build-Release.ps1 -Force -SkipUiAssetDownload   then commit the regenerated artifact."
+            Write-Output "committed=$committedSha"
+            Write-Output "rebuilt  =$rebuiltSha"
+            $failed = $true
+          } elseif ((Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $rebuiltPath -Algorithm SHA256).Hash) {
+            Write-Output "::warning file=acs-domain-checker.ps1::Artifact matches after newline normalization but differs in raw bytes (line-ending drift)."
+          }
+
+          $versionPattern = '(?m)^[ \t]*\$script:AppVersion[ \t]*=[ \t]*(?<q>[''"])(?<v>[^''"\r\n]+)\k<q>'
+          $versionMatches = [regex]::Matches([System.IO.File]::ReadAllText($rebuiltPath), $versionPattern)
+          if ($versionMatches.Count -ne 1) {
+            Write-Output '::error file=src/03-MetricsHashKey.ps1::Expected exactly one literal $script:AppVersion assignment in the rebuilt artifact.'
+            $failed = $true
+          } else {
+            $artifactVersion = $versionMatches[0].Groups['v'].Value
+            # A tag may add a pre-release suffix (2.16.0-rc1), but its numeric core must
+            # identify the code inside the image. A free-text override would reopen the
+            # mislabeling hole this gate exists to close.
+            $versionOk = ($env:RELEASE_VERSION -ceq $artifactVersion) -or $env:RELEASE_VERSION.StartsWith("$artifactVersion-", [System.StringComparison]::Ordinal)
+            if (-not $versionOk) {
+              Write-Output "::error file=src/03-MetricsHashKey.ps1::Release version '$($env:RELEASE_VERSION)' does not match the compiled artifact version '$artifactVersion'. Update src/03-MetricsHashKey.ps1 and rebuild, or correct the tag. A pre-release suffix such as '$artifactVersion-rc1' is allowed."
+              $failed = $true
+            }
+          }
+
+          if ($failed) { exit 1 }
+          "artifact-sha=$committedSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Output "Release gate passed. Artifact matches src/ and version $artifactVersion is consistent."
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -87,6 +152,25 @@ jobs:
           Write-Output "Using version: $VERSION"
           Write-Output "version=$VERSION" >> $env:GITHUB_OUTPUT
           Write-Output "windows-tag=windows-$VERSION" >> $env:GITHUB_OUTPUT
+
+      - name: Verify release artifact matches the gated build
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ needs.build-linux.outputs.artifact-sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # This job can be re-run on its own after the Linux job already succeeded,
+          # which would otherwise push an unverified artifact.
+          if ([string]::IsNullOrWhiteSpace($env:EXPECTED_SHA)) { throw 'No verified artifact hash was published by the Linux job.' }
+          $text = [System.IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'acs-domain-checker.ps1')) -replace "`r`n", "`n"
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $actual = (-join ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') }))
+          } finally { $sha.Dispose() }
+          if ($actual -cne $env:EXPECTED_SHA) {
+            throw "Windows job artifact ($actual) does not match the artifact verified by the Linux job ($($env:EXPECTED_SHA))."
+          }
+          Write-Output 'Artifact matches the gated build.'
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v4

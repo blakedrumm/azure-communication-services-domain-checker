@@ -259,6 +259,9 @@ function Get-DnsReputationStatus {
 
   $lookupDomain = $Domain
   $usedParent = $false
+  $nullMx = $false
+  $ipCheckState = 'unknown'
+  $ipCheckReason = $null
 
   function Get-IPv4FromHost {
     param([string]$HostName)
@@ -315,14 +318,25 @@ function Get-DnsReputationStatus {
   $targets = @()
   $ipSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-  # Prefer MX hosts, otherwise fall back to A on the root domain.
+  # Prefer MX hosts, otherwise fall back to A on the root domain. Normalize
+  # exchanges before deciding: RFC 7505 Null MX (MX 0 .) arrives as "." from
+  # DoH and as an empty value from some system-resolver implementations.
   $mx = @(Get-MxRecordObjects -Records (ResolveSafely $Domain 'MX'))
   $hosts = @()
+  $targetSource = 'mx'
   if ($mx) {
-    $hosts = @($mx | Sort-Object Preference, NameExchange | Select-Object -First $maxTargets -ExpandProperty NameExchange)
+    $hosts = @($mx |
+      Sort-Object Preference, NameExchange |
+      ForEach-Object { ([string]$_.NameExchange).Trim().TrimEnd('.') } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Select-Object -First $maxTargets)
+    $nullMx = ($hosts.Count -eq 0 -and @($mx | Where-Object {
+      [int]$_.Preference -eq 0 -and [string]::IsNullOrWhiteSpace((([string]$_.NameExchange).Trim().TrimEnd('.')))
+    }).Count -gt 0)
   }
-  if (-not $hosts -or $hosts.Count -eq 0) {
+  if (-not $nullMx -and (-not $hosts -or $hosts.Count -eq 0)) {
     $hosts = @($Domain)
+    $targetSource = 'apex'
   }
 
   foreach ($h in $hosts) {
@@ -337,10 +351,14 @@ function Get-DnsReputationStatus {
     $targets += [pscustomobject]@{
       hostname = $hostName
       ipAddresses = $v4
+      source = $targetSource
     }
   }
 
-  if ($ipSet.Count -eq 0) {
+  # Null MX explicitly declares that the domain operates no mail service. Never
+  # fall back to parent or website addresses in that state: those IPs are not
+  # sending-mail infrastructure and their DNSBL reputation would be misleading.
+  if ($ipSet.Count -eq 0 -and -not $nullMx) {
     foreach ($parentDomain in @(Get-ParentDomains -Domain $Domain)) {
       if ([string]::IsNullOrWhiteSpace($parentDomain) -or $parentDomain -eq $Domain) { continue }
 
@@ -363,6 +381,7 @@ function Get-DnsReputationStatus {
         $targets += [pscustomobject]@{
           hostname = $phName
           ipAddresses = $v4p
+          source = 'parent'
         }
       }
 
@@ -372,6 +391,14 @@ function Get-DnsReputationStatus {
 
   $allIps = @($ipSet | Sort-Object)
   $ips = @($allIps | Select-Object -First $maxIps)
+  if ($nullMx) {
+    $ipCheckState = 'notApplicable'
+    $ipCheckReason = 'nullMx'
+  } elseif ($ips.Count -gt 0) {
+    $ipCheckState = 'checked'
+  } else {
+    $ipCheckReason = 'noAddresses'
+  }
   $skippedIpCount = [Math]::Max(0, $allIps.Count - $ips.Count)
   $pairs = New-Object System.Collections.Generic.List[pscustomobject]
   foreach ($ip in $ips) {
@@ -399,7 +426,7 @@ function Get-DnsReputationStatus {
   $ttl = [int]$script:RblCacheTtlSec
 
   try {
-    [System.Threading.Tasks.Parallel]::ForEach(
+    $null = [System.Threading.Tasks.Parallel]::ForEach(
       $pairs,
       $options,
       [System.Action[object]]{
@@ -439,16 +466,39 @@ function Get-DnsReputationStatus {
   $totalCount = $resultsArray.Count
   $notListedCount = $totalCount - $listedCount - $errorCount
   $validQueryCount = [Math]::Max(0, $totalCount - $errorCount)
-  $riskSummary = if ($listedCount -ge 2) { 'ElevatedRisk' } elseif ($listedCount -eq 1 -or $errorCount -gt 0) { 'Warning' } elseif ($validQueryCount -eq 0) { 'Unknown' } else { 'Clean' }
+  $riskSummary = if ($nullMx) { 'NotApplicable' } elseif ($listedCount -ge 2) { 'ElevatedRisk' } elseif ($listedCount -eq 1 -or $errorCount -gt 0) { 'Warning' } elseif ($validQueryCount -eq 0) { 'Unknown' } else { 'Clean' }
+
+  # Literal-domain reputation is a separate scope with provider-specific
+  # controls and counters. Keep every legacy top-level field mail-IP-only so
+  # existing API consumers retain the same meanings and collection shapes.
+  $domainReputation = Get-DomainReputationStatus -Domain $Domain
+  $overallReputationState = Get-CombinedReputationState -IpSummary ([pscustomobject]@{
+    totalQueries = $totalCount
+    errorCount = $errorCount
+    listedCount = $listedCount
+  }) -IpCheckState $ipCheckState -DomainReputation $domainReputation
+  $overallRiskSummary = switch ($overallReputationState) {
+    'clean' { 'Clean' }
+    'listed' { 'Warning' }
+    'partial' { 'Warning' }
+    'notApplicable' { 'NotApplicable' }
+    default { 'Unknown' }
+  }
 
   [pscustomobject]@{
     domain = $Domain
     lookupDomain = $lookupDomain
     lookupUsedParent = $usedParent
+    nullMx = $nullMx
+    ipCheckState = $ipCheckState
+    ipCheckReason = $ipCheckReason
     generatedAtUtc = ([DateTime]::UtcNow.ToString('o'))
     targets = $targets
     rblZones = $zones
     results = $resultsArray
+    domainReputation = $domainReputation
+    overallReputationState = $overallReputationState
+    overallRiskSummary = $overallRiskSummary
     summary = [pscustomobject]@{
       totalQueries = $totalCount
       listedCount = $listedCount

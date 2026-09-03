@@ -333,24 +333,67 @@ function ConvertFrom-PublicSuffixListFile {
     # A rule ends at the first whitespace (the PSL format keeps one rule per line).
     $rule = ($line -split '\s+')[0]
     if ([string]::IsNullOrWhiteSpace($rule)) { continue }
-    $rule = $rule.ToLowerInvariant()
 
-    if ($rule.StartsWith('!')) {
-      # Exception rule: the labels after '!' are NOT a public suffix.
-      $null = $exceptions.Add($rule.Substring(1))
+    # The PSL publishes IDN suffixes ONLY in Unicode form (the xn-- spelling appears
+    # only inside comments), but queries always arrive as A-labels. Store BOTH forms,
+    # or an IDN suffix never matches and Get-RegistrableDomain silently returns the
+    # public suffix itself. Lowercasing happens after the mapper, not before.
+    $prefix = ''
+    $body = $rule
+    if ($body.StartsWith('!')) { $prefix = '!'; $body = $body.Substring(1) }
+    elseif ($body.StartsWith('*.')) { $prefix = '*.'; $body = $body.Substring(2) }
+
+    $bodyLower = $body.ToLowerInvariant()
+    $bodyAscii = (ConvertTo-AsciiDomainName -Name $body).ToLowerInvariant()
+
+    if ($prefix -eq '!') {
+      $null = $exceptions.Add($bodyLower)
+      if ($bodyAscii -ne $bodyLower) { $null = $exceptions.Add($bodyAscii) }
     }
-    elseif ($rule.StartsWith('*.')) {
-      # Wildcard rule: store only the fixed remainder after '*.'.
-      $null = $wildcards.Add($rule.Substring(2))
+    elseif ($prefix -eq '*.') {
+      $null = $wildcards.Add($bodyLower)
+      if ($bodyAscii -ne $bodyLower) { $null = $wildcards.Add($bodyAscii) }
     }
     else {
-      $null = $exact.Add($rule)
+      $null = $exact.Add($bodyLower)
+      if ($bodyAscii -ne $bodyLower) { $null = $exact.Add($bodyAscii) }
     }
   }
 
   if ($exact.Count -eq 0 -and $wildcards.Count -eq 0) { return $null }
 
   return @{ exact = $exact; wildcards = $wildcards; exceptions = $exceptions }
+}
+
+# Convert a possibly-internationalized (Unicode) domain to its IDNA A-label
+# ("punycode") form. Everything downstream is ASCII-only: the raw DNS packet
+# builders, the port-43 WHOIS writer, RDAP/DoH URLs, PSL matching and the metrics
+# HMAC. This is the single place the conversion is allowed to happen.
+function ConvertTo-AsciiDomainName {
+  param([string]$Name)
+
+  if ([string]::IsNullOrWhiteSpace($Name)) { return $Name }
+
+  # Fast path for input that is already ASCII (including existing xn-- input).
+  # Skipping the mapper guarantees a byte-identical result for every domain the
+  # tool accepted before IDN support existed.
+  $isAscii = $true
+  foreach ($ch in $Name.ToCharArray()) {
+    if ([int]$ch -gt 127) { $isAscii = $false; break }
+  }
+  if ($isAscii) { return $Name }
+
+  try {
+    # Defaults are deliberate: Test-DomainName already enforces a stricter LDH rule
+    # on the RESULT, and AllowUnassigned stays false so unknown code points fail closed.
+    $idn = [System.Globalization.IdnMapping]::new()
+    return $idn.GetAscii($Name)
+  } catch {
+    # Malformed IDN. Return the input unchanged so Test-DomainName rejects it
+    # normally instead of this surfacing as an HTTP 500.
+    $null = $_
+    return $Name
+  }
 }
 
 # Load (and lazily refresh) the parsed PSL rule sets, caching in-process. Returns
@@ -1665,9 +1708,15 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.13.2'
+$script:AppVersion = '2.16.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
-  $script:AppVersion = $env:ACS_APP_VERSION
+  # Validate at the boundary: this value is interpolated into generated JSON
+  # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
+  # emit a malformed document. Accept only version-shaped characters.
+  $candidateVersion = ([string]$env:ACS_APP_VERSION).Trim()
+  if ($candidateVersion.Length -le 64 -and $candidateVersion -match '^[0-9A-Za-z][0-9A-Za-z.\-+_]*$') {
+    $script:AppVersion = $candidateVersion
+  }
 }
 
 # Acquire a cross-process mutex to protect the metrics JSON file from concurrent writes.
@@ -5249,7 +5298,7 @@ Version: __ACS_VERSION__
 - [DKIM](__ACS_ROOT__/api/dkim?domain=example.com): ACS `selector1`/`selector2` DKIM keys.
 - [CNAME](__ACS_ROOT__/api/cname?domain=example.com): CNAME chain resolution.
 - [WHOIS / RDAP](__ACS_ROOT__/api/whois?domain=example.com): registrar, creation and expiry dates, domain age.
-- [Blocklist reputation](__ACS_ROOT__/api/reputation?domain=example.com): DNSBL/RBL listing status for the domain's mail IPs.
+- [Blocklist reputation](__ACS_ROOT__/api/reputation?domain=example.com): separate mail-target IPv4 DNSBL and control-validated literal-domain reputation results. URIBL Multi, NordSpam DBL, and Spam Eating Monkey URI are enabled by default; control failures never become clean results.
 - [Website probe](__ACS_ROOT__/api/website?domain=example.com): HTTP reachability and page title/description.
 - [Nameserver consistency](__ACS_ROOT__/api/nameservers?domain=example.com): queries each authoritative nameserver directly and reports whether they serve identical TXT records.
 - [Global DNS propagation](__ACS_ROOT__/api/propagation?domain=example.com&type=TXT&max=25): queries public recursive resolvers worldwide and reports what percentage see the record.
@@ -5334,7 +5383,7 @@ function Get-AcsOpenApiJson {
     '/api/dkim'         = 'ACS selector1/selector2 DKIM public keys.'
     '/api/cname'        = 'CNAME chain resolution.'
     '/api/whois'        = 'Registrar, creation/expiry dates and domain age via RDAP or WHOIS.'
-    '/api/reputation'   = 'DNSBL/RBL blocklist listing status for the domain mail IPs.'
+    '/api/reputation'   = 'Separate mail-target IPv4 DNSBL and control-validated literal-domain reputation results.'
     '/api/website'      = 'HTTP reachability probe with page title and description.'
     '/api/nameservers'  = 'Queries each authoritative nameserver directly and compares their TXT records.'
     '/api/propagation'  = 'Queries public recursive resolvers worldwide and reports propagation coverage.'
@@ -7039,6 +7088,10 @@ function ConvertTo-NormalizedDomain {
   # Remove wildcard prefix and surrounding dots/spaces
   $domain = $domain -replace '^\*\.', ''
   $domain = $domain.Trim().Trim('.')
+
+  # IDN to A-label BEFORE lowercasing: IDNA case-folds non-ASCII scripts correctly,
+  # which ToLowerInvariant does not. Test-DomainName then validates the FINAL value.
+  $domain = ConvertTo-AsciiDomainName -Name $domain
 
   return $domain.ToLowerInvariant()
 }
@@ -13337,6 +13390,9 @@ function Get-DnsReputationStatus {
 
   $lookupDomain = $Domain
   $usedParent = $false
+  $nullMx = $false
+  $ipCheckState = 'unknown'
+  $ipCheckReason = $null
 
   function Get-IPv4FromHost {
     param([string]$HostName)
@@ -13393,14 +13449,25 @@ function Get-DnsReputationStatus {
   $targets = @()
   $ipSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-  # Prefer MX hosts, otherwise fall back to A on the root domain.
+  # Prefer MX hosts, otherwise fall back to A on the root domain. Normalize
+  # exchanges before deciding: RFC 7505 Null MX (MX 0 .) arrives as "." from
+  # DoH and as an empty value from some system-resolver implementations.
   $mx = @(Get-MxRecordObjects -Records (ResolveSafely $Domain 'MX'))
   $hosts = @()
+  $targetSource = 'mx'
   if ($mx) {
-    $hosts = @($mx | Sort-Object Preference, NameExchange | Select-Object -First $maxTargets -ExpandProperty NameExchange)
+    $hosts = @($mx |
+      Sort-Object Preference, NameExchange |
+      ForEach-Object { ([string]$_.NameExchange).Trim().TrimEnd('.') } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Select-Object -First $maxTargets)
+    $nullMx = ($hosts.Count -eq 0 -and @($mx | Where-Object {
+      [int]$_.Preference -eq 0 -and [string]::IsNullOrWhiteSpace((([string]$_.NameExchange).Trim().TrimEnd('.')))
+    }).Count -gt 0)
   }
-  if (-not $hosts -or $hosts.Count -eq 0) {
+  if (-not $nullMx -and (-not $hosts -or $hosts.Count -eq 0)) {
     $hosts = @($Domain)
+    $targetSource = 'apex'
   }
 
   foreach ($h in $hosts) {
@@ -13415,10 +13482,14 @@ function Get-DnsReputationStatus {
     $targets += [pscustomobject]@{
       hostname = $hostName
       ipAddresses = $v4
+      source = $targetSource
     }
   }
 
-  if ($ipSet.Count -eq 0) {
+  # Null MX explicitly declares that the domain operates no mail service. Never
+  # fall back to parent or website addresses in that state: those IPs are not
+  # sending-mail infrastructure and their DNSBL reputation would be misleading.
+  if ($ipSet.Count -eq 0 -and -not $nullMx) {
     foreach ($parentDomain in @(Get-ParentDomains -Domain $Domain)) {
       if ([string]::IsNullOrWhiteSpace($parentDomain) -or $parentDomain -eq $Domain) { continue }
 
@@ -13441,6 +13512,7 @@ function Get-DnsReputationStatus {
         $targets += [pscustomobject]@{
           hostname = $phName
           ipAddresses = $v4p
+          source = 'parent'
         }
       }
 
@@ -13450,6 +13522,14 @@ function Get-DnsReputationStatus {
 
   $allIps = @($ipSet | Sort-Object)
   $ips = @($allIps | Select-Object -First $maxIps)
+  if ($nullMx) {
+    $ipCheckState = 'notApplicable'
+    $ipCheckReason = 'nullMx'
+  } elseif ($ips.Count -gt 0) {
+    $ipCheckState = 'checked'
+  } else {
+    $ipCheckReason = 'noAddresses'
+  }
   $skippedIpCount = [Math]::Max(0, $allIps.Count - $ips.Count)
   $pairs = New-Object System.Collections.Generic.List[pscustomobject]
   foreach ($ip in $ips) {
@@ -13477,7 +13557,7 @@ function Get-DnsReputationStatus {
   $ttl = [int]$script:RblCacheTtlSec
 
   try {
-    [System.Threading.Tasks.Parallel]::ForEach(
+    $null = [System.Threading.Tasks.Parallel]::ForEach(
       $pairs,
       $options,
       [System.Action[object]]{
@@ -13517,16 +13597,39 @@ function Get-DnsReputationStatus {
   $totalCount = $resultsArray.Count
   $notListedCount = $totalCount - $listedCount - $errorCount
   $validQueryCount = [Math]::Max(0, $totalCount - $errorCount)
-  $riskSummary = if ($listedCount -ge 2) { 'ElevatedRisk' } elseif ($listedCount -eq 1 -or $errorCount -gt 0) { 'Warning' } elseif ($validQueryCount -eq 0) { 'Unknown' } else { 'Clean' }
+  $riskSummary = if ($nullMx) { 'NotApplicable' } elseif ($listedCount -ge 2) { 'ElevatedRisk' } elseif ($listedCount -eq 1 -or $errorCount -gt 0) { 'Warning' } elseif ($validQueryCount -eq 0) { 'Unknown' } else { 'Clean' }
+
+  # Literal-domain reputation is a separate scope with provider-specific
+  # controls and counters. Keep every legacy top-level field mail-IP-only so
+  # existing API consumers retain the same meanings and collection shapes.
+  $domainReputation = Get-DomainReputationStatus -Domain $Domain
+  $overallReputationState = Get-CombinedReputationState -IpSummary ([pscustomobject]@{
+    totalQueries = $totalCount
+    errorCount = $errorCount
+    listedCount = $listedCount
+  }) -IpCheckState $ipCheckState -DomainReputation $domainReputation
+  $overallRiskSummary = switch ($overallReputationState) {
+    'clean' { 'Clean' }
+    'listed' { 'Warning' }
+    'partial' { 'Warning' }
+    'notApplicable' { 'NotApplicable' }
+    default { 'Unknown' }
+  }
 
   [pscustomobject]@{
     domain = $Domain
     lookupDomain = $lookupDomain
     lookupUsedParent = $usedParent
+    nullMx = $nullMx
+    ipCheckState = $ipCheckState
+    ipCheckReason = $ipCheckReason
     generatedAtUtc = ([DateTime]::UtcNow.ToString('o'))
     targets = $targets
     rblZones = $zones
     results = $resultsArray
+    domainReputation = $domainReputation
+    overallReputationState = $overallReputationState
+    overallRiskSummary = $overallRiskSummary
     summary = [pscustomobject]@{
       totalQueries = $totalCount
       listedCount = $listedCount
@@ -13539,6 +13642,1112 @@ function Get-DnsReputationStatus {
   }
 }
 
+# ===== Literal-Domain Reputation (RHSBL / URIBL) =====
+# This is deliberately separate from 17-DnsReputation.ps1's mail-server IPv4
+# DNSBL checks. URI/domain lists query a registrable domain directly and have
+# provider-specific access controls and response codes; mixing both scopes into
+# one percentage would produce misleading results.
+
+if (-not $global:AcsDomainReputationCache) {
+  $global:AcsDomainReputationCache = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+}
+if (-not $global:AcsDomainReputationHealth) {
+  $global:AcsDomainReputationHealth = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+}
+if (-not $global:AcsDomainReputationProviderBudgets) {
+  $global:AcsDomainReputationProviderBudgets = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+}
+if (-not $global:AcsDomainReputationGate) {
+  $global:AcsDomainReputationGate = [System.Threading.SemaphoreSlim]::new(4, 4)
+}
+if (-not $global:AcsDomainReputationBudgetLock) {
+  $global:AcsDomainReputationBudgetLock = [System.Threading.SemaphoreSlim]::new(1, 1)
+}
+if (-not $global:AcsDomainReputationBudgetState) {
+  $global:AcsDomainReputationBudgetState = [pscustomobject]@{ tokens = 120.0; updatedAtUtc = [DateTime]::UtcNow }
+}
+if (-not $global:AcsDomainReputationCacheKey) {
+  $keyBytes = New-Object byte[] 32
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($keyBytes) } finally { $rng.Dispose() }
+  $global:AcsDomainReputationCacheKey = $keyBytes
+}
+
+# Provider profiles are code-owned because each service has different controls,
+# categories and policy-block responses. Operator configuration selects IDs only;
+# it cannot inject an arbitrary DNS destination or decoder.
+function Get-DomainReputationProviderCatalog {
+  return @(
+    [pscustomobject]@{
+      id = 'uribl'
+      displayName = 'URIBL Multi'
+      queryZone = 'multi.uribl.com'
+      authorityDomain = 'multi.uribl.com'
+      controlDomain = 'test.uribl.com'
+      controlExpected = @('127.0.0.14')
+      controlMatch = 'exactSet'
+      negativeControlDomain = 'invalid'
+      classifier = 'uribl'
+      queryNameMode = 'registrableDomain'
+      defaultEnabled = $true
+      profileVersion = 2
+      queriesPerMinute = 60
+      queryBurst = 60
+      policyUrl = 'https://www.uribl.com/about.shtml'
+    },
+    [pscustomobject]@{
+      id = 'nordspam'
+      displayName = 'NordSpam DBL'
+      queryZone = 'dbl.nordspam.com'
+      authorityDomain = 'dbl.nordspam.com'
+      controlDomain = 'test'
+      controlExpected = @('127.0.0.2')
+      controlMatch = 'exactSet'
+      negativeControlDomain = 'invalid'
+      classifier = 'binary127002'
+      queryNameMode = 'registrableDomain'
+      defaultEnabled = $true
+      profileVersion = 1
+      # Sustained refill governs the daily total (6/min = 8,640/day, under the
+      # published ~10,000/day contact threshold). Burst only shapes short spikes,
+      # and must cover a full 10-domain sweep at 3 queries per domain.
+      queriesPerMinute = 6
+      queryBurst = 36
+      policyUrl = 'https://www.nordspam.com/usage/'
+    },
+    [pscustomobject]@{
+      id = 'sem-uri'
+      displayName = 'Spam Eating Monkey URI'
+      queryZone = 'uribl.spameatingmonkey.net'
+      authorityDomain = 'uribl.spameatingmonkey.net'
+      controlDomain = '_DNSBL_.test'
+      controlExpected = @('127.0.0.2')
+      controlMatch = 'exactSet'
+      negativeControlDomain = '_DNSBLNEG_.test'
+      classifier = 'binary127002'
+      queryNameMode = 'registrableDomain'
+      defaultEnabled = $true
+      profileVersion = 1
+      queriesPerMinute = 120
+      queryBurst = 60
+      policyUrl = 'https://spameatingmonkey.com/services/SEM-URI'
+    },
+    [pscustomobject]@{
+      id = 'surbl'
+      displayName = 'SURBL Multi'
+      queryZone = 'multi.surbl.org'
+      authorityDomain = 'surbl.org'
+      controlDomain = 'test.surbl.org'
+      controlExpected = @('127.0.0.126', '127.0.0.254')
+      controlMatch = 'anyOf'
+      negativeControlDomain = 'invalid'
+      classifier = 'surbl'
+      queryNameMode = 'registrableDomain'
+      defaultEnabled = $false
+      profileVersion = 2
+      queriesPerMinute = 30
+      queryBurst = 30
+      policyUrl = 'https://www.surbl.org/usage-policy'
+    },
+    [pscustomobject]@{
+      id = 'spamhaus'
+      displayName = 'Spamhaus DBL'
+      queryZone = 'dbl.spamhaus.org'
+      authorityDomain = 'dbl.spamhaus.org'
+      controlDomain = 'dbltest.com'
+      controlExpected = @('127.0.1.2')
+      controlMatch = 'exactSet'
+      negativeControlDomain = 'invalid'
+      classifier = 'spamhausDbl'
+      queryNameMode = 'exactHost'
+      defaultEnabled = $false
+      profileVersion = 1
+      queriesPerMinute = 30
+      queryBurst = 30
+      policyUrl = 'https://www.spamhaus.org/blocklists/dnsbl-fair-use-policy/'
+    }
+  )
+}
+
+function Get-DomainReputationCacheKey {
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  $hmac = [System.Security.Cryptography.HMACSHA256]::new([byte[]]$AcsDomainReputationCacheKey)
+  try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+    return ([Convert]::ToBase64String($hmac.ComputeHash($bytes))).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+  } finally {
+    $hmac.Dispose()
+  }
+}
+
+function Get-DomainReputationCacheEntry {
+  param([Parameter(Mandatory = $true)][string]$Key)
+
+  if (-not $AcsDomainReputationCache) { return $null }
+  $entry = $null
+  if (-not $AcsDomainReputationCache.TryGetValue($Key, [ref]$entry)) { return $null }
+  if ($null -eq $entry -or $null -eq $entry.expiresAtUtc -or [DateTime]$entry.expiresAtUtc -le [DateTime]::UtcNow) {
+    $removed = $null
+    $null = $AcsDomainReputationCache.TryRemove($Key, [ref]$removed)
+    return $null
+  }
+  return $entry.value
+}
+
+function Set-DomainReputationCacheEntry {
+  param(
+    [Parameter(Mandatory = $true)][string]$Key,
+    [Parameter(Mandatory = $true)][object]$Value,
+    [int]$TtlSeconds = 120
+  )
+
+  if (-not $AcsDomainReputationCache) { return }
+  $ttl = [Math]::Min(3600, [Math]::Max(5, $TtlSeconds))
+
+  # Keep provider traffic bounded without turning cache maintenance into a long
+  # request-path pause. Expired entries are removed in a bounded pass.
+  if ($AcsDomainReputationCache.Count -gt 5000) {
+    $removedCount = 0
+    foreach ($item in @($AcsDomainReputationCache.GetEnumerator())) {
+      if ($removedCount -ge 512) { break }
+      if ($null -eq $item.Value -or $null -eq $item.Value.expiresAtUtc -or [DateTime]$item.Value.expiresAtUtc -le [DateTime]::UtcNow) {
+        $removed = $null
+        if ($AcsDomainReputationCache.TryRemove($item.Key, [ref]$removed)) { $removedCount++ }
+      }
+    }
+    if ($AcsDomainReputationCache.Count -gt 5000) { return }
+  }
+
+  $AcsDomainReputationCache[$Key] = [pscustomobject]@{
+    expiresAtUtc = [DateTime]::UtcNow.AddSeconds($ttl)
+    value = $Value
+  }
+}
+
+function Remove-DomainReputationCacheEntry {
+  param([Parameter(Mandatory = $true)][string]$Key)
+
+  if (-not $AcsDomainReputationCache) { return }
+  $removed = $null
+  $null = $AcsDomainReputationCache.TryRemove($Key, [ref]$removed)
+}
+
+function Get-DomainReputationHealthEntry {
+  param(
+    [Parameter(Mandatory = $true)][string]$ProviderId,
+    [Parameter(Mandatory = $true)][string]$Endpoint,
+    [int]$ProfileVersion = 1
+  )
+
+  if (-not $AcsDomainReputationHealth) { return $null }
+  $key = Get-DomainReputationCacheKey -Value "health|$ProviderId|$ProfileVersion|$Endpoint"
+  $entry = $null
+  if (-not $AcsDomainReputationHealth.TryGetValue($key, [ref]$entry)) { return $null }
+  if ($null -eq $entry -or $null -eq $entry.expiresAtUtc -or [DateTime]$entry.expiresAtUtc -le [DateTime]::UtcNow) {
+    $removed = $null
+    $null = $AcsDomainReputationHealth.TryRemove($key, [ref]$removed)
+    return $null
+  }
+  return $entry.value
+}
+
+function Set-DomainReputationHealthEntry {
+  param(
+    [Parameter(Mandatory = $true)][string]$ProviderId,
+    [Parameter(Mandatory = $true)][string]$Endpoint,
+    [Parameter(Mandatory = $true)][object]$Value,
+    [int]$ProfileVersion = 1,
+    [int]$TtlSeconds = 300
+  )
+
+  if (-not $AcsDomainReputationHealth) { return }
+  if ($AcsDomainReputationHealth.Count -gt 256) {
+    foreach ($item in @($AcsDomainReputationHealth.GetEnumerator())) {
+      if ($null -eq $item.Value -or $null -eq $item.Value.expiresAtUtc -or [DateTime]$item.Value.expiresAtUtc -le [DateTime]::UtcNow) {
+        $removed = $null
+        $null = $AcsDomainReputationHealth.TryRemove($item.Key, [ref]$removed)
+      }
+    }
+    if ($AcsDomainReputationHealth.Count -gt 256) { return }
+  }
+
+  $key = Get-DomainReputationCacheKey -Value "health|$ProviderId|$ProfileVersion|$Endpoint"
+  $AcsDomainReputationHealth[$key] = [pscustomobject]@{
+    expiresAtUtc = [DateTime]::UtcNow.AddSeconds([Math]::Min(900, [Math]::Max(30, $TtlSeconds)))
+    value = $Value
+  }
+}
+
+# Process-wide token bucket. The ordinary endpoint rate limiter is per client;
+# this second bound protects provider fair-use limits across all clients.
+function Test-DomainReputationQueryBudget {
+  param([int]$Cost = 1)
+
+  if ($Cost -le 0) { return $true }
+  if (-not $AcsDomainReputationBudgetLock -or -not $AcsDomainReputationBudgetState) { return $false }
+
+  $limitPerMinute = 120
+  $configured = 0
+  if ([int]::TryParse([string]$env:ACS_DOMAIN_REPUTATION_QUERIES_PER_MIN, [ref]$configured) -and $configured -gt 0) {
+    $limitPerMinute = [Math]::Min(600, [Math]::Max(10, $configured))
+  }
+
+  # Never wait unbounded: request runspaces are force-stopped after 90 seconds, so a
+  # worker aborted inside this critical section could orphan the lock and deadlock
+  # the whole feature process-wide. Time out and deny the budget (fail closed).
+  if (-not $AcsDomainReputationBudgetLock.Wait(2000)) { return $false }
+  try {
+    $now = [DateTime]::UtcNow
+    $elapsedSeconds = [Math]::Max(0.0, ($now - [DateTime]$AcsDomainReputationBudgetState.updatedAtUtc).TotalSeconds)
+    $refill = $elapsedSeconds * ($limitPerMinute / 60.0)
+    $AcsDomainReputationBudgetState.tokens = [Math]::Min([double]$limitPerMinute, [double]$AcsDomainReputationBudgetState.tokens + $refill)
+    $AcsDomainReputationBudgetState.updatedAtUtc = $now
+    if ([double]$AcsDomainReputationBudgetState.tokens -lt $Cost) { return $false }
+    $AcsDomainReputationBudgetState.tokens = [double]$AcsDomainReputationBudgetState.tokens - $Cost
+    return $true
+  } finally {
+    $null = $AcsDomainReputationBudgetLock.Release()
+  }
+}
+
+function Test-DomainReputationProviderBudget {
+  param(
+    [Parameter(Mandatory = $true)][string]$ProviderId,
+    [int]$Cost = 1,
+    [int]$RatePerMinute = 60,
+    [int]$Burst = 60
+  )
+
+  if ($Cost -le 0) { return $true }
+  if (-not $AcsDomainReputationProviderBudgets -or -not $AcsDomainReputationBudgetLock) { return $false }
+  $rate = [Math]::Min(600, [Math]::Max(1, $RatePerMinute))
+  $capacity = [Math]::Min(600, [Math]::Max($Cost, $Burst))
+
+  # Bounded wait for the same reason as the global budget lock: an aborted worker
+  # must not be able to strand this lock and disable every future lookup.
+  if (-not $AcsDomainReputationBudgetLock.Wait(2000)) { return $false }
+  try {
+    $state = $null
+    if (-not $AcsDomainReputationProviderBudgets.TryGetValue($ProviderId, [ref]$state) -or $null -eq $state) {
+      $state = [pscustomobject]@{ tokens = [double]$capacity; updatedAtUtc = [DateTime]::UtcNow }
+      $AcsDomainReputationProviderBudgets[$ProviderId] = $state
+    }
+    $now = [DateTime]::UtcNow
+    $elapsedSeconds = [Math]::Max(0.0, ($now - [DateTime]$state.updatedAtUtc).TotalSeconds)
+    $state.tokens = [Math]::Min([double]$capacity, [double]$state.tokens + ($elapsedSeconds * ($rate / 60.0)))
+    $state.updatedAtUtc = $now
+    if ([double]$state.tokens -lt $Cost) { return $false }
+    $state.tokens = [double]$state.tokens - $Cost
+    return $true
+  } finally {
+    $null = $AcsDomainReputationBudgetLock.Release()
+  }
+}
+
+function Get-DomainReputationAuthorityHosts {
+  param([Parameter(Mandatory = $true)][object]$Provider)
+
+  $authorityDomain = ([string]$Provider.authorityDomain).Trim().TrimEnd('.').ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($authorityDomain)) { return @() }
+  $endpoint = [string]$env:ACS_DNS_DOH_ENDPOINT
+  if ([string]::IsNullOrWhiteSpace($endpoint)) { $endpoint = 'https://cloudflare-dns.com/dns-query' }
+
+  $hosts = [System.Collections.Generic.List[string]]::new()
+  foreach ($type in @('NS', 'SOA')) {
+    # DNSSEC validation is deliberately left ENABLED here (no cd=1). These records
+    # decide which servers receive the customer's domain name, so a forged answer
+    # would both leak the lookup and forge the verdict. Measured against all five
+    # provider zones, cd=1 and cd=0 return identical status and answer counts, so
+    # validating costs nothing today and fails closed if a zone is ever tampered with.
+    $uri = "{0}?name={1}&type={2}" -f $endpoint, ([uri]::EscapeDataString($authorityDomain)), $type
+    try {
+      $response = Invoke-OutboundHttp -Uri $uri -Headers @{ accept = 'application/dns-json' } -TimeoutSec 8 -MaximumRedirection 3
+      foreach ($answer in @($response.Answer)) {
+        if ($type -eq 'NS' -and ([int]$answer.type -eq 2 -or [string]$answer.type -eq 'NS')) {
+          $hostName = ([string]$answer.data).Trim().TrimEnd('.').ToLowerInvariant()
+          if ($hostName -and -not $hosts.Contains($hostName)) { $hosts.Add($hostName) }
+        }
+        elseif ($type -eq 'SOA' -and ([int]$answer.type -eq 6 -or [string]$answer.type -eq 'SOA')) {
+          $hostName = (([string]$answer.data).Trim() -split '\s+', 2)[0].TrimEnd('.').ToLowerInvariant()
+          if ($hostName -and -not $hosts.Contains($hostName)) { $hosts.Add($hostName) }
+        }
+      }
+    } catch { }
+  }
+
+  if ($hosts.Count -eq 0) {
+    foreach ($hostName in @(Get-AuthoritativeNameserverHosts -Domain $authorityDomain)) {
+      if ($hostName -and -not $hosts.Contains([string]$hostName)) { $hosts.Add([string]$hostName) }
+    }
+  }
+  return $hosts.ToArray()
+}
+
+function New-DomainReputationDnsQueryPacket {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][int]$TransactionId
+  )
+
+  $queryName = ([string]$Name).Trim().TrimEnd('.').ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($queryName) -or $queryName.Length -gt 253 -or $queryName -notmatch '^[a-z0-9._-]+$') {
+    throw 'Invalid DNS query name.'
+  }
+
+  $packet = [System.Collections.Generic.List[byte]]::new()
+  $packet.Add([byte](($TransactionId -shr 8) -band 0xFF))
+  $packet.Add([byte]($TransactionId -band 0xFF))
+  $packet.Add([byte]0x00)                            # QR=0, opcode=0, RD=0
+  $packet.Add([byte]0x00)
+  $packet.Add([byte]0x00); $packet.Add([byte]0x01)   # QDCOUNT=1
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)
+  $packet.Add([byte]0x00); $packet.Add([byte]0x00)
+
+  foreach ($label in ($queryName -split '\.')) {
+    if ([string]::IsNullOrWhiteSpace($label) -or $label.Length -gt 63) { throw 'Invalid DNS label.' }
+    $labelBytes = [Text.Encoding]::ASCII.GetBytes($label)
+    $packet.Add([byte]$labelBytes.Length)
+    $packet.AddRange($labelBytes)
+  }
+  $packet.Add([byte]0)
+  $packet.Add([byte]0); $packet.Add([byte]1)          # QTYPE=A
+  $packet.Add([byte]0); $packet.Add([byte]1)          # QCLASS=IN
+  return ,$packet.ToArray()
+}
+
+# Strict reader used only for direct authoritative domain-list queries. It does
+# not modify propagation parsing or health state. An NXDOMAIN becomes usable
+# only when it is authoritative, echoes the exact question, and carries an SOA
+# whose owner proves authority for the configured provider zone.
+function Read-DomainReputationDnsResponse {
+  param(
+    [byte[]]$Buffer,
+    [int]$TransactionId,
+    [Parameter(Mandatory = $true)][string]$ExpectedName,
+    [Parameter(Mandatory = $true)][string]$ExpectedZone
+  )
+
+  $result = [pscustomobject]@{
+    rcode = $null
+    rcodeLabel = $null
+    authoritative = $false
+    truncated = $false
+    negativeProof = $false
+    answers = @()
+    error = $null
+  }
+
+  function Read-DomainReputationRecord {
+    param([byte[]]$Data, [int]$Offset)
+
+    $owner = Read-DnsNameFromBuffer -Buffer $Data -Offset $Offset
+    if ($null -eq $owner -or $owner.next -lt 0 -or ($owner.next + 10) -gt $Data.Length) { throw 'Malformed DNS resource record.' }
+    $type = ([int]$Data[$owner.next] -shl 8) -bor [int]$Data[$owner.next + 1]
+    $class = ([int]$Data[$owner.next + 2] -shl 8) -bor [int]$Data[$owner.next + 3]
+    $rdLength = ([int]$Data[$owner.next + 8] -shl 8) -bor [int]$Data[$owner.next + 9]
+    $rdOffset = $owner.next + 10
+    if (($rdOffset + $rdLength) -gt $Data.Length) { throw 'DNS RDATA exceeds response bounds.' }
+    return [pscustomobject]@{
+      owner = ([string]$owner.name).TrimEnd('.').ToLowerInvariant()
+      type = $type
+      class = $class
+      rdOffset = $rdOffset
+      rdLength = $rdLength
+      next = $rdOffset + $rdLength
+    }
+  }
+
+  try {
+    if ($null -eq $Buffer -or $Buffer.Length -lt 12) { throw 'Short DNS response.' }
+    $responseId = ([int]$Buffer[0] -shl 8) -bor [int]$Buffer[1]
+    if ($responseId -ne $TransactionId) { throw 'DNS transaction ID mismatch.' }
+
+    $flags1 = [int]$Buffer[2]
+    if (($flags1 -band 0x80) -eq 0) { throw 'DNS response flag is not set.' }
+    if ((($flags1 -shr 3) -band 0x0F) -ne 0) { throw 'Unexpected DNS opcode.' }
+    $result.authoritative = (($flags1 -band 0x04) -ne 0)
+    $result.truncated = (($flags1 -band 0x02) -ne 0)
+    if ($result.truncated) { throw 'Truncated DNS response.' }
+    if (-not $result.authoritative) { throw 'DNS response is not authoritative.' }
+
+    $rcode = ([int]$Buffer[3] -band 0x0F)
+    $result.rcode = $rcode
+    $result.rcodeLabel = switch ($rcode) {
+      0 { 'NOERROR' }
+      1 { 'FORMERR' }
+      2 { 'SERVFAIL' }
+      3 { 'NXDOMAIN' }
+      4 { 'NOTIMP' }
+      5 { 'REFUSED' }
+      default { "RCODE $rcode" }
+    }
+
+    $qdCount = ([int]$Buffer[4] -shl 8) -bor [int]$Buffer[5]
+    $answerCount = ([int]$Buffer[6] -shl 8) -bor [int]$Buffer[7]
+    $authorityCount = ([int]$Buffer[8] -shl 8) -bor [int]$Buffer[9]
+    $additionalCount = ([int]$Buffer[10] -shl 8) -bor [int]$Buffer[11]
+    if ($qdCount -ne 1 -or $answerCount -gt 32 -or $authorityCount -gt 32 -or $additionalCount -gt 32) {
+      throw 'Unexpected DNS section count.'
+    }
+
+    $expectedName = ([string]$ExpectedName).Trim().TrimEnd('.').ToLowerInvariant()
+    $expectedZone = ([string]$ExpectedZone).Trim().TrimEnd('.').ToLowerInvariant()
+    $question = Read-DnsNameFromBuffer -Buffer $Buffer -Offset 12
+    if ($null -eq $question -or ($question.next + 4) -gt $Buffer.Length) { throw 'Malformed DNS question.' }
+    if (([string]$question.name).TrimEnd('.').ToLowerInvariant() -ne $expectedName) { throw 'DNS question name mismatch.' }
+    $questionType = ([int]$Buffer[$question.next] -shl 8) -bor [int]$Buffer[$question.next + 1]
+    $questionClass = ([int]$Buffer[$question.next + 2] -shl 8) -bor [int]$Buffer[$question.next + 3]
+    if ($questionType -ne 1 -or $questionClass -ne 1) { throw 'DNS question type or class mismatch.' }
+
+    $offset = $question.next + 4
+    $answers = [System.Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $answerCount; $index++) {
+      $record = Read-DomainReputationRecord -Data $Buffer -Offset $offset
+      $offset = $record.next
+      if ($record.type -ne 1 -or $record.class -ne 1 -or $record.owner -ne $expectedName -or $record.rdLength -ne 4) {
+        throw 'Unexpected DNS answer record.'
+      }
+      $address = [System.Net.IPAddress]::new([byte[]]@(
+        $Buffer[$record.rdOffset],
+        $Buffer[$record.rdOffset + 1],
+        $Buffer[$record.rdOffset + 2],
+        $Buffer[$record.rdOffset + 3]
+      )).ToString()
+      $answers.Add($address)
+    }
+
+    for ($index = 0; $index -lt $authorityCount; $index++) {
+      $record = Read-DomainReputationRecord -Data $Buffer -Offset $offset
+      $offset = $record.next
+      if ($record.type -eq 6 -and $record.class -eq 1) {
+        $ownerCoversQuestion = ($expectedName -eq $record.owner -or $expectedName.EndsWith(".$($record.owner)", [StringComparison]::OrdinalIgnoreCase))
+        $ownerCoversZone = ($expectedZone -eq $record.owner)
+        if ($ownerCoversQuestion -and $ownerCoversZone) {
+          $mname = Read-DnsNameFromBuffer -Buffer $Buffer -Offset $record.rdOffset
+          $rname = Read-DnsNameFromBuffer -Buffer $Buffer -Offset $mname.next
+          if ($null -eq $mname -or $null -eq $rname -or ($rname.next + 20) -gt ($record.rdOffset + $record.rdLength)) {
+            throw 'Malformed SOA negative proof.'
+          }
+          $result.negativeProof = $true
+        }
+      }
+    }
+
+    for ($index = 0; $index -lt $additionalCount; $index++) {
+      $record = Read-DomainReputationRecord -Data $Buffer -Offset $offset
+      $offset = $record.next
+    }
+
+    if ($rcode -eq 3 -and -not $result.negativeProof) { throw 'NXDOMAIN lacks authoritative SOA proof.' }
+    if ($rcode -eq 0 -and $answers.Count -eq 0 -and -not $result.negativeProof) { throw 'NOERROR response contains no recognized A answer or SOA proof.' }
+    if ($rcode -ne 0 -and $rcode -ne 3) { throw "Provider returned $($result.rcodeLabel)." }
+
+    $result.answers = @($answers | Sort-Object -Unique)
+  } catch {
+    $result.error = if ($_.Exception.Message -eq 'DNS transaction ID mismatch.') {
+      'DNS transaction ID mismatch.'
+    } else {
+      'Invalid authoritative DNS response.'
+    }
+  }
+
+  return $result
+}
+
+# Query heterogeneous provider/name pairs in one UDP Select window. Every socket
+# is connected to one public authority endpoint, binding accepted datagrams to
+# that source IP/port; the strict reader validates the transaction and question.
+function Invoke-DomainReputationDnsFanout {
+  param(
+    [Parameter(Mandatory = $true)][object[]]$Queries,
+    [int]$TimeoutMs = 2500
+  )
+
+  $outcomes = @{}
+  if ($Queries.Count -eq 0) { return $outcomes }
+  $timeout = [Math]::Min(5000, [Math]::Max(500, $TimeoutMs))
+  $pending = @{}
+  $sockets = [System.Collections.Generic.List[System.Net.Sockets.Socket]]::new()
+  $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+  # The transaction ID is one of only two entropy sources protecting these raw UDP
+  # queries from off-path spoofing (the other is the OS-assigned source port), so it
+  # must not come from Get-Random: that is not cryptographic, and concurrent worker
+  # runspaces can seed correlated streams. Create() + GetBytes() works on 5.1 and 7.
+  $txRng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  $txBytes = [byte[]]::new(2)
+
+  try {
+    foreach ($item in @($Queries)) {
+      $socket = $null
+      $key = ([string]$item.key).Trim()
+      $ipText = ([string]$item.ip).Trim()
+      $name = ([string]$item.name).Trim().TrimEnd('.').ToLowerInvariant()
+      $zone = ([string]$item.zone).Trim().TrimEnd('.').ToLowerInvariant()
+      if ([string]::IsNullOrWhiteSpace($key) -or $outcomes.ContainsKey($key)) { continue }
+
+      $outcomes[$key] = [pscustomobject]@{
+        rcode = $null; rcodeLabel = $null; authoritative = $false; truncated = $false
+        negativeProof = $false; answers = @(); error = 'No response from provider authority.'
+      }
+
+      $parsedIp = $null
+      if (-not [Net.IPAddress]::TryParse($ipText, [ref]$parsedIp) -or $parsedIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or -not (Test-IsPublicIpAddress -IpAddress $ipText)) {
+        $outcomes[$key].error = 'Invalid provider authority address.'
+        continue
+      }
+
+      $txRng.GetBytes($txBytes)
+      $transactionId = ((([int]$txBytes[0]) -shl 8) -bor ([int]$txBytes[1]))
+      if ($transactionId -le 0) { $transactionId = 1 }
+      try {
+        $packet = New-DomainReputationDnsQueryPacket -Name $name -TransactionId $transactionId
+        $socket = [Net.Sockets.Socket]::new($parsedIp.AddressFamily, [Net.Sockets.SocketType]::Dgram, [Net.Sockets.ProtocolType]::Udp)
+        $socket.Blocking = $false
+        $socket.Connect([Net.IPEndPoint]::new($parsedIp, 53))
+        [void]$socket.Send($packet)
+        $sockets.Add($socket)
+        $pending[$socket] = [pscustomobject]@{ key = $key; txid = $transactionId; name = $name; zone = $zone }
+      } catch {
+        $outcomes[$key].error = 'Could not query provider authority.'
+        if ($socket) { try { $socket.Dispose() } catch { } }
+      }
+    }
+
+    $buffer = New-Object byte[] 4096
+    while ($pending.Count -gt 0) {
+      $remaining = $timeout - $stopwatch.ElapsedMilliseconds
+      if ($remaining -le 0) { break }
+      $readList = New-Object System.Collections.ArrayList
+      foreach ($socket in $pending.Keys) { [void]$readList.Add($socket) }
+      $waitMicroseconds = [int]([Math]::Min(500000, [Math]::Max(1000, $remaining * 1000)))
+      try { [Net.Sockets.Socket]::Select($readList, $null, $null, $waitMicroseconds) } catch { break }
+      if ($readList.Count -eq 0) { continue }
+
+      foreach ($socket in @($readList)) {
+        $state = $pending[$socket]
+        if ($null -eq $state) { continue }
+        try {
+          $received = $socket.Receive($buffer)
+          if ($received -gt 0) {
+            $exact = New-Object byte[] $received
+            [Array]::Copy($buffer, $exact, $received)
+            $parsed = Read-DomainReputationDnsResponse -Buffer $exact -TransactionId $state.txid -ExpectedName $state.name -ExpectedZone $state.zone
+            if ($parsed.error -eq 'DNS transaction ID mismatch.') { continue }
+            $outcomes[$state.key] = $parsed
+          }
+        } catch {
+          $outcomes[$state.key].error = 'Provider authority connection error.'
+        }
+        $null = $pending.Remove($socket)
+      }
+    }
+  } finally {
+    foreach ($socket in $sockets) { try { $socket.Dispose() } catch { } }
+    try { $txRng.Dispose() } catch { }
+    $stopwatch.Stop()
+  }
+
+  return $outcomes
+}
+
+function Test-DomainReputationPositiveControl {
+  param(
+    [Parameter(Mandatory = $true)][object]$Provider,
+    [AllowNull()][object]$ControlOutcome
+  )
+
+  $result = [pscustomobject]@{ state = 'unavailable'; accessValidated = $false; reasonCode = 'controlUnavailable' }
+  if ($null -eq $ControlOutcome -or -not [string]::IsNullOrWhiteSpace([string]$ControlOutcome.error)) { return $result }
+  if ([int]$ControlOutcome.rcode -eq 3) { $result.state = 'blocked'; $result.reasonCode = 'controlNxDomain'; return $result }
+  if ([int]$ControlOutcome.rcode -ne 0) { $result.reasonCode = 'controlError'; return $result }
+
+  $actual = @($ControlOutcome.answers | Sort-Object -Unique)
+  $expected = @($Provider.controlExpected | Sort-Object -Unique)
+  $controlMatches = $false
+  if ([string]$Provider.controlMatch -eq 'anyOf') {
+    $controlMatches = ($actual.Count -gt 0 -and @($actual | Where-Object { $expected -notcontains $_ }).Count -eq 0)
+  } else {
+    $controlMatches = (($actual -join '|') -eq ($expected -join '|'))
+  }
+  if (-not $controlMatches) {
+    $result.state = if (@($actual | Where-Object { $_ -eq '127.0.0.1' -or $_ -eq '127.0.0.255' -or $_ -match '^127\.255\.255\.' }).Count -gt 0) { 'blocked' } else { 'invalid' }
+    $result.reasonCode = 'controlUnexpected'
+    return $result
+  }
+
+  $result.state = 'valid'
+  $result.accessValidated = $true
+  $result.reasonCode = $null
+  return $result
+}
+
+function Test-DomainReputationProviderControl {
+  param(
+    [Parameter(Mandatory = $true)][object]$Provider,
+    [AllowNull()][object]$ControlOutcome,
+    [AllowNull()][object]$NegativeControlOutcome
+  )
+
+  $result = Test-DomainReputationPositiveControl -Provider $Provider -ControlOutcome $ControlOutcome
+  if ($result.state -ne 'valid') { return $result }
+
+  if ($null -eq $NegativeControlOutcome -or -not [string]::IsNullOrWhiteSpace([string]$NegativeControlOutcome.error)) {
+    $result.state = 'unavailable'
+    $result.accessValidated = $false
+    $result.reasonCode = 'negativeControlUnavailable'
+    return $result
+  }
+  $negativeAnswers = @($NegativeControlOutcome.answers)
+  $isNegative = (([int]$NegativeControlOutcome.rcode -eq 3 -or [int]$NegativeControlOutcome.rcode -eq 0) -and
+    $NegativeControlOutcome.negativeProof -eq $true -and $negativeAnswers.Count -eq 0)
+  if (-not $isNegative) {
+    $result.state = 'invalid'
+    $result.accessValidated = $false
+    $result.reasonCode = if ($negativeAnswers.Count -gt 0) { 'wildcardDetected' } else { 'negativeControlUnexpected' }
+    return $result
+  }
+
+  $result.state = 'valid'
+  $result.accessValidated = $true
+  $result.reasonCode = $null
+  return $result
+}
+
+function ConvertFrom-DomainReputationProviderOutcome {
+  param(
+    [Parameter(Mandatory = $true)][object]$Provider,
+    [AllowNull()][object]$ControlOutcome,
+    [AllowNull()][object]$NegativeControlOutcome,
+    [AllowNull()][object]$TargetOutcome,
+    [Parameter(Mandatory = $true)][string]$QueryDomain
+  )
+
+  $base = [ordered]@{
+    providerId = [string]$Provider.id
+    providerName = [string]$Provider.displayName
+    queryDomain = $QueryDomain
+    queriedNameCategory = [string]$Provider.queryNameMode
+    state = 'unavailable'
+    listed = $null
+    categories = @()
+    responseCodes = @()
+    accessValidated = $false
+    degraded = $false
+    reasonCode = 'controlUnavailable'
+    policyUrl = [string]$Provider.policyUrl
+  }
+
+  $controlState = Test-DomainReputationProviderControl -Provider $Provider -ControlOutcome $ControlOutcome -NegativeControlOutcome $NegativeControlOutcome
+  if ($controlState.state -ne 'valid') {
+    $base.state = $controlState.state
+    $base.reasonCode = $controlState.reasonCode
+    return [pscustomobject]$base
+  }
+  $base.accessValidated = $true
+
+  if ($null -eq $TargetOutcome -or -not [string]::IsNullOrWhiteSpace([string]$TargetOutcome.error)) {
+    $base.reasonCode = 'targetUnavailable'
+    return [pscustomobject]$base
+  }
+  if (([int]$TargetOutcome.rcode -eq 3 -or [int]$TargetOutcome.rcode -eq 0) -and
+    @($TargetOutcome.answers).Count -eq 0 -and $TargetOutcome.negativeProof -eq $true) {
+    $base.state = 'notListed'; $base.listed = $false; $base.reasonCode = $null
+    return [pscustomobject]$base
+  }
+  if ([int]$TargetOutcome.rcode -ne 0) {
+    $base.reasonCode = 'targetError'
+    return [pscustomobject]$base
+  }
+
+  $answers = @($TargetOutcome.answers | Sort-Object -Unique)
+  $base.responseCodes = $answers
+  if ($answers.Count -eq 0 -or @($answers | Where-Object { $_ -notmatch '^127\.' }).Count -gt 0) {
+    $base.state = 'invalid'; $base.reasonCode = 'invalidAnswer'
+    return [pscustomobject]$base
+  }
+
+  $categories = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $blocked = $false
+  $invalid = $false
+  foreach ($answer in $answers) {
+    $parts = @($answer -split '\.')
+    if ($parts.Count -ne 4) { $invalid = $true; continue }
+    $last = [int]$parts[3]
+    switch ([string]$Provider.classifier) {
+      'uribl' {
+        if ($last -eq 255 -or (($last -band 1) -ne 0)) { $blocked = $true; continue }
+        $answerRecognized = $false
+        if (($last -band 2) -ne 0) { $null = $categories.Add('black'); $answerRecognized = $true }
+        if (($last -band 4) -ne 0) { $null = $categories.Add('grey'); $answerRecognized = $true }
+        if (($last -band 8) -ne 0) { $null = $categories.Add('red'); $answerRecognized = $true }
+        if (($last -band 0xF0) -ne 0 -or -not $answerRecognized) { $invalid = $true }
+      }
+      'surbl' {
+        if (($last -band 1) -ne 0) { $blocked = $true; continue }
+        $answerRecognized = $false
+        if (($last -band 4) -ne 0) { $null = $categories.Add('disposable-mail'); $answerRecognized = $true }
+        if (($last -band 8) -ne 0) { $null = $categories.Add('phishing'); $answerRecognized = $true }
+        if (($last -band 16) -ne 0) { $null = $categories.Add('malware'); $answerRecognized = $true }
+        if (($last -band 32) -ne 0) { $null = $categories.Add('click-tracker'); $answerRecognized = $true }
+        if (($last -band 64) -ne 0) { $null = $categories.Add('abuse'); $answerRecognized = $true }
+        if (($last -band 128) -ne 0) { $null = $categories.Add('cracked'); $answerRecognized = $true }
+        if (($last -band 2) -ne 0 -or -not $answerRecognized) { $invalid = $true }
+      }
+      'spamhausDbl' {
+        if ($answer -match '^127\.255\.255\.' -or $answer -eq '127.0.1.255') { $blocked = $true; continue }
+        $category = switch ($answer) {
+          '127.0.1.2' { 'low-reputation' }
+          '127.0.1.4' { 'phishing' }
+          '127.0.1.5' { 'malware' }
+          '127.0.1.6' { 'botnet-c2' }
+          '127.0.1.102' { 'abused-legitimate' }
+          '127.0.1.103' { 'abused-redirector' }
+          '127.0.1.104' { 'abused-phishing' }
+          '127.0.1.105' { 'abused-malware' }
+          '127.0.1.106' { 'abused-botnet-c2' }
+          default { $null }
+        }
+        if ($category) { $null = $categories.Add($category) } else { $invalid = $true }
+      }
+      'binary127002' {
+        # Providers in this family signal an access/policy block with 127.0.0.1,
+        # 127.0.0.255 or the 127.255.255.x range. Those must fail closed as
+        # 'blocked' so the operator is told access was refused, rather than being
+        # reported as a merely unreadable answer.
+        if ($answer -eq '127.0.0.1' -or $answer -eq '127.0.0.255' -or $answer -match '^127\.255\.255\.') { $blocked = $true; continue }
+        if ($answer -eq '127.0.0.2') { $null = $categories.Add('listed') } else { $invalid = $true }
+      }
+      default { $invalid = $true }
+    }
+  }
+
+  if ($blocked) {
+    $base.state = 'blocked'; $base.reasonCode = 'providerBlocked'
+  } elseif ($invalid) {
+    $base.state = 'invalid'; $base.reasonCode = 'invalidAnswer'
+  } else {
+    $base.state = 'listed'; $base.listed = $true; $base.categories = @($categories | Sort-Object); $base.reasonCode = $null
+  }
+  return [pscustomobject]$base
+}
+
+function Get-DomainReputationProviderEndpoints {
+  param(
+    [Parameter(Mandatory = $true)][object]$Provider,
+    [int]$MaxEndpoints = 2
+  )
+
+  $limit = [Math]::Min(2, [Math]::Max(1, $MaxEndpoints))
+  # Key on the fields that determine WHICH servers get discovered, so correcting a
+  # profile cannot be masked by a 30-minute cache entry keyed on the id alone.
+  $cacheKey = "endpoints:{0}|v{1}|{2}|{3}" -f ([string]$Provider.id).ToLowerInvariant(), [int]$Provider.profileVersion, ([string]$Provider.authorityDomain).Trim().TrimEnd('.').ToLowerInvariant(), ([string]$Provider.queryZone).Trim().TrimEnd('.').ToLowerInvariant()
+  $cached = Get-DomainReputationCacheEntry -Key $cacheKey
+  if ($cached) { return @($cached | Select-Object -First $limit) }
+
+  $addresses = [System.Collections.Generic.List[string]]::new()
+  $hosts = @(Get-DomainReputationAuthorityHosts -Provider $Provider | Sort-Object -Unique | Select-Object -First 4)
+  foreach ($hostName in $hosts) {
+    foreach ($ip in @(Resolve-NameserverPublicIps -NameserverHost $hostName)) {
+      $parsedIp = $null
+      if (-not [Net.IPAddress]::TryParse(([string]$ip).Trim(), [ref]$parsedIp)) { continue }
+      if ($parsedIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { continue }
+      if (-not (Test-IsPublicIpAddress -IpAddress ([string]$ip))) { continue }
+      if (-not $addresses.Contains([string]$ip)) { $addresses.Add([string]$ip) }
+    }
+  }
+
+  $result = @($addresses | Sort-Object | Select-Object -First 2)
+  if ($result.Count -gt 0) { Set-DomainReputationCacheEntry -Key $cacheKey -Value $result -TtlSeconds 1800 }
+  return @($result | Select-Object -First $limit)
+}
+
+function Get-DomainReputationStatus {
+  param([Parameter(Mandatory = $true)][string]$Domain)
+
+  $status = [pscustomobject]@{
+    state = 'unknown'
+    reasonCode = $null
+    queryDomain = $null
+    requestedCount = 0
+    configuredCount = 0
+    droppedCount = 0
+    results = @()
+    summary = [pscustomobject]@{
+      providerCount = 0; validatedCount = 0; listedCount = 0; notListedCount = 0
+      blockedCount = 0; errorCount = 0; riskSummary = 'Unknown'
+    }
+  }
+
+  if (([string]$env:ACS_DISABLE_DOMAIN_REPUTATION).Trim() -eq '1') {
+    $status.state = 'disabled'; $status.reasonCode = 'disabled'; return $status
+  }
+
+  $catalog = @(Get-DomainReputationProviderCatalog)
+  $requestedIds = @()
+  $configuredText = ([string]$env:ACS_DOMAIN_REPUTATION_PROVIDERS).Trim()
+  if ([string]::IsNullOrWhiteSpace($configuredText)) {
+    $requestedIds = @($catalog | Where-Object defaultEnabled | ForEach-Object id)
+  } else {
+    $requestedIds = @($configuredText -split '[,;\s]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+  }
+  $status.requestedCount = $requestedIds.Count
+  $providers = @($catalog | Where-Object { $requestedIds -contains $_.id } | Select-Object -First 8)
+  $status.configuredCount = $providers.Count
+  $status.droppedCount = [Math]::Max(0, $status.requestedCount - $status.configuredCount)
+  if ($providers.Count -eq 0) { $status.state = 'disabled'; $status.reasonCode = 'noProviders'; return $status }
+
+  $gateAcquired = $false
+  try {
+    $gateAcquired = $AcsDomainReputationGate.Wait(0)
+    if (-not $gateAcquired) { $status.reasonCode = 'busy'; return $status }
+
+    $timeout = 2500
+    $configuredTimeout = 0
+    if ([int]::TryParse([string]$env:ACS_DOMAIN_REPUTATION_TIMEOUT_MS, [ref]$configuredTimeout) -and $configuredTimeout -gt 0) {
+      $timeout = [Math]::Min(5000, [Math]::Max(500, $configuredTimeout))
+    }
+    $maxEndpoints = 1
+    $configuredEndpoints = 0
+    if ([int]::TryParse([string]$env:ACS_DOMAIN_REPUTATION_MAX_ENDPOINTS, [ref]$configuredEndpoints) -and $configuredEndpoints -gt 0) {
+      $maxEndpoints = [Math]::Min(2, [Math]::Max(1, $configuredEndpoints))
+    }
+
+    $pendingProviders = [System.Collections.Generic.List[object]]::new()
+    $providerResults = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($provider in $providers) {
+      $queryDomain = if ($provider.queryNameMode -eq 'registrableDomain') { Get-RegistrableDomain -Domain $Domain } else { ([string]$Domain).Trim().TrimEnd('.').ToLowerInvariant() }
+      if ([string]::IsNullOrWhiteSpace($queryDomain) -or -not (Test-DomainName -Domain $queryDomain)) {
+        $providerResults.Add([pscustomobject]@{ providerId=$provider.id;providerName=$provider.displayName;queryDomain=$queryDomain;queriedNameCategory=$provider.queryNameMode;state='invalid';listed=$null;categories=@();responseCodes=@();accessValidated=$false;degraded=$false;reasonCode='invalidName';policyUrl=$provider.policyUrl })
+        continue
+      }
+      if ([string]::IsNullOrWhiteSpace($status.queryDomain)) { $status.queryDomain = $queryDomain }
+
+      $domainHash = Get-DomainReputationCacheKey -Value "$($provider.id)|$($provider.profileVersion)|$($provider.classifier)|$($provider.queryZone)|$queryDomain"
+      $resultCacheKey = "result:$domainHash"
+      $cachedResult = Get-DomainReputationCacheEntry -Key $resultCacheKey
+      if ($cachedResult) { $providerResults.Add($cachedResult); continue }
+
+      $endpoints = @(Get-DomainReputationProviderEndpoints -Provider $provider -MaxEndpoints $maxEndpoints)
+      if ($endpoints.Count -eq 0) {
+        $providerResults.Add([pscustomobject]@{ providerId=$provider.id;providerName=$provider.displayName;queryDomain=$queryDomain;queriedNameCategory=$provider.queryNameMode;state='unavailable';listed=$null;categories=@();responseCodes=@();accessValidated=$false;degraded=$false;reasonCode='noAuthority';policyUrl=$provider.policyUrl })
+        continue
+      }
+
+      $endpointStates = [System.Collections.Generic.List[object]]::new()
+      foreach ($endpoint in $endpoints) {
+        $endpointKey = ([string]$endpoint).Replace(':', '_')
+        $health = Get-DomainReputationHealthEntry -ProviderId $provider.id -Endpoint $endpoint -ProfileVersion ([int]$provider.profileVersion)
+        $control = if ($health) { $health.control } else { $null }
+        $endpointStates.Add([pscustomobject]@{ endpoint=$endpoint;endpointKey=$endpointKey;control=$control;controlFromCache=($null -ne $control) })
+      }
+      # Every endpoint costs three queries regardless of cache state: one positive
+      # control (sent in stage 1 when absent, re-sent in stage 2 when cached), plus
+      # the negative control and the target.
+      $estimatedCost = 3 * $endpointStates.Count
+      $pendingProviders.Add([pscustomobject]@{ provider=$provider;queryDomain=$queryDomain;cacheKey=$resultCacheKey;endpointStates=$endpointStates.ToArray();estimatedCost=$estimatedCost })
+    }
+
+    $activeProviders = [System.Collections.Generic.List[object]]::new()
+    foreach ($pending in $pendingProviders) {
+      $provider = $pending.provider
+      # Charge the shared budget PER PROVIDER, not as one all-or-nothing total.
+      # An aggregate reservation let a single unreachable opt-in provider push the
+      # combined cost over the limit and drop every provider, including the ones
+      # that work. Catalog order puts the default-enabled providers first.
+      $providerBudgetAvailable = ($pending.estimatedCost -le 0 -or (Test-DomainReputationQueryBudget -Cost $pending.estimatedCost))
+      if ($providerBudgetAvailable) {
+        $providerBudgetAvailable = Test-DomainReputationProviderBudget -ProviderId $provider.id -Cost $pending.estimatedCost -RatePerMinute ([int]$provider.queriesPerMinute) -Burst ([int]$provider.queryBurst)
+      }
+      if ($providerBudgetAvailable) {
+        $activeProviders.Add($pending)
+      } else {
+        $providerResults.Add([pscustomobject]@{ providerId=$provider.id;providerName=$provider.displayName;queryDomain=$pending.queryDomain;queriedNameCategory=$provider.queryNameMode;state='unavailable';listed=$null;categories=@();responseCodes=@();accessValidated=$false;degraded=$false;reasonCode='queryBudget';policyUrl=$provider.policyUrl })
+      }
+    }
+
+    # Stage 1: a provider sees no customer domain until its documented positive
+    # control succeeds. Successful controls are cached briefly per endpoint.
+    $controlQueries = [System.Collections.Generic.List[object]]::new()
+    foreach ($pending in $activeProviders) {
+      foreach ($endpointState in @($pending.endpointStates)) {
+        if ($null -ne $endpointState.control) { continue }
+        $provider = $pending.provider
+        $controlQueries.Add([pscustomobject]@{
+          key="$($provider.id)|$($endpointState.endpointKey)|control"
+          ip=$endpointState.endpoint
+          name="$($provider.controlDomain).$($provider.queryZone)"
+          zone=$provider.queryZone
+          purpose='control'
+        })
+      }
+    }
+    $controlOutcomes = if ($controlQueries.Count -gt 0) { Invoke-DomainReputationDnsFanout -Queries $controlQueries.ToArray() -TimeoutMs $timeout } else { @{} }
+
+    foreach ($pending in $activeProviders) {
+      foreach ($endpointState in @($pending.endpointStates)) {
+        if ($null -eq $endpointState.control) {
+          $key = "$($pending.provider.id)|$($endpointState.endpointKey)|control"
+          $endpointState.control = $controlOutcomes[$key]
+          $positiveState = Test-DomainReputationPositiveControl -Provider $pending.provider -ControlOutcome $endpointState.control
+          if ($positiveState.state -eq 'valid') {
+            Set-DomainReputationHealthEntry -ProviderId $pending.provider.id -Endpoint $endpointState.endpoint -ProfileVersion ([int]$pending.provider.profileVersion) -Value ([pscustomobject]@{control=$endpointState.control}) -TtlSeconds 300
+          }
+        }
+      }
+    }
+
+    # Stage 2: only positive-control-valid endpoints receive the customer name.
+    # A fresh negative control is sent in the same window; wildcarded or
+    # repurposed zones therefore cannot create a listing or a clean verdict.
+    $targetQueries = [System.Collections.Generic.List[object]]::new()
+    foreach ($pending in $activeProviders) {
+      foreach ($endpointState in @($pending.endpointStates)) {
+        $positiveState = Test-DomainReputationPositiveControl -Provider $pending.provider -ControlOutcome $endpointState.control
+        if ($positiveState.state -ne 'valid') { continue }
+        $provider = $pending.provider
+        $targetQueries.Add([pscustomobject]@{ key="$($provider.id)|$($endpointState.endpointKey)|negative";ip=$endpointState.endpoint;name="$($provider.negativeControlDomain).$($provider.queryZone)";zone=$provider.queryZone;purpose='negative' })
+        $targetQueries.Add([pscustomobject]@{ key="$($provider.id)|$($endpointState.endpointKey)|target";ip=$endpointState.endpoint;name="$($pending.queryDomain).$($provider.queryZone)";zone=$provider.queryZone;purpose='target' })
+        # A cached positive control only authorizes SENDING the customer name. The
+        # verdict itself must rest on a control observed in THIS request: a provider
+        # that begins refusing access by answering NXDOMAIN for every name is
+        # otherwise indistinguishable from a genuine "not listed" answer, which
+        # would produce a false clean for the life of the health entry. Re-querying
+        # it inside the same fan-out window costs one packet and no extra round trip.
+        if ($endpointState.controlFromCache) {
+          $targetQueries.Add([pscustomobject]@{ key="$($provider.id)|$($endpointState.endpointKey)|control2";ip=$endpointState.endpoint;name="$($provider.controlDomain).$($provider.queryZone)";zone=$provider.queryZone;purpose='control' })
+        }
+      }
+    }
+    $targetOutcomes = if ($targetQueries.Count -gt 0) { Invoke-DomainReputationDnsFanout -Queries $targetQueries.ToArray() -TimeoutMs $timeout } else { @{} }
+
+    # Replace every cache-sourced control with the freshly observed one before any
+    # verdict is computed, so the classifier fails closed when access was revoked.
+    # A failed refresh deliberately does NOT overwrite the cached entry: caching a
+    # failure would block the endpoint from re-probing until the entry expired.
+    foreach ($pending in $activeProviders) {
+      foreach ($endpointState in @($pending.endpointStates)) {
+        if (-not $endpointState.controlFromCache) { continue }
+        $freshControl = $targetOutcomes["$($pending.provider.id)|$($endpointState.endpointKey)|control2"]
+        if ($null -eq $freshControl) {
+          # Never fall back to the stale cached control: keep the freshness guarantee
+          # local rather than depending on the fan-out pre-populating every key.
+          $endpointState.control = [pscustomobject]@{ rcode=$null;rcodeLabel=$null;authoritative=$false;truncated=$false;negativeProof=$false;answers=@();error='Fresh positive control unavailable.' }
+          continue
+        }
+        $endpointState.control = $freshControl
+        $freshState = Test-DomainReputationPositiveControl -Provider $pending.provider -ControlOutcome $freshControl
+        if ($freshState.state -eq 'valid') {
+          Set-DomainReputationHealthEntry -ProviderId $pending.provider.id -Endpoint $endpointState.endpoint -ProfileVersion ([int]$pending.provider.profileVersion) -Value ([pscustomobject]@{control=$freshControl}) -TtlSeconds 300
+        }
+      }
+    }
+
+    foreach ($pending in $activeProviders) {
+      $endpointResults = [System.Collections.Generic.List[object]]::new()
+      foreach ($endpointState in @($pending.endpointStates)) {
+        $control = $endpointState.control
+        $negative = $targetOutcomes["$($pending.provider.id)|$($endpointState.endpointKey)|negative"]
+        $target = $targetOutcomes["$($pending.provider.id)|$($endpointState.endpointKey)|target"]
+        if ($null -eq $control) { $control = [pscustomobject]@{rcode=$null;answers=@();negativeProof=$false;error='Query budget unavailable.'} }
+        if ($null -eq $negative) { $negative = [pscustomobject]@{rcode=$null;answers=@();negativeProof=$false;error='Negative control unavailable.'} }
+        if ($null -eq $target) { $target = [pscustomobject]@{rcode=$null;answers=@();negativeProof=$false;error='Query budget unavailable.'} }
+        $endpointResults.Add((ConvertFrom-DomainReputationProviderOutcome -Provider $pending.provider -ControlOutcome $control -NegativeControlOutcome $negative -TargetOutcome $target -QueryDomain $pending.queryDomain))
+      }
+
+      $listedResults = @($endpointResults | Where-Object state -eq 'listed')
+      $cleanResults = @($endpointResults | Where-Object state -eq 'notListed')
+      $blockedResults = @($endpointResults | Where-Object state -eq 'blocked')
+      $result = $null
+      if ($listedResults.Count -gt 0) {
+        $first = $listedResults[0]
+        $result = [pscustomobject]@{ providerId=$first.providerId;providerName=$first.providerName;queryDomain=$first.queryDomain;queriedNameCategory=$first.queriedNameCategory;state='listed';listed=$true;categories=@($listedResults.categories|Sort-Object -Unique);responseCodes=@($listedResults.responseCodes|Sort-Object -Unique);accessValidated=$true;degraded=($endpointResults.Count -gt $listedResults.Count);reasonCode=$(if($cleanResults.Count -gt 0){'endpointDisagreement'}else{$null});policyUrl=$first.policyUrl }
+      } elseif ($cleanResults.Count -gt 0) {
+        $first = $cleanResults[0]
+        $result = [pscustomobject]@{ providerId=$first.providerId;providerName=$first.providerName;queryDomain=$first.queryDomain;queriedNameCategory=$first.queriedNameCategory;state='notListed';listed=$false;categories=@();responseCodes=@();accessValidated=$true;degraded=($endpointResults.Count -gt $cleanResults.Count);reasonCode=$(if($endpointResults.Count -gt $cleanResults.Count){'partialEndpoints'}else{$null});policyUrl=$first.policyUrl }
+      } elseif ($blockedResults.Count -gt 0) {
+        $first = $blockedResults[0]
+        $result = [pscustomobject]@{ providerId=$first.providerId;providerName=$first.providerName;queryDomain=$first.queryDomain;queriedNameCategory=$first.queriedNameCategory;state='blocked';listed=$null;categories=@();responseCodes=@();accessValidated=$false;degraded=$false;reasonCode=$first.reasonCode;policyUrl=$first.policyUrl }
+      } else {
+        $first = $endpointResults[0]
+        $result = [pscustomobject]@{ providerId=$pending.provider.id;providerName=$pending.provider.displayName;queryDomain=$pending.queryDomain;queriedNameCategory=$pending.provider.queryNameMode;state='unavailable';listed=$null;categories=@();responseCodes=@();accessValidated=$false;degraded=$false;reasonCode=$(if($first){$first.reasonCode}else{'unavailable'});policyUrl=$pending.provider.policyUrl }
+      }
+      $providerResults.Add($result)
+      # An unreachable provider is cached longer than a few seconds so a sequential
+      # multi-domain sweep does not re-probe it once per domain.
+      $ttl = if ($result.state -eq 'listed') { 300 } elseif ($result.state -eq 'notListed') { 120 } elseif ($result.state -eq 'blocked') { 300 } else { 60 }
+      Set-DomainReputationCacheEntry -Key $pending.cacheKey -Value $result -TtlSeconds $ttl
+    }
+
+    $results = @($providerResults | Sort-Object providerId)
+    $validated = @($results | Where-Object { $_.state -eq 'listed' -or $_.state -eq 'notListed' })
+    $listed = @($results | Where-Object state -eq 'listed')
+    $notListed = @($results | Where-Object state -eq 'notListed')
+    $blocked = @($results | Where-Object state -eq 'blocked')
+    $errors = @($results | Where-Object { $_.state -eq 'unavailable' -or $_.state -eq 'invalid' -or $_.degraded -eq $true })
+
+    $status.results = @($results)
+    $status.summary = [pscustomobject]@{
+      providerCount = $results.Count
+      validatedCount = $validated.Count
+      listedCount = $listed.Count
+      notListedCount = $notListed.Count
+      blockedCount = $blocked.Count
+      errorCount = $errors.Count
+      riskSummary = if ($listed.Count -gt 0) { 'Warning' } elseif ($validated.Count -gt 0 -and $errors.Count -eq 0 -and $blocked.Count -eq 0) { 'Clean' } else { 'Unknown' }
+    }
+    $status.state = if ($listed.Count -gt 0) { 'listed' } elseif ($validated.Count -gt 0 -and $errors.Count -eq 0 -and $blocked.Count -eq 0) { 'clean' } elseif ($validated.Count -gt 0) { 'partial' } else { 'unknown' }
+    if ($status.state -eq 'unknown' -and $blocked.Count -gt 0) { $status.reasonCode = 'providerBlocked' }
+    # Surface a budget exhaustion at the top level too. Without this the operator
+    # sees a bare 'unknown' with no explanation of why nothing was queried.
+    elseif ($status.state -eq 'unknown' -and $results.Count -gt 0 -and @($results | Where-Object { $_.reasonCode -eq 'queryBudget' }).Count -eq $results.Count) { $status.reasonCode = 'queryBudget' }
+  } catch {
+    # Keep the failure diagnosable without leaking the domain, the provider
+    # response, or the raw exception text into the log.
+    try { Write-AcsLogException -Component 'DomainReputation' -Operation 'GetDomainReputationStatus' -EventId 'ACS-DOMAINREP-FAIL' -ErrorCode 'internalError' -Exception $_.Exception -Level 'Error' } catch { $null = $_ }
+    $status.state = 'unknown'
+    $status.reasonCode = 'internalError'
+  } finally {
+    if ($gateAcquired) { $null = $AcsDomainReputationGate.Release() }
+  }
+
+  return $status
+}
+
+function Get-CombinedReputationState {
+  param(
+    [Parameter(Mandatory = $true)][object]$IpSummary,
+    [Parameter(Mandatory = $true)][string]$IpCheckState,
+    [Parameter(Mandatory = $true)][object]$DomainReputation
+  )
+
+  $ipValid = [Math]::Max(0, [int]$IpSummary.totalQueries - [int]$IpSummary.errorCount)
+  $ipErrors = [Math]::Max(0, [int]$IpSummary.errorCount)
+  $ipListed = [int]$IpSummary.listedCount -gt 0
+  $domainState = if ($DomainReputation) { [string]$DomainReputation.state } else { 'disabled' }
+
+  # A mail-IP scope that had ANY failed query is not proof of a clean domain, and
+  # the legacy summary.riskSummary already reports Warning in exactly that case.
+  # Returning 'clean' here would put two contradictory verdicts in the SAME payload
+  # (green badge above its own "errors: N" detail line), which is the recurring
+  # failure this codebase forbids. Degrade to 'partial' (WARN) instead.
+  $ipClean = ($IpCheckState -eq 'checked' -and $ipValid -gt 0 -and $ipErrors -eq 0)
+
+  if ($ipListed -or $domainState -eq 'listed') { return 'listed' }
+  if ($domainState -eq 'clean') {
+    if ($IpCheckState -eq 'notApplicable' -or $ipClean) { return 'clean' }
+    return 'partial'
+  }
+  if ($domainState -eq 'partial') { return 'partial' }
+  if ($domainState -eq 'disabled') {
+    if ($IpCheckState -eq 'notApplicable') { return 'notApplicable' }
+    if ($ipClean) { return 'clean' }
+  }
+  if ($IpCheckState -eq 'checked' -and $ipValid -gt 0) { return 'partial' }
+  return 'unknown'
+}
 # ===== Aggregated DNS Readiness =====
 # ------------------- AGGREGATED DNS READINESS -------------------
 # The main "check everything" function called by /dns and the CLI -TestDomain mode.
@@ -21865,6 +23074,131 @@ Object.keys(MULTI_DOMAIN_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, MULTI_DOMAIN_TRANSLATION_OVERRIDES[code]);
 });
 
+// Mail-IP reputation scope and Null MX explanations. MultiRBL also performs
+// domain/RHSBL checks, so a domain can have results there even when it declares
+// that it operates no mail server and therefore has no sending IP to check.
+const REPUTATION_SCOPE_TRANSLATION_OVERRIDES = {
+  en: {
+    reputationNotApplicable: 'Not applicable',
+    reputationNullMxNote: 'This domain publishes a Null MX record (MX 0 .), so it declares that it operates no mail server. There are no sending-mail IPv4 addresses to check against IP blocklists. Literal-domain reputation is evaluated separately below.',
+    reputationNoMailIpsNote: 'No public IPv4 addresses could be resolved from the domain\'s mail targets, so no IP blocklist queries were made.',
+    reputationApexFallbackNote: 'No MX record was published, so the domain\'s own IPv4 addresses were checked as a fallback. These may be website or shared-hosting addresses rather than sending-mail IPs.',
+    reputationInfo: 'Runs two independent checks: public mail-target IPv4 addresses against IP DNSBLs, and the ICANN registrable domain against control-validated URI/domain reputation providers. MultiRBL checks many more third-party lists, so its totals will differ. Listed entries are advisory warnings; provider blocks or incomplete coverage never become Clean.',
+    reputationMailIpScope: 'Mail-server IP reputation',
+    reputationDomainScope: 'Literal-domain reputation',
+    reputationDomainQueried: 'Domain queried',
+    reputationDomainCategories: 'Categories',
+    reputationDomainProviderListed: 'Listed',
+    reputationDomainProviderNotListed: 'Not listed',
+    reputationDomainProviderBlocked: 'Provider blocked this query path',
+    reputationDomainProviderInvalid: 'Invalid provider response',
+    reputationDomainProviderUnavailable: 'Provider unavailable',
+    reputationDomainProviderOptInHint: '(opt-in list: requires provider eligibility and is not verified by this tool; this is not a listing)',
+    reputationDomainClean: '{count} validated provider(s) reported no listing',
+    reputationDomainListed: 'Listed by {count} domain reputation provider(s)',
+    reputationDomainPartial: '{count} provider result(s) validated; coverage is incomplete',
+    reputationDomainDisabled: 'Domain reputation providers are disabled',
+    reputationDomainUnknown: 'No domain reputation provider returned a conclusive result'
+  },
+  es: {
+    reputationNotApplicable: 'No aplicable',
+    reputationNullMxNote: 'Este dominio publica un registro Null MX (MX 0 .), por lo que declara que no opera ning\u00FAn servidor de correo. No hay direcciones IPv4 de env\u00EDo que comprobar en listas de bloqueo de IP. La reputaci\u00F3n del dominio literal se eval\u00FAa por separado a continuaci\u00F3n.',
+    reputationNoMailIpsNote: 'No se pudieron resolver direcciones IPv4 p\u00FAblicas desde los destinos de correo del dominio, por lo que no se realizaron consultas a listas de bloqueo de IP.',
+    reputationApexFallbackNote: 'No se public\u00F3 ning\u00FAn registro MX, por lo que se comprobaron como alternativa las direcciones IPv4 propias del dominio. Pueden pertenecer a un sitio web o alojamiento compartido, no a servidores de correo emisor.',
+    reputationInfo: 'Ejecuta dos comprobaciones independientes: las direcciones IPv4 de correo en DNSBL de IP y el dominio registrable de ICANN en proveedores de reputaci\u00F3n de dominios con controles validados. MultiRBL consulta muchas m\u00E1s listas, por lo que sus totales pueden diferir.',
+    reputationMailIpScope: 'Reputaci\u00F3n de IP del servidor de correo',
+    reputationDomainScope: 'Reputaci\u00F3n del dominio literal',
+    reputationDomainQueried: 'Dominio consultado',
+    reputationDomainCategories: 'Categor\u00EDas',
+    reputationDomainProviderListed: 'Incluido',
+    reputationDomainProviderNotListed: 'No incluido',
+    reputationDomainProviderBlocked: 'El proveedor bloque\u00F3 esta ruta de consulta',
+    reputationDomainProviderInvalid: 'Respuesta no v\u00E1lida del proveedor',
+    reputationDomainProviderUnavailable: 'Proveedor no disponible',
+    reputationDomainProviderOptInHint: '(lista opcional: requiere elegibilidad del proveedor y esta herramienta no la verifica; esto no es una inclusi\u00F3n)',
+    reputationDomainClean: '{count} proveedor(es) validado(s) no informaron inclusiones',
+    reputationDomainListed: 'Incluido por {count} proveedor(es) de reputaci\u00F3n de dominios',
+    reputationDomainPartial: '{count} resultado(s) de proveedor validado(s); la cobertura est\u00E1 incompleta',
+    reputationDomainDisabled: 'Los proveedores de reputaci\u00F3n de dominios est\u00E1n deshabilitados',
+    reputationDomainUnknown: 'Ning\u00FAn proveedor devolvi\u00F3 un resultado concluyente'
+  },
+  fr: {
+    reputationNotApplicable: 'Non applicable',
+    reputationNullMxNote: 'Ce domaine publie un enregistrement Null MX (MX 0 .), indiquant qu\u2019il n\u2019exploite aucun serveur de messagerie. Il n\u2019existe donc aucune adresse IPv4 d\u2019envoi \u00E0 v\u00E9rifier dans les listes de blocage IP. La r\u00E9putation du domaine litt\u00E9ral est \u00E9valu\u00E9e s\u00E9par\u00E9ment ci-dessous.',
+    reputationNoMailIpsNote: 'Aucune adresse IPv4 publique n\u2019a pu \u00EAtre r\u00E9solue depuis les destinations de messagerie du domaine. Aucune requ\u00EAte de liste de blocage IP n\u2019a donc \u00E9t\u00E9 effectu\u00E9e.',
+    reputationApexFallbackNote: 'Aucun enregistrement MX n\u2019a \u00E9t\u00E9 publi\u00E9; les adresses IPv4 propres au domaine ont donc \u00E9t\u00E9 v\u00E9rifi\u00E9es en secours. Elles peuvent appartenir \u00E0 un site web ou \u00E0 un h\u00E9bergement partag\u00E9 plut\u00F4t qu\u2019\u00E0 un serveur d\u2019envoi.',
+    reputationInfo: 'Ex\u00E9cute deux contr\u00F4les ind\u00E9pendants: les adresses IPv4 de messagerie dans les DNSBL IP et le domaine enregistrable ICANN aupr\u00E8s de fournisseurs de r\u00E9putation de domaines dont les contr\u00F4les sont valid\u00E9s. MultiRBL interroge beaucoup plus de listes, ses totaux peuvent donc diff\u00E9rer.',
+    reputationMailIpScope: 'R\u00E9putation IP du serveur de messagerie',
+    reputationDomainScope: 'R\u00E9putation du domaine litt\u00E9ral',
+    reputationDomainQueried: 'Domaine interrog\u00E9',
+    reputationDomainCategories: 'Cat\u00E9gories',
+    reputationDomainProviderListed: 'R\u00E9pertori\u00E9',
+    reputationDomainProviderNotListed: 'Non r\u00E9pertori\u00E9',
+    reputationDomainProviderBlocked: 'Le fournisseur a bloqu\u00E9 ce chemin de requ\u00EAte',
+    reputationDomainProviderInvalid: 'R\u00E9ponse fournisseur non valide',
+    reputationDomainProviderUnavailable: 'Fournisseur indisponible',
+    reputationDomainProviderOptInHint: '(liste optionnelle\u00A0: n\u00E9cessite une \u00E9ligibilit\u00E9 aupr\u00E8s du fournisseur et n\u2019est pas v\u00E9rifi\u00E9e par cet outil\u00A0; il ne s\u2019agit pas d\u2019un signalement)',
+    reputationDomainClean: '{count} fournisseur(s) valid\u00E9(s) n\u2019ont signal\u00E9 aucune inscription',
+    reputationDomainListed: 'R\u00E9pertori\u00E9 par {count} fournisseur(s) de r\u00E9putation de domaines',
+    reputationDomainPartial: '{count} r\u00E9sultat(s) fournisseur valid\u00E9(s); la couverture est incompl\u00E8te',
+    reputationDomainDisabled: 'Les fournisseurs de r\u00E9putation de domaines sont d\u00E9sactiv\u00E9s',
+    reputationDomainUnknown: 'Aucun fournisseur n\u2019a renvoy\u00E9 de r\u00E9sultat concluant'
+  },
+  de: {
+    reputationNotApplicable: 'Nicht anwendbar',
+    reputationNullMxNote: 'Diese Dom\u00E4ne ver\u00F6ffentlicht einen Null-MX-Eintrag (MX 0 .) und erkl\u00E4rt damit, dass sie keinen Mailserver betreibt. Es gibt keine sendenden IPv4-Adressen, die gegen IP-Sperrlisten gepr\u00FCft werden k\u00F6nnen. Die Reputation der w\u00F6rtlichen Dom\u00E4ne wird unten separat ausgewertet.',
+    reputationNoMailIpsNote: 'F\u00FCr die Mailziele der Dom\u00E4ne konnten keine \u00F6ffentlichen IPv4-Adressen aufgel\u00F6st werden. Daher wurden keine IP-Sperrlisten abgefragt.',
+    reputationApexFallbackNote: 'Es wurde kein MX-Eintrag ver\u00F6ffentlicht, daher wurden ersatzweise die eigenen IPv4-Adressen der Dom\u00E4ne gepr\u00FCft. Diese k\u00F6nnen zu einer Website oder einem gemeinsam genutzten Hostingdienst geh\u00F6ren und m\u00FCssen keine sendenden Mailserver sein.',
+    reputationInfo: 'F\u00FChrt zwei unabh\u00E4ngige Pr\u00FCfungen aus: Mail-IPv4-Adressen gegen IP-DNSBLs und die registrierbare ICANN-Dom\u00E4ne gegen kontrollvalidierte Dom\u00E4nen-Reputationsanbieter. MultiRBL fragt deutlich mehr Listen ab, daher k\u00F6nnen die Summen abweichen.',
+    reputationMailIpScope: 'Mailserver-IP-Reputation',
+    reputationDomainScope: 'Reputation der w\u00F6rtlichen Dom\u00E4ne',
+    reputationDomainQueried: 'Abgefragte Dom\u00E4ne',
+    reputationDomainCategories: 'Kategorien',
+    reputationDomainProviderListed: 'Gelistet',
+    reputationDomainProviderNotListed: 'Nicht gelistet',
+    reputationDomainProviderBlocked: 'Anbieter hat diesen Abfrageweg blockiert',
+    reputationDomainProviderInvalid: 'Ung\u00FCltige Anbieterantwort',
+    reputationDomainProviderUnavailable: 'Anbieter nicht verf\u00FCgbar',
+    reputationDomainProviderOptInHint: '(optionale Liste: erfordert eine Berechtigung des Anbieters und wird von diesem Tool nicht gepr\u00FCft; dies ist kein Eintrag)',
+    reputationDomainClean: '{count} validierte(r) Anbieter meldete(n) keinen Eintrag',
+    reputationDomainListed: 'Von {count} Dom\u00E4nen-Reputationsanbieter(n) gelistet',
+    reputationDomainPartial: '{count} Anbieterergebnis(se) validiert; Abdeckung unvollst\u00E4ndig',
+    reputationDomainDisabled: 'Dom\u00E4nen-Reputationsanbieter sind deaktiviert',
+    reputationDomainUnknown: 'Kein Anbieter lieferte ein eindeutiges Ergebnis'
+  },
+  'pt-BR': {
+    reputationNotApplicable: 'N\u00E3o aplic\u00E1vel',
+    reputationNullMxNote: 'Este dom\u00EDnio publica um registro Null MX (MX 0 .), declarando que n\u00E3o opera nenhum servidor de email. N\u00E3o h\u00E1 endere\u00E7os IPv4 de envio para verificar em listas de bloqueio de IP. A reputa\u00E7\u00E3o do dom\u00EDnio literal \u00E9 avaliada separadamente abaixo.',
+    reputationNoMailIpsNote: 'N\u00E3o foi poss\u00EDvel resolver endere\u00E7os IPv4 p\u00FAblicos dos destinos de email do dom\u00EDnio, portanto nenhuma consulta a listas de bloqueio de IP foi feita.',
+    reputationApexFallbackNote: 'Nenhum registro MX foi publicado, portanto os endere\u00E7os IPv4 do pr\u00F3prio dom\u00EDnio foram verificados como alternativa. Eles podem pertencer a um site ou hospedagem compartilhada, e n\u00E3o a servidores de envio de email.',
+    reputationInfo: 'Executa duas verifica\u00E7\u00F5es independentes: endere\u00E7os IPv4 de email em DNSBLs de IP e o dom\u00EDnio registr\u00E1vel da ICANN em provedores de reputa\u00E7\u00E3o de dom\u00EDnio com controles validados. O MultiRBL consulta muito mais listas, portanto os totais podem diferir.',
+    reputationMailIpScope: 'Reputa\u00E7\u00E3o de IP do servidor de email',
+    reputationDomainScope: 'Reputa\u00E7\u00E3o do dom\u00EDnio literal',
+    reputationDomainQueried: 'Dom\u00EDnio consultado',
+    reputationDomainCategories: 'Categorias',
+    reputationDomainProviderListed: 'Listado',
+    reputationDomainProviderNotListed: 'N\u00E3o listado',
+    reputationDomainProviderBlocked: 'O provedor bloqueou este caminho de consulta',
+    reputationDomainProviderInvalid: 'Resposta inv\u00E1lida do provedor',
+    reputationDomainProviderUnavailable: 'Provedor indispon\u00EDvel',
+    reputationDomainProviderOptInHint: '(lista opcional: exige elegibilidade do provedor e n\u00E3o \u00E9 verificada por esta ferramenta; isto n\u00E3o \u00E9 uma inclus\u00E3o)',
+    reputationDomainClean: '{count} provedor(es) validado(s) n\u00E3o relatou(aram) listagem',
+    reputationDomainListed: 'Listado por {count} provedor(es) de reputa\u00E7\u00E3o de dom\u00EDnio',
+    reputationDomainPartial: '{count} resultado(s) de provedor validado(s); cobertura incompleta',
+    reputationDomainDisabled: 'Os provedores de reputa\u00E7\u00E3o de dom\u00EDnio est\u00E3o desativados',
+    reputationDomainUnknown: 'Nenhum provedor retornou um resultado conclusivo'
+  },
+  ar: { reputationNotApplicable: '\u063A\u064A\u0631 \u0645\u0646\u0637\u0628\u0642', reputationMailIpScope: '\u0633\u0645\u0639\u0629 IP \u0644\u062E\u0627\u062F\u0645 \u0627\u0644\u0628\u0631\u064A\u062F', reputationDomainScope: '\u0633\u0645\u0639\u0629 \u0627\u0644\u0646\u0637\u0627\u0642' },
+  'zh-CN': { reputationNotApplicable: '\u4E0D\u9002\u7528', reputationMailIpScope: '\u90AE\u4EF6\u670D\u52A1\u5668 IP \u58F0\u8A89', reputationDomainScope: '\u57DF\u540D\u58F0\u8A89' },
+  'hi-IN': { reputationNotApplicable: '\u0932\u093E\u0917\u0942 \u0928\u0939\u0940\u0902', reputationMailIpScope: '\u092E\u0947\u0932 \u0938\u0930\u094D\u0935\u0930 IP \u092A\u094D\u0930\u0924\u093F\u0937\u094D\u0920\u093E', reputationDomainScope: '\u0921\u094B\u092E\u0947\u0928 \u092A\u094D\u0930\u0924\u093F\u0937\u094D\u0920\u093E' },
+  'ja-JP': { reputationNotApplicable: '\u8A72\u5F53\u306A\u3057', reputationMailIpScope: '\u30E1\u30FC\u30EB\u30B5\u30FC\u30D0\u30FC IP \u30EC\u30D4\u30E5\u30C6\u30FC\u30B7\u30E7\u30F3', reputationDomainScope: '\u30C9\u30E1\u30A4\u30F3\u30EC\u30D4\u30E5\u30C6\u30FC\u30B7\u30E7\u30F3' },
+  'ru-RU': { reputationNotApplicable: '\u041D\u0435\u043F\u0440\u0438\u043C\u0435\u043D\u0438\u043C\u043E', reputationMailIpScope: '\u0420\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u044F IP \u043F\u043E\u0447\u0442\u043E\u0432\u043E\u0433\u043E \u0441\u0435\u0440\u0432\u0435\u0440\u0430', reputationDomainScope: '\u0420\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u044F \u0434\u043E\u043C\u0435\u043D\u0430' }
+};
+
+Object.keys(REPUTATION_SCOPE_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, REPUTATION_SCOPE_TRANSLATION_OVERRIDES[code]);
+});
+
 // Duplicate-record (RFC 7208 / RFC 7489) strings. Publishing more than one SPF or DMARC
 // record is a PermError: receivers reject the whole set, so these are hard failures, not
 // cosmetic warnings.
@@ -25081,6 +26415,18 @@ function normalizeDomain(raw) {
   raw = raw.replace(/^\*\./, "");
   raw = raw.replace(/^\.+/, "").replace(/\.+$/, "");
 
+  // IDN to A-label. The browser's URL parser performs IDNA conversion, which is
+  // what makes a Unicode domain pass the ASCII-only validator below and match
+  // what the server computes. Skipped when the value still carries URL syntax.
+  if (/[^\x00-\x7F]/.test(raw) && !/[\/\\?#\s]/.test(raw)) {
+    try {
+      const asciiHost = new URL("http://" + raw).hostname;
+      if (asciiHost) { raw = asciiHost; }
+    } catch {
+      // leave unchanged; isValidDomain rejects it
+    }
+  }
+
   return raw.toLowerCase();
 }
 
@@ -25467,7 +26813,118 @@ function localizeRiskSummary(value) {
   if (normalized === 'clean') return t('riskClean');
   if (normalized === 'warning') return t('riskWarning');
   if (normalized === 'elevatedrisk') return t('riskElevated');
+  if (normalized === 'notapplicable') return t('reputationNotApplicable');
   return value || t('unknown');
+}
+
+// Build one canonical reputation view for the card, quota row, overall quota
+// verdict, domain-tab dot, and copied report. Older API payloads without the
+// literal-domain branch retain their previous mail-IP-only behavior.
+function getReputationViewModel(rep) {
+  const value = (rep && typeof rep === 'object' && !Array.isArray(rep)) ? rep : {};
+  const ipSummary = value.summary || {};
+  const total = Number(ipSummary.totalQueries) || 0;
+  const errors = Number(ipSummary.errorCount) || 0;
+  const listed = Number(ipSummary.listedCount) || 0;
+  const notListed = Number(ipSummary.notListedCount) || 0;
+  const valid = Math.max(0, total - errors);
+  const percent = valid > 0 ? Math.max(0, Math.min(100, Math.round((notListed / valid) * 100))) : null;
+  const ipNotApplicable = value.ipCheckState === 'notApplicable';
+  const ipState = ipNotApplicable ? 'notApplicable'
+    : (listed > 0 ? 'listed' : (valid > 0 ? 'clean' : 'unknown'));
+  const ratingKey = percent === null ? 'unknown'
+    : (percent >= 99 ? 'excellent'
+    : (percent >= 90 ? 'great'
+    : (percent >= 75 ? 'good'
+    : (percent >= 50 ? 'fair' : 'poor'))));
+
+  const domain = (value.domainReputation && typeof value.domainReputation === 'object')
+    ? value.domainReputation
+    : null;
+  const domainSummary = domain && domain.summary ? domain.summary : {};
+  const domainResults = domain && Array.isArray(domain.results) ? domain.results : [];
+  const domainState = domain ? String(domain.state || 'unknown') : 'disabled';
+
+  let combinedState = String(value.overallReputationState || '');
+  if (!combinedState) {
+    if (ipState === 'listed') combinedState = 'listed';
+    else if (!domain) combinedState = ipState;
+    else if (domainState === 'listed') combinedState = 'listed';
+    else if (domainState === 'clean' && (ipState === 'clean' || ipState === 'notApplicable')) combinedState = 'clean';
+    else if (domainState === 'disabled' && ipState === 'clean') combinedState = 'clean';
+    else if (domainState === 'disabled' && ipState === 'notApplicable') combinedState = 'notApplicable';
+    else if (domainState === 'partial' || ipState === 'clean') combinedState = 'partial';
+    else combinedState = 'unknown';
+  }
+
+  const quotaState = combinedState === 'clean' ? 'pass'
+    : (combinedState === 'notApplicable' ? 'notApplicable' : 'warn');
+  const badgeClass = combinedState === 'clean' ? 'tag-pass'
+    : (combinedState === 'notApplicable' ? 'tag-info' : 'tag-warn');
+
+  return {
+    ipSummary,
+    total,
+    errors,
+    listed,
+    notListed,
+    valid,
+    percent,
+    ratingKey,
+    ipState,
+    ipNotApplicable,
+    domain,
+    domainSummary,
+    domainResults,
+    domainState,
+    combinedState,
+    quotaState,
+    badgeClass
+  };
+}
+
+function getDomainReputationProviderText(result) {
+  const item = result || {};
+  const stateKey = {
+    listed: 'reputationDomainProviderListed',
+    notListed: 'reputationDomainProviderNotListed',
+    blocked: 'reputationDomainProviderBlocked',
+    invalid: 'reputationDomainProviderInvalid',
+    unavailable: 'reputationDomainProviderUnavailable'
+  }[String(item.state || '')] || 'reputationDomainProviderUnavailable';
+  const categories = Array.isArray(item.categories) && item.categories.length > 0
+    ? ` (${t('reputationDomainCategories')}: ${item.categories.join(', ')})`
+    : '';
+  let text = `${String(item.providerName || item.providerId || t('unknown'))}: ${t(stateKey)}${categories}`;
+  // Opt-in lists require operator eligibility and are not exercised against the
+  // live service by default, so a failure here says nothing about the domain.
+  // SERVFAIL, timeout and refusal are indistinguishable on the wire, so the copy
+  // must not claim a specific cause.
+  const optInProvider = item.providerId === 'surbl' || item.providerId === 'spamhaus';
+  const unusable = item.state === 'unavailable' || item.state === 'invalid' || item.state === 'blocked';
+  if (optInProvider && unusable) {
+    text += ` ${t('reputationDomainProviderOptInHint')}`;
+    if (item.policyUrl) { text += ` ${item.policyUrl}`; }
+  }
+  return text;
+}
+
+function getDomainReputationSummaryText(view) {
+  const model = view || {};
+  if (!model.domain) return '';
+  const summary = model.domainSummary || {};
+  switch (model.domainState) {
+    case 'clean':
+      return t('reputationDomainClean', { count: String(summary.validatedCount || 0) });
+    case 'listed':
+      return t('reputationDomainListed', { count: String(summary.listedCount || 0) });
+    case 'partial':
+      return t('reputationDomainPartial', { count: String(summary.validatedCount || 0) });
+    case 'disabled':
+      return t('reputationDomainDisabled');
+    default:
+      return t('reputationDomainUnknown');
+  }
 }
 
 function localizeWhoisStatus(status) {
@@ -27142,10 +28599,8 @@ function getDomainQuotaStatus(r) {
 
   // Reputation
   if (r.reputation) {
-    const repSum = r.reputation.summary || {};
-    const repValid = (repSum.totalQueries || 0) - (repSum.errorCount || 0);
-    const repPercent = (repValid > 0) ? ((repSum.notListedCount || 0) / repValid * 100) : null;
-    if ((repSum.listedCount > 0) || (repPercent !== null && repPercent < 75)) quotaWarn = true;
+    const reputationView = getReputationViewModel(r.reputation);
+    if (reputationView.quotaState === 'warn') quotaWarn = true;
   }
 
   // Registration (WHOIS/RDAP)
@@ -30442,14 +31897,11 @@ function render(r) {
     if (!hasUsableMxForQuota) { quotaFail = true; }
 
     // 2. Reputation
-    // Logic from card: state is 'warn' if listed or poor reputation.
+    // One shared view model keeps this status aligned with the card, quota row,
+    // domain-tab dot and copied report across both reputation scopes.
     if (r.reputation) {
-        const repSum = r.reputation.summary || {};
-        const repValid = (repSum.totalQueries || 0) - (repSum.errorCount || 0);
-        const repPercent = (repValid > 0) ? ((repSum.notListedCount || 0) / repValid * 100) : null;
-        if ((repSum.listedCount > 0) || (repPercent !== null && repPercent < 75)) {
-            quotaWarn = true;
-        }
+      const reputationView = getReputationViewModel(r.reputation);
+      if (reputationView.quotaState === 'warn') quotaWarn = true;
     }
 
     // 3. Registration
@@ -30528,12 +31980,14 @@ function render(r) {
       case 'fail':
       case 'error': return 'tag-fail';
       case 'warn': return 'tag-warn';
+      case 'info':
+      case 'notApplicable':
       case 'pending':
       default: return 'tag-info';
     }
   };
   const quotaRow = (name, state, detail, infoTitle = null, targetId = null, extraHtml = '') => {
-    const stateKeyMap = { pass: 'pass', fail: 'fail', error: 'error', warn: 'warn', pending: 'pending' };
+    const stateKeyMap = { pass: 'pass', fail: 'fail', error: 'error', warn: 'warn', info: 'info', notApplicable: 'reputationNotApplicable', pending: 'pending' };
     const badge = `<span class="tag ${quotaStateClass(state)} status-pill">${escapeHtml(t(stateKeyMap[state] || String(state || '').toLowerCase()))}</span>`;
     const nameHtml = escapeHtml(name)
       + (infoTitle ? ` <button type="button" class="info-dot" aria-label="${escapeHtml(infoTitle)}" data-info="${escapeHtml(infoTitle)}">i</button>` : "")
@@ -30638,38 +32092,39 @@ function render(r) {
     repStateForCopy = 'ERROR';
   } else {
     const rep = r.reputation || {};
-    const summary = rep.summary || {};
-    const listed = summary.listedCount || 0;
-    const notListed = summary.notListedCount || 0;
-    const errorCount = summary.errorCount || 0;
-    const total = summary.totalQueries || 0;
+    const reputationView = getReputationViewModel(rep);
+    const ratingLabel = t(reputationView.ratingKey);
+    const repUsedApex = Array.isArray(rep.targets) && rep.targets.some(target => target && target.source === 'apex');
     const repUsedParent = rep.lookupUsedParent === true && rep.lookupDomain && rep.lookupDomain !== (r.domain || '');
-    const valid = Math.max(0, total - errorCount);
-    const percent = (valid > 0) ? Math.max(0, Math.min(100, Math.round((notListed / valid) * 100))) : null;
-    const rating = percent === null ? 'unknown' : (percent >= 99 ? 'excellent' : percent >= 90 ? 'great' : percent >= 75 ? 'good' : percent >= 50 ? 'fair' : 'poor');
-      const ratingMap = { excellent: t('excellent'), great: t('great'), good: t('good'), fair: t('fair'), poor: t('poor'), unknown: t('unknown') };
-      const ratingLabel = ratingMap[rating] || rating;
-    const state = listed > 0 ? 'warn' : (percent === null ? 'warn' : (percent >= 75 ? 'pass' : 'warn'));
-      const riskSummary = (summary.riskSummary || 'Clean') === 'Clean' ? t('clean') : (summary.riskSummary || 'Clean');
-    const baseDetail = percent === null
-      ? `${t('riskLabel')}: ${riskSummary} | ${t('totalQueries')}: ${total}, ${t('notListed')}: ${notListed}`
-      : `${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${ratingLabel} (${percent}%) | ${t('listed')}: ${listed}, ${t('notListed')}: ${notListed}`;
-      const parentNote = repUsedParent ? t('usingIpParent', { domain: rep.lookupDomain, queryDomain: r.domain || '' }) : '';
-    const detail = parentNote ? `${baseDetail} | ${parentNote}` : baseDetail;
+    const riskSummary = localizeRiskSummary(rep.overallRiskSummary || rep.summary?.riskSummary || 'Unknown');
+    const mailDetail = reputationView.ipNotApplicable
+      ? t('reputationNullMxNote')
+      : (reputationView.percent === null
+        ? `${t('riskLabel')}: ${riskSummary} | ${t('totalQueries')}: ${reputationView.total}, ${t('notListed')}: ${reputationView.notListed}`
+        : `${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${ratingLabel} (${reputationView.percent}%) | ${t('listed')}: ${reputationView.listed}, ${t('notListed')}: ${reputationView.notListed}`);
+    const sourceNote = repUsedApex
+      ? t('reputationApexFallbackNote')
+      : (repUsedParent ? t('usingIpParent', { domain: rep.lookupDomain, queryDomain: r.domain || '' }) : '');
+    const domainDetail = getDomainReputationSummaryText(reputationView);
+    const providerDetails = reputationView.domainResults.map(getDomainReputationProviderText);
+    const detail = [mailDetail, sourceNote, domainDetail].concat(providerDetails).filter(Boolean).join(' | ');
     repCopyDetail = detail;
-    repStats = {
+    repStats = reputationView.ipNotApplicable ? null : {
       zones: Array.isArray(rep.rblZones) ? rep.rblZones.length : 0,
-      total,
-      errors: errorCount,
-      percent,
+      total: reputationView.total,
+      errors: reputationView.errors,
+      percent: reputationView.percent,
       rating: ratingLabel,
-      listed,
-      notListed: summary.notListedCount || 0
+      listed: reputationView.listed,
+      notListed: reputationView.notListed
     };
-    quotaItems.push(quotaRow(t('reputationDnsbl'), state, detail, reputationInfo, 'reputation', multiRblHtml));
-    quotaLines.push(`**Reputation (DNSBL):** ${state.toUpperCase()}${detail ? ' - ' + detail : ''}`);
-    quotaLinesHtml.push(`<strong>Reputation (DNSBL):</strong> ${escapeHtml(state.toUpperCase())}${detail ? ' - ' + escapeHtml(detail) : ''}`);
-    repStateForCopy = state.toUpperCase();
+    quotaItems.push(quotaRow(t('reputationDnsbl'), reputationView.quotaState, detail, reputationInfo, 'reputation', multiRblHtml));
+    const stateText = reputationView.quotaState === 'notApplicable'
+      ? t('reputationNotApplicable').toUpperCase()
+      : reputationView.quotaState.toUpperCase();
+    quotaLines.push(`**Reputation (DNSBL):** ${stateText}${detail ? ' - ' + detail : ''}`);
+    quotaLinesHtml.push(`<strong>Reputation (DNSBL):</strong> ${escapeHtml(stateText)}${detail ? ' - ' + escapeHtml(detail) : ''}`);
+    repStateForCopy = stateText;
   }
 
   // 3) Domain Registration
@@ -31861,51 +33316,32 @@ function render(r) {
     ));
   } else {
     const rep = r.reputation || {};
-    const summary = rep.summary || {};
-    const listed = summary.listedCount || 0;
-    const errorCount = summary.errorCount || 0;
-    const notListed = summary.notListedCount || 0;
-    const total = summary.totalQueries || 0;
-    const repUsedParent = rep.lookupUsedParent === true && rep.lookupDomain && rep.lookupDomain !== (r.domain || '');
-    const validQueries = Math.max(0, total - errorCount);
-
-    let percent = null;
-    if (validQueries > 0) {
-      percent = Math.max(0, Math.min(100, Math.round((notListed / validQueries) * 100)));
-    }
-
-    let rating = t('unknown');
-    if (percent !== null) {
-      if (percent >= 99) rating = t('excellent');
-      else if (percent >= 90) rating = t('great');
-      else if (percent >= 75) rating = t('good');
-      else if (percent >= 50) rating = t('fair');
-      else rating = t('poor');
-    }
-
-    const statusLabel = percent === null ? t('unknown') : `${rating.toUpperCase()} (${percent}%)`;
-    // Colour on listings first. A domain listed on 1 of 25 zones still scores 96%, so
-    // grading on percentage alone painted this card green while its own body read
-    // "Listed: 1" and the Email Quota row correctly said WARN.
-    const statusClass = listed > 0 ? "tag-warn"
-      : (percent === null ? "tag-info"
-      : (percent >= 90 ? "tag-pass"
-      : (percent >= 75 ? "tag-info" : "tag-fail")));
+    const reputationView = getReputationViewModel(rep);
+    const repUsedApex = Array.isArray(rep.targets) && rep.targets.some(target => target && target.source === 'apex');
+    const rating = t(reputationView.ratingKey);
+    const statusLabel = reputationView.combinedState === 'clean' ? t('clean').toUpperCase()
+      : (reputationView.combinedState === 'notApplicable' ? t('reputationNotApplicable')
+      : (reputationView.combinedState === 'unknown' ? t('unknown').toUpperCase() : t('warningState').toUpperCase()));
 
     // Show only listed entries to avoid noise
     const listedItems = (rep.results || []).filter(x => x && x.listed === true);
-    let body = `${t('zonesQueried')}: ${rep.rblZones ? rep.rblZones.length : 0}\n` +
-               `${t('totalQueries')}: ${total}\n` +
-               `${t('errorsCount')}: ${errorCount}`;
-    if (percent !== null) {
-    const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
-      body += `\n${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${rating} (${percent}%)`;
-      body += `\n${t('listed')}: ${listed}\n${t('notListed')}: ${notListed}`;
+    let body = `${t('reputationMailIpScope')}: `;
+    if (reputationView.ipNotApplicable) {
+      body += `${t('reputationNotApplicable')}\n${t('reputationNullMxNote')}`;
     } else {
-      const riskSummary = localizeRiskSummary(summary.riskSummary || 'Clean');
+      body += `\n${t('zonesQueried')}: ${rep.rblZones ? rep.rblZones.length : 0}\n` +
+        `${t('totalQueries')}: ${reputationView.total}\n` +
+        `${t('errorsCount')}: ${reputationView.errors}`;
+      const riskSummary = localizeRiskSummary(rep.summary?.riskSummary || 'Unknown');
+      if (reputationView.percent !== null) {
+        body += `\n${t('riskLabel')}: ${riskSummary} | ${t('reputationWord')}: ${rating} (${reputationView.percent}%)`;
+        body += `\n${t('listed')}: ${reputationView.listed}\n${t('notListed')}: ${reputationView.notListed}`;
+      } else {
       body += `\n${t('riskLabel')}: ${riskSummary}`;
-      body += `\n${t('reputationWord')}: ${t('noSuccessfulQueries')}`;
+      body += `\n${t('reputationWord')}: ${rep.ipCheckReason === 'noAddresses' ? t('reputationNoMailIpsNote') : t('noSuccessfulQueries')}`;
+      }
     }
+    if (repUsedApex) body += `\n${t('reputationApexFallbackNote')}`;
     if (listedItems.length > 0) {
       const lines = listedItems.map(x => t('listedOnZone', {
         ip: x.ip,
@@ -31915,11 +33351,21 @@ function render(r) {
       body += `\n\n${t('listingsLabel')}:\n` + lines.join("\n");
     }
 
+    if (reputationView.domain) {
+      body += `\n\n${t('reputationDomainScope')}: ${getDomainReputationSummaryText(reputationView)}`;
+      if (reputationView.domain.queryDomain) {
+        body += `\n${t('reputationDomainQueried')}: ${reputationView.domain.queryDomain}`;
+      }
+      if (reputationView.domainResults.length > 0) {
+        body += `\n` + reputationView.domainResults.map(getDomainReputationProviderText).join('\n');
+      }
+    }
+
     cards.push(card(
       t('reputationDnsbl'),
       body,
       statusLabel,
-      statusClass,
+      reputationView.badgeClass,
       "reputation",
       false,
       `<button type="button" class="info-dot" aria-label="${escapeHtml(reputationInfo)}" data-info="${escapeHtml(reputationInfo)}">i</button> ${multiRblHtml}`
@@ -35404,7 +36850,7 @@ $script:PrivacyPageHtml = @'
 <ul>
   <li id="privacySection2Item1"><strong>No personal information</strong> &mdash; the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.</li>
   <li id="privacySection2Item2"><strong>No tracking cookies</strong> &mdash; the Tool does not use advertising or analytics tracking cookies.</li>
-  <li id="privacySection2Item3"><strong>No query logging</strong> &mdash; domain names you look up are not stored on the server.</li>
+  <li id="privacySection2Item3"><strong>No query logging</strong> &mdash; domain names you look up are never written to logs or saved to disk.</li>
 </ul>
 
 <h2 id="privacySection3Title">3. Anonymous Usage Metrics (Optional)</h2>
@@ -35423,7 +36869,7 @@ $script:PrivacyPageHtml = @'
 <p id="privacySection5Body">When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool&rsquo;s server does not proxy, log, or store any Azure data.</p>
 
 <h2 id="privacySection6Title">6. DNS Lookups</h2>
-<p id="privacySection6Body">DNS queries are performed server-side using the configured resolver (system DNS or DNS-over-HTTPS). Query results are returned to your browser and are not stored.</p>
+<p id="privacySection6Body">DNS queries are performed server-side using the configured resolver or selected reputation provider. Queried domain names are sent to those services. Results may be cached briefly in process memory to limit provider traffic, but are not persisted to disk.</p>
 
 <h2 id="privacySection7Title">7. Browser Storage and Cookie Consent</h2>
 <p id="privacySection7Body">The Tool uses your browser&rsquo;s <code>localStorage</code> for consent state and, if you allow preferences storage, for your theme preference, language, and recent domain history. If you allow anonymous analytics, the Tool may also issue a temporary first-party session cookie used only for aggregate usage counting. This data never leaves your browser except for the anonymous aggregate metrics described above.</p>
@@ -35435,7 +36881,7 @@ $script:PrivacyPageHtml = @'
 <p><a id="privacyManageCookiesLink" href="/?openCookieSettings=1">Manage cookie settings</a></p>
 
 <h2 id="privacySection8Title">8. Third-Party Services</h2>
-<p id="privacySection8Body">The Tool may use third-party services for DNS resolution (e.g., DNS-over-HTTPS providers), WHOIS lookups, and DNSBL reputation checks. These services have their own privacy policies.</p>
+<p id="privacySection8Body">The Tool may use third-party services for DNS resolution, WHOIS lookups, IP blocklists, and literal-domain reputation checks. Selected providers receive the domain being checked and have their own privacy policies and usage terms.</p>
 
 <h2 id="privacySection9Title">9. Changes to This Statement</h2>
 <p id="privacySection9Body">This privacy statement may be updated from time to time. Changes take effect when published in the Tool.</p>
@@ -35448,7 +36894,7 @@ $script:PrivacyPageHtml = @'
     en: {
       pageTitle: 'Privacy Statement - ACS Email Domain Checker', back: '\u2190 Back to ACS Email Domain Checker', title: 'Privacy Statement', updatedLabel: 'Last updated:', updatedValue: 'March 2026',
       s1t: '1. Overview', s1b: 'The ACS Email Domain Checker (\u201Cthe Tool\u201D) is designed with privacy in mind. This statement explains what data the Tool does and does not collect.',
-      s2t: '2. Data We Do Not Collect', s2l1: '<strong>No personal information</strong> \u2014 the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.', s2l2: '<strong>No tracking cookies</strong> \u2014 the Tool does not use advertising or analytics tracking cookies.', s2l3: '<strong>No query logging</strong> \u2014 domain names you look up are not stored on the server.',
+      s2t: '2. Data We Do Not Collect', s2l1: '<strong>No personal information</strong> \u2014 the Tool does not collect names, email addresses, IP addresses, or hardware identifiers.', s2l2: '<strong>No tracking cookies</strong> \u2014 the Tool does not use advertising or analytics tracking cookies.', s2l3: '<strong>No query logging</strong> \u2014 domain names you look up are never written to logs or saved to disk.',
       s3t: '3. Anonymous Usage Metrics (Optional)', s3i: 'When anonymous metrics are enabled, the Tool collects:', s3l1: 'HMAC-hashed domain names (irreversible; the original domain cannot be recovered).', s3l2: 'Aggregate lookup counters and first-seen timestamps.', s3l3: 'A random session identifier (not persisted across restarts).', s3b: 'Anonymous metrics can be disabled entirely with the <code>-DisableAnonymousMetrics</code> flag.',
       s4t: '4. Microsoft Entra ID Authentication', s4b: 'If you choose to sign in with Microsoft, the Tool uses MSAL.js with the Authorization Code + PKCE flow. Tokens are stored in your browser\u2019s session storage and are never sent to the Tool\u2019s server. The Tool reads only your display name and email address from Microsoft Graph to show your identity in the UI.',
       s5t: '5. Azure Resource Queries', s5b: 'When using Azure Workspace Diagnostics, all API calls go directly from your browser to Azure Resource Manager and Log Analytics using your own access token. The Tool\u2019s server does not proxy, log, or store any Azure data.',
@@ -35570,6 +37016,34 @@ $script:PrivacyPageHtml = @'
     if (value === 'ru' || value.startsWith('ru-ru') || value.startsWith('ru_ru')) return 'ru-RU';
     return 'en';
   }
+
+  const PRIVACY_DNS_OVERRIDES = {
+    en: {
+      s6b: 'DNS queries are performed server-side using the configured resolver or selected reputation provider. Queried domain names are sent to those services. Results may be cached briefly in process memory to limit provider traffic, but are not persisted to disk.',
+      s8b: 'The Tool may use third-party services for DNS resolution, WHOIS lookups, IP blocklists, and literal-domain reputation checks. Selected providers receive the domain being checked and have their own privacy policies and usage terms.'
+    },
+    es: {
+      s6b: 'Las consultas DNS se realizan en el servidor mediante el solucionador configurado o el proveedor de reputaci\u00F3n seleccionado. Los nombres de dominio consultados se env\u00EDan a esos servicios. Los resultados pueden almacenarse brevemente en la memoria del proceso, pero no se guardan en disco.',
+      s8b: 'La Herramienta puede usar servicios de terceros para resoluci\u00F3n DNS, consultas WHOIS, listas de bloqueo de IP y reputaci\u00F3n de dominios. Los proveedores seleccionados reciben el dominio consultado y tienen sus propias pol\u00EDticas y condiciones.'
+    },
+    fr: {
+      s6b: 'Les requ\u00EAtes DNS sont effectu\u00E9es c\u00F4t\u00E9 serveur avec le r\u00E9solveur configur\u00E9 ou le fournisseur de r\u00E9putation s\u00E9lectionn\u00E9. Les domaines interrog\u00E9s sont envoy\u00E9s \u00E0 ces services. Les r\u00E9sultats peuvent \u00EAtre bri\u00E8vement mis en cache en m\u00E9moire, mais ne sont pas persist\u00E9s sur disque.',
+      s8b: 'L\u2019Outil peut utiliser des services tiers pour la r\u00E9solution DNS, WHOIS, les listes de blocage IP et la r\u00E9putation de domaines. Les fournisseurs s\u00E9lectionn\u00E9s re\u00E7oivent le domaine interrog\u00E9 et appliquent leurs propres politiques et conditions.'
+    },
+    de: {
+      s6b: 'DNS-Abfragen werden serverseitig mit dem konfigurierten Resolver oder ausgew\u00E4hlten Reputationsanbieter ausgef\u00FChrt. Abgefragte Dom\u00E4nen werden an diese Dienste gesendet. Ergebnisse k\u00F6nnen kurzzeitig im Prozessspeicher zwischengespeichert, aber nicht auf Datentr\u00E4gern persistiert werden.',
+      s8b: 'Das Tool kann Drittanbieter f\u00FCr DNS-Aufl\u00F6sung, WHOIS, IP-Sperrlisten und Dom\u00E4nen-Reputation verwenden. Ausgew\u00E4hlte Anbieter erhalten die abgefragte Dom\u00E4ne und haben eigene Datenschutzrichtlinien und Nutzungsbedingungen.'
+    },
+    'pt-BR': {
+      s6b: 'As consultas DNS s\u00E3o realizadas no servidor usando o resolvedor configurado ou o provedor de reputa\u00E7\u00E3o selecionado. Os dom\u00EDnios consultados s\u00E3o enviados a esses servi\u00E7os. Os resultados podem ser armazenados brevemente na mem\u00F3ria do processo, mas n\u00E3o s\u00E3o persistidos em disco.',
+      s8b: 'A Ferramenta pode usar servi\u00E7os de terceiros para DNS, WHOIS, listas de bloqueio de IP e reputa\u00E7\u00E3o de dom\u00EDnios. Os provedores selecionados recebem o dom\u00EDnio consultado e t\u00EAm suas pr\u00F3prias pol\u00EDticas e termos.'
+    }
+  };
+  Object.keys(TRANSLATIONS).forEach(code => {
+    const override = PRIVACY_DNS_OVERRIDES[code] || PRIVACY_DNS_OVERRIDES.en;
+    TRANSLATIONS[code].s6b = override.s6b;
+    TRANSLATIONS[code].s8b = override.s8b;
+  });
 
   const params = new URLSearchParams(window.location.search);
   const lang = normalizeLanguageCode(params.get('lang') || navigator.language || 'en');
@@ -35718,12 +37192,13 @@ $functionNames = @(
   'Get-AnonymousMetricsPersistPath','Import-AnonymousMetricsPersisted','Save-AnonymousMetricsPersisted','Set-AnonymousMetricsFilePermissions','ConvertTo-Iso8601Utc',
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
-  'Get-RegistrableDomain','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
+  'Get-RegistrableDomain','ConvertTo-AsciiDomainName','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
   'ConvertFrom-DnsTxtPresentationData','Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Select-SpfRecordFromSet','Merge-SpfRecordSet','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
+  'Get-DomainReputationProviderCatalog','Get-DomainReputationCacheKey','Get-DomainReputationCacheEntry','Set-DomainReputationCacheEntry','Remove-DomainReputationCacheEntry','Get-DomainReputationHealthEntry','Set-DomainReputationHealthEntry','Test-DomainReputationQueryBudget','Test-DomainReputationProviderBudget','Get-DomainReputationAuthorityHosts','New-DomainReputationDnsQueryPacket','Read-DomainReputationDnsResponse','Invoke-DomainReputationDnsFanout','Test-DomainReputationPositiveControl','Test-DomainReputationProviderControl','ConvertFrom-DomainReputationProviderOutcome','Get-DomainReputationProviderEndpoints','Get-DomainReputationStatus','Get-CombinedReputationState',
   'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
   'Invoke-RawDnsTxtQuery','Get-AuthoritativeNameserverHosts','Resolve-NameserverPublicIps','Get-NameserverTxtStatus',
   'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Get-DnsPropagationHealthTtlMinutes','Get-DnsPropagationHealthState','Set-DnsPropagationHealthState','ConvertFrom-DnsPropagationResolverInput','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
@@ -35772,6 +37247,30 @@ if ($global:AcsWhoisServerCooldown) {
 # health pre-check could never learn across requests.
 if ($global:AcsPropagationHealth) {
   $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsPropagationHealth', $global:AcsPropagationHealth, 'Shared DNS propagation resolver health cache'))
+}
+
+# Share domain-reputation state so provider controls, answer caches and traffic
+# budgets apply process-wide rather than once per request worker.
+if ($global:AcsDomainReputationCache) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationCache', $global:AcsDomainReputationCache, 'Shared literal-domain reputation cache'))
+}
+if ($global:AcsDomainReputationHealth) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationHealth', $global:AcsDomainReputationHealth, 'Shared literal-domain provider health cache'))
+}
+if ($global:AcsDomainReputationProviderBudgets) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationProviderBudgets', $global:AcsDomainReputationProviderBudgets, 'Shared per-provider query budgets'))
+}
+if ($global:AcsDomainReputationGate) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationGate', $global:AcsDomainReputationGate, 'Shared literal-domain reputation concurrency gate'))
+}
+if ($global:AcsDomainReputationBudgetLock) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationBudgetLock', $global:AcsDomainReputationBudgetLock, 'Shared literal-domain provider budget lock'))
+}
+if ($global:AcsDomainReputationBudgetState) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationBudgetState', $global:AcsDomainReputationBudgetState, 'Shared literal-domain provider budget state'))
+}
+if ($global:AcsDomainReputationCacheKey) {
+  $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsDomainReputationCacheKey', $global:AcsDomainReputationCacheKey, 'Process-random literal-domain cache key'))
 }
 
 foreach ($name in $functionNames) {

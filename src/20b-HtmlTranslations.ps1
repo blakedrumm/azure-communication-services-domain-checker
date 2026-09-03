@@ -3830,6 +3830,131 @@ Object.keys(MULTI_DOMAIN_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, MULTI_DOMAIN_TRANSLATION_OVERRIDES[code]);
 });
 
+// Mail-IP reputation scope and Null MX explanations. MultiRBL also performs
+// domain/RHSBL checks, so a domain can have results there even when it declares
+// that it operates no mail server and therefore has no sending IP to check.
+const REPUTATION_SCOPE_TRANSLATION_OVERRIDES = {
+  en: {
+    reputationNotApplicable: 'Not applicable',
+    reputationNullMxNote: 'This domain publishes a Null MX record (MX 0 .), so it declares that it operates no mail server. There are no sending-mail IPv4 addresses to check against IP blocklists. Literal-domain reputation is evaluated separately below.',
+    reputationNoMailIpsNote: 'No public IPv4 addresses could be resolved from the domain\'s mail targets, so no IP blocklist queries were made.',
+    reputationApexFallbackNote: 'No MX record was published, so the domain\'s own IPv4 addresses were checked as a fallback. These may be website or shared-hosting addresses rather than sending-mail IPs.',
+    reputationInfo: 'Runs two independent checks: public mail-target IPv4 addresses against IP DNSBLs, and the ICANN registrable domain against control-validated URI/domain reputation providers. MultiRBL checks many more third-party lists, so its totals will differ. Listed entries are advisory warnings; provider blocks or incomplete coverage never become Clean.',
+    reputationMailIpScope: 'Mail-server IP reputation',
+    reputationDomainScope: 'Literal-domain reputation',
+    reputationDomainQueried: 'Domain queried',
+    reputationDomainCategories: 'Categories',
+    reputationDomainProviderListed: 'Listed',
+    reputationDomainProviderNotListed: 'Not listed',
+    reputationDomainProviderBlocked: 'Provider blocked this query path',
+    reputationDomainProviderInvalid: 'Invalid provider response',
+    reputationDomainProviderUnavailable: 'Provider unavailable',
+    reputationDomainProviderOptInHint: '(opt-in list: requires provider eligibility and is not verified by this tool; this is not a listing)',
+    reputationDomainClean: '{count} validated provider(s) reported no listing',
+    reputationDomainListed: 'Listed by {count} domain reputation provider(s)',
+    reputationDomainPartial: '{count} provider result(s) validated; coverage is incomplete',
+    reputationDomainDisabled: 'Domain reputation providers are disabled',
+    reputationDomainUnknown: 'No domain reputation provider returned a conclusive result'
+  },
+  es: {
+    reputationNotApplicable: 'No aplicable',
+    reputationNullMxNote: 'Este dominio publica un registro Null MX (MX 0 .), por lo que declara que no opera ning\u00FAn servidor de correo. No hay direcciones IPv4 de env\u00EDo que comprobar en listas de bloqueo de IP. La reputaci\u00F3n del dominio literal se eval\u00FAa por separado a continuaci\u00F3n.',
+    reputationNoMailIpsNote: 'No se pudieron resolver direcciones IPv4 p\u00FAblicas desde los destinos de correo del dominio, por lo que no se realizaron consultas a listas de bloqueo de IP.',
+    reputationApexFallbackNote: 'No se public\u00F3 ning\u00FAn registro MX, por lo que se comprobaron como alternativa las direcciones IPv4 propias del dominio. Pueden pertenecer a un sitio web o alojamiento compartido, no a servidores de correo emisor.',
+    reputationInfo: 'Ejecuta dos comprobaciones independientes: las direcciones IPv4 de correo en DNSBL de IP y el dominio registrable de ICANN en proveedores de reputaci\u00F3n de dominios con controles validados. MultiRBL consulta muchas m\u00E1s listas, por lo que sus totales pueden diferir.',
+    reputationMailIpScope: 'Reputaci\u00F3n de IP del servidor de correo',
+    reputationDomainScope: 'Reputaci\u00F3n del dominio literal',
+    reputationDomainQueried: 'Dominio consultado',
+    reputationDomainCategories: 'Categor\u00EDas',
+    reputationDomainProviderListed: 'Incluido',
+    reputationDomainProviderNotListed: 'No incluido',
+    reputationDomainProviderBlocked: 'El proveedor bloque\u00F3 esta ruta de consulta',
+    reputationDomainProviderInvalid: 'Respuesta no v\u00E1lida del proveedor',
+    reputationDomainProviderUnavailable: 'Proveedor no disponible',
+    reputationDomainProviderOptInHint: '(lista opcional: requiere elegibilidad del proveedor y esta herramienta no la verifica; esto no es una inclusi\u00F3n)',
+    reputationDomainClean: '{count} proveedor(es) validado(s) no informaron inclusiones',
+    reputationDomainListed: 'Incluido por {count} proveedor(es) de reputaci\u00F3n de dominios',
+    reputationDomainPartial: '{count} resultado(s) de proveedor validado(s); la cobertura est\u00E1 incompleta',
+    reputationDomainDisabled: 'Los proveedores de reputaci\u00F3n de dominios est\u00E1n deshabilitados',
+    reputationDomainUnknown: 'Ning\u00FAn proveedor devolvi\u00F3 un resultado concluyente'
+  },
+  fr: {
+    reputationNotApplicable: 'Non applicable',
+    reputationNullMxNote: 'Ce domaine publie un enregistrement Null MX (MX 0 .), indiquant qu\u2019il n\u2019exploite aucun serveur de messagerie. Il n\u2019existe donc aucune adresse IPv4 d\u2019envoi \u00E0 v\u00E9rifier dans les listes de blocage IP. La r\u00E9putation du domaine litt\u00E9ral est \u00E9valu\u00E9e s\u00E9par\u00E9ment ci-dessous.',
+    reputationNoMailIpsNote: 'Aucune adresse IPv4 publique n\u2019a pu \u00EAtre r\u00E9solue depuis les destinations de messagerie du domaine. Aucune requ\u00EAte de liste de blocage IP n\u2019a donc \u00E9t\u00E9 effectu\u00E9e.',
+    reputationApexFallbackNote: 'Aucun enregistrement MX n\u2019a \u00E9t\u00E9 publi\u00E9; les adresses IPv4 propres au domaine ont donc \u00E9t\u00E9 v\u00E9rifi\u00E9es en secours. Elles peuvent appartenir \u00E0 un site web ou \u00E0 un h\u00E9bergement partag\u00E9 plut\u00F4t qu\u2019\u00E0 un serveur d\u2019envoi.',
+    reputationInfo: 'Ex\u00E9cute deux contr\u00F4les ind\u00E9pendants: les adresses IPv4 de messagerie dans les DNSBL IP et le domaine enregistrable ICANN aupr\u00E8s de fournisseurs de r\u00E9putation de domaines dont les contr\u00F4les sont valid\u00E9s. MultiRBL interroge beaucoup plus de listes, ses totaux peuvent donc diff\u00E9rer.',
+    reputationMailIpScope: 'R\u00E9putation IP du serveur de messagerie',
+    reputationDomainScope: 'R\u00E9putation du domaine litt\u00E9ral',
+    reputationDomainQueried: 'Domaine interrog\u00E9',
+    reputationDomainCategories: 'Cat\u00E9gories',
+    reputationDomainProviderListed: 'R\u00E9pertori\u00E9',
+    reputationDomainProviderNotListed: 'Non r\u00E9pertori\u00E9',
+    reputationDomainProviderBlocked: 'Le fournisseur a bloqu\u00E9 ce chemin de requ\u00EAte',
+    reputationDomainProviderInvalid: 'R\u00E9ponse fournisseur non valide',
+    reputationDomainProviderUnavailable: 'Fournisseur indisponible',
+    reputationDomainProviderOptInHint: '(liste optionnelle\u00A0: n\u00E9cessite une \u00E9ligibilit\u00E9 aupr\u00E8s du fournisseur et n\u2019est pas v\u00E9rifi\u00E9e par cet outil\u00A0; il ne s\u2019agit pas d\u2019un signalement)',
+    reputationDomainClean: '{count} fournisseur(s) valid\u00E9(s) n\u2019ont signal\u00E9 aucune inscription',
+    reputationDomainListed: 'R\u00E9pertori\u00E9 par {count} fournisseur(s) de r\u00E9putation de domaines',
+    reputationDomainPartial: '{count} r\u00E9sultat(s) fournisseur valid\u00E9(s); la couverture est incompl\u00E8te',
+    reputationDomainDisabled: 'Les fournisseurs de r\u00E9putation de domaines sont d\u00E9sactiv\u00E9s',
+    reputationDomainUnknown: 'Aucun fournisseur n\u2019a renvoy\u00E9 de r\u00E9sultat concluant'
+  },
+  de: {
+    reputationNotApplicable: 'Nicht anwendbar',
+    reputationNullMxNote: 'Diese Dom\u00E4ne ver\u00F6ffentlicht einen Null-MX-Eintrag (MX 0 .) und erkl\u00E4rt damit, dass sie keinen Mailserver betreibt. Es gibt keine sendenden IPv4-Adressen, die gegen IP-Sperrlisten gepr\u00FCft werden k\u00F6nnen. Die Reputation der w\u00F6rtlichen Dom\u00E4ne wird unten separat ausgewertet.',
+    reputationNoMailIpsNote: 'F\u00FCr die Mailziele der Dom\u00E4ne konnten keine \u00F6ffentlichen IPv4-Adressen aufgel\u00F6st werden. Daher wurden keine IP-Sperrlisten abgefragt.',
+    reputationApexFallbackNote: 'Es wurde kein MX-Eintrag ver\u00F6ffentlicht, daher wurden ersatzweise die eigenen IPv4-Adressen der Dom\u00E4ne gepr\u00FCft. Diese k\u00F6nnen zu einer Website oder einem gemeinsam genutzten Hostingdienst geh\u00F6ren und m\u00FCssen keine sendenden Mailserver sein.',
+    reputationInfo: 'F\u00FChrt zwei unabh\u00E4ngige Pr\u00FCfungen aus: Mail-IPv4-Adressen gegen IP-DNSBLs und die registrierbare ICANN-Dom\u00E4ne gegen kontrollvalidierte Dom\u00E4nen-Reputationsanbieter. MultiRBL fragt deutlich mehr Listen ab, daher k\u00F6nnen die Summen abweichen.',
+    reputationMailIpScope: 'Mailserver-IP-Reputation',
+    reputationDomainScope: 'Reputation der w\u00F6rtlichen Dom\u00E4ne',
+    reputationDomainQueried: 'Abgefragte Dom\u00E4ne',
+    reputationDomainCategories: 'Kategorien',
+    reputationDomainProviderListed: 'Gelistet',
+    reputationDomainProviderNotListed: 'Nicht gelistet',
+    reputationDomainProviderBlocked: 'Anbieter hat diesen Abfrageweg blockiert',
+    reputationDomainProviderInvalid: 'Ung\u00FCltige Anbieterantwort',
+    reputationDomainProviderUnavailable: 'Anbieter nicht verf\u00FCgbar',
+    reputationDomainProviderOptInHint: '(optionale Liste: erfordert eine Berechtigung des Anbieters und wird von diesem Tool nicht gepr\u00FCft; dies ist kein Eintrag)',
+    reputationDomainClean: '{count} validierte(r) Anbieter meldete(n) keinen Eintrag',
+    reputationDomainListed: 'Von {count} Dom\u00E4nen-Reputationsanbieter(n) gelistet',
+    reputationDomainPartial: '{count} Anbieterergebnis(se) validiert; Abdeckung unvollst\u00E4ndig',
+    reputationDomainDisabled: 'Dom\u00E4nen-Reputationsanbieter sind deaktiviert',
+    reputationDomainUnknown: 'Kein Anbieter lieferte ein eindeutiges Ergebnis'
+  },
+  'pt-BR': {
+    reputationNotApplicable: 'N\u00E3o aplic\u00E1vel',
+    reputationNullMxNote: 'Este dom\u00EDnio publica um registro Null MX (MX 0 .), declarando que n\u00E3o opera nenhum servidor de email. N\u00E3o h\u00E1 endere\u00E7os IPv4 de envio para verificar em listas de bloqueio de IP. A reputa\u00E7\u00E3o do dom\u00EDnio literal \u00E9 avaliada separadamente abaixo.',
+    reputationNoMailIpsNote: 'N\u00E3o foi poss\u00EDvel resolver endere\u00E7os IPv4 p\u00FAblicos dos destinos de email do dom\u00EDnio, portanto nenhuma consulta a listas de bloqueio de IP foi feita.',
+    reputationApexFallbackNote: 'Nenhum registro MX foi publicado, portanto os endere\u00E7os IPv4 do pr\u00F3prio dom\u00EDnio foram verificados como alternativa. Eles podem pertencer a um site ou hospedagem compartilhada, e n\u00E3o a servidores de envio de email.',
+    reputationInfo: 'Executa duas verifica\u00E7\u00F5es independentes: endere\u00E7os IPv4 de email em DNSBLs de IP e o dom\u00EDnio registr\u00E1vel da ICANN em provedores de reputa\u00E7\u00E3o de dom\u00EDnio com controles validados. O MultiRBL consulta muito mais listas, portanto os totais podem diferir.',
+    reputationMailIpScope: 'Reputa\u00E7\u00E3o de IP do servidor de email',
+    reputationDomainScope: 'Reputa\u00E7\u00E3o do dom\u00EDnio literal',
+    reputationDomainQueried: 'Dom\u00EDnio consultado',
+    reputationDomainCategories: 'Categorias',
+    reputationDomainProviderListed: 'Listado',
+    reputationDomainProviderNotListed: 'N\u00E3o listado',
+    reputationDomainProviderBlocked: 'O provedor bloqueou este caminho de consulta',
+    reputationDomainProviderInvalid: 'Resposta inv\u00E1lida do provedor',
+    reputationDomainProviderUnavailable: 'Provedor indispon\u00EDvel',
+    reputationDomainProviderOptInHint: '(lista opcional: exige elegibilidade do provedor e n\u00E3o \u00E9 verificada por esta ferramenta; isto n\u00E3o \u00E9 uma inclus\u00E3o)',
+    reputationDomainClean: '{count} provedor(es) validado(s) n\u00E3o relatou(aram) listagem',
+    reputationDomainListed: 'Listado por {count} provedor(es) de reputa\u00E7\u00E3o de dom\u00EDnio',
+    reputationDomainPartial: '{count} resultado(s) de provedor validado(s); cobertura incompleta',
+    reputationDomainDisabled: 'Os provedores de reputa\u00E7\u00E3o de dom\u00EDnio est\u00E3o desativados',
+    reputationDomainUnknown: 'Nenhum provedor retornou um resultado conclusivo'
+  },
+  ar: { reputationNotApplicable: '\u063A\u064A\u0631 \u0645\u0646\u0637\u0628\u0642', reputationMailIpScope: '\u0633\u0645\u0639\u0629 IP \u0644\u062E\u0627\u062F\u0645 \u0627\u0644\u0628\u0631\u064A\u062F', reputationDomainScope: '\u0633\u0645\u0639\u0629 \u0627\u0644\u0646\u0637\u0627\u0642' },
+  'zh-CN': { reputationNotApplicable: '\u4E0D\u9002\u7528', reputationMailIpScope: '\u90AE\u4EF6\u670D\u52A1\u5668 IP \u58F0\u8A89', reputationDomainScope: '\u57DF\u540D\u58F0\u8A89' },
+  'hi-IN': { reputationNotApplicable: '\u0932\u093E\u0917\u0942 \u0928\u0939\u0940\u0902', reputationMailIpScope: '\u092E\u0947\u0932 \u0938\u0930\u094D\u0935\u0930 IP \u092A\u094D\u0930\u0924\u093F\u0937\u094D\u0920\u093E', reputationDomainScope: '\u0921\u094B\u092E\u0947\u0928 \u092A\u094D\u0930\u0924\u093F\u0937\u094D\u0920\u093E' },
+  'ja-JP': { reputationNotApplicable: '\u8A72\u5F53\u306A\u3057', reputationMailIpScope: '\u30E1\u30FC\u30EB\u30B5\u30FC\u30D0\u30FC IP \u30EC\u30D4\u30E5\u30C6\u30FC\u30B7\u30E7\u30F3', reputationDomainScope: '\u30C9\u30E1\u30A4\u30F3\u30EC\u30D4\u30E5\u30C6\u30FC\u30B7\u30E7\u30F3' },
+  'ru-RU': { reputationNotApplicable: '\u041D\u0435\u043F\u0440\u0438\u043C\u0435\u043D\u0438\u043C\u043E', reputationMailIpScope: '\u0420\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u044F IP \u043F\u043E\u0447\u0442\u043E\u0432\u043E\u0433\u043E \u0441\u0435\u0440\u0432\u0435\u0440\u0430', reputationDomainScope: '\u0420\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u044F \u0434\u043E\u043C\u0435\u043D\u0430' }
+};
+
+Object.keys(REPUTATION_SCOPE_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, REPUTATION_SCOPE_TRANSLATION_OVERRIDES[code]);
+});
+
 // Duplicate-record (RFC 7208 / RFC 7489) strings. Publishing more than one SPF or DMARC
 // record is a PermError: receivers reject the whole set, so these are hard failures, not
 // cosmetic warnings.
