@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 2.16.0). Leave empty to extract from acs-domain-checker.ps1'
+        description: 'Version to publish (e.g., 2.16.2). Leave empty to extract from acs-domain-checker.ps1'
         required: false
         default: ''
 
@@ -99,7 +99,7 @@ jobs:
             $failed = $true
           } else {
             $artifactVersion = $versionMatches[0].Groups['v'].Value
-            # A tag may add a pre-release suffix (2.16.0-rc1), but its numeric core must
+            # A tag may add a pre-release suffix (2.16.2-rc1), but its numeric core must
             # identify the code inside the image. A free-text override would reopen the
             # mislabeling hole this gate exists to close.
             $versionOk = ($env:RELEASE_VERSION -ceq $artifactVersion) -or $env:RELEASE_VERSION.StartsWith("$artifactVersion-", [System.StringComparison]::Ordinal)

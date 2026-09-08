@@ -580,6 +580,9 @@ function applyLanguageToStaticUi() {
   if (typeof updateAuthUI === 'function') {
     updateAuthUI(lastAuthData);
   }
+  if (typeof applySmtpResponseLanguage === 'function') {
+    applySmtpResponseLanguage();
+  }
 }
 
 function applyLanguage(language, persist = true) {

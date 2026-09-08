@@ -12,6 +12,7 @@
 - [Quick Start (Docker)](#-quick-start-docker)
 - [Command-Line Test Mode](#-command-line-test-mode)
 - [Web UI Features](#-web-ui-features)
+- [SMTP Response Lookup](#smtp-response-lookup)
 - [Localization / Multi-Language Support](#-localization--multi-language-support)
 - [DNS Checks & Guidance](#-dns-checks--guidance)
 - [DNSBL Reputation Checks](#-dnsbl-reputation-checks)
@@ -202,6 +203,7 @@ The embedded single-page application includes a rich set of interactive features
 | 🕑 **Search history** | Recent domain lookups appear as dismissible chips below the search box |
 | 🔗 **Copy shareable link** | Copies a permalink to the current domain lookup so you can share it with teammates |
 | 📥 **Download JSON report** | Downloads the full aggregated DNS check result as a `.json` file |
+| **SMTP response lookup** | A pop-up near the bottom-page tools decodes pasted SMTP replies and enhanced status codes into meanings, likely causes, and suggested fixes. Includes a searchable code reference and copyable table. |
 | 📸 **Copy page screenshot** | Captures the results page to the clipboard using `html2canvas` |
 | 🐛 **Report issue button** | Visible after a lookup; opens the configured issue tracker with domain pre-filled |
 | 📋 **Email Quota checklist** | Summary card showing MX, Reputation, Registration, SPF, and DMARC pass/warn/fail status. On a multi-domain lookup, **Copy Email Quota** emits one table per domain. |
@@ -209,6 +211,18 @@ The embedded single-page application includes a rich set of interactive features
 | 🔑 **Microsoft sign-in** | Optional Entra ID sign-in for employee verification via MSAL |
 | 🌍 **Multi-language UI** | 10 languages with a flag-icon dropdown; preference saved in `localStorage` and shareable via `?lang=` |
 | 📄 **Terms of Service & Privacy** | Embedded `/terms` and `/privacy` pages, localized into all supported languages |
+
+### SMTP Response Lookup
+
+Open **SMTP Responses > Look up a response** immediately above the footer, below Helpful Links and External Tools when domain results are present. The tool is also available before running a domain lookup.
+
+- Paste a basic code such as `550`, an enhanced code such as `5.7.26`, a complete reply such as `550 5.1.1 Recipient not found`, or a multiline delivery report. Standard `Status:` and `Diagnostic-Code: smtp;` fields and common quoted NDR replies are recognized.
+- The table keeps the supplied SMTP and enhanced codes separate and shows the status class, meaning, likely causes, suggested fixes, and reference links. An absent code is never invented. Mismatched classes are flagged, and unknown codes receive generic guidance instead of an assumed diagnosis.
+- **Code reference** supports text search and status-class filtering. The copy button copies the visible guidance table; the clear button clears the pasted response. Escape, the close button, and a backdrop click dismiss the dialog and return focus to its launcher.
+- Interpretations are based on RFC/IANA definitions and explicitly attributed Exchange Online usages. Provider meanings can differ, and a successful SMTP reply is not proof of final delivery or inbox placement. A final NDR can mean automatic retries have already ended.
+- Decoding runs entirely in the browser. Pasted content is not submitted, logged, or saved to browser storage, and the raw diagnostic text is not included in the copied table. This is a response-code reference, not a live connection or mail-delivery test. Do not paste credentials or access tokens.
+- Controls, meanings, likely causes, fixes, retry advice, reference searches, and copied tables follow the selected UI language in all 10 supported languages. Protocol codes and provider attribution remain unchanged. English is the fallback for future entries without a translation.
+- Input is bounded to 16,000 characters and 50 distinct replies. The dialog stays open with its pasted text intact while the language changes or domain results refresh. Pasted diagnostic text is never translated or uploaded.
 
 ## 🌍 Localization / Multi-Language Support
 
@@ -713,12 +727,15 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
 |------|--------|
 | `tools/Audit-RunspaceFunctions.ps1` | Every function reachable from the HTTP request handler is registered in the runspace pool. An unregistered function surfaces to users as an HTTP 500 on one specific check. |
 | `tools/Test-SecureLogging.ps1` | Captured logs contain no PII, secrets, headers, query strings, bodies, or raw exception data. |
+| `tools/Test-SmtpResponses.ps1` | Runs the actual browser parser, catalog, reference filters, table renderer, and copy formatter using Node.js. Covers code boundaries, status conflicts, provider attribution, generic fallbacks, input limits, escaped output, and localized controls. Run under both PowerShell 5.1 and 7. |
 | `tools/Test-SeoMetadata.ps1` | Language lists stay in sync across the SPA, sitemap and `hreflang` links; every `__TOKEN__` has a replacement site; `-f` format strings are valid; every lookup endpoint is documented in `/llms.txt` and `/openapi.json`; required `<head>` tags and the JSON-LD CSP nonce are present; both listener modes preserve bodyless `HEAD` semantics; share-link bootstrap has an idempotent hidden-tab fallback. |
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Audit-RunspaceFunctions.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SeoMetadata.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SmtpResponses.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SmtpResponses.ps1
 ```
 
 ### 🐛 Issue Reporting
@@ -861,7 +878,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.16.0`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.16.2`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -884,8 +901,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.16.0
-git push origin v2.16.0
+git tag v2.16.2
+git push origin v2.16.2
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -896,7 +913,7 @@ git push origin v2.16.0
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.16.0`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.16.2`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -913,11 +930,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.16.0
+docker pull limitlessworlds/acs-domain-checker:2.16.2
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.16.0
-docker pull limitlessworlds/acs-domain-checker:windows-2.16.0
+docker pull limitlessworlds/acs-domain-checker:linux-2.16.2
+docker pull limitlessworlds/acs-domain-checker:windows-2.16.2
 ```
 
 ### 🛠️ Manual Build Script
@@ -932,7 +949,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.16.0
+./acs-domain-checker-dockerhub.ps1 -Version 2.16.2
 ```
 
 **📋 Requirements for manual script:**

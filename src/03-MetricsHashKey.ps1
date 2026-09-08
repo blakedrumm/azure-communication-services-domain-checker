@@ -32,7 +32,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.16.0'
+$script:AppVersion = '2.16.2'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   # Validate at the boundary: this value is interpolated into generated JSON
   # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could

@@ -4,13 +4,11 @@
 #   Central, single-file home for the SPA's accessibility (a11y) code so it
 #   lives in one place instead of being scattered across the other 20-* UI
 #   files. This file appends a dedicated, nonce-bound <style> block and a
-#   <script> helper module to the page, then emits the document-closing
-#   </body></html> tags (relocated here from 20e-HtmlAzureIntegration.ps1) so
-#   this accessibility layer lands immediately before </body> -- the correct
-#   place for shared a11y CSS/JS and ARIA live regions.
+#   <script> helper module to the page, followed by the SMTP response tool in
+#   20h-HtmlSmtpResponses.ps1, which emits the document-closing tags.
 #
 # LOAD ORDER / BUILD NOTES
-#   This is the LAST file that appends to $htmlPage. It runs AFTER
+#   This runs AFTER
 #   20f-HtmlPostProcess.ps1, which performs the build-time "__TOKEN__ -> value"
 #   replacements. Therefore do NOT use build-time template tokens in this file
 #   (__APP_VERSION__, __ENTRA_CLIENT_ID__, __ENTRA_TENANT_ID__, __ACS_API_KEY__,
@@ -134,7 +132,4 @@ $htmlPage += @'
   window.acsAnnounce = announce;
 })();
 </script>
-
-</body>
-</html>
 '@

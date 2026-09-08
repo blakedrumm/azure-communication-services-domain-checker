@@ -73,7 +73,8 @@ $msalBrowserVersion = '5.11.0'
 $msalBrowserUrl = "https://cdn.jsdelivr.net/npm/@azure/msal-browser@$msalBrowserVersion/lib/msal-browser.min.js"
 
 # Keep this list in sync with the icon names referenced by `UI_LABEL_ICONS` and
-# the guidance/status rendering in `src/20c-HtmlJsUtilities.ps1` and `src/20d-HtmlJsCore.ps1`.
+# the guidance/status rendering in `src/20c-HtmlJsUtilities.ps1`, `src/20d-HtmlJsCore.ps1`,
+# and the response dialog in `src/20h-HtmlSmtpResponses.ps1`.
 $lucideIcons = @(
   'moon-star',
   'sun',
@@ -86,7 +87,11 @@ $lucideIcons = @(
   'triangle-alert',
   'info',
   'check-circle',
-  'alert-circle'
+  'alert-circle',
+  'search',
+  'x',
+  'copy',
+  'trash-2'
 )
 
 # Keep this list in sync with `LANGUAGE_FLAG_URLS` in `src/20b-HtmlTranslations.ps1`.
