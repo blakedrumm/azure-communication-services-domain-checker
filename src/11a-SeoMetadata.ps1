@@ -315,6 +315,20 @@ global, namer, samer, europe, asia, africa, oceania), `max` (1-1000 resolvers),
 resolver health pre-selection). The active server catalog can contain up to 1000
 resolvers; URL-supplied custom lists are limited to 100 addresses.
 
+## Custom SPF and DKIM requirement parameters
+
+The SPF and DKIM checks default to the Azure public cloud values
+(`include:spf.protection.outlook.com` and the `selector1-azurecomm-prod-net` /
+`selector2-azurecomm-prod-net` CNAMEs). For a domain set up in another environment,
+such as a sovereign or government cloud, pass the values the Azure portal shows:
+`spfInclude` on `__ACS_ROOT__/api/base` and `__ACS_ROOT__/dns` (an include host, an
+`include:` term, or a whole SPF record; the first include is used), and
+`dkim1Target` / `dkim2Target` (the expected CNAME target) with optional
+`dkim1Selector` / `dkim2Selector` (derived from the target when omitted) on
+`__ACS_ROOT__/api/dkim`, `__ACS_ROOT__/api/records` and `__ACS_ROOT__/dns`. Responses
+echo the values checked (`spfRequiredInclude`, `dkim1Selector`, `dkim1ExpectedCname`,
+...). Invalid values return HTTP 400 instead of falling back to the defaults.
+
 ## Reading a verdict
 
 - Checks report a `state` or `status` string. `propagated`, `consistent`, `pass` and `ok` are healthy.
@@ -402,15 +416,30 @@ function Get-AcsOpenApiJson {
     [void]$sb.AppendLine('        "parameters": [')
     [void]$sb.Append($domainParam)
 
+    $extraParams = [System.Collections.Generic.List[string]]::new()
     if ($endpoint -eq '/api/propagation') {
+      $extraParams.Add('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } }')
+      $extraParams.Add('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } }')
+      $extraParams.Add('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 25 } }')
+      $extraParams.Add('        { "name": "timeout", "in": "query", "description": "Per-resolver timeout in milliseconds.", "schema": { "type": "integer", "minimum": 1, "maximum": 15000, "default": 4000 } }')
+      $extraParams.Add('        { "name": "expected", "in": "query", "description": "Substring the answer must contain to count as a match.", "schema": { "type": "string", "maxLength": 255 } }')
+      $extraParams.Add('        { "name": "custom", "in": "query", "description": "Up to 100 comma-separated public IPv4 resolver addresses to query instead of the server catalog.", "schema": { "type": "string", "maxLength": 4000 } }')
+      $extraParams.Add('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
+    }
+    # Optional custom SPF / DKIM requirements for domains set up outside the Azure public cloud.
+    if ($endpoint -in @('/dns', '/api/base')) {
+      $extraParams.Add('        { "name": "spfInclude", "in": "query", "description": "Check the SPF requirement against this include instead of spf.protection.outlook.com (for example a sovereign or government cloud include). Accepts a host name, an include: term, or a whole SPF record; the first include is used. Invalid values return 400.", "schema": { "type": "string", "maxLength": 512 } }')
+    }
+    if ($endpoint -in @('/dns', '/api/dkim', '/api/records')) {
+      foreach ($slot in 1, 2) {
+        $extraParams.Add('        { "name": "dkim' + $slot + 'Target", "in": "query", "description": "Expected CNAME target for DKIM selector ' + $slot + ' instead of the Azure public cloud default (the Value column in the Azure portal). Invalid values return 400.", "schema": { "type": "string", "maxLength": 253 } }')
+        $extraParams.Add('        { "name": "dkim' + $slot + 'Selector", "in": "query", "description": "Selector host name for DKIM selector ' + $slot + ', for example selector' + $slot + '-example._domainkey (the Name column in the Azure portal). Optional: derived from dkim' + $slot + 'Target when omitted.", "schema": { "type": "string", "maxLength": 253 } }')
+      }
+    }
+
+    if ($extraParams.Count -gt 0) {
       [void]$sb.AppendLine(',')
-      [void]$sb.AppendLine('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } },')
-      [void]$sb.AppendLine('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } },')
-      [void]$sb.AppendLine('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 25 } },')
-      [void]$sb.AppendLine('        { "name": "timeout", "in": "query", "description": "Per-resolver timeout in milliseconds.", "schema": { "type": "integer", "minimum": 1, "maximum": 15000, "default": 4000 } },')
-      [void]$sb.AppendLine('        { "name": "expected", "in": "query", "description": "Substring the answer must contain to count as a match.", "schema": { "type": "string", "maxLength": 255 } },')
-      [void]$sb.AppendLine('        { "name": "custom", "in": "query", "description": "Up to 100 comma-separated public IPv4 resolver addresses to query instead of the server catalog.", "schema": { "type": "string", "maxLength": 4000 } },')
-      [void]$sb.AppendLine('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
+      [void]$sb.AppendLine(($extraParams -join (',' + [Environment]::NewLine)))
     } else {
       [void]$sb.AppendLine()
     }

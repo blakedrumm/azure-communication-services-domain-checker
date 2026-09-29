@@ -1389,7 +1389,12 @@ function Resolve-DnsRecordsDetailed {
 }
 
 function Get-DnsRecordsStatus {
-  param([string]$Domain)
+  param(
+    [string]$Domain,
+    # "<selector>._domainkey" names from a custom DKIM requirement, so the records grid
+    # lists the same selectors the DKIM cards check.
+    [string[]]$AdditionalDkimSelectors
+  )
 
   $records = New-Object System.Collections.Generic.List[object]
   $errors = New-Object System.Collections.Generic.List[string]
@@ -1495,6 +1500,12 @@ function Get-DnsRecordsStatus {
     [pscustomobject]@{ Name = "_dmarc.$Domain";                                  Types = @('TXT') },
     [pscustomobject]@{ Name = "www.$Domain";                                     Types = @('CNAME', 'A', 'AAAA') }
   )
+  foreach ($selectorName in @($AdditionalDkimSelectors | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+    $selectorHost = "$selectorName.$Domain"
+    if (@($relatedTargets | Where-Object { $_.Name -eq $selectorHost }).Count -eq 0) {
+      $relatedTargets += [pscustomobject]@{ Name = $selectorHost; Types = @('CNAME', 'TXT') }
+    }
+  }
   foreach ($target in $relatedTargets) {
     try {
       foreach ($row in @(Resolve-DnsRecordsDetailed -Name $target.Name -Types $target.Types)) {

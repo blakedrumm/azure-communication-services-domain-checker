@@ -4,17 +4,25 @@
 # Runs all individual checks (TXT/SPF, MX, DMARC, DKIM, CNAME, WHOIS) and assembles
 # a single result object with guidance strings for the UI.
 function Get-AcsDnsStatus {
-    param([string]$Domain)
+    param(
+      [string]$Domain,
+      # Optional custom SPF / DKIM requirements (see Get-CheckOverridesFromQuery).
+      [string]$SpfRequiredInclude,
+      [object]$Dkim1Override,
+      [object]$Dkim2Override
+    )
 
   # Aggregated status used by the UI.
   # Combines the individual checks + generates human-friendly guidance strings.
 
-  $base  = Get-DnsBaseStatus  -Domain $Domain
+  $customDkimSelectors = @(@($Dkim1Override, $Dkim2Override) | Where-Object { $_ } | ForEach-Object { [string]$_.selector })
+
+  $base  = Get-DnsBaseStatus  -Domain $Domain -SpfRequiredInclude $SpfRequiredInclude
   $mx    = Get-DnsMxStatus    -Domain $Domain
-  $records = Get-DnsRecordsStatus -Domain $Domain
+  $records = Get-DnsRecordsStatus -Domain $Domain -AdditionalDkimSelectors $customDkimSelectors
   $whois = Get-DomainRegistrationStatus -Domain $Domain
   $dmarc = Get-DnsDmarcStatus -Domain $Domain
-  $dkim  = Get-DnsDkimStatus  -Domain $Domain
+  $dkim  = Get-DnsDkimStatus  -Domain $Domain -Dkim1Override $Dkim1Override -Dkim2Override $Dkim2Override
   $cname = Get-DnsCnameStatus -Domain $Domain
 
   # DNSSEC anomaly is detected as part of Get-DnsBaseStatus (so the incremental
@@ -88,7 +96,7 @@ function Get-AcsDnsStatus {
   $effectiveSpfPresent = [bool]$effectiveSpfValue
   $effectiveAcsPresent = [bool]$effectiveAcsValue
   $effectiveSpfHasRequiredInclude = if ($recoveredFromDetailedRecords -and $effectiveSpfValue) {
-    [regex]::IsMatch([string]$effectiveSpfValue, '(?i)(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)')
+    [regex]::IsMatch([string]$effectiveSpfValue, '(?i)(^|\s)include:' + [regex]::Escape([string]$base.spfRequiredInclude) + '(?=\s|$)')
   } else {
     $base.spfHasRequiredInclude
   }
@@ -127,7 +135,7 @@ function Get-AcsDnsStatus {
         if ($base.parentSpfPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("SPF is missing on $Domain. Parent domain $($base.txtLookupDomain) publishes SPF, but SPF does not automatically apply to the queried subdomain.")
         } else {
-          $guidance.Add("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent).")
+          $guidance.Add("SPF is missing. Add v=spf1 include:$($base.spfRequiredInclude) -all (or provider equivalent).")
         }
       }
       foreach ($spfMessage in @($base.spfGuidance)) {
@@ -178,12 +186,14 @@ function Get-AcsDnsStatus {
       # selector was found, so it cannot be used to detect ACS-side records.
       $dkim1HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1TxtValue)
       $dkim2HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2TxtValue)
-      if (-not $dkim1HasAcsRecord) { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
+      $dkim1Label = ([string]$dkim.dkim1Selector) -replace '\._domainkey$', ''
+      $dkim2Label = ([string]$dkim.dkim2Selector) -replace '\._domainkey$', ''
+      if (-not $dkim1HasAcsRecord) { $guidance.Add("DKIM selector1 ($dkim1Label) is missing.") }
       elseif (-not $dkim.dkim1AcsConfigured) {
         $actual1 = if ($dkim.dkim1CnameTarget) { $dkim.dkim1CnameTarget } else { '(no CNAME)' }
         $guidance.Add("DKIM selector1 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim1ExpectedCname); found: $actual1.")
       }
-      if (-not $dkim2HasAcsRecord) { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
+      if (-not $dkim2HasAcsRecord) { $guidance.Add("DKIM selector2 ($dkim2Label) is missing.") }
       elseif (-not $dkim.dkim2AcsConfigured) {
         $actual2 = if ($dkim.dkim2CnameTarget) { $dkim.dkim2CnameTarget } else { '(no CNAME)' }
         $guidance.Add("DKIM selector2 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim2ExpectedCname); found: $actual2.")
@@ -200,7 +210,9 @@ function Get-AcsDnsStatus {
       if ($mx.mxProvider -and $mx.mxProvider -ne 'Unknown') {
         $guidance.Add("Detected MX provider: $($mx.mxProvider)")
       }
-      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $effectiveSpfPresent -and ($effectiveSpfHasRequiredInclude -eq $false)) {
+      # Only meaningful for the default requirement: with a custom include the verdict
+      # says nothing about spf.protection.outlook.com.
+      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $effectiveSpfPresent -and ($effectiveSpfHasRequiredInclude -eq $false) -and -not $base.spfRequiredIncludeCustom) {
         $guidance.Add("Your MX indicates Microsoft 365, but SPF does not include spf.protection.outlook.com. Verify your SPF includes the correct provider include.")
       }
       if ($mx.mxProvider -eq 'Google Workspace / Gmail' -and $effectiveSpfPresent -and ($effectiveSpfValue -notmatch '(?i)_spf\.google\.com')) {
@@ -247,6 +259,7 @@ function Get-AcsDnsStatus {
         spfGuidance = $base.spfGuidance
         spfHasRequiredInclude = $effectiveSpfHasRequiredInclude
         spfRequiredInclude = $base.spfRequiredInclude
+        spfRequiredIncludeCustom = $base.spfRequiredIncludeCustom
         spfRequiredIncludeMatchType = $base.spfRequiredIncludeMatchType
         spfRequiredIncludeDetail = $base.spfRequiredIncludeDetail
         spfRequiredIncludeError = $base.spfRequiredIncludeError
@@ -303,6 +316,8 @@ function Get-AcsDnsStatus {
         dmarcRecordCount = $dmarc.dmarcRecordCount
         dmarcMultipleRecords = $dmarc.dmarcMultipleRecords
         dkim1                = $dkim.dkim1
+        dkim1Selector        = $dkim.dkim1Selector
+        dkim1Custom          = $dkim.dkim1Custom
         dkim1CnameTarget     = $dkim.dkim1CnameTarget
         dkim1TxtValue        = $dkim.dkim1TxtValue
         dkim1TxtValues       = @($dkim.dkim1TxtValues)
@@ -310,6 +325,8 @@ function Get-AcsDnsStatus {
         dkim1AcsConfigured   = $dkim.dkim1AcsConfigured
         dkim1FallbackSelectors = $dkim.dkim1FallbackSelectors
         dkim2                = $dkim.dkim2
+        dkim2Selector        = $dkim.dkim2Selector
+        dkim2Custom          = $dkim.dkim2Custom
         dkim2CnameTarget     = $dkim.dkim2CnameTarget
         dkim2TxtValue        = $dkim.dkim2TxtValue
         dkim2TxtValues       = @($dkim.dkim2TxtValues)

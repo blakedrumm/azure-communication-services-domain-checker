@@ -67,18 +67,22 @@ function Get-SpfMechanismType {
 
 # Pick which record to analyze when a domain publishes MORE than one SPF record.
 # The set is a PermError either way (RFC 7208 3.2), but for an ACS domain checker the
-# record carrying the Outlook include is the one the customer intended for ACS, so
+# record carrying the required include (the Outlook include unless a custom
+# requirement is supplied) is the one the customer intended for ACS, so
 # preferring it keeps the requirement verdict truthful while the duplicate-record error
 # stays the headline. Without this the choice would depend on RRset ordering, which
 # varies per resolver and per query.
 function Select-SpfRecordFromSet {
-  param([string[]]$Records)
+  param(
+    [string[]]$Records,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
+  )
 
   $set = @($Records | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   if ($set.Count -eq 0) { return $null }
 
   foreach ($record in $set) {
-    if (Test-SpfOutlookIncludeToken -Text $record) { return $record }
+    if (Test-SpfOutlookIncludeToken -Text $record -RequiredInclude $RequiredInclude) { return $record }
   }
   return $set[0]
 }
@@ -141,11 +145,17 @@ function Merge-SpfRecordSet {
   }
 }
 
-# Check whether an SPF record string contains a direct "include:spf.protection.outlook.com" token.
+# Check whether an SPF record string contains a direct "include:<required>" token.
+# The required include is spf.protection.outlook.com unless a custom requirement
+# (for example a sovereign or government cloud include) is supplied.
 function Test-SpfOutlookIncludeToken {
-  param([string]$Text)
+  param(
+    [string]$Text,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
+  )
 
   if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+  $required = ([string]$RequiredInclude).Trim().TrimEnd('.').ToLowerInvariant()
 
   foreach ($token in @(Get-SpfTokens -SpfRecord $Text)) {
     $normalized = ([string]$token).Trim()
@@ -165,7 +175,7 @@ function Test-SpfOutlookIncludeToken {
       $target = $target.Substring(0, $slashIndex)
     }
     $target = $target.Trim().TrimEnd('.').ToLowerInvariant()
-    if ($target -eq 'spf.protection.outlook.com') {
+    if ($target -eq $required) {
       return $true
     }
   }
@@ -173,86 +183,93 @@ function Test-SpfOutlookIncludeToken {
   return $false
 }
 
-# Recursively search the entire expanded SPF analysis tree for any reference to
-# spf.protection.outlook.com — whether via direct include, nested include, redirect, exists,
-# a/mx mechanism, or macro. Returns the first match found with its match type.
+# Recursively search the entire expanded SPF analysis tree for any reference to the
+# required include (spf.protection.outlook.com by default) -- whether via direct
+# include, nested include, redirect, exists, a/mx mechanism, or macro. Returns the
+# first match found with its match type.
 function Find-SpfOutlookRequirementMatch {
-  param([object]$Analysis)
+  param(
+    [object]$Analysis,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
+  )
 
   if (-not $Analysis) { return $null }
 
-  if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.record)) {
+  $required = ([string]$RequiredInclude).Trim().TrimEnd('.').ToLowerInvariant()
+  $requiredPattern = [regex]::Escape($required)
+
+  if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.record) -RequiredInclude $required) {
     return [pscustomobject]@{
       matchType = 'direct-include'
-      value = 'include:spf.protection.outlook.com'
+      value = "include:$required"
     }
   }
 
   foreach ($include in @($Analysis.includes)) {
     $includeDomain = ([string]$include.domain).Trim().TrimEnd('.').ToLowerInvariant()
-    if ($includeDomain -eq 'spf.protection.outlook.com') {
+    if ($includeDomain -eq $required) {
       return [pscustomobject]@{
         matchType = 'nested-include'
         value = $include.domain
       }
     }
 
-    if (Test-SpfOutlookIncludeToken -Text ([string]$include.record)) {
+    if (Test-SpfOutlookIncludeToken -Text ([string]$include.record) -RequiredInclude $required) {
       return [pscustomobject]@{
         matchType = 'nested-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    if (([string]$include.domain) -match '(?i)(^|\.)spf\.protection\.outlook\.com$') {
+    if (([string]$include.domain) -match ('(?i)(^|\.)' + $requiredPattern + '$')) {
       return [pscustomobject]@{
         matchType = 'nested-include'
         value = $include.domain
       }
     }
 
-    if ($include.record -and ([string]$include.record) -match '(?i)\binclude:spf\.protection\.outlook\.com\b') {
+    if ($include.record -and ([string]$include.record) -match ('(?i)\binclude:' + $requiredPattern + '\b')) {
       return [pscustomobject]@{
         matchType = 'nested-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    $childMatch = Find-SpfOutlookRequirementMatch -Analysis $include.analysis
+    $childMatch = Find-SpfOutlookRequirementMatch -Analysis $include.analysis -RequiredInclude $required
     if ($childMatch) { return $childMatch }
   }
 
   # A redirect that an `all` mechanism overrides is never evaluated by a receiver
-  # (RFC 7208 6.1), so its subtree must not be able to satisfy the Outlook requirement.
+  # (RFC 7208 6.1), so its subtree must not be able to satisfy the requirement.
   if ($Analysis.redirect -and $Analysis.redirect.ignoredByAll -ne $true) {
     $redirectDomain = ([string]$Analysis.redirect.domain).Trim().TrimEnd('.').ToLowerInvariant()
-    if ($redirectDomain -eq 'spf.protection.outlook.com') {
+    if ($redirectDomain -eq $required) {
       return [pscustomobject]@{
         matchType = 'redirect-reference'
         value = $Analysis.redirect.domain
       }
     }
 
-    if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.redirect.record)) {
+    if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.redirect.record) -RequiredInclude $required) {
       return [pscustomobject]@{
         matchType = 'redirect-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    if ($Analysis.redirect.record -and ([string]$Analysis.redirect.record) -match '(?i)\binclude:spf\.protection\.outlook\.com\b') {
+    if ($Analysis.redirect.record -and ([string]$Analysis.redirect.record) -match ('(?i)\binclude:' + $requiredPattern + '\b')) {
       return [pscustomobject]@{
         matchType = 'redirect-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    $redirectMatch = Find-SpfOutlookRequirementMatch -Analysis $Analysis.redirect.analysis
+    $redirectMatch = Find-SpfOutlookRequirementMatch -Analysis $Analysis.redirect.analysis -RequiredInclude $required
     if ($redirectMatch) { return $redirectMatch }
   }
 
   foreach ($existsTerm in @($Analysis.existsTerms)) {
-    if (([string]$existsTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$existsTerm.target) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'exists-reference'
         value = $existsTerm.target
@@ -261,7 +278,7 @@ function Find-SpfOutlookRequirementMatch {
   }
 
   foreach ($aTerm in @($Analysis.aTerms)) {
-    if (([string]$aTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$aTerm.target) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'a-reference'
         value = $aTerm.target
@@ -270,7 +287,7 @@ function Find-SpfOutlookRequirementMatch {
   }
 
   foreach ($mxTerm in @($Analysis.mxTerms)) {
-    if (([string]$mxTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$mxTerm.target) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'mx-reference'
         value = $mxTerm.target
@@ -279,7 +296,7 @@ function Find-SpfOutlookRequirementMatch {
   }
 
   foreach ($macro in @($Analysis.macros)) {
-    if (([string]$macro) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$macro) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'macro-reference'
         value = $macro
@@ -298,9 +315,11 @@ function Find-SpfOutlookRequirementMatch {
 # we resolve spf.protection.outlook.com ourselves at runtime, collect every
 # ip4:/ip6: CIDR it publishes (including any nested includes such as
 # spfa.hotmail.com), and compare them against the customer's expanded SPF chain.
-# Result is cached in $script:OutlookSpfCanonicalCache for the lifetime of the
-# process so we only do this lookup once per server run. Cache returns $null
-# arrays on failure so the literal-include detection still works offline.
+# A custom required include (sovereign / government clouds) is handled the same way
+# against the ranges that include publishes. Results are cached per include in
+# $script:SpfCanonicalRangeCache for the lifetime of the process so each include is
+# looked up once per server run. The lookup returns $null on failure so the
+# literal-include detection still works offline.
 
 # Convert an IPv4 CIDR string ("a.b.c.d/n") into an integer (start, prefix)
 # pair, or $null if the input is not a valid IPv4 CIDR. Host-only addresses
@@ -418,29 +437,39 @@ function Test-IpRangeContains {
   return ($Outer.start -le $Inner.start) -and ($Outer.end -ge $Inner.end)
 }
 
-# Resolve spf.protection.outlook.com live, recursively expand any nested
-# includes it publishes, and return every ip4:/ip6: CIDR as a parsed range
-# object. Result is cached for the process lifetime in
-# $script:OutlookSpfCanonicalCache. Returns $null when the lookup fails so
-# the caller can gracefully fall back to literal-include detection.
+# Resolve the required include (spf.protection.outlook.com by default) live,
+# recursively expand any nested includes it publishes, and return every ip4:/ip6:
+# CIDR as a parsed range object. Results are cached per include for the process
+# lifetime in $script:SpfCanonicalRangeCache. Returns $null when the lookup fails
+# so the caller can gracefully fall back to literal-include detection.
 function Get-OutlookSpfCanonicalRanges {
-  param([int]$MaxAgeMinutes = 1440)
+  param(
+    [int]$MaxAgeMinutes = 1440,
+    [string]$Target = 'spf.protection.outlook.com'
+  )
+
+  $rootTarget = ([string]$Target).Trim().TrimEnd('.').ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($rootTarget)) { return $null }
+  if (-not ($script:SpfCanonicalRangeCache -is [hashtable])) { $script:SpfCanonicalRangeCache = @{} }
+  $cached = $script:SpfCanonicalRangeCache[$rootTarget]
 
   $now = [DateTime]::UtcNow
-  if ($script:OutlookSpfCanonicalCache -and
-      $script:OutlookSpfCanonicalCache.fetchedAt -and
-      ($now - [DateTime]$script:OutlookSpfCanonicalCache.fetchedAt).TotalMinutes -lt $MaxAgeMinutes -and
-      $script:OutlookSpfCanonicalCache.ranges) {
-    return $script:OutlookSpfCanonicalCache
+  if ($cached -and
+      $cached.fetchedAt -and
+      ($now - [DateTime]$cached.fetchedAt).TotalMinutes -lt $MaxAgeMinutes -and
+      $cached.ranges) {
+    return $cached
   }
 
   $ranges = New-Object System.Collections.Generic.List[object]
   $visited = @{}
   $queue = New-Object System.Collections.Generic.Queue[string]
-  $queue.Enqueue('spf.protection.outlook.com')
+  $queue.Enqueue($rootTarget)
+  # A custom include is caller-supplied, so bound how much of its tree is walked.
+  $maxLookups = 25
 
   $success = $false
-  while ($queue.Count -gt 0) {
+  while ($queue.Count -gt 0 -and $visited.Count -lt $maxLookups) {
     $target = $queue.Dequeue()
     $key = ([string]$target).Trim().TrimEnd('.').ToLowerInvariant()
     if ([string]::IsNullOrWhiteSpace($key)) { continue }
@@ -486,20 +515,25 @@ function Get-OutlookSpfCanonicalRanges {
   if (-not $success) {
     # Keep any prior cached value so transient DNS failures don't disable
     # coverage detection completely.
-    if ($script:OutlookSpfCanonicalCache) { return $script:OutlookSpfCanonicalCache }
+    if ($cached) { return $cached }
     return $null
   }
 
   $ipv4Ranges = @($ranges | Where-Object { $_.family -eq 'IPv4' })
   $ipv6Ranges = @($ranges | Where-Object { $_.family -eq 'IPv6' })
 
-  $script:OutlookSpfCanonicalCache = [pscustomobject]@{
+  $entry = [pscustomobject]@{
     fetchedAt = $now
     ranges    = $ranges.ToArray()
     ipv4      = $ipv4Ranges
     ipv6      = $ipv6Ranges
   }
-  return $script:OutlookSpfCanonicalCache
+  # Keys include caller-supplied values, so the cache must not grow without bound.
+  if ($script:SpfCanonicalRangeCache.Count -ge 32 -and -not $script:SpfCanonicalRangeCache.ContainsKey($rootTarget)) {
+    $script:SpfCanonicalRangeCache.Clear()
+  }
+  $script:SpfCanonicalRangeCache[$rootTarget] = $entry
+  return $entry
 }
 
 # Walk the SPF analysis tree and collect every ip4:/ip6: CIDR authorized by
@@ -679,43 +713,50 @@ function Find-SpfMacroDelegatedTarget {
   return $null
 }
 
-# Determine whether the ACS-required "include:spf.protection.outlook.com" is present
-# in the domain's SPF record (directly or through nested includes/redirects).
+# Determine whether the ACS-required include is present in the domain's SPF record
+# (directly or through nested includes/redirects). The requirement is
+# include:spf.protection.outlook.com unless the caller supplies a custom include
+# (for example the one a sovereign or government cloud publishes); the default
+# path keeps its original wording so existing output is unchanged.
 # Returns an object with isPresent, matchType, detail, and error.
 function Get-SpfOutlookRequirementStatus {  param(
     [string]$Domain,
     [string]$SpfRecord,
-    [object]$SpfAnalysis
+    [object]$SpfAnalysis,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
   )
+
+  $required = ([string]$RequiredInclude).Trim().TrimEnd('.').ToLowerInvariant()
+  $isDefaultInclude = ($required -eq 'spf.protection.outlook.com')
 
   if ([string]::IsNullOrWhiteSpace($SpfRecord)) {
     return [pscustomobject]@{
       isPresent = $false
       matchType = 'missing-spf'
       detail = 'No SPF record was found.'
-      error = 'SPF record is missing, so the required include:spf.protection.outlook.com could not be validated.'
+      error = "SPF record is missing, so the required include:$required could not be validated."
     }
   }
 
   $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
 
-  if (Test-SpfOutlookIncludeToken -Text $SpfRecord) {
+  if (Test-SpfOutlookIncludeToken -Text $SpfRecord -RequiredInclude $required) {
     return [pscustomobject]@{
       isPresent = $true
       matchType = 'direct-include'
-      detail = 'Found direct include:spf.protection.outlook.com in the SPF record.'
+      detail = "Found direct include:$required in the SPF record."
       error = $null
     }
   }
 
-  $match = Find-SpfOutlookRequirementMatch -Analysis $SpfAnalysis
+  $match = Find-SpfOutlookRequirementMatch -Analysis $SpfAnalysis -RequiredInclude $required
   if ($match) {
     switch ($match.matchType) {
       'nested-include' {
         return [pscustomobject]@{
           isPresent = $true
           matchType = $match.matchType
-          detail = "Found include:spf.protection.outlook.com in the expanded SPF chain ($($match.value))."
+          detail = "Found include:$required in the expanded SPF chain ($($match.value))."
           error = $null
         }
       }
@@ -723,7 +764,7 @@ function Get-SpfOutlookRequirementStatus {  param(
         return [pscustomobject]@{
           isPresent = $true
           matchType = $match.matchType
-          detail = 'Found include:spf.protection.outlook.com through an SPF redirect target.'
+          detail = "Found include:$required through an SPF redirect target."
           error = $null
         }
       }
@@ -732,7 +773,7 @@ function Get-SpfOutlookRequirementStatus {  param(
           isPresent = $false
           matchType = $match.matchType
           detail = $null
-          error = "SPF for $targetDomain references spf.protection.outlook.com indirectly ($($match.value)), but the required include:spf.protection.outlook.com could not be confirmed in the expanded SPF chain."
+          error = "SPF for $targetDomain references $required indirectly ($($match.value)), but the required include:$required could not be confirmed in the expanded SPF chain."
         }
       }
     }
@@ -740,22 +781,23 @@ function Get-SpfOutlookRequirementStatus {  param(
 
   # Final fallback: SPF-flattening / Dynamic SPF services (OnDMARC, Valimail,
   # Sendmarc, EasyDMARC, Sparkpost, etc.) inline the IP ranges published by
-  # spf.protection.outlook.com instead of preserving the literal include
-  # token. Resolve spf.protection.outlook.com live and check whether the
-  # expanded SPF chain still authorizes the full set of canonical Exchange
-  # Online Protection ranges. When every canonical IPv4 EOP range is
-  # covered we treat the Outlook requirement as satisfied via flattening.
+  # the required include instead of preserving the literal include token.
+  # Resolve the include live and check whether the expanded SPF chain still
+  # authorizes the full set of canonical ranges it publishes (the Exchange
+  # Online Protection ranges by default). When every canonical IPv4 range is
+  # covered we treat the requirement as satisfied via flattening.
   $canonical = $null
-  try { $canonical = Get-OutlookSpfCanonicalRanges } catch { $canonical = $null }
+  try { $canonical = Get-OutlookSpfCanonicalRanges -Target $required } catch { $canonical = $null }
   if ($canonical -and $canonical.ipv4 -and @($canonical.ipv4).Count -gt 0) {
     $coverage = Test-SpfChainCoversOutlookRanges -Analysis $SpfAnalysis -CanonicalCache $canonical
     if ($coverage -and $coverage.isCovered) {
       $matchedCount = @($coverage.matchedIpv4).Count
       $totalCount = @($canonical.ipv4).Count
+      $rangeOwner = if ($isDefaultInclude) { 'the Exchange Online IP ranges' } else { 'the IP ranges' }
       return [pscustomobject]@{
         isPresent = $true
         matchType = 'flattened-include'
-        detail = "SPF for $targetDomain inlines the Exchange Online IP ranges currently published by spf.protection.outlook.com ($matchedCount of $totalCount canonical IPv4 ranges covered). This is typical of SPF-flattening / Dynamic SPF services such as OnDMARC, Valimail, Sendmarc, or EasyDMARC."
+        detail = "SPF for $targetDomain inlines $rangeOwner currently published by $required ($matchedCount of $totalCount canonical IPv4 ranges covered). This is typical of SPF-flattening / Dynamic SPF services such as OnDMARC, Valimail, Sendmarc, or EasyDMARC."
         error = $null
       }
     }
@@ -764,38 +806,44 @@ function Get-SpfOutlookRequirementStatus {  param(
   $analysisScope = if ($SpfAnalysis -and $SpfAnalysis.analysisScope) { [string]$SpfAnalysis.analysisScope } else { 'full-static' }
 
   # Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...).
-  # Reached only when flattening coverage above did NOT confirm the Outlook
+  # Reached only when flattening coverage above did NOT confirm the required
   # ranges. When the only path to authorization is a macro include/redirect
   # target, the service builds a different DNS answer per message using the live
-  # sending IP, HELO, and MAIL FROM, so spf.protection.outlook.com can be
+  # sending IP, HELO, and MAIL FROM, so the required include can be
   # neither confirmed nor denied by static analysis. Report an explicit
   # "indeterminate" verdict (isPresent = $null) so the UI can soften the strict
-  # FAIL to a WARN and tell the operator to verify Exchange Online is enabled in
+  # FAIL to a WARN and tell the operator to verify the include is enabled in
   # the provider's console, instead of implying the SPF record is broken for ACS.
   $macroTarget = Find-SpfMacroDelegatedTarget -Analysis $SpfAnalysis -SpfRecord $SpfRecord
   if ($macroTarget) {
     $provider = Get-SpfMacroDelegationProvider -Target $macroTarget
     $providerLabel = if ($provider) { $provider } else { 'a hosted/dynamic SPF service' }
+    $macroError = if ($isDefaultInclude) {
+      "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Microsoft 365 / Exchange Online authorization is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that spf.protection.outlook.com (Exchange Online) is enabled for this domain."
+    } else {
+      "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Authorization for the required include:$required is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that $required is enabled for this domain."
+    }
     return [pscustomobject]@{
       isPresent = $null
       matchType = 'macro-delegated'
       provider = $provider
       macroTarget = $macroTarget
       detail = $null
-      error = "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Microsoft 365 / Exchange Online authorization is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that spf.protection.outlook.com (Exchange Online) is enabled for this domain."
+      error = $macroError
     }
   }
 
+  $requirementLabel = if ($isDefaultInclude) { 'Outlook include' } else { 'include' }
   $requirementError = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
-    "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
+    "SPF for $targetDomain could not be confirmed to include include:$required. The record uses nested or macro-based logic, and the required $requirementLabel was not found during static analysis."
   } else {
-    "SPF for $targetDomain does not include include:spf.protection.outlook.com in the expanded SPF chain. This is required for ACS SPF validation."
+    "SPF for $targetDomain does not include include:$required in the expanded SPF chain. This is required for ACS SPF validation."
   }
 
   return [pscustomobject]@{
     isPresent = $false
     matchType = 'not-found'
-    detail = 'Did not find include:spf.protection.outlook.com in the expanded SPF chain.'
+    detail = "Did not find include:$required in the expanded SPF chain."
     error = $requirementError
   }
 }

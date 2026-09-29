@@ -1992,6 +1992,181 @@ html.dark .prop-settings-row select option {
   background: var(--border);
 }
 
+/* ---- Custom SPF / DKIM requirements (Options dialog on the SPF and DKIM cards) ---- */
+.check-override-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid #d97706;
+  background: #fef3c7;
+  color: #78350f;
+}
+
+.dark .check-override-badge {
+  background: #422006;
+  color: #fde68a;
+  border-color: #f59e0b;
+}
+
+.check-options-dialog {
+  width: min(640px, calc(100% - 24px));
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 24px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--fg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.check-options-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.check-options-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.check-options-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.check-options-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.check-options-header h2 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.4;
+}
+
+.check-options-close {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid var(--button-border-secondary);
+  border-radius: 4px;
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  cursor: pointer;
+}
+
+.check-options-body {
+  display: grid;
+  gap: 14px;
+  padding: 14px 18px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.check-options-intro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--status);
+}
+
+.check-options-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.check-options-group legend {
+  padding: 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.check-options-field {
+  display: grid;
+  gap: 4px;
+}
+
+.check-options-field label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--status);
+}
+
+/* Overrides the global input[type=text] sizing used by the search box. */
+.check-options-field input[type=text] {
+  flex: none;
+  width: 100%;
+  height: auto;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.check-options-field input[aria-invalid="true"] {
+  border-color: #c5221f;
+}
+
+.check-options-field input:focus-visible,
+.check-options-close:focus-visible {
+  outline: 2px solid var(--button-bg);
+  outline-offset: 2px;
+}
+
+.check-options-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--status);
+}
+
+.check-options-error {
+  margin: 0;
+  font-size: 12px;
+  color: #c5221f;
+}
+
+.dark .check-options-error {
+  color: #fca5a5;
+}
+
+.check-options-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.check-options-actions button.primary {
+  height: auto;
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+html.check-options-open {
+  overflow-y: hidden;
+}
+
 /* ---- Per-resolver detail rows ---- */
 .prop-detail-panel {
   display: grid;

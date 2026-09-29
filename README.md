@@ -49,6 +49,7 @@
   - Null MX records (`MX 0 .`) are treated as explicit no-mail configuration and fail the MX readiness row instead of being counted as usable mail routing
   - DMARC policy verification (including inherited parent-domain DMARC)
   - DKIM selector validation (`selector1-azurecomm-prod-net`, `selector2-azurecomm-prod-net`)
+  - Optional custom SPF include and DKIM selector requirements (for example, Azure Government values) through the **Options** button on the SPF and DKIM cards or the matching API query parameters
   - CNAME record checks (root and `www` prefix)
 - 🛡️ **DNSBL reputation lookup** with parallel queries and intelligent caching
 - 🌍 **WHOIS/RDAP diagnostics** with multiple fallback providers (Sysinternals, Linux CLI, TCP whois, GoDaddy, WhoisXML, RDAP)
@@ -288,6 +289,27 @@ Mail provider detection recognizes Microsoft 365, Azure Communication Services E
 
 A separate **SPF Expansion Records** card sits directly below the SPF card and lists every `include:` / `redirect=` target the recursive SPF resolver visited, the parent record that referenced it, and the actual TXT record returned by each lookup. This keeps the main DNS Records table scoped to the queried domain while still surfacing the third-party SPF chain (for example `_u.<domain>._spf.smart.ondmarc.com`, `spf.protection.outlook.com`, `_spf.google.com`) for troubleshooting. The expansion card also reports a per-row "Lookups" contribution and a chain-wide "N of 10 DNS lookups used" summary against the SPF 10-lookup limit (RFC 7208 §4.6.4). Because the structured table now owns the expansion view, the SPF card itself is intentionally kept lean: it shows just the queried-domain SPF record value and the ACS Outlook-include verdict, without duplicating the indented per-node text dump that older versions appended.
 
+### Custom SPF and DKIM requirements
+
+The SPF and DKIM checks use the Azure public cloud values by default (`include:spf.protection.outlook.com` and the `selector1-azurecomm-prod-net` / `selector2-azurecomm-prod-net` CNAMEs). A domain set up in another environment, such as a sovereign or government cloud, is given different values in the Azure portal. To check against them, select **Options** on the SPF, DKIM1, or DKIM2 card and paste the values the portal shows for the domain. Leave a field blank to keep its default. Nothing is pre-filled.
+
+For example, a domain in Azure Government might show:
+
+| Field | Example value |
+|-------|---------------|
+| SPF include | `spf.protection.office365.us` (a whole record such as `v=spf1 include:spf.protection.office365.us -all` can be pasted) |
+| DKIM1 Name / Value | `selector1-azurecomm-gcch._domainkey` / `selector1-azurecomm-gcch._domainkey.azurecomm.azure.us` |
+| DKIM2 Name / Value | `selector2-azurecomm-gcch._domainkey` / `selector2-azurecomm-gcch._domainkey.azurecomm.azure.us` |
+
+Always use the values shown for your own domain.
+
+- Applying the options re-runs only the SPF, DKIM, and DNS records checks, for every domain tab. All other checks keep their results.
+- Cards checked against a custom value show a **Custom** badge, including in screenshots. The copied report adds a **Custom requirements** row.
+- The values are kept only in the page URL, not in browser storage. A copied link reproduces the same check, and **Reset to defaults** removes them.
+- The DKIM Name is optional when the Value contains `._domainkey.`. A fully qualified Name is trimmed to `<selector>._domainkey`.
+- The same values can be passed to the API: `spfInclude` on `/dns` and `/api/base`, and `dkim1Selector`, `dkim1Target`, `dkim2Selector`, `dkim2Target` on `/dns`, `/api/dkim`, and `/api/records`. A DKIM override needs its `Target`. An unusable value returns HTTP 400 instead of silently falling back to the default. Responses report the requirement that was checked in `spfRequiredInclude` / `spfRequiredIncludeCustom` and `dkim1Selector` / `dkim1Custom` (and the `dkim2` equivalents).
+- An SPF record that delegates evaluation to a hosted SPF service through a macro-based include (for example Valimail) resolves includes per message, so the required include cannot be confirmed from DNS alone. The SPF card shows **WARN** and asks you to confirm in that provider's console that the required include is enabled for the domain.
+
 ## 🛡️ DNSBL Reputation Checks
 
 The `/api/reputation` endpoint performs two independent checks:
@@ -526,13 +548,13 @@ The application exposes the following RESTful API endpoints:
 | Endpoint | Description | 📝 Purpose |
 |----------|-------------|------------|
 | `/` | Web UI | Interactive single-page application for domain checking |
-| `/dns` | Aggregated readiness JSON | Complete DNS readiness report for a domain |
-| `/api/base` | Root TXT/SPF/ACS TXT | Validates SPF and ACS verification TXT records |
+| `/dns` | Aggregated readiness JSON | Complete DNS readiness report for a domain. Accepts the optional `spfInclude`, `dkim1Selector`, `dkim1Target`, `dkim2Selector` and `dkim2Target` parameters (see [Custom SPF and DKIM requirements](#custom-spf-and-dkim-requirements)) |
+| `/api/base` | Root TXT/SPF/ACS TXT | Validates SPF and ACS verification TXT records. Accepts an optional `spfInclude` parameter |
 | `/api/mx` | MX + A/AAAA resolution | Checks mail exchange records and IP resolution |
-| `/api/records` | Raw DNS records table payload | Returns the detailed DNS records dataset used by the UI table, including reverse-lookup supplements and TTL seconds for expanded display formatting |
+| `/api/records` | Raw DNS records table payload | Returns the detailed DNS records dataset used by the UI table, including reverse-lookup supplements and TTL seconds for expanded display formatting. Accepts the optional `dkim1Selector`, `dkim1Target`, `dkim2Selector` and `dkim2Target` parameters |
 | `/api/whois` | WHOIS / RDAP registration | Returns domain registration data (creation, expiry, registrar) |
 | `/api/dmarc` | DMARC records | Validates DMARC email authentication policy |
-| `/api/dkim` | DKIM selectors | Checks DomainKeys Identified Mail signatures |
+| `/api/dkim` | DKIM selectors | Checks DomainKeys Identified Mail signatures. Accepts the optional `dkim1Selector`, `dkim1Target`, `dkim2Selector` and `dkim2Target` parameters |
 | `/api/cname` | CNAME records | Validates canonical name records |
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
 | `/api/website` | Website reachability snapshot | Performs a security-guarded HTTP(S) probe (apex + www, HTTPS first) and returns a neutral, factual snapshot: reachability, HTTP status, redirect chain, page title/description, a short text excerpt, and recognized placeholder/parked-page markers |
@@ -544,7 +566,7 @@ The application exposes the following RESTful API endpoints:
 | `/privacy` | Privacy Statement | Embedded, localized Privacy Statement page |
 | `/robots.txt` | Crawler policy | Allows search engines on the pages, blocks `/api/` and `/dns` for general crawlers, and explicitly grants AI assistants access (including the JSON API). Points at the sitemap. |
 | `/sitemap.xml` | Sitemap | Lists `/`, `/terms` and `/privacy` with `hreflang` alternates for all 10 shipped locales |
-| `/llms.txt` | LLM-readable summary | [llmstxt.org](https://llmstxt.org)-style Markdown brief describing the tool, every endpoint, the propagation parameters, and how to read a verdict — so an AI agent can learn the whole API in one fetch |
+| `/llms.txt` | LLM-readable summary | [llmstxt.org](https://llmstxt.org)-style Markdown brief describing the tool, every endpoint, the propagation and custom SPF/DKIM requirement parameters, and how to read a verdict — so an AI agent can learn the whole API in one fetch |
 | `/openapi.json` | OpenAPI 3.1 contract | Machine-readable API definition covering all 12 lookup endpoints, their parameters, and the 400/401/429 responses |
 | `/favicon.svg` | Site icon | Scalable shield icon served from memory (keeps the single-file distribution intact) |
 | `/og-image.svg` | Social/link-preview card | 1200×630 branded card referenced by `og:image` / `twitter:image` |
@@ -558,6 +580,9 @@ curl "http://localhost:8080/dns?domain=example.com"
 
 # Check only MX records
 curl "http://localhost:8080/api/mx?domain=example.com"
+
+# Check against custom SPF/DKIM requirements (for example, Azure Government values)
+curl "http://localhost:8080/dns?domain=example.com&spfInclude=spf.protection.office365.us&dkim1Target=selector1-azurecomm-gcch._domainkey.azurecomm.azure.us&dkim2Target=selector2-azurecomm-gcch._domainkey.azurecomm.azure.us"
 
 # With API key authentication
 curl -H "X-Api-Key: your-secret-key" "http://localhost:8080/dns?domain=example.com"
@@ -878,7 +903,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.16.2`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.16.3`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -901,8 +926,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.16.2
-git push origin v2.16.2
+git tag v2.16.3
+git push origin v2.16.3
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -913,7 +938,7 @@ git push origin v2.16.2
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.16.2`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.16.3`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -930,11 +955,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.16.2
+docker pull limitlessworlds/acs-domain-checker:2.16.3
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.16.2
-docker pull limitlessworlds/acs-domain-checker:windows-2.16.2
+docker pull limitlessworlds/acs-domain-checker:linux-2.16.3
+docker pull limitlessworlds/acs-domain-checker:windows-2.16.3
 ```
 
 ### 🛠️ Manual Build Script
@@ -949,7 +974,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.16.2
+./acs-domain-checker-dockerhub.ps1 -Version 2.16.3
 ```
 
 **📋 Requirements for manual script:**

@@ -970,6 +970,17 @@ function formatGuidanceText(text, checkedDomain) {
   protect(/\binclude:zoho\.com\b/gi);
   protect(/\bms-domain-verification\b/gi);
   protect(/\bselector[12]-azurecomm-prod-net\b/gi);
+  // Custom requirement values from the Options dialog render as code like the defaults above.
+  if (checkOverrides.spfInclude) {
+    const includePattern = escapeRegex(checkOverrides.spfInclude);
+    protect(new RegExp('v=spf1\\s+include:' + includePattern + '\\s+-all', 'gi'));
+    protect(new RegExp('\\binclude:' + includePattern + '\\b', 'gi'));
+    protect(new RegExp('\\b' + includePattern + '\\b', 'gi'));
+  }
+  [1, 2].forEach(slot => {
+    const selector = checkOverrides['dkim' + slot + 'Selector'];
+    if (selector) protect(new RegExp('\\b' + escapeRegex(selector.replace(/\._domainkey$/, '')) + '\\b', 'gi'));
+  });
 
   let formatted = linkifyText(value);
   formatted = formatted.replace(/`([^`]+)`/g, '<code class="guidance-code">$1</code>');
@@ -1190,6 +1201,10 @@ function localizeWebsiteSignal(value) {
 
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
+  // A custom requirement (Options dialog) is described by its include rather than as
+  // the Outlook include. Callers pass the include the verdict was checked against.
+  const requiredInclude = String((result && result.spfRequiredInclude) || '').trim().toLowerCase();
+  const customInclude = (requiredInclude && requiredInclude !== CHECK_OVERRIDE_DEFAULTS.spfInclude) ? 'include:' + requiredInclude : '';
   // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...)
   // resolves Exchange Online authorization dynamically per message, so the
   // Outlook include can be neither confirmed nor denied by static analysis.
@@ -1199,11 +1214,19 @@ function getLocalizedSpfRequirementSummary(result) {
   if (matchTypeRaw === 'macro-delegated' || result.spfHasRequiredInclude === null) {
     const provider = String((result && result.spfRequiredIncludeProvider) || '').trim();
     if (provider) {
-      return t('spfOutlookRequirementMacroDelegatedProvider', { provider });
+      return customInclude
+        ? t('spfCustomRequirementMacroDelegatedProvider', { provider, include: customInclude, host: requiredInclude })
+        : t('spfOutlookRequirementMacroDelegatedProvider', { provider });
     }
-    return t('spfOutlookRequirementMacroDelegated');
+    return customInclude
+      ? t('spfCustomRequirementMacroDelegated', { include: customInclude, host: requiredInclude })
+      : t('spfOutlookRequirementMacroDelegated');
   }
-  if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
+  if (result.spfHasRequiredInclude === false) {
+    return customInclude
+      ? t('spfCustomRequirementMissing', { include: customInclude })
+      : t('spfOutlookRequirementMissing');
+  }
   if (result.spfHasRequiredInclude === true) {
     // Base verdict ("Required Outlook SPF include detected for ACS.") is the
     // same regardless of how the requirement was matched. When the customer
@@ -1213,7 +1236,9 @@ function getLocalizedSpfRequirementSummary(result) {
     // that case we append a short suffix so operators can see at a glance
     // whether the requirement was met via the actual DNS include name or
     // via the flattened IP ranges.
-    const base = t('spfOutlookRequirementPresent');
+    const base = customInclude
+      ? t('spfCustomRequirementPresent', { include: customInclude })
+      : t('spfOutlookRequirementPresent');
     const matchType = String((result && result.spfRequiredIncludeMatchType) || '').trim().toLowerCase();
     if (matchType === 'flattened-include') {
       return base + ' ' + t('spfOutlookRequirementFlattenedSuffix');
@@ -1433,9 +1458,10 @@ function getDnsTxtRecoveryState(r) {
       : ((r && r.spfValue) ? [r.spfValue] : []));
   const spfMultipleRecords = spfRecords.length > 1;
   // Mirror Select-SpfRecordFromSet on the server: prefer the record carrying the
-  // Outlook include so the requirement verdict never depends on RRset ordering.
+  // required include so the requirement verdict never depends on RRset ordering.
+  const requiredIncludePattern = new RegExp('(^|\\s)include:' + escapeRegex(getSpfRequirementInclude(r)) + '(?=\\s|$)', 'i');
   const spfValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
-    ? (spfRecords.find(value => /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(value || ''))) || spfRecords[0] || null)
+    ? (spfRecords.find(value => requiredIncludePattern.test(String(value || ''))) || spfRecords[0] || null)
     : (r ? r.spfValue : null);
   const acsValues = (recoveredFromDetailedRecords || recoveredFromNameservers)
     ? txtRecords.filter(value => /ms-domain-verification/i.test(String(value || '').trim()))
@@ -1446,7 +1472,7 @@ function getDnsTxtRecoveryState(r) {
     ? (acsValues[0] || null)
     : (r ? r.acsValue : null);
   const spfHasRequiredInclude = (recoveredFromDetailedRecords || recoveredFromNameservers) && spfValue
-    ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
+    ? requiredIncludePattern.test(String(spfValue || ''))
     : (r ? r.spfHasRequiredInclude : null);
   // Macro-delegated SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...) cannot be
   // statically confirmed for the Outlook include. The server reports this via
@@ -1491,6 +1517,179 @@ function getDnsTxtRecoveryState(r) {
     acsValues,
     acsPresent: !!acsValue
   };
+}
+
+// ===================== Custom SPF / DKIM requirements =====================
+//
+// The SPF and DKIM checks default to the Azure public cloud values below. A domain
+// set up in another environment (for example a sovereign or government cloud) is
+// given a different SPF include and different DKIM selector records, so the
+// operator can paste the values the Azure portal shows into the Options dialog on
+// the SPF / DKIM cards. Overrides live only in memory and in the page URL (so a
+// reload or a shared link keeps them), never in browser storage, which keeps the
+// tool on the defaults for everyone who has not explicitly opted in. The server
+// re-validates every value (13-InputValidation.ps1) and echoes back what it checked.
+const CHECK_OVERRIDE_DEFAULTS = {
+  spfInclude: 'spf.protection.outlook.com',
+  dkim1Selector: 'selector1-azurecomm-prod-net._domainkey',
+  dkim1Target: 'selector1-azurecomm-prod-net._domainkey.azurecomm.net',
+  dkim2Selector: 'selector2-azurecomm-prod-net._domainkey',
+  dkim2Target: 'selector2-azurecomm-prod-net._domainkey.azurecomm.net'
+};
+const CHECK_OVERRIDE_KEYS = Object.keys(CHECK_OVERRIDE_DEFAULTS);
+const EMPTY_CHECK_OVERRIDES = { spfInclude: '', dkim1Selector: '', dkim1Target: '', dkim2Selector: '', dkim2Target: '' };
+let checkOverrides = Object.assign({}, EMPTY_CHECK_OVERRIDES);
+
+// Mirrors Test-DomainName -AllowUnderscore (SPF and DKIM names use underscore labels).
+function isValidOverrideHostName(value) {
+  const name = String(value || '');
+  if (!name || name.length > 253 || !/^[a-z0-9_.-]+$/.test(name)) return false;
+  const labels = name.split('.');
+  return labels.length >= 2 && labels.every(label => label.length > 0 && label.length <= 63 && !label.startsWith('-') && !label.endsWith('-'));
+}
+
+function trimOverrideQuotes(value) {
+  return String(value === null || value === undefined ? '' : value).trim().replace(/^"+|"+$/g, '').trim();
+}
+
+// Mirrors ConvertTo-SpfIncludeOverride: a host name, an include: term, or a whole
+// pasted SPF record (the first include wins). '' for blank input, null when unusable.
+function normalizeSpfIncludeOverride(raw) {
+  const text = trimOverrideQuotes(raw);
+  if (!text) return '';
+  if (text.length > 512) return null;
+  let candidate = null;
+  for (const token of text.split(/\s+/)) {
+    const match = token.replace(/^"+|"+$/g, '').replace(/^[+\-~?]/, '').match(/^include:(.+)$/i);
+    if (match) { candidate = match[1]; break; }
+  }
+  if (candidate === null) {
+    if (/\s/.test(text) || /^v=spf1/i.test(text)) return null;
+    candidate = text;
+  }
+  candidate = candidate.replace(/^"+|"+$/g, '').replace(/\.+$/, '').toLowerCase();
+  return isValidOverrideHostName(candidate) ? candidate : null;
+}
+
+// Mirrors ConvertTo-DkimSelectorOverride: the Value (CNAME target) is required, the
+// Name is optional (derived from the target) and a pasted FQDN is trimmed back to
+// "<selector>._domainkey". { selector, target } ('' for both when blank) or null.
+function normalizeDkimOverride(selectorRaw, targetRaw) {
+  const target = trimOverrideQuotes(targetRaw).replace(/\.+$/, '').toLowerCase();
+  let selector = trimOverrideQuotes(selectorRaw).replace(/\.+$/, '').toLowerCase();
+  if (!selector && !target) return { selector: '', target: '' };
+  if (!isValidOverrideHostName(target)) return null;
+  if (!selector) {
+    const derived = target.match(/^(.+?\._domainkey)\./);
+    if (!derived) return null;
+    selector = derived[1];
+  } else {
+    const trimmed = selector.match(/^(.+?\._domainkey)(?:\.|$)/);
+    selector = trimmed ? trimmed[1] : selector + '._domainkey';
+  }
+  return isValidOverrideHostName(selector) ? { selector, target } : null;
+}
+
+// Values equal to the defaults are stored as '' so they never show as custom.
+function toCheckOverrideState(spfInclude, dkim1, dkim2) {
+  const state = Object.assign({}, EMPTY_CHECK_OVERRIDES);
+  if (spfInclude && spfInclude !== CHECK_OVERRIDE_DEFAULTS.spfInclude) state.spfInclude = spfInclude;
+  [[1, dkim1], [2, dkim2]].forEach(([slot, value]) => {
+    if (!value || !value.target) return;
+    if (value.selector === CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Selector'] && value.target === CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Target']) return;
+    state['dkim' + slot + 'Selector'] = value.selector;
+    state['dkim' + slot + 'Target'] = value.target;
+  });
+  return state;
+}
+
+// Extra query strings for /api/base, /api/dkim and /api/records. Empty on the
+// defaults, so default request URLs are unchanged.
+function buildSpfOverrideQuery() {
+  return checkOverrides.spfInclude ? 'spfInclude=' + encodeURIComponent(checkOverrides.spfInclude) : '';
+}
+
+function buildDkimOverrideQuery() {
+  const parts = [];
+  [1, 2].forEach(slot => {
+    const target = checkOverrides['dkim' + slot + 'Target'];
+    if (!target) return;
+    parts.push('dkim' + slot + 'Selector=' + encodeURIComponent(checkOverrides['dkim' + slot + 'Selector']));
+    parts.push('dkim' + slot + 'Target=' + encodeURIComponent(target));
+  });
+  return parts.join('&');
+}
+
+function syncCheckOverridesToUrl() {
+  try {
+    const url = new URL(window.location.href);
+    CHECK_OVERRIDE_KEYS.forEach(key => {
+      if (checkOverrides[key]) url.searchParams.set(key, checkOverrides[key]);
+      else url.searchParams.delete(key);
+    });
+    window.history.replaceState({}, '', url);
+  } catch {}
+}
+
+// Restore overrides from a reloaded or shared link before the first lookup. Unusable
+// values are dropped (and removed from the URL) instead of being sent to the server.
+function loadCheckOverridesFromUrl() {
+  let params;
+  try { params = new URLSearchParams(window.location.search); } catch { return; }
+  if (!CHECK_OVERRIDE_KEYS.some(key => params.has(key))) return;
+  checkOverrides = toCheckOverrideState(
+    normalizeSpfIncludeOverride(params.get('spfInclude')),
+    normalizeDkimOverride(params.get('dkim1Selector'), params.get('dkim1Target')),
+    normalizeDkimOverride(params.get('dkim2Selector'), params.get('dkim2Target'))
+  );
+  syncCheckOverridesToUrl();
+}
+
+// The requirement a result was actually checked against. The server echoes these
+// back, so a card never describes a value other than the one its verdict used.
+function getSpfRequirementInclude(r) {
+  const echoed = (r && typeof r.spfRequiredInclude === 'string') ? r.spfRequiredInclude.trim().toLowerCase() : '';
+  return echoed || checkOverrides.spfInclude || CHECK_OVERRIDE_DEFAULTS.spfInclude;
+}
+
+function isCustomSpfRequirement(r) {
+  return getSpfRequirementInclude(r) !== CHECK_OVERRIDE_DEFAULTS.spfInclude;
+}
+
+function getDkimRequirement(r, slot) {
+  const defaultSelector = CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Selector'];
+  const defaultTarget = CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Target'];
+  const selector = String((r && r['dkim' + slot + 'Selector']) || checkOverrides['dkim' + slot + 'Selector'] || defaultSelector).toLowerCase();
+  const target = String((r && r['dkim' + slot + 'ExpectedCname']) || checkOverrides['dkim' + slot + 'Target'] || defaultTarget).toLowerCase();
+  return { selector, target, custom: selector !== defaultSelector || target !== defaultTarget };
+}
+
+// Existing translations name the default include / selectors as literal code tokens
+// in every language, so a custom requirement can be substituted in place.
+function applySpfIncludeToText(text, include) {
+  const value = String(text || '');
+  if (!include || include === CHECK_OVERRIDE_DEFAULTS.spfInclude) return value;
+  return value.split(CHECK_OVERRIDE_DEFAULTS.spfInclude).join(include);
+}
+
+function applyDkimSelectorToText(text, slot, selector) {
+  const value = String(text || '');
+  const defaultLabel = CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Selector'].replace(/\._domainkey$/, '');
+  const label = String(selector || '').replace(/\._domainkey$/, '');
+  if (!label || label === defaultLabel) return value;
+  return value.split(defaultLabel).join(label);
+}
+
+// Every custom requirement a result was checked against ('' on the defaults), used
+// to label copied reports so a PASS is never mistaken for the default requirement.
+function getCheckOverrideSummary(r) {
+  const parts = [];
+  if (isCustomSpfRequirement(r)) parts.push('SPF include:' + getSpfRequirementInclude(r));
+  [1, 2].forEach(slot => {
+    const requirement = getDkimRequirement(r, slot);
+    if (requirement.custom) parts.push('DKIM' + slot + ' ' + requirement.selector + ' \u2192 ' + requirement.target);
+  });
+  return parts.join('; ');
 }
 
 // ===================== DNS Propagation helpers =====================
@@ -1839,7 +2038,7 @@ function buildGuidance(r) {
       if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
-        guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
+        guidance.push({ type: 'attention', text: applySpfIncludeToText(t('guidanceSpfMissing'), getSpfRequirementInclude(r)) });
       }
     }
     const spfLookupLimitGuidance = getSpfLookupLimitWarningText(r);
@@ -1850,16 +2049,20 @@ function buildGuidance(r) {
       // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
       // informational note explaining the indeterminate verdict (and how to
       // verify it in the provider console) instead of a hard "missing" warning.
+      // The wording comes from getLocalizedSpfRequirementSummary so the guidance
+      // and the SPF card always describe the same (default or custom) requirement.
       const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
-      if (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null) {
-        const provider = String(txtRecovery.spfRequiredIncludeProvider || '').trim();
-        const text = provider
-          ? t('spfOutlookRequirementMacroDelegatedProvider', { provider })
-          : t('spfOutlookRequirementMacroDelegated');
-        guidance.push({ type: 'info', text });
-      } else {
-        guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
-      }
+      const spfIndeterminate = spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null;
+      guidance.push({
+        type: spfIndeterminate ? 'info' : 'attention',
+        text: getLocalizedSpfRequirementSummary({
+          spfPresent: true,
+          spfHasRequiredInclude: spfIndeterminate ? null : false,
+          spfRequiredIncludeMatchType: txtRecovery.spfRequiredIncludeMatchType,
+          spfRequiredIncludeProvider: txtRecovery.spfRequiredIncludeProvider,
+          spfRequiredInclude: getSpfRequirementInclude(r)
+        })
+      });
     }
     if (!txtRecovery.acsPresent) {
       if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
@@ -1940,22 +2143,24 @@ function buildGuidance(r) {
     // strictly about the ACS selector hostname itself.
     const dkim1HasAcsRecord = !!(r.dkim1CnameTarget || r.dkim1TxtValue);
     const dkim2HasAcsRecord = !!(r.dkim2CnameTarget || r.dkim2TxtValue);
+    const dkim1Requirement = getDkimRequirement(r, 1);
+    const dkim2Requirement = getDkimRequirement(r, 2);
     if (!dkim1HasAcsRecord) {
-      guidance.push({ type: 'attention', text: t('guidanceDkim1Missing') });
+      guidance.push({ type: 'attention', text: applyDkimSelectorToText(t('guidanceDkim1Missing'), 1, dkim1Requirement.selector) });
     } else if (r.dkim1AcsConfigured === false) {
       // Selector hostname is published but the CNAME target does not point at
       // the ACS-managed selector. The server-side guidance list also includes
       // a localized version of this message; we add a concise client-side
       // hint here so the in-page guidance is complete even when the server
       // payload is partial. No translation key yet -- English fallback.
-      const expected1 = r.dkim1ExpectedCname || 'selector1-azurecomm-prod-net._domainkey.azurecomm.net';
+      const expected1 = dkim1Requirement.target;
       const actual1 = r.dkim1CnameTarget || '(no CNAME target)';
       guidance.push({ type: 'attention', text: 'DKIM selector1 is published but its CNAME does not point to ACS. Expected: ' + expected1 + '; found: ' + actual1 + '.' });
     }
     if (!dkim2HasAcsRecord) {
-      guidance.push({ type: 'attention', text: t('guidanceDkim2Missing') });
+      guidance.push({ type: 'attention', text: applyDkimSelectorToText(t('guidanceDkim2Missing'), 2, dkim2Requirement.selector) });
     } else if (r.dkim2AcsConfigured === false) {
-      const expected2 = r.dkim2ExpectedCname || 'selector2-azurecomm-prod-net._domainkey.azurecomm.net';
+      const expected2 = dkim2Requirement.target;
       const actual2 = r.dkim2CnameTarget || '(no CNAME target)';
       guidance.push({ type: 'attention', text: 'DKIM selector2 is published but its CNAME does not point to ACS. Expected: ' + expected2 + '; found: ' + actual2 + '.' });
     }
@@ -1965,7 +2170,9 @@ function buildGuidance(r) {
     guidance.push({ type: 'attention', text: t('guidanceCnameMissing') });
   }
 
-  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === false) {
+  // Only meaningful for the default requirement: a custom include's verdict says
+  // nothing about spf.protection.outlook.com.
+  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === false && !isCustomSpfRequirement(r)) {
     guidance.push({ type: 'attention', text: t('guidanceMxMicrosoftSpf') });
   }
   if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && txtRecovery.spfPresent && txtRecovery.spfValue && !/_spf\.google\.com/i.test(txtRecovery.spfValue)) {

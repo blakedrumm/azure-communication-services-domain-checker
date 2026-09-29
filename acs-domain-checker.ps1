@@ -1708,7 +1708,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.16.2'
+$script:AppVersion = '2.16.3'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   # Validate at the boundary: this value is interpolated into generated JSON
   # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
@@ -5313,6 +5313,20 @@ global, namer, samer, europe, asia, africa, oceania), `max` (1-1000 resolvers),
 resolver health pre-selection). The active server catalog can contain up to 1000
 resolvers; URL-supplied custom lists are limited to 100 addresses.
 
+## Custom SPF and DKIM requirement parameters
+
+The SPF and DKIM checks default to the Azure public cloud values
+(`include:spf.protection.outlook.com` and the `selector1-azurecomm-prod-net` /
+`selector2-azurecomm-prod-net` CNAMEs). For a domain set up in another environment,
+such as a sovereign or government cloud, pass the values the Azure portal shows:
+`spfInclude` on `__ACS_ROOT__/api/base` and `__ACS_ROOT__/dns` (an include host, an
+`include:` term, or a whole SPF record; the first include is used), and
+`dkim1Target` / `dkim2Target` (the expected CNAME target) with optional
+`dkim1Selector` / `dkim2Selector` (derived from the target when omitted) on
+`__ACS_ROOT__/api/dkim`, `__ACS_ROOT__/api/records` and `__ACS_ROOT__/dns`. Responses
+echo the values checked (`spfRequiredInclude`, `dkim1Selector`, `dkim1ExpectedCname`,
+...). Invalid values return HTTP 400 instead of falling back to the defaults.
+
 ## Reading a verdict
 
 - Checks report a `state` or `status` string. `propagated`, `consistent`, `pass` and `ok` are healthy.
@@ -5400,15 +5414,30 @@ function Get-AcsOpenApiJson {
     [void]$sb.AppendLine('        "parameters": [')
     [void]$sb.Append($domainParam)
 
+    $extraParams = [System.Collections.Generic.List[string]]::new()
     if ($endpoint -eq '/api/propagation') {
+      $extraParams.Add('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } }')
+      $extraParams.Add('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } }')
+      $extraParams.Add('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 25 } }')
+      $extraParams.Add('        { "name": "timeout", "in": "query", "description": "Per-resolver timeout in milliseconds.", "schema": { "type": "integer", "minimum": 1, "maximum": 15000, "default": 4000 } }')
+      $extraParams.Add('        { "name": "expected", "in": "query", "description": "Substring the answer must contain to count as a match.", "schema": { "type": "string", "maxLength": 255 } }')
+      $extraParams.Add('        { "name": "custom", "in": "query", "description": "Up to 100 comma-separated public IPv4 resolver addresses to query instead of the server catalog.", "schema": { "type": "string", "maxLength": 4000 } }')
+      $extraParams.Add('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
+    }
+    # Optional custom SPF / DKIM requirements for domains set up outside the Azure public cloud.
+    if ($endpoint -in @('/dns', '/api/base')) {
+      $extraParams.Add('        { "name": "spfInclude", "in": "query", "description": "Check the SPF requirement against this include instead of spf.protection.outlook.com (for example a sovereign or government cloud include). Accepts a host name, an include: term, or a whole SPF record; the first include is used. Invalid values return 400.", "schema": { "type": "string", "maxLength": 512 } }')
+    }
+    if ($endpoint -in @('/dns', '/api/dkim', '/api/records')) {
+      foreach ($slot in 1, 2) {
+        $extraParams.Add('        { "name": "dkim' + $slot + 'Target", "in": "query", "description": "Expected CNAME target for DKIM selector ' + $slot + ' instead of the Azure public cloud default (the Value column in the Azure portal). Invalid values return 400.", "schema": { "type": "string", "maxLength": 253 } }')
+        $extraParams.Add('        { "name": "dkim' + $slot + 'Selector", "in": "query", "description": "Selector host name for DKIM selector ' + $slot + ', for example selector' + $slot + '-example._domainkey (the Name column in the Azure portal). Optional: derived from dkim' + $slot + 'Target when omitted.", "schema": { "type": "string", "maxLength": 253 } }')
+      }
+    }
+
+    if ($extraParams.Count -gt 0) {
       [void]$sb.AppendLine(',')
-      [void]$sb.AppendLine('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } },')
-      [void]$sb.AppendLine('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } },')
-      [void]$sb.AppendLine('        { "name": "max", "in": "query", "description": "Number of resolvers to query.", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 25 } },')
-      [void]$sb.AppendLine('        { "name": "timeout", "in": "query", "description": "Per-resolver timeout in milliseconds.", "schema": { "type": "integer", "minimum": 1, "maximum": 15000, "default": 4000 } },')
-      [void]$sb.AppendLine('        { "name": "expected", "in": "query", "description": "Substring the answer must contain to count as a match.", "schema": { "type": "string", "maxLength": 255 } },')
-      [void]$sb.AppendLine('        { "name": "custom", "in": "query", "description": "Up to 100 comma-separated public IPv4 resolver addresses to query instead of the server catalog.", "schema": { "type": "string", "maxLength": 4000 } },')
-      [void]$sb.AppendLine('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
+      [void]$sb.AppendLine(($extraParams -join (',' + [Environment]::NewLine)))
     } else {
       [void]$sb.AppendLine()
     }
@@ -6870,7 +6899,12 @@ function Resolve-DnsRecordsDetailed {
 }
 
 function Get-DnsRecordsStatus {
-  param([string]$Domain)
+  param(
+    [string]$Domain,
+    # "<selector>._domainkey" names from a custom DKIM requirement, so the records grid
+    # lists the same selectors the DKIM cards check.
+    [string[]]$AdditionalDkimSelectors
+  )
 
   $records = New-Object System.Collections.Generic.List[object]
   $errors = New-Object System.Collections.Generic.List[string]
@@ -6976,6 +7010,12 @@ function Get-DnsRecordsStatus {
     [pscustomobject]@{ Name = "_dmarc.$Domain";                                  Types = @('TXT') },
     [pscustomobject]@{ Name = "www.$Domain";                                     Types = @('CNAME', 'A', 'AAAA') }
   )
+  foreach ($selectorName in @($AdditionalDkimSelectors | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+    $selectorHost = "$selectorName.$Domain"
+    if (@($relatedTargets | Where-Object { $_.Name -eq $selectorHost }).Count -eq 0) {
+      $relatedTargets += [pscustomobject]@{ Name = $selectorHost; Types = @('CNAME', 'TXT') }
+    }
+  }
   foreach ($target in $relatedTargets) {
     try {
       foreach ($row in @(Resolve-DnsRecordsDetailed -Name $target.Name -Types $target.Types)) {
@@ -7099,7 +7139,12 @@ function ConvertTo-NormalizedDomain {
 # Validate that a string looks like a legitimate domain name.
 # Rejects obviously invalid input, prevents path/query injection, and enforces RFC label rules.
 function Test-DomainName {
-  param([string]$Domain)
+  param(
+    [string]$Domain,
+    # SPF include targets and DKIM selector names legitimately use underscore labels
+    # (_spf.example.com, selector1._domainkey); a queried domain never does.
+    [switch]$AllowUnderscore
+  )
 
   # Lightweight validation to avoid:
   # - obviously invalid domains
@@ -7109,7 +7154,8 @@ function Test-DomainName {
 
   $d = $Domain.Trim().ToLowerInvariant()
   if ($d.Length -gt 253) { return $false }
-  if ($d -notmatch '^[a-z0-9.-]+$') { return $false }
+  $allowedPattern = if ($AllowUnderscore) { '^[a-z0-9_.-]+$' } else { '^[a-z0-9.-]+$' }
+  if ($d -notmatch $allowedPattern) { return $false }
   if ($d.Contains('..')) { return $false }
   if ($d.StartsWith('-') -or $d.EndsWith('-')) { return $false }
 
@@ -7121,6 +7167,125 @@ function Test-DomainName {
     if ($label.StartsWith('-') -or $label.EndsWith('-')) { return $false }
   }
   return $true
+}
+
+# ------------------- OPTIONAL SPF / DKIM REQUIREMENT OVERRIDES -------------------
+# The SPF and DKIM checks default to the Azure public cloud values
+# (include:spf.protection.outlook.com and the selector1/selector2-azurecomm-prod-net
+# CNAMEs). A domain set up in another environment, such as a sovereign or government
+# cloud, is given a different SPF include and different DKIM selector records, so a
+# caller may pass the values the Azure portal shows for that domain. Every value is
+# normalized and validated here before it can reach a DNS query or a verdict. The
+# SPA mirrors these rules in 20c-HtmlJsUtilities.ps1 (normalizeSpfIncludeOverride /
+# normalizeDkimOverride), so keep the two in sync.
+
+# Normalize an SPF include override. Accepts a bare host name, an "include:<host>"
+# term, or a whole pasted SPF record (the first include term wins). Returns the
+# lower-case include host, or $null when the input is unusable.
+function ConvertTo-SpfIncludeOverride {
+  param([string]$Raw)
+
+  if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
+  $text = $Raw.Trim().Trim('"').Trim()
+  if ($text.Length -eq 0 -or $text.Length -gt 512) { return $null }
+
+  $candidate = $null
+  foreach ($token in ($text -split '\s+')) {
+    $term = $token.Trim('"') -replace '^[\+\-~\?]', ''
+    if ($term -match '^(?i)include:(.+)$') {
+      $candidate = $Matches[1]
+      break
+    }
+  }
+  if ($null -eq $candidate) {
+    # A pasted record without any include term has nothing to require.
+    if ($text -match '\s' -or $text -match '^(?i)v=spf1') { return $null }
+    $candidate = $text
+  }
+
+  $candidate = $candidate.Trim('"').TrimEnd('.').ToLowerInvariant()
+  if (-not (Test-DomainName -Domain $candidate -AllowUnderscore)) { return $null }
+  return $candidate
+}
+
+# Normalize a DKIM selector override. The expected CNAME target (the portal's Value
+# column) is required because it is what the check compares against. The selector
+# (the Name column) is optional: when omitted it is derived from the target, and a
+# pasted fully qualified name is trimmed back to "<selector>._domainkey".
+# Returns [pscustomobject]@{ selector; target } or $null when the input is unusable.
+function ConvertTo-DkimSelectorOverride {
+  param(
+    [string]$Selector,
+    [string]$Target,
+    [string]$Domain
+  )
+
+  $cleanTarget = if ($Target) { $Target.Trim().Trim('"').Trim().TrimEnd('.').ToLowerInvariant() } else { '' }
+  $cleanSelector = if ($Selector) { $Selector.Trim().Trim('"').Trim().TrimEnd('.').ToLowerInvariant() } else { '' }
+
+  if (-not (Test-DomainName -Domain $cleanTarget -AllowUnderscore)) { return $null }
+
+  if ([string]::IsNullOrWhiteSpace($cleanSelector)) {
+    if ($cleanTarget -notmatch '^(.+?\._domainkey)\.') { return $null }
+    $cleanSelector = $Matches[1]
+  }
+  elseif ($cleanSelector -match '^(.+?\._domainkey)(\.|$)') {
+    $cleanSelector = $Matches[1]
+  }
+  else {
+    $cleanSelector = "$cleanSelector._domainkey"
+  }
+
+  if (-not (Test-DomainName -Domain $cleanSelector -AllowUnderscore)) { return $null }
+  if (-not [string]::IsNullOrWhiteSpace($Domain) -and ("$cleanSelector.$Domain").Length -gt 253) { return $null }
+
+  [pscustomobject]@{
+    selector = $cleanSelector
+    target   = $cleanTarget
+  }
+}
+
+# Read the optional override parameters (spfInclude, dkim1Selector/dkim1Target,
+# dkim2Selector/dkim2Target) from a request query string. An unusable value sets
+# `error` instead of being ignored, so a caller never receives a default-requirement
+# verdict it believes was checked against its custom value.
+function Get-CheckOverridesFromQuery {
+  param(
+    [object]$QueryString,
+    [string]$Domain
+  )
+
+  $result = [pscustomobject]@{
+    spfInclude = $null
+    dkim1      = $null
+    dkim2      = $null
+    error      = $null
+  }
+  if ($null -eq $QueryString) { return $result }
+
+  $rawSpfInclude = [string]$QueryString['spfInclude']
+  if (-not [string]::IsNullOrWhiteSpace($rawSpfInclude)) {
+    $result.spfInclude = ConvertTo-SpfIncludeOverride -Raw $rawSpfInclude
+    if (-not $result.spfInclude) {
+      $result.error = 'Invalid spfInclude parameter.'
+      return $result
+    }
+  }
+
+  foreach ($slot in 1, 2) {
+    $rawSelector = [string]$QueryString["dkim${slot}Selector"]
+    $rawTarget = [string]$QueryString["dkim${slot}Target"]
+    if ([string]::IsNullOrWhiteSpace($rawSelector) -and [string]::IsNullOrWhiteSpace($rawTarget)) { continue }
+
+    $override = ConvertTo-DkimSelectorOverride -Selector $rawSelector -Target $rawTarget -Domain $Domain
+    if (-not $override) {
+      $result.error = "Invalid dkim${slot}Selector/dkim${slot}Target parameters."
+      return $result
+    }
+    $result."dkim$slot" = $override
+  }
+
+  return $result
 }
 
 # ------------------- SPF ANALYSIS ENGINE -------------------
@@ -7199,18 +7364,22 @@ function Get-SpfMechanismType {
 
 # Pick which record to analyze when a domain publishes MORE than one SPF record.
 # The set is a PermError either way (RFC 7208 3.2), but for an ACS domain checker the
-# record carrying the Outlook include is the one the customer intended for ACS, so
+# record carrying the required include (the Outlook include unless a custom
+# requirement is supplied) is the one the customer intended for ACS, so
 # preferring it keeps the requirement verdict truthful while the duplicate-record error
 # stays the headline. Without this the choice would depend on RRset ordering, which
 # varies per resolver and per query.
 function Select-SpfRecordFromSet {
-  param([string[]]$Records)
+  param(
+    [string[]]$Records,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
+  )
 
   $set = @($Records | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   if ($set.Count -eq 0) { return $null }
 
   foreach ($record in $set) {
-    if (Test-SpfOutlookIncludeToken -Text $record) { return $record }
+    if (Test-SpfOutlookIncludeToken -Text $record -RequiredInclude $RequiredInclude) { return $record }
   }
   return $set[0]
 }
@@ -7273,11 +7442,17 @@ function Merge-SpfRecordSet {
   }
 }
 
-# Check whether an SPF record string contains a direct "include:spf.protection.outlook.com" token.
+# Check whether an SPF record string contains a direct "include:<required>" token.
+# The required include is spf.protection.outlook.com unless a custom requirement
+# (for example a sovereign or government cloud include) is supplied.
 function Test-SpfOutlookIncludeToken {
-  param([string]$Text)
+  param(
+    [string]$Text,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
+  )
 
   if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+  $required = ([string]$RequiredInclude).Trim().TrimEnd('.').ToLowerInvariant()
 
   foreach ($token in @(Get-SpfTokens -SpfRecord $Text)) {
     $normalized = ([string]$token).Trim()
@@ -7297,7 +7472,7 @@ function Test-SpfOutlookIncludeToken {
       $target = $target.Substring(0, $slashIndex)
     }
     $target = $target.Trim().TrimEnd('.').ToLowerInvariant()
-    if ($target -eq 'spf.protection.outlook.com') {
+    if ($target -eq $required) {
       return $true
     }
   }
@@ -7305,86 +7480,93 @@ function Test-SpfOutlookIncludeToken {
   return $false
 }
 
-# Recursively search the entire expanded SPF analysis tree for any reference to
-# spf.protection.outlook.com — whether via direct include, nested include, redirect, exists,
-# a/mx mechanism, or macro. Returns the first match found with its match type.
+# Recursively search the entire expanded SPF analysis tree for any reference to the
+# required include (spf.protection.outlook.com by default) -- whether via direct
+# include, nested include, redirect, exists, a/mx mechanism, or macro. Returns the
+# first match found with its match type.
 function Find-SpfOutlookRequirementMatch {
-  param([object]$Analysis)
+  param(
+    [object]$Analysis,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
+  )
 
   if (-not $Analysis) { return $null }
 
-  if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.record)) {
+  $required = ([string]$RequiredInclude).Trim().TrimEnd('.').ToLowerInvariant()
+  $requiredPattern = [regex]::Escape($required)
+
+  if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.record) -RequiredInclude $required) {
     return [pscustomobject]@{
       matchType = 'direct-include'
-      value = 'include:spf.protection.outlook.com'
+      value = "include:$required"
     }
   }
 
   foreach ($include in @($Analysis.includes)) {
     $includeDomain = ([string]$include.domain).Trim().TrimEnd('.').ToLowerInvariant()
-    if ($includeDomain -eq 'spf.protection.outlook.com') {
+    if ($includeDomain -eq $required) {
       return [pscustomobject]@{
         matchType = 'nested-include'
         value = $include.domain
       }
     }
 
-    if (Test-SpfOutlookIncludeToken -Text ([string]$include.record)) {
+    if (Test-SpfOutlookIncludeToken -Text ([string]$include.record) -RequiredInclude $required) {
       return [pscustomobject]@{
         matchType = 'nested-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    if (([string]$include.domain) -match '(?i)(^|\.)spf\.protection\.outlook\.com$') {
+    if (([string]$include.domain) -match ('(?i)(^|\.)' + $requiredPattern + '$')) {
       return [pscustomobject]@{
         matchType = 'nested-include'
         value = $include.domain
       }
     }
 
-    if ($include.record -and ([string]$include.record) -match '(?i)\binclude:spf\.protection\.outlook\.com\b') {
+    if ($include.record -and ([string]$include.record) -match ('(?i)\binclude:' + $requiredPattern + '\b')) {
       return [pscustomobject]@{
         matchType = 'nested-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    $childMatch = Find-SpfOutlookRequirementMatch -Analysis $include.analysis
+    $childMatch = Find-SpfOutlookRequirementMatch -Analysis $include.analysis -RequiredInclude $required
     if ($childMatch) { return $childMatch }
   }
 
   # A redirect that an `all` mechanism overrides is never evaluated by a receiver
-  # (RFC 7208 6.1), so its subtree must not be able to satisfy the Outlook requirement.
+  # (RFC 7208 6.1), so its subtree must not be able to satisfy the requirement.
   if ($Analysis.redirect -and $Analysis.redirect.ignoredByAll -ne $true) {
     $redirectDomain = ([string]$Analysis.redirect.domain).Trim().TrimEnd('.').ToLowerInvariant()
-    if ($redirectDomain -eq 'spf.protection.outlook.com') {
+    if ($redirectDomain -eq $required) {
       return [pscustomobject]@{
         matchType = 'redirect-reference'
         value = $Analysis.redirect.domain
       }
     }
 
-    if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.redirect.record)) {
+    if (Test-SpfOutlookIncludeToken -Text ([string]$Analysis.redirect.record) -RequiredInclude $required) {
       return [pscustomobject]@{
         matchType = 'redirect-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    if ($Analysis.redirect.record -and ([string]$Analysis.redirect.record) -match '(?i)\binclude:spf\.protection\.outlook\.com\b') {
+    if ($Analysis.redirect.record -and ([string]$Analysis.redirect.record) -match ('(?i)\binclude:' + $requiredPattern + '\b')) {
       return [pscustomobject]@{
         matchType = 'redirect-include'
-        value = 'include:spf.protection.outlook.com'
+        value = "include:$required"
       }
     }
 
-    $redirectMatch = Find-SpfOutlookRequirementMatch -Analysis $Analysis.redirect.analysis
+    $redirectMatch = Find-SpfOutlookRequirementMatch -Analysis $Analysis.redirect.analysis -RequiredInclude $required
     if ($redirectMatch) { return $redirectMatch }
   }
 
   foreach ($existsTerm in @($Analysis.existsTerms)) {
-    if (([string]$existsTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$existsTerm.target) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'exists-reference'
         value = $existsTerm.target
@@ -7393,7 +7575,7 @@ function Find-SpfOutlookRequirementMatch {
   }
 
   foreach ($aTerm in @($Analysis.aTerms)) {
-    if (([string]$aTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$aTerm.target) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'a-reference'
         value = $aTerm.target
@@ -7402,7 +7584,7 @@ function Find-SpfOutlookRequirementMatch {
   }
 
   foreach ($mxTerm in @($Analysis.mxTerms)) {
-    if (([string]$mxTerm.target) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$mxTerm.target) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'mx-reference'
         value = $mxTerm.target
@@ -7411,7 +7593,7 @@ function Find-SpfOutlookRequirementMatch {
   }
 
   foreach ($macro in @($Analysis.macros)) {
-    if (([string]$macro) -match '(?i)spf\.protection\.outlook\.com') {
+    if (([string]$macro) -match ('(?i)' + $requiredPattern)) {
       return [pscustomobject]@{
         matchType = 'macro-reference'
         value = $macro
@@ -7430,9 +7612,11 @@ function Find-SpfOutlookRequirementMatch {
 # we resolve spf.protection.outlook.com ourselves at runtime, collect every
 # ip4:/ip6: CIDR it publishes (including any nested includes such as
 # spfa.hotmail.com), and compare them against the customer's expanded SPF chain.
-# Result is cached in $script:OutlookSpfCanonicalCache for the lifetime of the
-# process so we only do this lookup once per server run. Cache returns $null
-# arrays on failure so the literal-include detection still works offline.
+# A custom required include (sovereign / government clouds) is handled the same way
+# against the ranges that include publishes. Results are cached per include in
+# $script:SpfCanonicalRangeCache for the lifetime of the process so each include is
+# looked up once per server run. The lookup returns $null on failure so the
+# literal-include detection still works offline.
 
 # Convert an IPv4 CIDR string ("a.b.c.d/n") into an integer (start, prefix)
 # pair, or $null if the input is not a valid IPv4 CIDR. Host-only addresses
@@ -7550,29 +7734,39 @@ function Test-IpRangeContains {
   return ($Outer.start -le $Inner.start) -and ($Outer.end -ge $Inner.end)
 }
 
-# Resolve spf.protection.outlook.com live, recursively expand any nested
-# includes it publishes, and return every ip4:/ip6: CIDR as a parsed range
-# object. Result is cached for the process lifetime in
-# $script:OutlookSpfCanonicalCache. Returns $null when the lookup fails so
-# the caller can gracefully fall back to literal-include detection.
+# Resolve the required include (spf.protection.outlook.com by default) live,
+# recursively expand any nested includes it publishes, and return every ip4:/ip6:
+# CIDR as a parsed range object. Results are cached per include for the process
+# lifetime in $script:SpfCanonicalRangeCache. Returns $null when the lookup fails
+# so the caller can gracefully fall back to literal-include detection.
 function Get-OutlookSpfCanonicalRanges {
-  param([int]$MaxAgeMinutes = 1440)
+  param(
+    [int]$MaxAgeMinutes = 1440,
+    [string]$Target = 'spf.protection.outlook.com'
+  )
+
+  $rootTarget = ([string]$Target).Trim().TrimEnd('.').ToLowerInvariant()
+  if ([string]::IsNullOrWhiteSpace($rootTarget)) { return $null }
+  if (-not ($script:SpfCanonicalRangeCache -is [hashtable])) { $script:SpfCanonicalRangeCache = @{} }
+  $cached = $script:SpfCanonicalRangeCache[$rootTarget]
 
   $now = [DateTime]::UtcNow
-  if ($script:OutlookSpfCanonicalCache -and
-      $script:OutlookSpfCanonicalCache.fetchedAt -and
-      ($now - [DateTime]$script:OutlookSpfCanonicalCache.fetchedAt).TotalMinutes -lt $MaxAgeMinutes -and
-      $script:OutlookSpfCanonicalCache.ranges) {
-    return $script:OutlookSpfCanonicalCache
+  if ($cached -and
+      $cached.fetchedAt -and
+      ($now - [DateTime]$cached.fetchedAt).TotalMinutes -lt $MaxAgeMinutes -and
+      $cached.ranges) {
+    return $cached
   }
 
   $ranges = New-Object System.Collections.Generic.List[object]
   $visited = @{}
   $queue = New-Object System.Collections.Generic.Queue[string]
-  $queue.Enqueue('spf.protection.outlook.com')
+  $queue.Enqueue($rootTarget)
+  # A custom include is caller-supplied, so bound how much of its tree is walked.
+  $maxLookups = 25
 
   $success = $false
-  while ($queue.Count -gt 0) {
+  while ($queue.Count -gt 0 -and $visited.Count -lt $maxLookups) {
     $target = $queue.Dequeue()
     $key = ([string]$target).Trim().TrimEnd('.').ToLowerInvariant()
     if ([string]::IsNullOrWhiteSpace($key)) { continue }
@@ -7618,20 +7812,25 @@ function Get-OutlookSpfCanonicalRanges {
   if (-not $success) {
     # Keep any prior cached value so transient DNS failures don't disable
     # coverage detection completely.
-    if ($script:OutlookSpfCanonicalCache) { return $script:OutlookSpfCanonicalCache }
+    if ($cached) { return $cached }
     return $null
   }
 
   $ipv4Ranges = @($ranges | Where-Object { $_.family -eq 'IPv4' })
   $ipv6Ranges = @($ranges | Where-Object { $_.family -eq 'IPv6' })
 
-  $script:OutlookSpfCanonicalCache = [pscustomobject]@{
+  $entry = [pscustomobject]@{
     fetchedAt = $now
     ranges    = $ranges.ToArray()
     ipv4      = $ipv4Ranges
     ipv6      = $ipv6Ranges
   }
-  return $script:OutlookSpfCanonicalCache
+  # Keys include caller-supplied values, so the cache must not grow without bound.
+  if ($script:SpfCanonicalRangeCache.Count -ge 32 -and -not $script:SpfCanonicalRangeCache.ContainsKey($rootTarget)) {
+    $script:SpfCanonicalRangeCache.Clear()
+  }
+  $script:SpfCanonicalRangeCache[$rootTarget] = $entry
+  return $entry
 }
 
 # Walk the SPF analysis tree and collect every ip4:/ip6: CIDR authorized by
@@ -7811,43 +8010,50 @@ function Find-SpfMacroDelegatedTarget {
   return $null
 }
 
-# Determine whether the ACS-required "include:spf.protection.outlook.com" is present
-# in the domain's SPF record (directly or through nested includes/redirects).
+# Determine whether the ACS-required include is present in the domain's SPF record
+# (directly or through nested includes/redirects). The requirement is
+# include:spf.protection.outlook.com unless the caller supplies a custom include
+# (for example the one a sovereign or government cloud publishes); the default
+# path keeps its original wording so existing output is unchanged.
 # Returns an object with isPresent, matchType, detail, and error.
 function Get-SpfOutlookRequirementStatus {  param(
     [string]$Domain,
     [string]$SpfRecord,
-    [object]$SpfAnalysis
+    [object]$SpfAnalysis,
+    [string]$RequiredInclude = 'spf.protection.outlook.com'
   )
+
+  $required = ([string]$RequiredInclude).Trim().TrimEnd('.').ToLowerInvariant()
+  $isDefaultInclude = ($required -eq 'spf.protection.outlook.com')
 
   if ([string]::IsNullOrWhiteSpace($SpfRecord)) {
     return [pscustomobject]@{
       isPresent = $false
       matchType = 'missing-spf'
       detail = 'No SPF record was found.'
-      error = 'SPF record is missing, so the required include:spf.protection.outlook.com could not be validated.'
+      error = "SPF record is missing, so the required include:$required could not be validated."
     }
   }
 
   $targetDomain = if ([string]::IsNullOrWhiteSpace($Domain)) { 'the domain' } else { $Domain }
 
-  if (Test-SpfOutlookIncludeToken -Text $SpfRecord) {
+  if (Test-SpfOutlookIncludeToken -Text $SpfRecord -RequiredInclude $required) {
     return [pscustomobject]@{
       isPresent = $true
       matchType = 'direct-include'
-      detail = 'Found direct include:spf.protection.outlook.com in the SPF record.'
+      detail = "Found direct include:$required in the SPF record."
       error = $null
     }
   }
 
-  $match = Find-SpfOutlookRequirementMatch -Analysis $SpfAnalysis
+  $match = Find-SpfOutlookRequirementMatch -Analysis $SpfAnalysis -RequiredInclude $required
   if ($match) {
     switch ($match.matchType) {
       'nested-include' {
         return [pscustomobject]@{
           isPresent = $true
           matchType = $match.matchType
-          detail = "Found include:spf.protection.outlook.com in the expanded SPF chain ($($match.value))."
+          detail = "Found include:$required in the expanded SPF chain ($($match.value))."
           error = $null
         }
       }
@@ -7855,7 +8061,7 @@ function Get-SpfOutlookRequirementStatus {  param(
         return [pscustomobject]@{
           isPresent = $true
           matchType = $match.matchType
-          detail = 'Found include:spf.protection.outlook.com through an SPF redirect target.'
+          detail = "Found include:$required through an SPF redirect target."
           error = $null
         }
       }
@@ -7864,7 +8070,7 @@ function Get-SpfOutlookRequirementStatus {  param(
           isPresent = $false
           matchType = $match.matchType
           detail = $null
-          error = "SPF for $targetDomain references spf.protection.outlook.com indirectly ($($match.value)), but the required include:spf.protection.outlook.com could not be confirmed in the expanded SPF chain."
+          error = "SPF for $targetDomain references $required indirectly ($($match.value)), but the required include:$required could not be confirmed in the expanded SPF chain."
         }
       }
     }
@@ -7872,22 +8078,23 @@ function Get-SpfOutlookRequirementStatus {  param(
 
   # Final fallback: SPF-flattening / Dynamic SPF services (OnDMARC, Valimail,
   # Sendmarc, EasyDMARC, Sparkpost, etc.) inline the IP ranges published by
-  # spf.protection.outlook.com instead of preserving the literal include
-  # token. Resolve spf.protection.outlook.com live and check whether the
-  # expanded SPF chain still authorizes the full set of canonical Exchange
-  # Online Protection ranges. When every canonical IPv4 EOP range is
-  # covered we treat the Outlook requirement as satisfied via flattening.
+  # the required include instead of preserving the literal include token.
+  # Resolve the include live and check whether the expanded SPF chain still
+  # authorizes the full set of canonical ranges it publishes (the Exchange
+  # Online Protection ranges by default). When every canonical IPv4 range is
+  # covered we treat the requirement as satisfied via flattening.
   $canonical = $null
-  try { $canonical = Get-OutlookSpfCanonicalRanges } catch { $canonical = $null }
+  try { $canonical = Get-OutlookSpfCanonicalRanges -Target $required } catch { $canonical = $null }
   if ($canonical -and $canonical.ipv4 -and @($canonical.ipv4).Count -gt 0) {
     $coverage = Test-SpfChainCoversOutlookRanges -Analysis $SpfAnalysis -CanonicalCache $canonical
     if ($coverage -and $coverage.isCovered) {
       $matchedCount = @($coverage.matchedIpv4).Count
       $totalCount = @($canonical.ipv4).Count
+      $rangeOwner = if ($isDefaultInclude) { 'the Exchange Online IP ranges' } else { 'the IP ranges' }
       return [pscustomobject]@{
         isPresent = $true
         matchType = 'flattened-include'
-        detail = "SPF for $targetDomain inlines the Exchange Online IP ranges currently published by spf.protection.outlook.com ($matchedCount of $totalCount canonical IPv4 ranges covered). This is typical of SPF-flattening / Dynamic SPF services such as OnDMARC, Valimail, Sendmarc, or EasyDMARC."
+        detail = "SPF for $targetDomain inlines $rangeOwner currently published by $required ($matchedCount of $totalCount canonical IPv4 ranges covered). This is typical of SPF-flattening / Dynamic SPF services such as OnDMARC, Valimail, Sendmarc, or EasyDMARC."
         error = $null
       }
     }
@@ -7896,38 +8103,44 @@ function Get-SpfOutlookRequirementStatus {  param(
   $analysisScope = if ($SpfAnalysis -and $SpfAnalysis.analysisScope) { [string]$SpfAnalysis.analysisScope } else { 'full-static' }
 
   # Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...).
-  # Reached only when flattening coverage above did NOT confirm the Outlook
+  # Reached only when flattening coverage above did NOT confirm the required
   # ranges. When the only path to authorization is a macro include/redirect
   # target, the service builds a different DNS answer per message using the live
-  # sending IP, HELO, and MAIL FROM, so spf.protection.outlook.com can be
+  # sending IP, HELO, and MAIL FROM, so the required include can be
   # neither confirmed nor denied by static analysis. Report an explicit
   # "indeterminate" verdict (isPresent = $null) so the UI can soften the strict
-  # FAIL to a WARN and tell the operator to verify Exchange Online is enabled in
+  # FAIL to a WARN and tell the operator to verify the include is enabled in
   # the provider's console, instead of implying the SPF record is broken for ACS.
   $macroTarget = Find-SpfMacroDelegatedTarget -Analysis $SpfAnalysis -SpfRecord $SpfRecord
   if ($macroTarget) {
     $provider = Get-SpfMacroDelegationProvider -Target $macroTarget
     $providerLabel = if ($provider) { $provider } else { 'a hosted/dynamic SPF service' }
+    $macroError = if ($isDefaultInclude) {
+      "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Microsoft 365 / Exchange Online authorization is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that spf.protection.outlook.com (Exchange Online) is enabled for this domain."
+    } else {
+      "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Authorization for the required include:$required is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that $required is enabled for this domain."
+    }
     return [pscustomobject]@{
       isPresent = $null
       matchType = 'macro-delegated'
       provider = $provider
       macroTarget = $macroTarget
       detail = $null
-      error = "SPF for $targetDomain delegates evaluation to $providerLabel via a macro-based include ($macroTarget). Microsoft 365 / Exchange Online authorization is resolved dynamically at send time and cannot be confirmed by static analysis. Verify in the $providerLabel console that spf.protection.outlook.com (Exchange Online) is enabled for this domain."
+      error = $macroError
     }
   }
 
+  $requirementLabel = if ($isDefaultInclude) { 'Outlook include' } else { 'include' }
   $requirementError = if ($analysisScope -eq 'message-context-required' -or $analysisScope -eq 'partial-static') {
-    "SPF for $targetDomain could not be confirmed to include include:spf.protection.outlook.com. The record uses nested or macro-based logic, and the required Outlook include was not found during static analysis."
+    "SPF for $targetDomain could not be confirmed to include include:$required. The record uses nested or macro-based logic, and the required $requirementLabel was not found during static analysis."
   } else {
-    "SPF for $targetDomain does not include include:spf.protection.outlook.com in the expanded SPF chain. This is required for ACS SPF validation."
+    "SPF for $targetDomain does not include include:$required in the expanded SPF chain. This is required for ACS SPF validation."
   }
 
   return [pscustomobject]@{
     isPresent = $false
     matchType = 'not-found'
-    detail = 'Did not find include:spf.protection.outlook.com in the expanded SPF chain.'
+    detail = "Did not find include:$required in the expanded SPF chain."
     error = $requirementError
   }
 }
@@ -8946,11 +9159,19 @@ function Test-RateLimit {
 # Also resolves A/AAAA for the domain and falls back to parent domains if needed.
 # ===== Individual DNS Check Functions =====
 function Get-DnsBaseStatus {
-  param([string]$Domain)
+  param(
+    [string]$Domain,
+    # Include the SPF requirement is checked against; blank means the Azure public cloud
+    # default. Callers pass a value already normalized by ConvertTo-SpfIncludeOverride.
+    [string]$SpfRequiredInclude
+  )
 
   # Base/root TXT checks.
   # - Collect all root TXT strings.
   # - Detect SPF (v=spf1...) and ACS verification token (ms-domain-verification...).
+
+  $requiredInclude = if ([string]::IsNullOrWhiteSpace($SpfRequiredInclude)) { 'spf.protection.outlook.com' } else { $SpfRequiredInclude.Trim().TrimEnd('.').ToLowerInvariant() }
+  $requiredIncludeCustom = ($requiredInclude -ne 'spf.protection.outlook.com')
 
   $spf        = $null
   $acsTxt     = $null
@@ -9020,7 +9241,7 @@ function Get-DnsBaseStatus {
     # arbitrary record (RRset order varies per resolver and per query).
     $spfRecords = @($txtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
     $acsValues  = @($txtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' })
-    $spf    = Select-SpfRecordFromSet -Records $spfRecords
+    $spf    = Select-SpfRecordFromSet -Records $spfRecords -RequiredInclude $requiredInclude
     $acsTxt = $(if ($acsValues.Count -gt 0) { $acsValues[0] } else { $null })
 
     if ($txtRecords.Count -eq 0) {
@@ -9044,7 +9265,7 @@ function Get-DnsBaseStatus {
             $txtUsedParent = $true
 
             $parentSpfRecords = @($parentTxtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
-            $parentSpf = Select-SpfRecordFromSet -Records $parentSpfRecords
+            $parentSpf = Select-SpfRecordFromSet -Records $parentSpfRecords -RequiredInclude $requiredInclude
             $parentAcsTxt = @($parentTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1)[0]
             break
           }
@@ -9072,18 +9293,19 @@ function Get-DnsBaseStatus {
   $acsPresent = -not $dnsFailed -and [bool]$acsTxt
 
   if ($spfPresent -and -not [string]::IsNullOrWhiteSpace($spf)) {
+    $requirementHeading = if ($requiredIncludeCustom) { "ACS SPF requirement (custom include $requiredInclude):" } else { 'ACS Outlook SPF requirement:' }
     try {
       $spfAnalysis = Get-SpfNestedAnalysis -SpfRecord $spf -Domain $Domain
-      $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $spfAnalysis
+      $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $spfAnalysis -RequiredInclude $requiredInclude
       $spfExpandedLines = @(Format-SpfNestedAnalysisText -Analysis $spfAnalysis)
       if ($spfOutlookRequirement -and -not [string]::IsNullOrWhiteSpace([string]$spfOutlookRequirement.detail)) {
         $spfExpandedLines += ''
-        $spfExpandedLines += 'ACS Outlook SPF requirement:'
+        $spfExpandedLines += $requirementHeading
         $spfExpandedLines += [string]$spfOutlookRequirement.detail
       }
       elseif ($spfOutlookRequirement -and -not [string]::IsNullOrWhiteSpace([string]$spfOutlookRequirement.error)) {
         $spfExpandedLines += ''
-        $spfExpandedLines += 'ACS Outlook SPF requirement:'
+        $spfExpandedLines += $requirementHeading
         $spfExpandedLines += [string]$spfOutlookRequirement.error
       }
       if ($spfExpandedLines.Count -gt 0) {
@@ -9092,7 +9314,7 @@ function Get-DnsBaseStatus {
       $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $spfAnalysis -OutlookRequirementStatus $spfOutlookRequirement)
     } catch {
       try {
-        $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $null
+        $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $null -RequiredInclude $requiredInclude
         $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $null -OutlookRequirementStatus $spfOutlookRequirement)
       } catch { }
     }
@@ -9180,7 +9402,10 @@ function Get-DnsBaseStatus {
     spfExpandedText = $spfExpandedText
     spfGuidance = $spfGuidance
     spfHasRequiredInclude = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.isPresent } else { $null })
-    spfRequiredInclude = 'spf.protection.outlook.com'
+    # The include the verdict was checked against, echoed back so the UI never describes
+    # a different requirement than the one that produced the verdict.
+    spfRequiredInclude = $requiredInclude
+    spfRequiredIncludeCustom = $requiredIncludeCustom
     spfRequiredIncludeMatchType = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.matchType } else { $null })
     spfRequiredIncludeDetail = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.detail } else { $null })
     spfRequiredIncludeError = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.error } else { $null })
@@ -10057,8 +10282,17 @@ function Get-DnsDmarcStatus {
 # `selector1._domainkey`, plus a few common ones) so the card body can still
 # show the operator what DKIM IS configured for the domain. The pass/fail tag
 # in the UI is always evaluated against the strict ACS expectation.
+#
+# A domain set up outside the Azure public cloud (for example a sovereign or
+# government cloud) is given different selector names and CNAME targets, so the
+# caller may replace either expectation with a { selector; target } object from
+# ConvertTo-DkimSelectorOverride.
 function Get-DnsDkimStatus {
-  param([string]$Domain)
+  param(
+    [string]$Domain,
+    [object]$Dkim1Override,
+    [object]$Dkim2Override
+  )
 
   # Lookup helper: resolves the CNAME target (if any) and the TXT value (which
   # follows the CNAME chain), then compares the CNAME target against the
@@ -10181,8 +10415,15 @@ function Get-DnsDkimStatus {
     }
   }
 
-  $dkim1Result = Invoke-AcsDkimSelectorLookup -LookupName "selector1-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector1-azurecomm-prod-net._domainkey.azurecomm.net'
-  $dkim2Result = Invoke-AcsDkimSelectorLookup -LookupName "selector2-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector2-azurecomm-prod-net._domainkey.azurecomm.net'
+  $dkim1Selector = if ($Dkim1Override) { [string]$Dkim1Override.selector } else { 'selector1-azurecomm-prod-net._domainkey' }
+  $dkim1Expected = if ($Dkim1Override) { [string]$Dkim1Override.target } else { 'selector1-azurecomm-prod-net._domainkey.azurecomm.net' }
+  $dkim2Selector = if ($Dkim2Override) { [string]$Dkim2Override.selector } else { 'selector2-azurecomm-prod-net._domainkey' }
+  $dkim2Expected = if ($Dkim2Override) { [string]$Dkim2Override.target } else { 'selector2-azurecomm-prod-net._domainkey.azurecomm.net' }
+  $dkim1Custom = ($dkim1Selector -ne 'selector1-azurecomm-prod-net._domainkey') -or ($dkim1Expected -ne 'selector1-azurecomm-prod-net._domainkey.azurecomm.net')
+  $dkim2Custom = ($dkim2Selector -ne 'selector2-azurecomm-prod-net._domainkey') -or ($dkim2Expected -ne 'selector2-azurecomm-prod-net._domainkey.azurecomm.net')
+
+  $dkim1Result = Invoke-AcsDkimSelectorLookup -LookupName "$dkim1Selector.$Domain" -ExpectedCnameTarget $dkim1Expected
+  $dkim2Result = Invoke-AcsDkimSelectorLookup -LookupName "$dkim2Selector.$Domain" -ExpectedCnameTarget $dkim2Expected
 
   # If either ACS slot is empty, run the fallback probe so the card body can
   # show whatever DKIM is actually published. The ACS-specific PASS/FAIL flag
@@ -10226,6 +10467,8 @@ function Get-DnsDkimStatus {
   [pscustomobject]@{
     domain                    = $Domain
     dkim1                     = $dkim1Display
+    dkim1Selector             = $dkim1Selector
+    dkim1Custom               = $dkim1Custom
     dkim1CnameTarget          = $dkim1Result.CnameTarget
     dkim1TxtValue             = $dkim1Result.TxtValue
     dkim1TxtValues            = @($dkim1Result.TxtValues)
@@ -10233,6 +10476,8 @@ function Get-DnsDkimStatus {
     dkim1AcsConfigured        = $dkim1Result.AcsConfigured
     dkim1FallbackSelectors    = $dkim1FallbackRows
     dkim2                     = $dkim2Display
+    dkim2Selector             = $dkim2Selector
+    dkim2Custom               = $dkim2Custom
     dkim2CnameTarget          = $dkim2Result.CnameTarget
     dkim2TxtValue             = $dkim2Result.TxtValue
     dkim2TxtValues            = @($dkim2Result.TxtValues)
@@ -14754,17 +14999,25 @@ function Get-CombinedReputationState {
 # Runs all individual checks (TXT/SPF, MX, DMARC, DKIM, CNAME, WHOIS) and assembles
 # a single result object with guidance strings for the UI.
 function Get-AcsDnsStatus {
-    param([string]$Domain)
+    param(
+      [string]$Domain,
+      # Optional custom SPF / DKIM requirements (see Get-CheckOverridesFromQuery).
+      [string]$SpfRequiredInclude,
+      [object]$Dkim1Override,
+      [object]$Dkim2Override
+    )
 
   # Aggregated status used by the UI.
   # Combines the individual checks + generates human-friendly guidance strings.
 
-  $base  = Get-DnsBaseStatus  -Domain $Domain
+  $customDkimSelectors = @(@($Dkim1Override, $Dkim2Override) | Where-Object { $_ } | ForEach-Object { [string]$_.selector })
+
+  $base  = Get-DnsBaseStatus  -Domain $Domain -SpfRequiredInclude $SpfRequiredInclude
   $mx    = Get-DnsMxStatus    -Domain $Domain
-  $records = Get-DnsRecordsStatus -Domain $Domain
+  $records = Get-DnsRecordsStatus -Domain $Domain -AdditionalDkimSelectors $customDkimSelectors
   $whois = Get-DomainRegistrationStatus -Domain $Domain
   $dmarc = Get-DnsDmarcStatus -Domain $Domain
-  $dkim  = Get-DnsDkimStatus  -Domain $Domain
+  $dkim  = Get-DnsDkimStatus  -Domain $Domain -Dkim1Override $Dkim1Override -Dkim2Override $Dkim2Override
   $cname = Get-DnsCnameStatus -Domain $Domain
 
   # DNSSEC anomaly is detected as part of Get-DnsBaseStatus (so the incremental
@@ -14838,7 +15091,7 @@ function Get-AcsDnsStatus {
   $effectiveSpfPresent = [bool]$effectiveSpfValue
   $effectiveAcsPresent = [bool]$effectiveAcsValue
   $effectiveSpfHasRequiredInclude = if ($recoveredFromDetailedRecords -and $effectiveSpfValue) {
-    [regex]::IsMatch([string]$effectiveSpfValue, '(?i)(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)')
+    [regex]::IsMatch([string]$effectiveSpfValue, '(?i)(^|\s)include:' + [regex]::Escape([string]$base.spfRequiredInclude) + '(?=\s|$)')
   } else {
     $base.spfHasRequiredInclude
   }
@@ -14877,7 +15130,7 @@ function Get-AcsDnsStatus {
         if ($base.parentSpfPresent -and $base.txtUsedParent -and $base.txtLookupDomain -and $base.txtLookupDomain -ne $Domain) {
           $guidance.Add("SPF is missing on $Domain. Parent domain $($base.txtLookupDomain) publishes SPF, but SPF does not automatically apply to the queried subdomain.")
         } else {
-          $guidance.Add("SPF is missing. Add v=spf1 include:spf.protection.outlook.com -all (or provider equivalent).")
+          $guidance.Add("SPF is missing. Add v=spf1 include:$($base.spfRequiredInclude) -all (or provider equivalent).")
         }
       }
       foreach ($spfMessage in @($base.spfGuidance)) {
@@ -14928,12 +15181,14 @@ function Get-AcsDnsStatus {
       # selector was found, so it cannot be used to detect ACS-side records.
       $dkim1HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim1TxtValue)
       $dkim2HasAcsRecord = -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2CnameTarget) -or -not [string]::IsNullOrWhiteSpace([string]$dkim.dkim2TxtValue)
-      if (-not $dkim1HasAcsRecord) { $guidance.Add("DKIM selector1 (selector1-azurecomm-prod-net) is missing.") }
+      $dkim1Label = ([string]$dkim.dkim1Selector) -replace '\._domainkey$', ''
+      $dkim2Label = ([string]$dkim.dkim2Selector) -replace '\._domainkey$', ''
+      if (-not $dkim1HasAcsRecord) { $guidance.Add("DKIM selector1 ($dkim1Label) is missing.") }
       elseif (-not $dkim.dkim1AcsConfigured) {
         $actual1 = if ($dkim.dkim1CnameTarget) { $dkim.dkim1CnameTarget } else { '(no CNAME)' }
         $guidance.Add("DKIM selector1 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim1ExpectedCname); found: $actual1.")
       }
-      if (-not $dkim2HasAcsRecord) { $guidance.Add("DKIM selector2 (selector2-azurecomm-prod-net) is missing.") }
+      if (-not $dkim2HasAcsRecord) { $guidance.Add("DKIM selector2 ($dkim2Label) is missing.") }
       elseif (-not $dkim.dkim2AcsConfigured) {
         $actual2 = if ($dkim.dkim2CnameTarget) { $dkim.dkim2CnameTarget } else { '(no CNAME)' }
         $guidance.Add("DKIM selector2 is published but does not point to ACS. Expected CNAME target: $($dkim.dkim2ExpectedCname); found: $actual2.")
@@ -14950,7 +15205,9 @@ function Get-AcsDnsStatus {
       if ($mx.mxProvider -and $mx.mxProvider -ne 'Unknown') {
         $guidance.Add("Detected MX provider: $($mx.mxProvider)")
       }
-      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $effectiveSpfPresent -and ($effectiveSpfHasRequiredInclude -eq $false)) {
+      # Only meaningful for the default requirement: with a custom include the verdict
+      # says nothing about spf.protection.outlook.com.
+      if ($mx.mxProvider -eq 'Microsoft 365 / Exchange Online' -and $effectiveSpfPresent -and ($effectiveSpfHasRequiredInclude -eq $false) -and -not $base.spfRequiredIncludeCustom) {
         $guidance.Add("Your MX indicates Microsoft 365, but SPF does not include spf.protection.outlook.com. Verify your SPF includes the correct provider include.")
       }
       if ($mx.mxProvider -eq 'Google Workspace / Gmail' -and $effectiveSpfPresent -and ($effectiveSpfValue -notmatch '(?i)_spf\.google\.com')) {
@@ -14997,6 +15254,7 @@ function Get-AcsDnsStatus {
         spfGuidance = $base.spfGuidance
         spfHasRequiredInclude = $effectiveSpfHasRequiredInclude
         spfRequiredInclude = $base.spfRequiredInclude
+        spfRequiredIncludeCustom = $base.spfRequiredIncludeCustom
         spfRequiredIncludeMatchType = $base.spfRequiredIncludeMatchType
         spfRequiredIncludeDetail = $base.spfRequiredIncludeDetail
         spfRequiredIncludeError = $base.spfRequiredIncludeError
@@ -15053,6 +15311,8 @@ function Get-AcsDnsStatus {
         dmarcRecordCount = $dmarc.dmarcRecordCount
         dmarcMultipleRecords = $dmarc.dmarcMultipleRecords
         dkim1                = $dkim.dkim1
+        dkim1Selector        = $dkim.dkim1Selector
+        dkim1Custom          = $dkim.dkim1Custom
         dkim1CnameTarget     = $dkim.dkim1CnameTarget
         dkim1TxtValue        = $dkim.dkim1TxtValue
         dkim1TxtValues       = @($dkim.dkim1TxtValues)
@@ -15060,6 +15320,8 @@ function Get-AcsDnsStatus {
         dkim1AcsConfigured   = $dkim.dkim1AcsConfigured
         dkim1FallbackSelectors = $dkim.dkim1FallbackSelectors
         dkim2                = $dkim.dkim2
+        dkim2Selector        = $dkim.dkim2Selector
+        dkim2Custom          = $dkim.dkim2Custom
         dkim2CnameTarget     = $dkim.dkim2CnameTarget
         dkim2TxtValue        = $dkim.dkim2TxtValue
         dkim2TxtValues       = @($dkim.dkim2TxtValues)
@@ -17094,6 +17356,181 @@ html.dark .prop-settings-row select option {
 
 .prop-settings-btn:hover {
   background: var(--border);
+}
+
+/* ---- Custom SPF / DKIM requirements (Options dialog on the SPF and DKIM cards) ---- */
+.check-override-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid #d97706;
+  background: #fef3c7;
+  color: #78350f;
+}
+
+.dark .check-override-badge {
+  background: #422006;
+  color: #fde68a;
+  border-color: #f59e0b;
+}
+
+.check-options-dialog {
+  width: min(640px, calc(100% - 24px));
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 24px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--fg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.check-options-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.check-options-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.check-options-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.check-options-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.check-options-header h2 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.4;
+}
+
+.check-options-close {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid var(--button-border-secondary);
+  border-radius: 4px;
+  background: var(--button-bg-secondary);
+  color: var(--button-fg-secondary);
+  cursor: pointer;
+}
+
+.check-options-body {
+  display: grid;
+  gap: 14px;
+  padding: 14px 18px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.check-options-intro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--status);
+}
+
+.check-options-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.check-options-group legend {
+  padding: 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.check-options-field {
+  display: grid;
+  gap: 4px;
+}
+
+.check-options-field label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--status);
+}
+
+/* Overrides the global input[type=text] sizing used by the search box. */
+.check-options-field input[type=text] {
+  flex: none;
+  width: 100%;
+  height: auto;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.check-options-field input[aria-invalid="true"] {
+  border-color: #c5221f;
+}
+
+.check-options-field input:focus-visible,
+.check-options-close:focus-visible {
+  outline: 2px solid var(--button-bg);
+  outline-offset: 2px;
+}
+
+.check-options-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--status);
+}
+
+.check-options-error {
+  margin: 0;
+  font-size: 12px;
+  color: #c5221f;
+}
+
+.dark .check-options-error {
+  color: #fca5a5;
+}
+
+.check-options-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.check-options-actions button.primary {
+  height: auto;
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+html.check-options-open {
+  overflow-y: hidden;
 }
 
 /* ---- Per-resolver detail rows ---- */
@@ -19192,6 +19629,13 @@ async function ensureMsalLoaded() {
     <span data-smtp-i18n="smtpOpenLookup">Look up a response</span>
   </button>
 </section>
+
+<!--
+  Custom SPF / DKIM requirements dialog, opened by the Options buttons on the SPF
+  and DKIM cards. renderCheckOptionsDialog() in 20d-HtmlJsCore.ps1 builds its
+  content; it sits outside #results so partial result renders cannot discard it.
+-->
+<dialog id="checkOptionsDialog" class="check-options-dialog hide-on-screenshot" aria-labelledby="checkOptionsTitle" aria-describedby="checkOptionsIntro"></dialog>
 
 <div class="footer" id="footerText">
   ACS Email Domain Checker v__APP_VERSION__ &bull; Written by: <a href="https://blakedrumm.com/" style="color:inherit;">Blake Drumm</a> &bull; Generated by PowerShell &bull; <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Back to Top</a>
@@ -23830,6 +24274,204 @@ Object.keys(PROPAGATION_TRANSLATION_OVERRIDES).forEach(code => {
   TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, PROPAGATION_TRANSLATION_OVERRIDES[code]);
 });
 
+// Custom SPF / DKIM requirement strings (Options dialog on the SPF and DKIM cards,
+// the "Custom" badge, and the verdicts shown when a custom SPF include is checked).
+//
+// Per repo convention the Latin-script locales carry the full set; the
+// non-Latin-script locales carry the short, user-visible UI labels and let the
+// longer explanatory sentences fall back to English through t().
+const CHECK_OVERRIDE_TRANSLATION_OVERRIDES = {
+  en: {
+    checkOptionsButton: 'Options',
+    checkOptionsButtonTitle: 'Check against custom SPF or DKIM values, for example for a domain set up in a sovereign or government cloud',
+    checkOptionsTitle: 'Custom SPF and DKIM requirements',
+    checkOptionsIntro: 'By default the SPF and DKIM checks use the Azure public cloud values. If this domain was set up in another environment, such as a sovereign or government cloud, paste the values the Azure portal shows for it. Leave a field blank to keep the default. These values apply only to this browser tab and are included in the page link.',
+    checkOptionsSpfLabel: 'Required SPF include',
+    checkOptionsSpfHint: 'Leave blank to use the default shown. Accepts an include host name, an include: term, or the whole SPF record.',
+    checkOptionsDkimNameLabel: 'Name (host)',
+    checkOptionsDkimValueLabel: 'Value (CNAME target)',
+    checkOptionsDkimHint: 'Leave blank to use the default shown. The Name can be left blank when the Value contains "._domainkey.".',
+    checkOptionsApply: 'Apply and re-check',
+    checkOptionsReset: 'Reset to defaults',
+    checkOptionsCancel: 'Cancel',
+    checkOptionsClose: 'Close',
+    checkOptionsInvalidSpf: 'Enter a host name such as spf.example.com, an include: term, or a full SPF record that contains an include.',
+    checkOptionsInvalidDkim: 'Enter the Value as a host name. The Name is optional when the Value contains "._domainkey.".',
+    checkOptionsCustomBadge: 'Custom',
+    checkOptionsCustomBadgeTitle: 'Checked against a custom value from the Options dialog instead of the Azure public cloud default',
+    checkOptionsCopyLabel: 'Custom requirements',
+    spfCustomRequirementPresent: 'Custom SPF requirement met: {include} was detected.',
+    spfCustomRequirementMissing: 'Custom SPF requirement not met: {include} was not detected.',
+    spfCustomRequirementMacroDelegated: 'This SPF record delegates evaluation to a hosted/dynamic SPF service using a macro-based include, so the custom requirement ({include}) is resolved per message and cannot be confirmed by static analysis. Verify in your SPF provider console that {host} is enabled for this domain.',
+    spfCustomRequirementMacroDelegatedProvider: 'This SPF record delegates evaluation to {provider} using a macro-based include, so the custom requirement ({include}) is resolved per message and cannot be confirmed by static analysis. Verify in the {provider} console that {host} is enabled for this domain.'
+  },
+  es: {
+    checkOptionsButton: 'Opciones',
+    checkOptionsButtonTitle: 'Comprobar con valores SPF o DKIM personalizados, por ejemplo para un dominio configurado en una nube soberana o gubernamental',
+    checkOptionsTitle: 'Requisitos personalizados de SPF y DKIM',
+    checkOptionsIntro: 'De forma predeterminada, las comprobaciones de SPF y DKIM usan los valores de la nube p\u00FAblica de Azure. Si este dominio se configur\u00F3 en otro entorno, como una nube soberana o gubernamental, pegue los valores que muestra el portal de Azure para \u00E9l. Deje un campo en blanco para mantener el valor predeterminado. Estos valores solo se aplican a esta pesta\u00F1a del navegador y se incluyen en el v\u00EDnculo de la p\u00E1gina.',
+    checkOptionsSpfLabel: 'Include SPF requerido',
+    checkOptionsSpfHint: 'D\u00E9jelo en blanco para usar el valor predeterminado mostrado. Acepta un nombre de host de include, un t\u00E9rmino include: o el registro SPF completo.',
+    checkOptionsDkimNameLabel: 'Nombre (host)',
+    checkOptionsDkimValueLabel: 'Valor (destino CNAME)',
+    checkOptionsDkimHint: 'D\u00E9jelo en blanco para usar el valor predeterminado mostrado. El Nombre puede quedar en blanco cuando el Valor contiene "._domainkey.".',
+    checkOptionsApply: 'Aplicar y volver a comprobar',
+    checkOptionsReset: 'Restablecer valores predeterminados',
+    checkOptionsCancel: 'Cancelar',
+    checkOptionsClose: 'Cerrar',
+    checkOptionsInvalidSpf: 'Escriba un nombre de host como spf.example.com, un t\u00E9rmino include: o un registro SPF completo que contenga un include.',
+    checkOptionsInvalidDkim: 'Escriba el Valor como nombre de host. El Nombre es opcional cuando el Valor contiene "._domainkey.".',
+    checkOptionsCustomBadge: 'Personalizado',
+    checkOptionsCustomBadgeTitle: 'Comprobado con un valor personalizado del cuadro de di\u00E1logo Opciones en lugar del valor predeterminado de la nube p\u00FAblica de Azure',
+    checkOptionsCopyLabel: 'Requisitos personalizados',
+    spfCustomRequirementPresent: 'Requisito SPF personalizado cumplido: se detect\u00F3 {include}.',
+    spfCustomRequirementMissing: 'Requisito SPF personalizado no cumplido: no se detect\u00F3 {include}.',
+    spfCustomRequirementMacroDelegated: 'Este registro SPF delega la evaluaci\u00F3n a un servicio SPF alojado/din\u00E1mico mediante un include basado en macros, por lo que el requisito personalizado ({include}) se resuelve por mensaje y no puede confirmarse mediante an\u00E1lisis est\u00E1tico. Verifique en la consola de su proveedor SPF que {host} est\u00E9 habilitado para este dominio.',
+    spfCustomRequirementMacroDelegatedProvider: 'Este registro SPF delega la evaluaci\u00F3n a {provider} mediante un include basado en macros, por lo que el requisito personalizado ({include}) se resuelve por mensaje y no puede confirmarse mediante an\u00E1lisis est\u00E1tico. Verifique en la consola de {provider} que {host} est\u00E9 habilitado para este dominio.'
+  },
+  'fr': {
+    checkOptionsButton: 'Options',
+    checkOptionsButtonTitle: 'V\u00E9rifier avec des valeurs SPF ou DKIM personnalis\u00E9es, par exemple pour un domaine configur\u00E9 dans un cloud souverain ou gouvernemental',
+    checkOptionsTitle: 'Exigences SPF et DKIM personnalis\u00E9es',
+    checkOptionsIntro: 'Par d\u00E9faut, les v\u00E9rifications SPF et DKIM utilisent les valeurs du cloud public Azure. Si ce domaine a \u00E9t\u00E9 configur\u00E9 dans un autre environnement, comme un cloud souverain ou gouvernemental, collez les valeurs que le portail Azure affiche pour ce domaine. Laissez un champ vide pour conserver la valeur par d\u00E9faut. Ces valeurs s\u2019appliquent uniquement \u00E0 cet onglet du navigateur et sont incluses dans le lien de la page.',
+    checkOptionsSpfLabel: 'Include SPF requis',
+    checkOptionsSpfHint: 'Laissez vide pour utiliser la valeur par d\u00E9faut affich\u00E9e. Accepte un nom d\u2019h\u00F4te d\u2019include, un terme include: ou l\u2019enregistrement SPF complet.',
+    checkOptionsDkimNameLabel: 'Nom (h\u00F4te)',
+    checkOptionsDkimValueLabel: 'Valeur (cible CNAME)',
+    checkOptionsDkimHint: 'Laissez vide pour utiliser la valeur par d\u00E9faut affich\u00E9e. Le Nom peut rester vide lorsque la Valeur contient "._domainkey.".',
+    checkOptionsApply: 'Appliquer et rev\u00E9rifier',
+    checkOptionsReset: 'R\u00E9tablir les valeurs par d\u00E9faut',
+    checkOptionsCancel: 'Annuler',
+    checkOptionsClose: 'Fermer',
+    checkOptionsInvalidSpf: 'Saisissez un nom d\u2019h\u00F4te tel que spf.example.com, un terme include: ou un enregistrement SPF complet contenant un include.',
+    checkOptionsInvalidDkim: 'Saisissez la Valeur sous forme de nom d\u2019h\u00F4te. Le Nom est facultatif lorsque la Valeur contient "._domainkey.".',
+    checkOptionsCustomBadge: 'Personnalis\u00E9',
+    checkOptionsCustomBadgeTitle: 'V\u00E9rifi\u00E9 avec une valeur personnalis\u00E9e de la bo\u00EEte de dialogue Options au lieu de la valeur par d\u00E9faut du cloud public Azure',
+    checkOptionsCopyLabel: 'Exigences personnalis\u00E9es',
+    spfCustomRequirementPresent: 'Exigence SPF personnalis\u00E9e satisfaite\u00A0: {include} a \u00E9t\u00E9 d\u00E9tect\u00E9.',
+    spfCustomRequirementMissing: 'Exigence SPF personnalis\u00E9e non satisfaite\u00A0: {include} n\u2019a pas \u00E9t\u00E9 d\u00E9tect\u00E9.',
+    spfCustomRequirementMacroDelegated: 'Cet enregistrement SPF d\u00E9l\u00E8gue l\u2019\u00E9valuation \u00E0 un service SPF h\u00E9berg\u00E9/dynamique via un include bas\u00E9 sur des macros\u00A0; l\u2019exigence personnalis\u00E9e ({include}) est donc r\u00E9solue par message et ne peut pas \u00EAtre confirm\u00E9e par une analyse statique. V\u00E9rifiez dans la console de votre fournisseur SPF que {host} est activ\u00E9 pour ce domaine.',
+    spfCustomRequirementMacroDelegatedProvider: 'Cet enregistrement SPF d\u00E9l\u00E8gue l\u2019\u00E9valuation \u00E0 {provider} via un include bas\u00E9 sur des macros\u00A0; l\u2019exigence personnalis\u00E9e ({include}) est donc r\u00E9solue par message et ne peut pas \u00EAtre confirm\u00E9e par une analyse statique. V\u00E9rifiez dans la console {provider} que {host} est activ\u00E9 pour ce domaine.'
+  },
+  'de': {
+    checkOptionsButton: 'Optionen',
+    checkOptionsButtonTitle: 'Mit benutzerdefinierten SPF- oder DKIM-Werten pr\u00FCfen, z.\u00A0B. f\u00FCr eine Dom\u00E4ne, die in einer souver\u00E4nen oder beh\u00F6rdlichen Cloud eingerichtet wurde',
+    checkOptionsTitle: 'Benutzerdefinierte SPF- und DKIM-Anforderungen',
+    checkOptionsIntro: 'Standardm\u00E4\u00DFig verwenden die SPF- und DKIM-Pr\u00FCfungen die Werte der \u00F6ffentlichen Azure-Cloud. Wenn diese Dom\u00E4ne in einer anderen Umgebung eingerichtet wurde, z.\u00A0B. in einer souver\u00E4nen oder beh\u00F6rdlichen Cloud, f\u00FCgen Sie die Werte ein, die das Azure-Portal daf\u00FCr anzeigt. Lassen Sie ein Feld leer, um den Standardwert zu behalten. Diese Werte gelten nur f\u00FCr diesen Browser-Tab und sind im Seitenlink enthalten.',
+    checkOptionsSpfLabel: 'Erforderlicher SPF-Include',
+    checkOptionsSpfHint: 'Leer lassen, um den angezeigten Standardwert zu verwenden. Akzeptiert einen Include-Hostnamen, einen include:-Ausdruck oder den vollst\u00E4ndigen SPF-Eintrag.',
+    checkOptionsDkimNameLabel: 'Name (Host)',
+    checkOptionsDkimValueLabel: 'Wert (CNAME-Ziel)',
+    checkOptionsDkimHint: 'Leer lassen, um den angezeigten Standardwert zu verwenden. Der Name kann leer bleiben, wenn der Wert "._domainkey." enth\u00E4lt.',
+    checkOptionsApply: '\u00DCbernehmen und erneut pr\u00FCfen',
+    checkOptionsReset: 'Auf Standardwerte zur\u00FCcksetzen',
+    checkOptionsCancel: 'Abbrechen',
+    checkOptionsClose: 'Schlie\u00DFen',
+    checkOptionsInvalidSpf: 'Geben Sie einen Hostnamen wie spf.example.com, einen include:-Ausdruck oder einen vollst\u00E4ndigen SPF-Eintrag mit einem Include ein.',
+    checkOptionsInvalidDkim: 'Geben Sie den Wert als Hostnamen ein. Der Name ist optional, wenn der Wert "._domainkey." enth\u00E4lt.',
+    checkOptionsCustomBadge: 'Benutzerdefiniert',
+    checkOptionsCustomBadgeTitle: 'Mit einem benutzerdefinierten Wert aus dem Optionen-Dialog statt mit dem Standardwert der \u00F6ffentlichen Azure-Cloud gepr\u00FCft',
+    checkOptionsCopyLabel: 'Benutzerdefinierte Anforderungen',
+    spfCustomRequirementPresent: 'Benutzerdefinierte SPF-Anforderung erf\u00FCllt: {include} wurde erkannt.',
+    spfCustomRequirementMissing: 'Benutzerdefinierte SPF-Anforderung nicht erf\u00FCllt: {include} wurde nicht erkannt.',
+    spfCustomRequirementMacroDelegated: 'Dieser SPF-Eintrag delegiert die Auswertung \u00FCber ein makrobasiertes Include an einen gehosteten/dynamischen SPF-Dienst. Die benutzerdefinierte Anforderung ({include}) wird daher pro Nachricht aufgel\u00F6st und kann durch statische Analyse nicht best\u00E4tigt werden. Pr\u00FCfen Sie in der Konsole Ihres SPF-Anbieters, ob {host} f\u00FCr diese Dom\u00E4ne aktiviert ist.',
+    spfCustomRequirementMacroDelegatedProvider: 'Dieser SPF-Eintrag delegiert die Auswertung \u00FCber ein makrobasiertes Include an {provider}. Die benutzerdefinierte Anforderung ({include}) wird daher pro Nachricht aufgel\u00F6st und kann durch statische Analyse nicht best\u00E4tigt werden. Pr\u00FCfen Sie in der {provider}-Konsole, ob {host} f\u00FCr diese Dom\u00E4ne aktiviert ist.'
+  },
+  'pt-BR': {
+    checkOptionsButton: 'Op\u00E7\u00F5es',
+    checkOptionsButtonTitle: 'Verificar com valores SPF ou DKIM personalizados, por exemplo para um dom\u00EDnio configurado em uma nuvem soberana ou governamental',
+    checkOptionsTitle: 'Requisitos personalizados de SPF e DKIM',
+    checkOptionsIntro: 'Por padr\u00E3o, as verifica\u00E7\u00F5es de SPF e DKIM usam os valores da nuvem p\u00FAblica do Azure. Se este dom\u00EDnio foi configurado em outro ambiente, como uma nuvem soberana ou governamental, cole os valores que o portal do Azure mostra para ele. Deixe um campo em branco para manter o padr\u00E3o. Esses valores se aplicam somente a esta guia do navegador e s\u00E3o inclu\u00EDdos no link da p\u00E1gina.',
+    checkOptionsSpfLabel: 'Include SPF obrigat\u00F3rio',
+    checkOptionsSpfHint: 'Deixe em branco para usar o padr\u00E3o mostrado. Aceita um nome de host de include, um termo include: ou o registro SPF completo.',
+    checkOptionsDkimNameLabel: 'Nome (host)',
+    checkOptionsDkimValueLabel: 'Valor (destino CNAME)',
+    checkOptionsDkimHint: 'Deixe em branco para usar o padr\u00E3o mostrado. O Nome pode ficar em branco quando o Valor cont\u00E9m "._domainkey.".',
+    checkOptionsApply: 'Aplicar e verificar novamente',
+    checkOptionsReset: 'Restaurar padr\u00F5es',
+    checkOptionsCancel: 'Cancelar',
+    checkOptionsClose: 'Fechar',
+    checkOptionsInvalidSpf: 'Informe um nome de host como spf.example.com, um termo include: ou um registro SPF completo que contenha um include.',
+    checkOptionsInvalidDkim: 'Informe o Valor como um nome de host. O Nome \u00E9 opcional quando o Valor cont\u00E9m "._domainkey.".',
+    checkOptionsCustomBadge: 'Personalizado',
+    checkOptionsCustomBadgeTitle: 'Verificado com um valor personalizado da caixa de di\u00E1logo Op\u00E7\u00F5es em vez do padr\u00E3o da nuvem p\u00FAblica do Azure',
+    checkOptionsCopyLabel: 'Requisitos personalizados',
+    spfCustomRequirementPresent: 'Requisito SPF personalizado atendido: {include} foi detectado.',
+    spfCustomRequirementMissing: 'Requisito SPF personalizado n\u00E3o atendido: {include} n\u00E3o foi detectado.',
+    spfCustomRequirementMacroDelegated: 'Este registro SPF delega a avalia\u00E7\u00E3o a um servi\u00E7o SPF hospedado/din\u00E2mico por meio de um include baseado em macros, portanto o requisito personalizado ({include}) \u00E9 resolvido por mensagem e n\u00E3o pode ser confirmado por an\u00E1lise est\u00E1tica. Verifique no console do seu provedor SPF se {host} est\u00E1 habilitado para este dom\u00EDnio.',
+    spfCustomRequirementMacroDelegatedProvider: 'Este registro SPF delega a avalia\u00E7\u00E3o a {provider} por meio de um include baseado em macros, portanto o requisito personalizado ({include}) \u00E9 resolvido por mensagem e n\u00E3o pode ser confirmado por an\u00E1lise est\u00E1tica. Verifique no console do {provider} se {host} est\u00E1 habilitado para este dom\u00EDnio.'
+  },
+  'ar': {
+    checkOptionsButton: '\u062E\u064A\u0627\u0631\u0627\u062A',
+    checkOptionsTitle: '\u0645\u062A\u0637\u0644\u0628\u0627\u062A SPF \u0648DKIM \u0645\u062E\u0635\u0635\u0629',
+    checkOptionsSpfLabel: '\u062A\u0636\u0645\u064A\u0646 SPF \u0627\u0644\u0645\u0637\u0644\u0648\u0628',
+    checkOptionsDkimNameLabel: '\u0627\u0644\u0627\u0633\u0645 (\u0627\u0644\u0645\u0636\u064A\u0641)',
+    checkOptionsDkimValueLabel: '\u0627\u0644\u0642\u064A\u0645\u0629 (\u0647\u062F\u0641 CNAME)',
+    checkOptionsApply: '\u062A\u0637\u0628\u064A\u0642 \u0648\u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0641\u062D\u0635',
+    checkOptionsReset: '\u0625\u0639\u0627\u062F\u0629 \u062A\u0639\u064A\u064A\u0646 \u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0644\u0627\u0641\u062A\u0631\u0627\u0636\u064A\u0629',
+    checkOptionsCancel: '\u0625\u0644\u063A\u0627\u0621',
+    checkOptionsClose: '\u0625\u063A\u0644\u0627\u0642',
+    checkOptionsCustomBadge: '\u0645\u062E\u0635\u0635',
+    checkOptionsCopyLabel: '\u0645\u062A\u0637\u0644\u0628\u0627\u062A \u0645\u062E\u0635\u0635\u0629'
+  },
+  'zh-CN': {
+    checkOptionsButton: '\u9009\u9879',
+    checkOptionsTitle: '\u81EA\u5B9A\u4E49 SPF \u548C DKIM \u8981\u6C42',
+    checkOptionsSpfLabel: '\u5FC5\u9700\u7684 SPF include',
+    checkOptionsDkimNameLabel: '\u540D\u79F0\uFF08\u4E3B\u673A\uFF09',
+    checkOptionsDkimValueLabel: '\u503C\uFF08CNAME \u76EE\u6807\uFF09',
+    checkOptionsApply: '\u5E94\u7528\u5E76\u91CD\u65B0\u68C0\u67E5',
+    checkOptionsReset: '\u6062\u590D\u9ED8\u8BA4\u503C',
+    checkOptionsCancel: '\u53D6\u6D88',
+    checkOptionsClose: '\u5173\u95ED',
+    checkOptionsCustomBadge: '\u81EA\u5B9A\u4E49',
+    checkOptionsCopyLabel: '\u81EA\u5B9A\u4E49\u8981\u6C42'
+  },
+  'hi-IN': {
+    checkOptionsButton: '\u0935\u093F\u0915\u0932\u094D\u092A',
+    checkOptionsTitle: '\u0915\u0938\u094D\u091F\u092E SPF \u0914\u0930 DKIM \u0906\u0935\u0936\u094D\u092F\u0915\u0924\u093E\u090F\u0901',
+    checkOptionsSpfLabel: '\u0906\u0935\u0936\u094D\u092F\u0915 SPF include',
+    checkOptionsDkimNameLabel: '\u0928\u093E\u092E (\u0939\u094B\u0938\u094D\u091F)',
+    checkOptionsDkimValueLabel: '\u092E\u093E\u0928 (CNAME \u0932\u0915\u094D\u0937\u094D\u092F)',
+    checkOptionsApply: '\u0932\u093E\u0917\u0942 \u0915\u0930\u0947\u0902 \u0914\u0930 \u092B\u093F\u0930 \u0938\u0947 \u091C\u093E\u0901\u091A\u0947\u0902',
+    checkOptionsReset: '\u0921\u093F\u092B\u093C\u0949\u0932\u094D\u091F \u092A\u0930 \u0930\u0940\u0938\u0947\u091F \u0915\u0930\u0947\u0902',
+    checkOptionsCancel: '\u0930\u0926\u094D\u0926 \u0915\u0930\u0947\u0902',
+    checkOptionsClose: '\u092C\u0902\u0926 \u0915\u0930\u0947\u0902',
+    checkOptionsCustomBadge: '\u0915\u0938\u094D\u091F\u092E',
+    checkOptionsCopyLabel: '\u0915\u0938\u094D\u091F\u092E \u0906\u0935\u0936\u094D\u092F\u0915\u0924\u093E\u090F\u0901'
+  },
+  'ja-JP': {
+    checkOptionsButton: '\u30AA\u30D7\u30B7\u30E7\u30F3',
+    checkOptionsTitle: '\u30AB\u30B9\u30BF\u30E0 SPF \u304A\u3088\u3073 DKIM \u8981\u4EF6',
+    checkOptionsSpfLabel: '\u5FC5\u9808\u306E SPF include',
+    checkOptionsDkimNameLabel: '\u540D\u524D (\u30DB\u30B9\u30C8)',
+    checkOptionsDkimValueLabel: '\u5024 (CNAME \u30BF\u30FC\u30B2\u30C3\u30C8)',
+    checkOptionsApply: '\u9069\u7528\u3057\u3066\u518D\u30C1\u30A7\u30C3\u30AF',
+    checkOptionsReset: '\u65E2\u5B9A\u5024\u306B\u30EA\u30BB\u30C3\u30C8',
+    checkOptionsCancel: '\u30AD\u30E3\u30F3\u30BB\u30EB',
+    checkOptionsClose: '\u9589\u3058\u308B',
+    checkOptionsCustomBadge: '\u30AB\u30B9\u30BF\u30E0',
+    checkOptionsCopyLabel: '\u30AB\u30B9\u30BF\u30E0\u8981\u4EF6'
+  },
+  'ru-RU': {
+    checkOptionsButton: '\u041F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B',
+    checkOptionsTitle: '\u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u0441\u043A\u0438\u0435 \u0442\u0440\u0435\u0431\u043E\u0432\u0430\u043D\u0438\u044F SPF \u0438 DKIM',
+    checkOptionsSpfLabel: '\u041E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439 SPF include',
+    checkOptionsDkimNameLabel: '\u0418\u043C\u044F (\u0443\u0437\u0435\u043B)',
+    checkOptionsDkimValueLabel: '\u0417\u043D\u0430\u0447\u0435\u043D\u0438\u0435 (\u0446\u0435\u043B\u044C CNAME)',
+    checkOptionsApply: '\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u0441\u043D\u043E\u0432\u0430',
+    checkOptionsReset: '\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u043A \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u044F\u043C \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E',
+    checkOptionsCancel: '\u041E\u0442\u043C\u0435\u043D\u0430',
+    checkOptionsClose: '\u0417\u0430\u043A\u0440\u044B\u0442\u044C',
+    checkOptionsCustomBadge: '\u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u0441\u043A\u043E\u0435',
+    checkOptionsCopyLabel: '\u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C\u0441\u043A\u0438\u0435 \u0442\u0440\u0435\u0431\u043E\u0432\u0430\u043D\u0438\u044F'
+  }
+};
+
+Object.keys(CHECK_OVERRIDE_TRANSLATION_OVERRIDES).forEach(code => {
+  TRANSLATIONS[code] = Object.assign({}, TRANSLATIONS[code] || TRANSLATIONS.en, CHECK_OVERRIDE_TRANSLATION_OVERRIDES[code]);
+});
+
 const DNS_RECORD_TRANSLATION_OVERRIDES = {
   en: {
     dnsRecords: 'DNS records',
@@ -28149,6 +28791,17 @@ function formatGuidanceText(text, checkedDomain) {
   protect(/\binclude:zoho\.com\b/gi);
   protect(/\bms-domain-verification\b/gi);
   protect(/\bselector[12]-azurecomm-prod-net\b/gi);
+  // Custom requirement values from the Options dialog render as code like the defaults above.
+  if (checkOverrides.spfInclude) {
+    const includePattern = escapeRegex(checkOverrides.spfInclude);
+    protect(new RegExp('v=spf1\\s+include:' + includePattern + '\\s+-all', 'gi'));
+    protect(new RegExp('\\binclude:' + includePattern + '\\b', 'gi'));
+    protect(new RegExp('\\b' + includePattern + '\\b', 'gi'));
+  }
+  [1, 2].forEach(slot => {
+    const selector = checkOverrides['dkim' + slot + 'Selector'];
+    if (selector) protect(new RegExp('\\b' + escapeRegex(selector.replace(/\._domainkey$/, '')) + '\\b', 'gi'));
+  });
 
   let formatted = linkifyText(value);
   formatted = formatted.replace(/`([^`]+)`/g, '<code class="guidance-code">$1</code>');
@@ -28369,6 +29022,10 @@ function localizeWebsiteSignal(value) {
 
 function getLocalizedSpfRequirementSummary(result) {
   if (!result || !result.spfPresent) return null;
+  // A custom requirement (Options dialog) is described by its include rather than as
+  // the Outlook include. Callers pass the include the verdict was checked against.
+  const requiredInclude = String((result && result.spfRequiredInclude) || '').trim().toLowerCase();
+  const customInclude = (requiredInclude && requiredInclude !== CHECK_OVERRIDE_DEFAULTS.spfInclude) ? 'include:' + requiredInclude : '';
   // Macro-delegated / hosted SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...)
   // resolves Exchange Online authorization dynamically per message, so the
   // Outlook include can be neither confirmed nor denied by static analysis.
@@ -28378,11 +29035,19 @@ function getLocalizedSpfRequirementSummary(result) {
   if (matchTypeRaw === 'macro-delegated' || result.spfHasRequiredInclude === null) {
     const provider = String((result && result.spfRequiredIncludeProvider) || '').trim();
     if (provider) {
-      return t('spfOutlookRequirementMacroDelegatedProvider', { provider });
+      return customInclude
+        ? t('spfCustomRequirementMacroDelegatedProvider', { provider, include: customInclude, host: requiredInclude })
+        : t('spfOutlookRequirementMacroDelegatedProvider', { provider });
     }
-    return t('spfOutlookRequirementMacroDelegated');
+    return customInclude
+      ? t('spfCustomRequirementMacroDelegated', { include: customInclude, host: requiredInclude })
+      : t('spfOutlookRequirementMacroDelegated');
   }
-  if (result.spfHasRequiredInclude === false) return t('spfOutlookRequirementMissing');
+  if (result.spfHasRequiredInclude === false) {
+    return customInclude
+      ? t('spfCustomRequirementMissing', { include: customInclude })
+      : t('spfOutlookRequirementMissing');
+  }
   if (result.spfHasRequiredInclude === true) {
     // Base verdict ("Required Outlook SPF include detected for ACS.") is the
     // same regardless of how the requirement was matched. When the customer
@@ -28392,7 +29057,9 @@ function getLocalizedSpfRequirementSummary(result) {
     // that case we append a short suffix so operators can see at a glance
     // whether the requirement was met via the actual DNS include name or
     // via the flattened IP ranges.
-    const base = t('spfOutlookRequirementPresent');
+    const base = customInclude
+      ? t('spfCustomRequirementPresent', { include: customInclude })
+      : t('spfOutlookRequirementPresent');
     const matchType = String((result && result.spfRequiredIncludeMatchType) || '').trim().toLowerCase();
     if (matchType === 'flattened-include') {
       return base + ' ' + t('spfOutlookRequirementFlattenedSuffix');
@@ -28612,9 +29279,10 @@ function getDnsTxtRecoveryState(r) {
       : ((r && r.spfValue) ? [r.spfValue] : []));
   const spfMultipleRecords = spfRecords.length > 1;
   // Mirror Select-SpfRecordFromSet on the server: prefer the record carrying the
-  // Outlook include so the requirement verdict never depends on RRset ordering.
+  // required include so the requirement verdict never depends on RRset ordering.
+  const requiredIncludePattern = new RegExp('(^|\\s)include:' + escapeRegex(getSpfRequirementInclude(r)) + '(?=\\s|$)', 'i');
   const spfValue = (recoveredFromDetailedRecords || recoveredFromNameservers)
-    ? (spfRecords.find(value => /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(value || ''))) || spfRecords[0] || null)
+    ? (spfRecords.find(value => requiredIncludePattern.test(String(value || ''))) || spfRecords[0] || null)
     : (r ? r.spfValue : null);
   const acsValues = (recoveredFromDetailedRecords || recoveredFromNameservers)
     ? txtRecords.filter(value => /ms-domain-verification/i.test(String(value || '').trim()))
@@ -28625,7 +29293,7 @@ function getDnsTxtRecoveryState(r) {
     ? (acsValues[0] || null)
     : (r ? r.acsValue : null);
   const spfHasRequiredInclude = (recoveredFromDetailedRecords || recoveredFromNameservers) && spfValue
-    ? /(^|\s)include:spf\.protection\.outlook\.com(?=\s|$)/i.test(String(spfValue || ''))
+    ? requiredIncludePattern.test(String(spfValue || ''))
     : (r ? r.spfHasRequiredInclude : null);
   // Macro-delegated SPF (Valimail, OnDMARC, Sendmarc, EasyDMARC, ...) cannot be
   // statically confirmed for the Outlook include. The server reports this via
@@ -28670,6 +29338,179 @@ function getDnsTxtRecoveryState(r) {
     acsValues,
     acsPresent: !!acsValue
   };
+}
+
+// ===================== Custom SPF / DKIM requirements =====================
+//
+// The SPF and DKIM checks default to the Azure public cloud values below. A domain
+// set up in another environment (for example a sovereign or government cloud) is
+// given a different SPF include and different DKIM selector records, so the
+// operator can paste the values the Azure portal shows into the Options dialog on
+// the SPF / DKIM cards. Overrides live only in memory and in the page URL (so a
+// reload or a shared link keeps them), never in browser storage, which keeps the
+// tool on the defaults for everyone who has not explicitly opted in. The server
+// re-validates every value (13-InputValidation.ps1) and echoes back what it checked.
+const CHECK_OVERRIDE_DEFAULTS = {
+  spfInclude: 'spf.protection.outlook.com',
+  dkim1Selector: 'selector1-azurecomm-prod-net._domainkey',
+  dkim1Target: 'selector1-azurecomm-prod-net._domainkey.azurecomm.net',
+  dkim2Selector: 'selector2-azurecomm-prod-net._domainkey',
+  dkim2Target: 'selector2-azurecomm-prod-net._domainkey.azurecomm.net'
+};
+const CHECK_OVERRIDE_KEYS = Object.keys(CHECK_OVERRIDE_DEFAULTS);
+const EMPTY_CHECK_OVERRIDES = { spfInclude: '', dkim1Selector: '', dkim1Target: '', dkim2Selector: '', dkim2Target: '' };
+let checkOverrides = Object.assign({}, EMPTY_CHECK_OVERRIDES);
+
+// Mirrors Test-DomainName -AllowUnderscore (SPF and DKIM names use underscore labels).
+function isValidOverrideHostName(value) {
+  const name = String(value || '');
+  if (!name || name.length > 253 || !/^[a-z0-9_.-]+$/.test(name)) return false;
+  const labels = name.split('.');
+  return labels.length >= 2 && labels.every(label => label.length > 0 && label.length <= 63 && !label.startsWith('-') && !label.endsWith('-'));
+}
+
+function trimOverrideQuotes(value) {
+  return String(value === null || value === undefined ? '' : value).trim().replace(/^"+|"+$/g, '').trim();
+}
+
+// Mirrors ConvertTo-SpfIncludeOverride: a host name, an include: term, or a whole
+// pasted SPF record (the first include wins). '' for blank input, null when unusable.
+function normalizeSpfIncludeOverride(raw) {
+  const text = trimOverrideQuotes(raw);
+  if (!text) return '';
+  if (text.length > 512) return null;
+  let candidate = null;
+  for (const token of text.split(/\s+/)) {
+    const match = token.replace(/^"+|"+$/g, '').replace(/^[+\-~?]/, '').match(/^include:(.+)$/i);
+    if (match) { candidate = match[1]; break; }
+  }
+  if (candidate === null) {
+    if (/\s/.test(text) || /^v=spf1/i.test(text)) return null;
+    candidate = text;
+  }
+  candidate = candidate.replace(/^"+|"+$/g, '').replace(/\.+$/, '').toLowerCase();
+  return isValidOverrideHostName(candidate) ? candidate : null;
+}
+
+// Mirrors ConvertTo-DkimSelectorOverride: the Value (CNAME target) is required, the
+// Name is optional (derived from the target) and a pasted FQDN is trimmed back to
+// "<selector>._domainkey". { selector, target } ('' for both when blank) or null.
+function normalizeDkimOverride(selectorRaw, targetRaw) {
+  const target = trimOverrideQuotes(targetRaw).replace(/\.+$/, '').toLowerCase();
+  let selector = trimOverrideQuotes(selectorRaw).replace(/\.+$/, '').toLowerCase();
+  if (!selector && !target) return { selector: '', target: '' };
+  if (!isValidOverrideHostName(target)) return null;
+  if (!selector) {
+    const derived = target.match(/^(.+?\._domainkey)\./);
+    if (!derived) return null;
+    selector = derived[1];
+  } else {
+    const trimmed = selector.match(/^(.+?\._domainkey)(?:\.|$)/);
+    selector = trimmed ? trimmed[1] : selector + '._domainkey';
+  }
+  return isValidOverrideHostName(selector) ? { selector, target } : null;
+}
+
+// Values equal to the defaults are stored as '' so they never show as custom.
+function toCheckOverrideState(spfInclude, dkim1, dkim2) {
+  const state = Object.assign({}, EMPTY_CHECK_OVERRIDES);
+  if (spfInclude && spfInclude !== CHECK_OVERRIDE_DEFAULTS.spfInclude) state.spfInclude = spfInclude;
+  [[1, dkim1], [2, dkim2]].forEach(([slot, value]) => {
+    if (!value || !value.target) return;
+    if (value.selector === CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Selector'] && value.target === CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Target']) return;
+    state['dkim' + slot + 'Selector'] = value.selector;
+    state['dkim' + slot + 'Target'] = value.target;
+  });
+  return state;
+}
+
+// Extra query strings for /api/base, /api/dkim and /api/records. Empty on the
+// defaults, so default request URLs are unchanged.
+function buildSpfOverrideQuery() {
+  return checkOverrides.spfInclude ? 'spfInclude=' + encodeURIComponent(checkOverrides.spfInclude) : '';
+}
+
+function buildDkimOverrideQuery() {
+  const parts = [];
+  [1, 2].forEach(slot => {
+    const target = checkOverrides['dkim' + slot + 'Target'];
+    if (!target) return;
+    parts.push('dkim' + slot + 'Selector=' + encodeURIComponent(checkOverrides['dkim' + slot + 'Selector']));
+    parts.push('dkim' + slot + 'Target=' + encodeURIComponent(target));
+  });
+  return parts.join('&');
+}
+
+function syncCheckOverridesToUrl() {
+  try {
+    const url = new URL(window.location.href);
+    CHECK_OVERRIDE_KEYS.forEach(key => {
+      if (checkOverrides[key]) url.searchParams.set(key, checkOverrides[key]);
+      else url.searchParams.delete(key);
+    });
+    window.history.replaceState({}, '', url);
+  } catch {}
+}
+
+// Restore overrides from a reloaded or shared link before the first lookup. Unusable
+// values are dropped (and removed from the URL) instead of being sent to the server.
+function loadCheckOverridesFromUrl() {
+  let params;
+  try { params = new URLSearchParams(window.location.search); } catch { return; }
+  if (!CHECK_OVERRIDE_KEYS.some(key => params.has(key))) return;
+  checkOverrides = toCheckOverrideState(
+    normalizeSpfIncludeOverride(params.get('spfInclude')),
+    normalizeDkimOverride(params.get('dkim1Selector'), params.get('dkim1Target')),
+    normalizeDkimOverride(params.get('dkim2Selector'), params.get('dkim2Target'))
+  );
+  syncCheckOverridesToUrl();
+}
+
+// The requirement a result was actually checked against. The server echoes these
+// back, so a card never describes a value other than the one its verdict used.
+function getSpfRequirementInclude(r) {
+  const echoed = (r && typeof r.spfRequiredInclude === 'string') ? r.spfRequiredInclude.trim().toLowerCase() : '';
+  return echoed || checkOverrides.spfInclude || CHECK_OVERRIDE_DEFAULTS.spfInclude;
+}
+
+function isCustomSpfRequirement(r) {
+  return getSpfRequirementInclude(r) !== CHECK_OVERRIDE_DEFAULTS.spfInclude;
+}
+
+function getDkimRequirement(r, slot) {
+  const defaultSelector = CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Selector'];
+  const defaultTarget = CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Target'];
+  const selector = String((r && r['dkim' + slot + 'Selector']) || checkOverrides['dkim' + slot + 'Selector'] || defaultSelector).toLowerCase();
+  const target = String((r && r['dkim' + slot + 'ExpectedCname']) || checkOverrides['dkim' + slot + 'Target'] || defaultTarget).toLowerCase();
+  return { selector, target, custom: selector !== defaultSelector || target !== defaultTarget };
+}
+
+// Existing translations name the default include / selectors as literal code tokens
+// in every language, so a custom requirement can be substituted in place.
+function applySpfIncludeToText(text, include) {
+  const value = String(text || '');
+  if (!include || include === CHECK_OVERRIDE_DEFAULTS.spfInclude) return value;
+  return value.split(CHECK_OVERRIDE_DEFAULTS.spfInclude).join(include);
+}
+
+function applyDkimSelectorToText(text, slot, selector) {
+  const value = String(text || '');
+  const defaultLabel = CHECK_OVERRIDE_DEFAULTS['dkim' + slot + 'Selector'].replace(/\._domainkey$/, '');
+  const label = String(selector || '').replace(/\._domainkey$/, '');
+  if (!label || label === defaultLabel) return value;
+  return value.split(defaultLabel).join(label);
+}
+
+// Every custom requirement a result was checked against ('' on the defaults), used
+// to label copied reports so a PASS is never mistaken for the default requirement.
+function getCheckOverrideSummary(r) {
+  const parts = [];
+  if (isCustomSpfRequirement(r)) parts.push('SPF include:' + getSpfRequirementInclude(r));
+  [1, 2].forEach(slot => {
+    const requirement = getDkimRequirement(r, slot);
+    if (requirement.custom) parts.push('DKIM' + slot + ' ' + requirement.selector + ' \u2192 ' + requirement.target);
+  });
+  return parts.join('; ');
 }
 
 // ===================== DNS Propagation helpers =====================
@@ -29018,7 +29859,7 @@ function buildGuidance(r) {
       if (r.parentSpfPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
         guidance.push({ type: 'attention', text: t('guidanceSpfMissingParent', { domain: r.domain || '', lookupDomain: r.txtLookupDomain }) });
       } else {
-        guidance.push({ type: 'attention', text: t('guidanceSpfMissing') });
+        guidance.push({ type: 'attention', text: applySpfIncludeToText(t('guidanceSpfMissing'), getSpfRequirementInclude(r)) });
       }
     }
     const spfLookupLimitGuidance = getSpfLookupLimitWarningText(r);
@@ -29029,16 +29870,20 @@ function buildGuidance(r) {
       // Macro-delegated / hosted SPF cannot be statically confirmed, so show an
       // informational note explaining the indeterminate verdict (and how to
       // verify it in the provider console) instead of a hard "missing" warning.
+      // The wording comes from getLocalizedSpfRequirementSummary so the guidance
+      // and the SPF card always describe the same (default or custom) requirement.
       const spfMatchType = String(txtRecovery.spfRequiredIncludeMatchType || '').trim().toLowerCase();
-      if (spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null) {
-        const provider = String(txtRecovery.spfRequiredIncludeProvider || '').trim();
-        const text = provider
-          ? t('spfOutlookRequirementMacroDelegatedProvider', { provider })
-          : t('spfOutlookRequirementMacroDelegated');
-        guidance.push({ type: 'info', text });
-      } else {
-        guidance.push({ type: 'attention', text: t('spfOutlookRequirementMissing') });
-      }
+      const spfIndeterminate = spfMatchType === 'macro-delegated' || txtRecovery.spfHasRequiredInclude === null;
+      guidance.push({
+        type: spfIndeterminate ? 'info' : 'attention',
+        text: getLocalizedSpfRequirementSummary({
+          spfPresent: true,
+          spfHasRequiredInclude: spfIndeterminate ? null : false,
+          spfRequiredIncludeMatchType: txtRecovery.spfRequiredIncludeMatchType,
+          spfRequiredIncludeProvider: txtRecovery.spfRequiredIncludeProvider,
+          spfRequiredInclude: getSpfRequirementInclude(r)
+        })
+      });
     }
     if (!txtRecovery.acsPresent) {
       if (r.parentAcsPresent && r.txtUsedParent && r.txtLookupDomain && r.txtLookupDomain !== r.domain) {
@@ -29119,22 +29964,24 @@ function buildGuidance(r) {
     // strictly about the ACS selector hostname itself.
     const dkim1HasAcsRecord = !!(r.dkim1CnameTarget || r.dkim1TxtValue);
     const dkim2HasAcsRecord = !!(r.dkim2CnameTarget || r.dkim2TxtValue);
+    const dkim1Requirement = getDkimRequirement(r, 1);
+    const dkim2Requirement = getDkimRequirement(r, 2);
     if (!dkim1HasAcsRecord) {
-      guidance.push({ type: 'attention', text: t('guidanceDkim1Missing') });
+      guidance.push({ type: 'attention', text: applyDkimSelectorToText(t('guidanceDkim1Missing'), 1, dkim1Requirement.selector) });
     } else if (r.dkim1AcsConfigured === false) {
       // Selector hostname is published but the CNAME target does not point at
       // the ACS-managed selector. The server-side guidance list also includes
       // a localized version of this message; we add a concise client-side
       // hint here so the in-page guidance is complete even when the server
       // payload is partial. No translation key yet -- English fallback.
-      const expected1 = r.dkim1ExpectedCname || 'selector1-azurecomm-prod-net._domainkey.azurecomm.net';
+      const expected1 = dkim1Requirement.target;
       const actual1 = r.dkim1CnameTarget || '(no CNAME target)';
       guidance.push({ type: 'attention', text: 'DKIM selector1 is published but its CNAME does not point to ACS. Expected: ' + expected1 + '; found: ' + actual1 + '.' });
     }
     if (!dkim2HasAcsRecord) {
-      guidance.push({ type: 'attention', text: t('guidanceDkim2Missing') });
+      guidance.push({ type: 'attention', text: applyDkimSelectorToText(t('guidanceDkim2Missing'), 2, dkim2Requirement.selector) });
     } else if (r.dkim2AcsConfigured === false) {
-      const expected2 = r.dkim2ExpectedCname || 'selector2-azurecomm-prod-net._domainkey.azurecomm.net';
+      const expected2 = dkim2Requirement.target;
       const actual2 = r.dkim2CnameTarget || '(no CNAME target)';
       guidance.push({ type: 'attention', text: 'DKIM selector2 is published but its CNAME does not point to ACS. Expected: ' + expected2 + '; found: ' + actual2 + '.' });
     }
@@ -29144,7 +29991,9 @@ function buildGuidance(r) {
     guidance.push({ type: 'attention', text: t('guidanceCnameMissing') });
   }
 
-  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === false) {
+  // Only meaningful for the default requirement: a custom include's verdict says
+  // nothing about spf.protection.outlook.com.
+  if (loaded.base && loaded.mx && r.mxProvider === 'Microsoft 365 / Exchange Online' && txtRecovery.spfPresent && txtRecovery.spfHasRequiredInclude === false && !isCustomSpfRequirement(r)) {
     guidance.push({ type: 'attention', text: t('guidanceMxMicrosoftSpf') });
   }
   if (loaded.base && loaded.mx && r.mxProvider === 'Google Workspace / Gmail' && txtRecovery.spfPresent && txtRecovery.spfValue && !/_spf\.google\.com/i.test(txtRecovery.spfValue)) {
@@ -30262,8 +31111,8 @@ function lookup(options = {}) {
       headers['Cache-Control'] = 'no-cache';
       headers['Pragma'] = 'no-cache';
       const cacheBuster = "_=" + Date.now();
-      // extraQuery carries endpoint-specific options (currently only the DNS
-      // propagation settings); it is already URL-encoded by its builder.
+      // extraQuery carries endpoint-specific options (the DNS propagation settings
+      // and any custom SPF/DKIM requirements); it is already URL-encoded by its builder.
       const extra = extraQuery ? ("&" + extraQuery) : "";
       const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster + extra;
       const r = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
@@ -30325,12 +31174,12 @@ function hideTopBarItem(element) {
   render(resultObj);
 
   const requests = [
-    { key: "base",  path: "/api/base"  },
+    { key: "base",  path: "/api/base", query: buildSpfOverrideQuery },
     { key: "mx",    path: "/api/mx"    },
-    { key: "records", path: "/api/records" },
+    { key: "records", path: "/api/records", query: buildDkimOverrideQuery },
     { key: "whois", path: "/api/whois" },
     { key: "dmarc", path: "/api/dmarc" },
-    { key: "dkim",  path: "/api/dkim"  },
+    { key: "dkim",  path: "/api/dkim", query: buildDkimOverrideQuery },
     { key: "cname", path: "/api/cname" },
     { key: "reputation", path: "/api/reputation" },
     { key: "website", path: "/api/website" },
@@ -30412,6 +31261,7 @@ function hideTopBarItem(element) {
         resultObj.dnsRecordsError = data.error || null;
       } else {
         Object.assign(resultObj, data);
+        rememberEndpointFields(resultObj, key, data);
       }
       resultObj._loaded[key] = true;
       delete resultObj._errors[key];
@@ -32208,6 +33058,288 @@ async function rerunPropagationCheck() {
   }
 }
 
+// ---- Custom SPF / DKIM requirements: Options dialog ----
+//
+// The Options buttons on the SPF and DKIM cards open one shared native <dialog>
+// (#checkOptionsDialog, declared in 20a outside #results so partial renders cannot
+// discard it). It holds every override field, so the SPF include and both DKIM
+// selectors copied from the Azure portal are applied with a single re-check.
+// State, validation and the query builders live in 20c (checkOverrides).
+let checkOptionsReturnScope = null;
+let checkOverrideRerunToken = 0;
+// Fields each endpoint merged into a result object. A targeted re-check clears them
+// first so the cards render exactly as they do while a lookup is loading, instead of
+// briefly showing verdicts computed against the previous requirement.
+const resultEndpointFields = new WeakMap();
+
+function rememberEndpointFields(result, key, data) {
+  const byKey = resultEndpointFields.get(result) || {};
+  byKey[key] = Object.keys(data || {});
+  resultEndpointFields.set(result, byKey);
+}
+
+// Visible (kept in screenshots) so a captured verdict is never mistaken for the
+// default requirement.
+function buildCheckOverrideBadgeHtml(isCustom) {
+  if (!isCustom) return '';
+  return `<span class="check-override-badge" title="${escapeHtml(t('checkOptionsCustomBadgeTitle'))}">${escapeHtml(t('checkOptionsCustomBadge'))}</span>`;
+}
+
+// `scope` is a fixed literal ('spf' | 'dkim1' | 'dkim2'), never user input.
+function buildCheckOptionsButtonHtml(scope) {
+  return `<button type="button" class="copy-btn hide-on-screenshot check-options-btn" aria-haspopup="dialog" aria-controls="checkOptionsDialog" title="${escapeHtml(t('checkOptionsButtonTitle'))}" onclick="event.stopPropagation(); openCheckOptions('${scope}')">${escapeHtml(t('checkOptionsButton'))}</button>`;
+}
+
+function renderCheckOptionsDialog() {
+  const dialog = document.getElementById('checkOptionsDialog');
+  if (!dialog) return;
+  const defaults = CHECK_OVERRIDE_DEFAULTS;
+  // Placeholders show the default each blank field falls back to.
+  const field = (id, labelKey, value, placeholder) => `
+        <div class="check-options-field">
+          <label for="${id}">${escapeHtml(t(labelKey))}</label>
+          <input type="text" id="${id}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" maxlength="512" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" dir="ltr">
+        </div>`;
+  const dkimGroup = slot => `
+      <fieldset class="check-options-group">
+        <legend>${escapeHtml(t('dkim' + slot + 'Title'))}</legend>
+        ${field('checkOptionDkim' + slot + 'Selector', 'checkOptionsDkimNameLabel', checkOverrides['dkim' + slot + 'Selector'], defaults['dkim' + slot + 'Selector'])}
+        ${field('checkOptionDkim' + slot + 'Target', 'checkOptionsDkimValueLabel', checkOverrides['dkim' + slot + 'Target'], defaults['dkim' + slot + 'Target'])}
+        <p class="check-options-hint">${escapeHtml(t('checkOptionsDkimHint'))}</p>
+        <p id="checkOptionDkim${slot}Error" class="check-options-error" role="alert" hidden></p>
+      </fieldset>`;
+  dialog.innerHTML = `
+    <form class="check-options-form" novalidate onsubmit="event.preventDefault(); applyCheckOptions();">
+      <div class="check-options-header">
+        <h2 id="checkOptionsTitle">${escapeHtml(t('checkOptionsTitle'))}</h2>
+        <button type="button" class="check-options-close" aria-label="${escapeHtml(t('checkOptionsClose'))}" title="${escapeHtml(t('checkOptionsClose'))}" onclick="closeCheckOptions()">&#x2715;</button>
+      </div>
+      <div class="check-options-body">
+        <p id="checkOptionsIntro" class="check-options-intro">${escapeHtml(t('checkOptionsIntro'))}</p>
+        <fieldset class="check-options-group">
+          <legend>SPF</legend>
+          ${field('checkOptionSpfInclude', 'checkOptionsSpfLabel', checkOverrides.spfInclude, defaults.spfInclude)}
+          <p class="check-options-hint">${escapeHtml(t('checkOptionsSpfHint'))}</p>
+          <p id="checkOptionSpfError" class="check-options-error" role="alert" hidden></p>
+        </fieldset>
+        ${dkimGroup(1)}
+        ${dkimGroup(2)}
+      </div>
+      <div class="check-options-actions">
+        <button type="button" class="copy-btn" onclick="resetCheckOptions()">${escapeHtml(t('checkOptionsReset'))}</button>
+        <button type="button" class="copy-btn" onclick="closeCheckOptions()">${escapeHtml(t('checkOptionsCancel'))}</button>
+        <button type="submit" class="primary">${escapeHtml(t('checkOptionsApply'))}</button>
+      </div>
+    </form>`;
+}
+
+// Close handling is wired once. The native 'close' event also fires for Escape.
+function wireCheckOptionsDialog(dialog) {
+  if (dialog.dataset.wired === '1') return;
+  dialog.dataset.wired = '1';
+  dialog.addEventListener('close', () => {
+    document.documentElement.classList.remove('check-options-open');
+    // The opener lives in #results and may have been re-rendered, so focus its current copy.
+    const opener = checkOptionsReturnScope ? document.querySelector('#card-' + checkOptionsReturnScope + ' .check-options-btn') : null;
+    if (opener) opener.focus({ preventScroll: true });
+  });
+  // Embedded browsers may not close a native dialog on Escape by themselves.
+  dialog.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || event.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dialog.close();
+  });
+  // Only a click outside the dialog bounds is a backdrop click.
+  dialog.addEventListener('click', event => {
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+  });
+}
+
+function openCheckOptions(scope) {
+  const dialog = document.getElementById('checkOptionsDialog');
+  if (!dialog || typeof dialog.showModal !== 'function') return;
+  wireCheckOptionsDialog(dialog);
+  checkOptionsReturnScope = scope || null;
+  renderCheckOptionsDialog();
+  if (!dialog.open) dialog.showModal();
+  document.documentElement.classList.add('check-options-open');
+  const focusId = { spf: 'checkOptionSpfInclude', dkim1: 'checkOptionDkim1Selector', dkim2: 'checkOptionDkim2Selector' }[scope] || 'checkOptionSpfInclude';
+  const input = document.getElementById(focusId);
+  if (input) input.focus({ preventScroll: true });
+}
+
+function closeCheckOptions() {
+  const dialog = document.getElementById('checkOptionsDialog');
+  if (dialog && dialog.open) dialog.close();
+}
+
+// render() rebuilds every card, which would drop keyboard focus from the Options
+// button the dialog returned it to; move it to that button's re-rendered copy.
+function renderKeepingOptionsFocus(result) {
+  const focused = document.activeElement;
+  const card = focused && focused.classList && focused.classList.contains('check-options-btn') ? focused.closest('.card[id]') : null;
+  render(result);
+  if (card && !focused.isConnected) {
+    const replacement = document.querySelector('#' + card.id + ' .check-options-btn');
+    if (replacement) replacement.focus({ preventScroll: true });
+  }
+}
+
+function applyCheckOptions() {
+  const read = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const spf = normalizeSpfIncludeOverride(read('checkOptionSpfInclude'));
+  const dkim1 = normalizeDkimOverride(read('checkOptionDkim1Selector'), read('checkOptionDkim1Target'));
+  const dkim2 = normalizeDkimOverride(read('checkOptionDkim2Selector'), read('checkOptionDkim2Target'));
+  // A usable Value with an unusable pairing means the Name is what needs fixing.
+  const dkimProblemField = slot => isValidOverrideHostName(trimOverrideQuotes(read('checkOptionDkim' + slot + 'Target')).replace(/\.+$/, '').toLowerCase())
+    ? 'checkOptionDkim' + slot + 'Selector'
+    : 'checkOptionDkim' + slot + 'Target';
+  const checks = [
+    { errorId: 'checkOptionSpfError', inputId: 'checkOptionSpfInclude', message: spf === null ? t('checkOptionsInvalidSpf') : '' },
+    { errorId: 'checkOptionDkim1Error', inputId: dkimProblemField(1), message: dkim1 === null ? t('checkOptionsInvalidDkim') : '' },
+    { errorId: 'checkOptionDkim2Error', inputId: dkimProblemField(2), message: dkim2 === null ? t('checkOptionsInvalidDkim') : '' }
+  ];
+  document.querySelectorAll('#checkOptionsDialog input[aria-invalid]').forEach(el => el.removeAttribute('aria-invalid'));
+  let firstInvalid = null;
+  checks.forEach(check => {
+    const errorEl = document.getElementById(check.errorId);
+    if (errorEl) {
+      errorEl.textContent = check.message;
+      errorEl.hidden = !check.message;
+    }
+    const inputEl = check.message ? document.getElementById(check.inputId) : null;
+    if (inputEl) {
+      inputEl.setAttribute('aria-invalid', 'true');
+      if (!firstInvalid) firstInvalid = inputEl;
+    }
+  });
+  if (checks.some(check => check.message)) {
+    if (firstInvalid) firstInvalid.focus();
+    return;
+  }
+  setCheckOverrides(toCheckOverrideState(spf, dkim1, dkim2));
+  closeCheckOptions();
+}
+
+function resetCheckOptions() {
+  setCheckOverrides(EMPTY_CHECK_OVERRIDES);
+  closeCheckOptions();
+}
+
+// Apply new overrides, keep the page URL in sync, and re-check only what changed.
+function setCheckOverrides(next) {
+  const previous = checkOverrides;
+  checkOverrides = Object.assign({}, EMPTY_CHECK_OVERRIDES, next);
+  syncCheckOverridesToUrl();
+  const keys = [];
+  if (previous.spfInclude !== checkOverrides.spfInclude) keys.push('base');
+  if (['dkim1Selector', 'dkim1Target', 'dkim2Selector', 'dkim2Target'].some(key => previous[key] !== checkOverrides[key])) keys.push('dkim', 'records');
+  if (keys.length > 0) rerunCheckOverrideEndpoints(keys);
+}
+
+// Re-fetch only the endpoints a changed requirement affects (/api/base for SPF,
+// /api/dkim and /api/records for DKIM) for every checked domain, visible tab first,
+// so the other checks are not re-run. A lookup still in flight was started with the
+// previous values, so it is restarted instead: otherwise one of its late responses
+// could land after (and silently undo) the re-check.
+async function rerunCheckOverrideEndpoints(keys) {
+  const domains = (multiDomainState && Array.isArray(multiDomainState.domains)) ? multiDomainState.domains.slice() : [];
+  if (domains.length === 0) return;
+  if (lookupInProgress || multiDomainState.running) {
+    if (domains.length > 1) runMultiDomainLookup(domains, { animateTopIntro: false });
+    else lookup({ domainOverride: domains[0] });
+    return;
+  }
+
+  const active = multiDomainState.active;
+  const ordered = [active].concat(domains.filter(d => d !== active))
+    .filter(d => d && multiDomainState.results && multiDomainState.results[d]);
+  if (ordered.length === 0) return;
+
+  const token = ++checkOverrideRerunToken;
+  const endpoints = {
+    base: { path: '/api/base', query: buildSpfOverrideQuery },
+    dkim: { path: '/api/dkim', query: buildDkimOverrideQuery },
+    records: { path: '/api/records', query: buildDkimOverrideQuery }
+  };
+  // A newer re-check or a new lookup (which replaces the result objects) wins.
+  const isCurrent = (domain, target) => token === checkOverrideRerunToken && multiDomainState.results[domain] === target;
+
+  // Put the affected cards back to LOADING first so no verdict computed with the
+  // previous requirement stays on screen while the re-check runs.
+  ordered.forEach(domain => {
+    const target = multiDomainState.results[domain];
+    const fieldsByKey = resultEndpointFields.get(target) || {};
+    target._loaded = target._loaded || {};
+    target._errors = target._errors || {};
+    keys.forEach(key => {
+      if (key === 'records') {
+        delete target.dnsRecords;
+        delete target.dnsRecordsError;
+      } else {
+        (fieldsByKey[key] || []).forEach(field => { if (field !== 'domain') delete target[field]; });
+      }
+      target._loaded[key] = false;
+      delete target._errors[key];
+    });
+    delete target.collectedAt;
+    recomputeDerived(target);
+  });
+  if (multiDomainState.results[active]) render(multiDomainState.results[active]);
+  updateDomainTabsUI();
+
+  for (const domain of ordered) {
+    const target = multiDomainState.results[domain];
+    if (!isCurrent(domain, target)) return;
+    await Promise.all(keys.map(async key => {
+      // Registered with the lookup controllers so starting a new lookup aborts it.
+      const controller = new AbortController();
+      activeLookup.controllers.push(controller);
+      try {
+        let headers = {};
+        const apiKey = (acsApiKey || '').trim();
+        if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
+        headers = buildConsentRequestHeaders(headers);
+        headers['Cache-Control'] = 'no-cache';
+        headers['Pragma'] = 'no-cache';
+        const extra = endpoints[key].query();
+        const url = endpoints[key].path + '?domain=' + encodeURIComponent(domain) + '&_=' + Date.now() + (extra ? '&' + extra : '');
+        const resp = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
+        if (!resp.ok) {
+          let body = '';
+          try { body = await resp.text(); } catch {}
+          throw new Error(`HTTP ${resp.status}${resp.statusText ? ' ' + resp.statusText : ''}${body ? ': ' + body.trim() : ''}`);
+        }
+        const raw = await resp.arrayBuffer();
+        const data = repairObjectStrings(JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(raw)));
+        if (!isCurrent(domain, target)) return;
+        if (key === 'records') {
+          target.dnsRecords = Array.isArray(data.records) ? data.records : [];
+          target.dnsRecordsError = data.error || null;
+        } else {
+          Object.assign(target, data);
+          rememberEndpointFields(target, key, data);
+        }
+        target._loaded[key] = true;
+      } catch (err) {
+        if ((err && err.name === 'AbortError') || !isCurrent(domain, target)) return;
+        target._loaded[key] = true;
+        target._errors[key] = (err && err.message) ? err.message : String(err);
+      } finally {
+        activeLookup.controllers = (activeLookup.controllers || []).filter(c => c !== controller);
+      }
+      // Paint each endpoint as soon as it answers; /api/records is much slower than
+      // /api/base and /api/dkim and must not hold their cards on LOADING.
+      recomputeDerived(target);
+      renderKeepingOptionsFocus(target);
+      updateDomainTabsUI();
+    }));
+  }
+}
+
 // Convert RDAP JSON into small grouped sections first so the registration card
 // is readable before the user decides to expand the full raw payload.
 function getRdapVcardText(vcardArray, propertyName) {
@@ -33326,6 +34458,10 @@ function render(r) {
       // SPF exists only via direct nameserver query (not resolving via public
       // DNS): a Warning rather than a hard Failure.
       quotaWarn = true;
+    } else if (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null) {
+      // Macro-delegated / hosted SPF is indeterminate, not failed, matching
+      // getDomainQuotaStatus (tab dot + copied verdict) and the SPF card.
+      quotaWarn = true;
     } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
     if (doesSpfExceedLookupLimit(r, effectiveSpfPresent)) {
       quotaWarn = true;
@@ -33654,7 +34790,7 @@ function render(r) {
       ? t('spfMultipleRecordsDetected', { count: String(effectiveSpfRecords.length) })
       : '';
     const spfDetail = effectiveSpfPresent
-      ? ([(effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue), spfMultipleDetail, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
+      ? ([(effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue), spfMultipleDetail, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider, spfRequiredInclude: getSpfRequirementInclude(r) })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
     // A duplicate record set is a PermError, so it outranks every other SPF state here.
     const spfState = effectiveSpfMultipleRecords ? 'fail' : ((spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail'));
@@ -33836,6 +34972,10 @@ function render(r) {
   plainTable.push(`| ${t('spfStatusLabel')} | ${spfStatusCopyText} |`);
   plainTable.push(`| ${t('dkim1StatusLabel')} | ${dkim1StatusText} |`);
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
+  // Label reports checked against custom SPF/DKIM values so a PASS is never read as
+  // meeting the default Azure public cloud requirement.
+  const checkOverrideSummary = getCheckOverrideSummary(r);
+  if (checkOverrideSummary) plainTable.push(`| ${t('checkOptionsCopyLabel')} | ${checkOverrideSummary} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
   plainTable.push(`| ${t('reputationDnsbl')} | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
   plainTable.push(`| ${t('websiteCheck')} | ${websiteSummaryText} |`);
@@ -33868,6 +35008,7 @@ function render(r) {
   addRow(t('spfStatusLabel'), spfStatusCopyText);
   addRow(t('dkim1StatusLabel'), dkim1StatusText);
   addRow(t('dkim2StatusLabel'), dkim2StatusText);
+  if (checkOverrideSummary) addRow(t('checkOptionsCopyLabel'), checkOverrideSummary);
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
   // Manual push for Reputation to include parsed HTML link (multiRblHtml)
   htmlTableRows.push(`<tr><th>${escapeHtml(t('reputationDnsbl'))}</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
@@ -34368,7 +35509,7 @@ function render(r) {
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
   const spfLookupLimitCardDetail = spfCardExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
-  const spfCardValue = [spfCardBaseValue, spfMultipleNoteText, (spfMergedSuggestionText ? `${t('spfMergedSuggestionLabel')}\n${spfMergedSuggestionText}` : ''), spfMergedLimitNoteText, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, spfMultipleNoteText, (spfMergedSuggestionText ? `${t('spfMergedSuggestionLabel')}\n${spfMergedSuggestionText}` : ''), spfMergedLimitNoteText, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider, spfRequiredInclude: getSpfRequirementInclude(r) })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -34413,7 +35554,7 @@ function render(r) {
       // Mirror the ACS Outlook requirement verdict inside the panel. This
       // is the same string the card body would normally show under the raw
       // record. Empty when no verdict is available (e.g., no SPF at all).
-      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider });
+      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider, spfRequiredInclude: getSpfRequirementInclude(r) });
       // Color the requirement note to match the actual verdict instead of a
       // fixed green: PASS (include found) => green, indeterminate/macro-delegated
       // => amber, otherwise (include missing) => red. This stops a FAIL card from
@@ -34462,7 +35603,7 @@ function render(r) {
     spfCardTagClass,
     "spf",
     true,
-    spfExplainedTitleSuffix,
+    buildCheckOverrideBadgeHtml(isCustomSpfRequirement(r)) + spfExplainedTitleSuffix + buildCheckOptionsButtonHtml('spf'),
     spfExplainedAppend,
     spfBodyHtml
   ));
@@ -34623,7 +35764,7 @@ function render(r) {
   //      default escaped "No Records Available" text body)
   function buildDkimBodyHtml(domain, slot, acsCnameTarget, acsTxtValue, fallbackSelectors) {
     if (acsCnameTarget || acsTxtValue) {
-      const acsName = 'selector' + slot + '-azurecomm-prod-net._domainkey.' + (domain || '');
+      const acsName = getDkimRequirement(r, slot).selector + '.' + (domain || '');
       const block = buildDkimSelectorBlockHtml(acsName, acsCnameTarget, acsTxtValue);
       return block ? '<div class="dkim-record-list">' + block + '</div>' : '';
     }
@@ -34655,14 +35796,16 @@ function render(r) {
     : (errors.dkim ? "tag-fail" : (r.dkim1AcsConfigured ? "tag-pass" : (dkim1HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
   const dkim1ShowAcsMissingNotice = loaded.dkim && !errors.dkim
     && !dkim1HasAcsSelectorRecord && !!dkim1RichBody;
+  // The selector checked (Azure public cloud default or a custom requirement).
+  const dkim1Requirement = getDkimRequirement(r, 1);
   cards.push(card(
-    `${t('dkim1Title')} (selector1-azurecomm-prod-net._domainkey.${r.domain || ""})`,
+    `${t('dkim1Title')} (${dkim1Requirement.selector}.${r.domain || ""})`,
     dkim1PlainBody,
     dkim1Tag,
     dkim1TagClass,
     "dkim1",
     true,
-    '',
+    buildCheckOverrideBadgeHtml(dkim1Requirement.custom) + buildCheckOptionsButtonHtml('dkim1'),
     dkim1ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
     dkim1RichBody
   ));
@@ -34682,14 +35825,15 @@ function render(r) {
     : (errors.dkim ? "tag-fail" : (r.dkim2AcsConfigured ? "tag-pass" : (dkim2HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
   const dkim2ShowAcsMissingNotice = loaded.dkim && !errors.dkim
     && !dkim2HasAcsSelectorRecord && !!dkim2RichBody;
+  const dkim2Requirement = getDkimRequirement(r, 2);
   cards.push(card(
-    `${t('dkim2Title')} (selector2-azurecomm-prod-net._domainkey.${r.domain || ""})`,
+    `${t('dkim2Title')} (${dkim2Requirement.selector}.${r.domain || ""})`,
     dkim2PlainBody,
     dkim2Tag,
     dkim2TagClass,
     "dkim2",
     true,
-    '',
+    buildCheckOverrideBadgeHtml(dkim2Requirement.custom) + buildCheckOptionsButtonHtml('dkim2'),
     dkim2ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
     dkim2RichBody
   ));
@@ -37134,6 +38278,8 @@ function initializePage() {
   // Restore the user's saved DNS propagation settings before the first lookup so
   // the bootstrap ?domain= run already uses them.
   loadPropagationSettings();
+  // Likewise any custom SPF/DKIM requirements carried by a reloaded or shared link.
+  loadCheckOverridesFromUrl();
   // Reflect the bootstrap domain(s) in the address box: a single domain shows
   // as plain text, several show as chips.
   applyDomainsToInputBox(bootstrapDomains);
@@ -39169,7 +40315,7 @@ $functionNames = @(
   'Update-AnonymousMetrics','Get-AnonymousMetricsSnapshot','Update-AnonymousAuthMetrics',
   'Get-PublicSuffixListPath','Update-PublicSuffixListFile','ConvertFrom-PublicSuffixListFile','Get-PublicSuffixData','Get-PublicSuffixFromLabels',
   'Get-RegistrableDomain','ConvertTo-AsciiDomainName','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
-  'ConvertFrom-DnsTxtPresentationData','Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
+  'ConvertFrom-DnsTxtPresentationData','Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','ConvertTo-SpfIncludeOverride','ConvertTo-DkimSelectorOverride','Get-CheckOverridesFromQuery','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Select-SpfRecordFromSet','Merge-SpfRecordSet','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
   'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
@@ -39687,7 +40833,23 @@ if ($metricsEnabled) {
       return
     }
 
-    # /api/propagation is the only endpoint that takes tuning parameters beyond
+    # Optional custom SPF / DKIM requirements (Options dialog on the SPF and DKIM
+    # cards) for domains set up outside the Azure public cloud. Unusable values are
+    # rejected rather than ignored so a caller never gets a default-requirement
+    # verdict it believes was custom.
+    $checkOverrides = $null
+    if ($path -eq '/api/base' -or $path -eq '/api/dkim' -or $path -eq '/api/records') {
+      $overrideQuery = $null
+      try { $overrideQuery = $ctx.Request.QueryString } catch { $overrideQuery = $null }
+      $checkOverrides = Get-CheckOverridesFromQuery -QueryString $overrideQuery -Domain $domain
+      if ($checkOverrides.error) {
+        Write-Json -Context $ctx -Object @{ error = $checkOverrides.error } -StatusCode 400
+        return
+      }
+    }
+    $customDkimSelectors = @(@($checkOverrides.dkim1, $checkOverrides.dkim2) | Where-Object { $_ } | ForEach-Object { [string]$_.selector })
+
+    # /api/propagation also takes tuning parameters beyond
     # the domain (the SPA's per-card settings panel sends them). Everything is
     # read here, validated against a strict allowlist, and clamped, so the
     # handler below can pass the values straight through.
@@ -39749,14 +40911,14 @@ if ($metricsEnabled) {
             $null = Get-OrCreate-AnonymousSessionId -Context $ctx
             Update-AnonymousMetrics -Domain $domain -Started
           }
-          Write-Json -Context $ctx -Object (Get-DnsBaseStatus  -Domain $domain)
+          Write-Json -Context $ctx -Object (Get-DnsBaseStatus  -Domain $domain -SpfRequiredInclude $checkOverrides.spfInclude)
           if ($metricsEnabled -and ($true -eq $analyticsConsentState)) { Update-AnonymousMetrics -Domain $domain -Completed }
         }
         "/api/mx"    { Write-Json -Context $ctx -Object (Get-DnsMxStatus    -Domain $domain) }
-        "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain) }
+        "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain -AdditionalDkimSelectors $customDkimSelectors) }
         "/api/whois" { Write-Json -Context $ctx -Object (Get-DomainRegistrationStatus -Domain $domain) }
         "/api/dmarc" { Write-Json -Context $ctx -Object (Get-DnsDmarcStatus -Domain $domain) }
-        "/api/dkim"  { Write-Json -Context $ctx -Object (Get-DnsDkimStatus  -Domain $domain) }
+        "/api/dkim"  { Write-Json -Context $ctx -Object (Get-DnsDkimStatus  -Domain $domain -Dkim1Override $checkOverrides.dkim1 -Dkim2Override $checkOverrides.dkim2) }
         "/api/cname" { Write-Json -Context $ctx -Object (Get-DnsCnameStatus -Domain $domain) }
         "/api/reputation" { Write-Json -Context $ctx -Object (Get-DnsReputationStatus -Domain $domain) }
         "/api/website" { Write-Json -Context $ctx -Object (Get-WebsiteProbeStatus -Domain $domain) }
@@ -39898,13 +41060,22 @@ if ($metricsEnabled) {
       return
     }
 
+    # Same optional SPF / DKIM requirement overrides as /api/base, /api/dkim and /api/records.
+    $overrideQuery = $null
+    try { $overrideQuery = $ctx.Request.QueryString } catch { $overrideQuery = $null }
+    $checkOverrides = Get-CheckOverridesFromQuery -QueryString $overrideQuery -Domain $domain
+    if ($checkOverrides.error) {
+      Write-Json -Context $ctx -Object @{ error = $checkOverrides.error; acsReady = $false } -StatusCode 400
+      return
+    }
+
     # Serialize duplicate work for this domain + endpoint, but allow other endpoints
     # for the same domain to execute in parallel.
     $sem = Get-DomainSemaphore -domain $domain -scope $path
     $null = $sem.Wait()
     try {
       if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Started }
-      $result = Get-AcsDnsStatus -Domain $domain
+      $result = Get-AcsDnsStatus -Domain $domain -SpfRequiredInclude $checkOverrides.spfInclude -Dkim1Override $checkOverrides.dkim1 -Dkim2Override $checkOverrides.dkim2
       Write-Json -Context $ctx -Object $result
       if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Completed }
     }

@@ -345,7 +345,23 @@ if ($metricsEnabled) {
       return
     }
 
-    # /api/propagation is the only endpoint that takes tuning parameters beyond
+    # Optional custom SPF / DKIM requirements (Options dialog on the SPF and DKIM
+    # cards) for domains set up outside the Azure public cloud. Unusable values are
+    # rejected rather than ignored so a caller never gets a default-requirement
+    # verdict it believes was custom.
+    $checkOverrides = $null
+    if ($path -eq '/api/base' -or $path -eq '/api/dkim' -or $path -eq '/api/records') {
+      $overrideQuery = $null
+      try { $overrideQuery = $ctx.Request.QueryString } catch { $overrideQuery = $null }
+      $checkOverrides = Get-CheckOverridesFromQuery -QueryString $overrideQuery -Domain $domain
+      if ($checkOverrides.error) {
+        Write-Json -Context $ctx -Object @{ error = $checkOverrides.error } -StatusCode 400
+        return
+      }
+    }
+    $customDkimSelectors = @(@($checkOverrides.dkim1, $checkOverrides.dkim2) | Where-Object { $_ } | ForEach-Object { [string]$_.selector })
+
+    # /api/propagation also takes tuning parameters beyond
     # the domain (the SPA's per-card settings panel sends them). Everything is
     # read here, validated against a strict allowlist, and clamped, so the
     # handler below can pass the values straight through.
@@ -407,14 +423,14 @@ if ($metricsEnabled) {
             $null = Get-OrCreate-AnonymousSessionId -Context $ctx
             Update-AnonymousMetrics -Domain $domain -Started
           }
-          Write-Json -Context $ctx -Object (Get-DnsBaseStatus  -Domain $domain)
+          Write-Json -Context $ctx -Object (Get-DnsBaseStatus  -Domain $domain -SpfRequiredInclude $checkOverrides.spfInclude)
           if ($metricsEnabled -and ($true -eq $analyticsConsentState)) { Update-AnonymousMetrics -Domain $domain -Completed }
         }
         "/api/mx"    { Write-Json -Context $ctx -Object (Get-DnsMxStatus    -Domain $domain) }
-        "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain) }
+        "/api/records" { Write-Json -Context $ctx -Object (Get-DnsRecordsStatus -Domain $domain -AdditionalDkimSelectors $customDkimSelectors) }
         "/api/whois" { Write-Json -Context $ctx -Object (Get-DomainRegistrationStatus -Domain $domain) }
         "/api/dmarc" { Write-Json -Context $ctx -Object (Get-DnsDmarcStatus -Domain $domain) }
-        "/api/dkim"  { Write-Json -Context $ctx -Object (Get-DnsDkimStatus  -Domain $domain) }
+        "/api/dkim"  { Write-Json -Context $ctx -Object (Get-DnsDkimStatus  -Domain $domain -Dkim1Override $checkOverrides.dkim1 -Dkim2Override $checkOverrides.dkim2) }
         "/api/cname" { Write-Json -Context $ctx -Object (Get-DnsCnameStatus -Domain $domain) }
         "/api/reputation" { Write-Json -Context $ctx -Object (Get-DnsReputationStatus -Domain $domain) }
         "/api/website" { Write-Json -Context $ctx -Object (Get-WebsiteProbeStatus -Domain $domain) }
@@ -556,13 +572,22 @@ if ($metricsEnabled) {
       return
     }
 
+    # Same optional SPF / DKIM requirement overrides as /api/base, /api/dkim and /api/records.
+    $overrideQuery = $null
+    try { $overrideQuery = $ctx.Request.QueryString } catch { $overrideQuery = $null }
+    $checkOverrides = Get-CheckOverridesFromQuery -QueryString $overrideQuery -Domain $domain
+    if ($checkOverrides.error) {
+      Write-Json -Context $ctx -Object @{ error = $checkOverrides.error; acsReady = $false } -StatusCode 400
+      return
+    }
+
     # Serialize duplicate work for this domain + endpoint, but allow other endpoints
     # for the same domain to execute in parallel.
     $sem = Get-DomainSemaphore -domain $domain -scope $path
     $null = $sem.Wait()
     try {
       if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Started }
-      $result = Get-AcsDnsStatus -Domain $domain
+      $result = Get-AcsDnsStatus -Domain $domain -SpfRequiredInclude $checkOverrides.spfInclude -Dkim1Override $checkOverrides.dkim1 -Dkim2Override $checkOverrides.dkim2
       Write-Json -Context $ctx -Object $result
       if ($metricsEnabled) { Update-AnonymousMetrics -Domain $domain -Completed }
     }

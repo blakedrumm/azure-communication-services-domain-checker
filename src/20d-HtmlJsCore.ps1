@@ -532,8 +532,8 @@ function lookup(options = {}) {
       headers['Cache-Control'] = 'no-cache';
       headers['Pragma'] = 'no-cache';
       const cacheBuster = "_=" + Date.now();
-      // extraQuery carries endpoint-specific options (currently only the DNS
-      // propagation settings); it is already URL-encoded by its builder.
+      // extraQuery carries endpoint-specific options (the DNS propagation settings
+      // and any custom SPF/DKIM requirements); it is already URL-encoded by its builder.
       const extra = extraQuery ? ("&" + extraQuery) : "";
       const url = path + "?domain=" + encodeURIComponent(domain) + "&" + cacheBuster + extra;
       const r = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
@@ -595,12 +595,12 @@ function hideTopBarItem(element) {
   render(resultObj);
 
   const requests = [
-    { key: "base",  path: "/api/base"  },
+    { key: "base",  path: "/api/base", query: buildSpfOverrideQuery },
     { key: "mx",    path: "/api/mx"    },
-    { key: "records", path: "/api/records" },
+    { key: "records", path: "/api/records", query: buildDkimOverrideQuery },
     { key: "whois", path: "/api/whois" },
     { key: "dmarc", path: "/api/dmarc" },
-    { key: "dkim",  path: "/api/dkim"  },
+    { key: "dkim",  path: "/api/dkim", query: buildDkimOverrideQuery },
     { key: "cname", path: "/api/cname" },
     { key: "reputation", path: "/api/reputation" },
     { key: "website", path: "/api/website" },
@@ -682,6 +682,7 @@ function hideTopBarItem(element) {
         resultObj.dnsRecordsError = data.error || null;
       } else {
         Object.assign(resultObj, data);
+        rememberEndpointFields(resultObj, key, data);
       }
       resultObj._loaded[key] = true;
       delete resultObj._errors[key];
@@ -2478,6 +2479,288 @@ async function rerunPropagationCheck() {
   }
 }
 
+// ---- Custom SPF / DKIM requirements: Options dialog ----
+//
+// The Options buttons on the SPF and DKIM cards open one shared native <dialog>
+// (#checkOptionsDialog, declared in 20a outside #results so partial renders cannot
+// discard it). It holds every override field, so the SPF include and both DKIM
+// selectors copied from the Azure portal are applied with a single re-check.
+// State, validation and the query builders live in 20c (checkOverrides).
+let checkOptionsReturnScope = null;
+let checkOverrideRerunToken = 0;
+// Fields each endpoint merged into a result object. A targeted re-check clears them
+// first so the cards render exactly as they do while a lookup is loading, instead of
+// briefly showing verdicts computed against the previous requirement.
+const resultEndpointFields = new WeakMap();
+
+function rememberEndpointFields(result, key, data) {
+  const byKey = resultEndpointFields.get(result) || {};
+  byKey[key] = Object.keys(data || {});
+  resultEndpointFields.set(result, byKey);
+}
+
+// Visible (kept in screenshots) so a captured verdict is never mistaken for the
+// default requirement.
+function buildCheckOverrideBadgeHtml(isCustom) {
+  if (!isCustom) return '';
+  return `<span class="check-override-badge" title="${escapeHtml(t('checkOptionsCustomBadgeTitle'))}">${escapeHtml(t('checkOptionsCustomBadge'))}</span>`;
+}
+
+// `scope` is a fixed literal ('spf' | 'dkim1' | 'dkim2'), never user input.
+function buildCheckOptionsButtonHtml(scope) {
+  return `<button type="button" class="copy-btn hide-on-screenshot check-options-btn" aria-haspopup="dialog" aria-controls="checkOptionsDialog" title="${escapeHtml(t('checkOptionsButtonTitle'))}" onclick="event.stopPropagation(); openCheckOptions('${scope}')">${escapeHtml(t('checkOptionsButton'))}</button>`;
+}
+
+function renderCheckOptionsDialog() {
+  const dialog = document.getElementById('checkOptionsDialog');
+  if (!dialog) return;
+  const defaults = CHECK_OVERRIDE_DEFAULTS;
+  // Placeholders show the default each blank field falls back to.
+  const field = (id, labelKey, value, placeholder) => `
+        <div class="check-options-field">
+          <label for="${id}">${escapeHtml(t(labelKey))}</label>
+          <input type="text" id="${id}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" maxlength="512" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" dir="ltr">
+        </div>`;
+  const dkimGroup = slot => `
+      <fieldset class="check-options-group">
+        <legend>${escapeHtml(t('dkim' + slot + 'Title'))}</legend>
+        ${field('checkOptionDkim' + slot + 'Selector', 'checkOptionsDkimNameLabel', checkOverrides['dkim' + slot + 'Selector'], defaults['dkim' + slot + 'Selector'])}
+        ${field('checkOptionDkim' + slot + 'Target', 'checkOptionsDkimValueLabel', checkOverrides['dkim' + slot + 'Target'], defaults['dkim' + slot + 'Target'])}
+        <p class="check-options-hint">${escapeHtml(t('checkOptionsDkimHint'))}</p>
+        <p id="checkOptionDkim${slot}Error" class="check-options-error" role="alert" hidden></p>
+      </fieldset>`;
+  dialog.innerHTML = `
+    <form class="check-options-form" novalidate onsubmit="event.preventDefault(); applyCheckOptions();">
+      <div class="check-options-header">
+        <h2 id="checkOptionsTitle">${escapeHtml(t('checkOptionsTitle'))}</h2>
+        <button type="button" class="check-options-close" aria-label="${escapeHtml(t('checkOptionsClose'))}" title="${escapeHtml(t('checkOptionsClose'))}" onclick="closeCheckOptions()">&#x2715;</button>
+      </div>
+      <div class="check-options-body">
+        <p id="checkOptionsIntro" class="check-options-intro">${escapeHtml(t('checkOptionsIntro'))}</p>
+        <fieldset class="check-options-group">
+          <legend>SPF</legend>
+          ${field('checkOptionSpfInclude', 'checkOptionsSpfLabel', checkOverrides.spfInclude, defaults.spfInclude)}
+          <p class="check-options-hint">${escapeHtml(t('checkOptionsSpfHint'))}</p>
+          <p id="checkOptionSpfError" class="check-options-error" role="alert" hidden></p>
+        </fieldset>
+        ${dkimGroup(1)}
+        ${dkimGroup(2)}
+      </div>
+      <div class="check-options-actions">
+        <button type="button" class="copy-btn" onclick="resetCheckOptions()">${escapeHtml(t('checkOptionsReset'))}</button>
+        <button type="button" class="copy-btn" onclick="closeCheckOptions()">${escapeHtml(t('checkOptionsCancel'))}</button>
+        <button type="submit" class="primary">${escapeHtml(t('checkOptionsApply'))}</button>
+      </div>
+    </form>`;
+}
+
+// Close handling is wired once. The native 'close' event also fires for Escape.
+function wireCheckOptionsDialog(dialog) {
+  if (dialog.dataset.wired === '1') return;
+  dialog.dataset.wired = '1';
+  dialog.addEventListener('close', () => {
+    document.documentElement.classList.remove('check-options-open');
+    // The opener lives in #results and may have been re-rendered, so focus its current copy.
+    const opener = checkOptionsReturnScope ? document.querySelector('#card-' + checkOptionsReturnScope + ' .check-options-btn') : null;
+    if (opener) opener.focus({ preventScroll: true });
+  });
+  // Embedded browsers may not close a native dialog on Escape by themselves.
+  dialog.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || event.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dialog.close();
+  });
+  // Only a click outside the dialog bounds is a backdrop click.
+  dialog.addEventListener('click', event => {
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+  });
+}
+
+function openCheckOptions(scope) {
+  const dialog = document.getElementById('checkOptionsDialog');
+  if (!dialog || typeof dialog.showModal !== 'function') return;
+  wireCheckOptionsDialog(dialog);
+  checkOptionsReturnScope = scope || null;
+  renderCheckOptionsDialog();
+  if (!dialog.open) dialog.showModal();
+  document.documentElement.classList.add('check-options-open');
+  const focusId = { spf: 'checkOptionSpfInclude', dkim1: 'checkOptionDkim1Selector', dkim2: 'checkOptionDkim2Selector' }[scope] || 'checkOptionSpfInclude';
+  const input = document.getElementById(focusId);
+  if (input) input.focus({ preventScroll: true });
+}
+
+function closeCheckOptions() {
+  const dialog = document.getElementById('checkOptionsDialog');
+  if (dialog && dialog.open) dialog.close();
+}
+
+// render() rebuilds every card, which would drop keyboard focus from the Options
+// button the dialog returned it to; move it to that button's re-rendered copy.
+function renderKeepingOptionsFocus(result) {
+  const focused = document.activeElement;
+  const card = focused && focused.classList && focused.classList.contains('check-options-btn') ? focused.closest('.card[id]') : null;
+  render(result);
+  if (card && !focused.isConnected) {
+    const replacement = document.querySelector('#' + card.id + ' .check-options-btn');
+    if (replacement) replacement.focus({ preventScroll: true });
+  }
+}
+
+function applyCheckOptions() {
+  const read = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const spf = normalizeSpfIncludeOverride(read('checkOptionSpfInclude'));
+  const dkim1 = normalizeDkimOverride(read('checkOptionDkim1Selector'), read('checkOptionDkim1Target'));
+  const dkim2 = normalizeDkimOverride(read('checkOptionDkim2Selector'), read('checkOptionDkim2Target'));
+  // A usable Value with an unusable pairing means the Name is what needs fixing.
+  const dkimProblemField = slot => isValidOverrideHostName(trimOverrideQuotes(read('checkOptionDkim' + slot + 'Target')).replace(/\.+$/, '').toLowerCase())
+    ? 'checkOptionDkim' + slot + 'Selector'
+    : 'checkOptionDkim' + slot + 'Target';
+  const checks = [
+    { errorId: 'checkOptionSpfError', inputId: 'checkOptionSpfInclude', message: spf === null ? t('checkOptionsInvalidSpf') : '' },
+    { errorId: 'checkOptionDkim1Error', inputId: dkimProblemField(1), message: dkim1 === null ? t('checkOptionsInvalidDkim') : '' },
+    { errorId: 'checkOptionDkim2Error', inputId: dkimProblemField(2), message: dkim2 === null ? t('checkOptionsInvalidDkim') : '' }
+  ];
+  document.querySelectorAll('#checkOptionsDialog input[aria-invalid]').forEach(el => el.removeAttribute('aria-invalid'));
+  let firstInvalid = null;
+  checks.forEach(check => {
+    const errorEl = document.getElementById(check.errorId);
+    if (errorEl) {
+      errorEl.textContent = check.message;
+      errorEl.hidden = !check.message;
+    }
+    const inputEl = check.message ? document.getElementById(check.inputId) : null;
+    if (inputEl) {
+      inputEl.setAttribute('aria-invalid', 'true');
+      if (!firstInvalid) firstInvalid = inputEl;
+    }
+  });
+  if (checks.some(check => check.message)) {
+    if (firstInvalid) firstInvalid.focus();
+    return;
+  }
+  setCheckOverrides(toCheckOverrideState(spf, dkim1, dkim2));
+  closeCheckOptions();
+}
+
+function resetCheckOptions() {
+  setCheckOverrides(EMPTY_CHECK_OVERRIDES);
+  closeCheckOptions();
+}
+
+// Apply new overrides, keep the page URL in sync, and re-check only what changed.
+function setCheckOverrides(next) {
+  const previous = checkOverrides;
+  checkOverrides = Object.assign({}, EMPTY_CHECK_OVERRIDES, next);
+  syncCheckOverridesToUrl();
+  const keys = [];
+  if (previous.spfInclude !== checkOverrides.spfInclude) keys.push('base');
+  if (['dkim1Selector', 'dkim1Target', 'dkim2Selector', 'dkim2Target'].some(key => previous[key] !== checkOverrides[key])) keys.push('dkim', 'records');
+  if (keys.length > 0) rerunCheckOverrideEndpoints(keys);
+}
+
+// Re-fetch only the endpoints a changed requirement affects (/api/base for SPF,
+// /api/dkim and /api/records for DKIM) for every checked domain, visible tab first,
+// so the other checks are not re-run. A lookup still in flight was started with the
+// previous values, so it is restarted instead: otherwise one of its late responses
+// could land after (and silently undo) the re-check.
+async function rerunCheckOverrideEndpoints(keys) {
+  const domains = (multiDomainState && Array.isArray(multiDomainState.domains)) ? multiDomainState.domains.slice() : [];
+  if (domains.length === 0) return;
+  if (lookupInProgress || multiDomainState.running) {
+    if (domains.length > 1) runMultiDomainLookup(domains, { animateTopIntro: false });
+    else lookup({ domainOverride: domains[0] });
+    return;
+  }
+
+  const active = multiDomainState.active;
+  const ordered = [active].concat(domains.filter(d => d !== active))
+    .filter(d => d && multiDomainState.results && multiDomainState.results[d]);
+  if (ordered.length === 0) return;
+
+  const token = ++checkOverrideRerunToken;
+  const endpoints = {
+    base: { path: '/api/base', query: buildSpfOverrideQuery },
+    dkim: { path: '/api/dkim', query: buildDkimOverrideQuery },
+    records: { path: '/api/records', query: buildDkimOverrideQuery }
+  };
+  // A newer re-check or a new lookup (which replaces the result objects) wins.
+  const isCurrent = (domain, target) => token === checkOverrideRerunToken && multiDomainState.results[domain] === target;
+
+  // Put the affected cards back to LOADING first so no verdict computed with the
+  // previous requirement stays on screen while the re-check runs.
+  ordered.forEach(domain => {
+    const target = multiDomainState.results[domain];
+    const fieldsByKey = resultEndpointFields.get(target) || {};
+    target._loaded = target._loaded || {};
+    target._errors = target._errors || {};
+    keys.forEach(key => {
+      if (key === 'records') {
+        delete target.dnsRecords;
+        delete target.dnsRecordsError;
+      } else {
+        (fieldsByKey[key] || []).forEach(field => { if (field !== 'domain') delete target[field]; });
+      }
+      target._loaded[key] = false;
+      delete target._errors[key];
+    });
+    delete target.collectedAt;
+    recomputeDerived(target);
+  });
+  if (multiDomainState.results[active]) render(multiDomainState.results[active]);
+  updateDomainTabsUI();
+
+  for (const domain of ordered) {
+    const target = multiDomainState.results[domain];
+    if (!isCurrent(domain, target)) return;
+    await Promise.all(keys.map(async key => {
+      // Registered with the lookup controllers so starting a new lookup aborts it.
+      const controller = new AbortController();
+      activeLookup.controllers.push(controller);
+      try {
+        let headers = {};
+        const apiKey = (acsApiKey || '').trim();
+        if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
+        headers = buildConsentRequestHeaders(headers);
+        headers['Cache-Control'] = 'no-cache';
+        headers['Pragma'] = 'no-cache';
+        const extra = endpoints[key].query();
+        const url = endpoints[key].path + '?domain=' + encodeURIComponent(domain) + '&_=' + Date.now() + (extra ? '&' + extra : '');
+        const resp = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
+        if (!resp.ok) {
+          let body = '';
+          try { body = await resp.text(); } catch {}
+          throw new Error(`HTTP ${resp.status}${resp.statusText ? ' ' + resp.statusText : ''}${body ? ': ' + body.trim() : ''}`);
+        }
+        const raw = await resp.arrayBuffer();
+        const data = repairObjectStrings(JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(raw)));
+        if (!isCurrent(domain, target)) return;
+        if (key === 'records') {
+          target.dnsRecords = Array.isArray(data.records) ? data.records : [];
+          target.dnsRecordsError = data.error || null;
+        } else {
+          Object.assign(target, data);
+          rememberEndpointFields(target, key, data);
+        }
+        target._loaded[key] = true;
+      } catch (err) {
+        if ((err && err.name === 'AbortError') || !isCurrent(domain, target)) return;
+        target._loaded[key] = true;
+        target._errors[key] = (err && err.message) ? err.message : String(err);
+      } finally {
+        activeLookup.controllers = (activeLookup.controllers || []).filter(c => c !== controller);
+      }
+      // Paint each endpoint as soon as it answers; /api/records is much slower than
+      // /api/base and /api/dkim and must not hold their cards on LOADING.
+      recomputeDerived(target);
+      renderKeepingOptionsFocus(target);
+      updateDomainTabsUI();
+    }));
+  }
+}
+
 // Convert RDAP JSON into small grouped sections first so the registration card
 // is readable before the user decides to expand the full raw payload.
 function getRdapVcardText(vcardArray, propertyName) {
@@ -3596,6 +3879,10 @@ function render(r) {
       // SPF exists only via direct nameserver query (not resolving via public
       // DNS): a Warning rather than a hard Failure.
       quotaWarn = true;
+    } else if (effectiveSpfPresent && effectiveSpfHasRequiredInclude === null) {
+      // Macro-delegated / hosted SPF is indeterminate, not failed, matching
+      // getDomainQuotaStatus (tab dot + copied verdict) and the SPF card.
+      quotaWarn = true;
     } else if (!effectiveSpfPresent || effectiveSpfHasRequiredInclude !== true) { quotaFail = true; }
     if (doesSpfExceedLookupLimit(r, effectiveSpfPresent)) {
       quotaWarn = true;
@@ -3924,7 +4211,7 @@ function render(r) {
       ? t('spfMultipleRecordsDetected', { count: String(effectiveSpfRecords.length) })
       : '';
     const spfDetail = effectiveSpfPresent
-      ? ([(effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue), spfMultipleDetail, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n"))
+      ? ([(effectiveSpfMultipleRecords ? effectiveSpfRecords.join("\n") : effectiveSpfValue), spfMultipleDetail, (spfIsNameserverRecovered ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider, spfRequiredInclude: getSpfRequirementInclude(r) })].filter(Boolean).join("\n\n"))
       : (spfIsServfail ? t('spfServfailDetected') : t('noSpfRecordDetected'));
     // A duplicate record set is a PermError, so it outranks every other SPF state here.
     const spfState = effectiveSpfMultipleRecords ? 'fail' : ((spfPassesRequirement && !spfIsNameserverRecovered && !spfExceedsLookupLimit) ? 'pass' : ((spfIsIndeterminate || spfIsServfail || spfIsNameserverRecovered || spfExceedsLookupLimit) ? 'warn' : 'fail'));
@@ -4106,6 +4393,10 @@ function render(r) {
   plainTable.push(`| ${t('spfStatusLabel')} | ${spfStatusCopyText} |`);
   plainTable.push(`| ${t('dkim1StatusLabel')} | ${dkim1StatusText} |`);
   plainTable.push(`| ${t('dkim2StatusLabel')} | ${dkim2StatusText} |`);
+  // Label reports checked against custom SPF/DKIM values so a PASS is never read as
+  // meeting the default Azure public cloud requirement.
+  const checkOverrideSummary = getCheckOverrideSummary(r);
+  if (checkOverrideSummary) plainTable.push(`| ${t('checkOptionsCopyLabel')} | ${checkOverrideSummary} |`);
   plainTable.push(`| ${t('dmarcStatusLabel')} | ${dmarcStatusText} |`);
   plainTable.push(`| ${t('reputationDnsbl')} | ${repSummaryText} [MultiRBL: ${multiRblLink}] |`);
   plainTable.push(`| ${t('websiteCheck')} | ${websiteSummaryText} |`);
@@ -4138,6 +4429,7 @@ function render(r) {
   addRow(t('spfStatusLabel'), spfStatusCopyText);
   addRow(t('dkim1StatusLabel'), dkim1StatusText);
   addRow(t('dkim2StatusLabel'), dkim2StatusText);
+  if (checkOverrideSummary) addRow(t('checkOptionsCopyLabel'), checkOverrideSummary);
   addRow(t('dmarcStatusLabel'), dmarcStatusText);
   // Manual push for Reputation to include parsed HTML link (multiRblHtml)
   htmlTableRows.push(`<tr><th>${escapeHtml(t('reputationDnsbl'))}</th><td>${escapeHtml(repSummaryText)}<br>${multiRblHtml}</td></tr>`);
@@ -4638,7 +4930,7 @@ function render(r) {
     : (baseError ? (errors.base || t('error')) : t('loadingValue'));
   const spfCardExceedsLookupLimit = doesSpfExceedLookupLimit(r, effectiveSpfPresent);
   const spfLookupLimitCardDetail = spfCardExceedsLookupLimit ? getSpfLookupLimitWarningText(r) : '';
-  const spfCardValue = [spfCardBaseValue, spfMultipleNoteText, (spfMergedSuggestionText ? `${t('spfMergedSuggestionLabel')}\n${spfMergedSuggestionText}` : ''), spfMergedLimitNoteText, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider })].filter(Boolean).join("\n\n");
+  const spfCardValue = [spfCardBaseValue, spfMultipleNoteText, (spfMergedSuggestionText ? `${t('spfMergedSuggestionLabel')}\n${spfMergedSuggestionText}` : ''), spfMergedLimitNoteText, (recoveredFromNameservers && effectiveSpfPresent ? t('spfRecoveredFromNameservers') : ''), spfLookupLimitCardDetail, getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider, spfRequiredInclude: getSpfRequirementInclude(r) })].filter(Boolean).join("\n\n");
   // The SPF card body intentionally stops at the record value + ACS Outlook
   // requirement verdict. The full expanded SPF chain (per-node domain,
   // resolved TXT, and lookup-count contributions) is rendered as a
@@ -4683,7 +4975,7 @@ function render(r) {
       // Mirror the ACS Outlook requirement verdict inside the panel. This
       // is the same string the card body would normally show under the raw
       // record. Empty when no verdict is available (e.g., no SPF at all).
-      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider });
+      const spfRequirementText = getLocalizedSpfRequirementSummary({ spfPresent: effectiveSpfPresent, spfHasRequiredInclude: effectiveSpfHasRequiredInclude, spfRequiredIncludeMatchType: effectiveSpfRequiredIncludeMatchType, spfRequiredIncludeProvider: r && r.spfRequiredIncludeProvider, spfRequiredInclude: getSpfRequirementInclude(r) });
       // Color the requirement note to match the actual verdict instead of a
       // fixed green: PASS (include found) => green, indeterminate/macro-delegated
       // => amber, otherwise (include missing) => red. This stops a FAIL card from
@@ -4732,7 +5024,7 @@ function render(r) {
     spfCardTagClass,
     "spf",
     true,
-    spfExplainedTitleSuffix,
+    buildCheckOverrideBadgeHtml(isCustomSpfRequirement(r)) + spfExplainedTitleSuffix + buildCheckOptionsButtonHtml('spf'),
     spfExplainedAppend,
     spfBodyHtml
   ));
@@ -4893,7 +5185,7 @@ function render(r) {
   //      default escaped "No Records Available" text body)
   function buildDkimBodyHtml(domain, slot, acsCnameTarget, acsTxtValue, fallbackSelectors) {
     if (acsCnameTarget || acsTxtValue) {
-      const acsName = 'selector' + slot + '-azurecomm-prod-net._domainkey.' + (domain || '');
+      const acsName = getDkimRequirement(r, slot).selector + '.' + (domain || '');
       const block = buildDkimSelectorBlockHtml(acsName, acsCnameTarget, acsTxtValue);
       return block ? '<div class="dkim-record-list">' + block + '</div>' : '';
     }
@@ -4925,14 +5217,16 @@ function render(r) {
     : (errors.dkim ? "tag-fail" : (r.dkim1AcsConfigured ? "tag-pass" : (dkim1HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
   const dkim1ShowAcsMissingNotice = loaded.dkim && !errors.dkim
     && !dkim1HasAcsSelectorRecord && !!dkim1RichBody;
+  // The selector checked (Azure public cloud default or a custom requirement).
+  const dkim1Requirement = getDkimRequirement(r, 1);
   cards.push(card(
-    `${t('dkim1Title')} (selector1-azurecomm-prod-net._domainkey.${r.domain || ""})`,
+    `${t('dkim1Title')} (${dkim1Requirement.selector}.${r.domain || ""})`,
     dkim1PlainBody,
     dkim1Tag,
     dkim1TagClass,
     "dkim1",
     true,
-    '',
+    buildCheckOverrideBadgeHtml(dkim1Requirement.custom) + buildCheckOptionsButtonHtml('dkim1'),
     dkim1ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
     dkim1RichBody
   ));
@@ -4952,14 +5246,15 @@ function render(r) {
     : (errors.dkim ? "tag-fail" : (r.dkim2AcsConfigured ? "tag-pass" : (dkim2HasAcsSelectorRecord ? "tag-fail" : "tag-info")));
   const dkim2ShowAcsMissingNotice = loaded.dkim && !errors.dkim
     && !dkim2HasAcsSelectorRecord && !!dkim2RichBody;
+  const dkim2Requirement = getDkimRequirement(r, 2);
   cards.push(card(
-    `${t('dkim2Title')} (selector2-azurecomm-prod-net._domainkey.${r.domain || ""})`,
+    `${t('dkim2Title')} (${dkim2Requirement.selector}.${r.domain || ""})`,
     dkim2PlainBody,
     dkim2Tag,
     dkim2TagClass,
     "dkim2",
     true,
-    '',
+    buildCheckOverrideBadgeHtml(dkim2Requirement.custom) + buildCheckOptionsButtonHtml('dkim2'),
     dkim2ShowAcsMissingNotice ? buildDkimAcsMissingNotice() : '',
     dkim2RichBody
   ));
@@ -7404,6 +7699,8 @@ function initializePage() {
   // Restore the user's saved DNS propagation settings before the first lookup so
   // the bootstrap ?domain= run already uses them.
   loadPropagationSettings();
+  // Likewise any custom SPF/DKIM requirements carried by a reloaded or shared link.
+  loadCheckOverridesFromUrl();
   // Reflect the bootstrap domain(s) in the address box: a single domain shows
   // as plain text, several show as chips.
   applyDomainsToInputBox(bootstrapDomains);

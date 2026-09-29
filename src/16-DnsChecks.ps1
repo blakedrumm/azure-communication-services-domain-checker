@@ -1,10 +1,18 @@
 # ===== Individual DNS Check Functions =====
 function Get-DnsBaseStatus {
-  param([string]$Domain)
+  param(
+    [string]$Domain,
+    # Include the SPF requirement is checked against; blank means the Azure public cloud
+    # default. Callers pass a value already normalized by ConvertTo-SpfIncludeOverride.
+    [string]$SpfRequiredInclude
+  )
 
   # Base/root TXT checks.
   # - Collect all root TXT strings.
   # - Detect SPF (v=spf1...) and ACS verification token (ms-domain-verification...).
+
+  $requiredInclude = if ([string]::IsNullOrWhiteSpace($SpfRequiredInclude)) { 'spf.protection.outlook.com' } else { $SpfRequiredInclude.Trim().TrimEnd('.').ToLowerInvariant() }
+  $requiredIncludeCustom = ($requiredInclude -ne 'spf.protection.outlook.com')
 
   $spf        = $null
   $acsTxt     = $null
@@ -74,7 +82,7 @@ function Get-DnsBaseStatus {
     # arbitrary record (RRset order varies per resolver and per query).
     $spfRecords = @($txtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
     $acsValues  = @($txtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' })
-    $spf    = Select-SpfRecordFromSet -Records $spfRecords
+    $spf    = Select-SpfRecordFromSet -Records $spfRecords -RequiredInclude $requiredInclude
     $acsTxt = $(if ($acsValues.Count -gt 0) { $acsValues[0] } else { $null })
 
     if ($txtRecords.Count -eq 0) {
@@ -98,7 +106,7 @@ function Get-DnsBaseStatus {
             $txtUsedParent = $true
 
             $parentSpfRecords = @($parentTxtRecords | Where-Object { $_ -match '(?i)^v=spf1\b' })
-            $parentSpf = Select-SpfRecordFromSet -Records $parentSpfRecords
+            $parentSpf = Select-SpfRecordFromSet -Records $parentSpfRecords -RequiredInclude $requiredInclude
             $parentAcsTxt = @($parentTxtRecords | Where-Object { $_ -match '(?i)ms-domain-verification' } | Select-Object -First 1)[0]
             break
           }
@@ -126,18 +134,19 @@ function Get-DnsBaseStatus {
   $acsPresent = -not $dnsFailed -and [bool]$acsTxt
 
   if ($spfPresent -and -not [string]::IsNullOrWhiteSpace($spf)) {
+    $requirementHeading = if ($requiredIncludeCustom) { "ACS SPF requirement (custom include $requiredInclude):" } else { 'ACS Outlook SPF requirement:' }
     try {
       $spfAnalysis = Get-SpfNestedAnalysis -SpfRecord $spf -Domain $Domain
-      $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $spfAnalysis
+      $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $spfAnalysis -RequiredInclude $requiredInclude
       $spfExpandedLines = @(Format-SpfNestedAnalysisText -Analysis $spfAnalysis)
       if ($spfOutlookRequirement -and -not [string]::IsNullOrWhiteSpace([string]$spfOutlookRequirement.detail)) {
         $spfExpandedLines += ''
-        $spfExpandedLines += 'ACS Outlook SPF requirement:'
+        $spfExpandedLines += $requirementHeading
         $spfExpandedLines += [string]$spfOutlookRequirement.detail
       }
       elseif ($spfOutlookRequirement -and -not [string]::IsNullOrWhiteSpace([string]$spfOutlookRequirement.error)) {
         $spfExpandedLines += ''
-        $spfExpandedLines += 'ACS Outlook SPF requirement:'
+        $spfExpandedLines += $requirementHeading
         $spfExpandedLines += [string]$spfOutlookRequirement.error
       }
       if ($spfExpandedLines.Count -gt 0) {
@@ -146,7 +155,7 @@ function Get-DnsBaseStatus {
       $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $spfAnalysis -OutlookRequirementStatus $spfOutlookRequirement)
     } catch {
       try {
-        $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $null
+        $spfOutlookRequirement = Get-SpfOutlookRequirementStatus -Domain $Domain -SpfRecord $spf -SpfAnalysis $null -RequiredInclude $requiredInclude
         $spfGuidance = @(Get-SpfGuidance -SpfRecord $spf -Domain $Domain -SpfAnalysis $null -OutlookRequirementStatus $spfOutlookRequirement)
       } catch { }
     }
@@ -234,7 +243,10 @@ function Get-DnsBaseStatus {
     spfExpandedText = $spfExpandedText
     spfGuidance = $spfGuidance
     spfHasRequiredInclude = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.isPresent } else { $null })
-    spfRequiredInclude = 'spf.protection.outlook.com'
+    # The include the verdict was checked against, echoed back so the UI never describes
+    # a different requirement than the one that produced the verdict.
+    spfRequiredInclude = $requiredInclude
+    spfRequiredIncludeCustom = $requiredIncludeCustom
     spfRequiredIncludeMatchType = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.matchType } else { $null })
     spfRequiredIncludeDetail = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.detail } else { $null })
     spfRequiredIncludeError = $(if ($spfOutlookRequirement) { $spfOutlookRequirement.error } else { $null })
@@ -1111,8 +1123,17 @@ function Get-DnsDmarcStatus {
 # `selector1._domainkey`, plus a few common ones) so the card body can still
 # show the operator what DKIM IS configured for the domain. The pass/fail tag
 # in the UI is always evaluated against the strict ACS expectation.
+#
+# A domain set up outside the Azure public cloud (for example a sovereign or
+# government cloud) is given different selector names and CNAME targets, so the
+# caller may replace either expectation with a { selector; target } object from
+# ConvertTo-DkimSelectorOverride.
 function Get-DnsDkimStatus {
-  param([string]$Domain)
+  param(
+    [string]$Domain,
+    [object]$Dkim1Override,
+    [object]$Dkim2Override
+  )
 
   # Lookup helper: resolves the CNAME target (if any) and the TXT value (which
   # follows the CNAME chain), then compares the CNAME target against the
@@ -1235,8 +1256,15 @@ function Get-DnsDkimStatus {
     }
   }
 
-  $dkim1Result = Invoke-AcsDkimSelectorLookup -LookupName "selector1-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector1-azurecomm-prod-net._domainkey.azurecomm.net'
-  $dkim2Result = Invoke-AcsDkimSelectorLookup -LookupName "selector2-azurecomm-prod-net._domainkey.$Domain" -ExpectedCnameTarget 'selector2-azurecomm-prod-net._domainkey.azurecomm.net'
+  $dkim1Selector = if ($Dkim1Override) { [string]$Dkim1Override.selector } else { 'selector1-azurecomm-prod-net._domainkey' }
+  $dkim1Expected = if ($Dkim1Override) { [string]$Dkim1Override.target } else { 'selector1-azurecomm-prod-net._domainkey.azurecomm.net' }
+  $dkim2Selector = if ($Dkim2Override) { [string]$Dkim2Override.selector } else { 'selector2-azurecomm-prod-net._domainkey' }
+  $dkim2Expected = if ($Dkim2Override) { [string]$Dkim2Override.target } else { 'selector2-azurecomm-prod-net._domainkey.azurecomm.net' }
+  $dkim1Custom = ($dkim1Selector -ne 'selector1-azurecomm-prod-net._domainkey') -or ($dkim1Expected -ne 'selector1-azurecomm-prod-net._domainkey.azurecomm.net')
+  $dkim2Custom = ($dkim2Selector -ne 'selector2-azurecomm-prod-net._domainkey') -or ($dkim2Expected -ne 'selector2-azurecomm-prod-net._domainkey.azurecomm.net')
+
+  $dkim1Result = Invoke-AcsDkimSelectorLookup -LookupName "$dkim1Selector.$Domain" -ExpectedCnameTarget $dkim1Expected
+  $dkim2Result = Invoke-AcsDkimSelectorLookup -LookupName "$dkim2Selector.$Domain" -ExpectedCnameTarget $dkim2Expected
 
   # If either ACS slot is empty, run the fallback probe so the card body can
   # show whatever DKIM is actually published. The ACS-specific PASS/FAIL flag
@@ -1280,6 +1308,8 @@ function Get-DnsDkimStatus {
   [pscustomobject]@{
     domain                    = $Domain
     dkim1                     = $dkim1Display
+    dkim1Selector             = $dkim1Selector
+    dkim1Custom               = $dkim1Custom
     dkim1CnameTarget          = $dkim1Result.CnameTarget
     dkim1TxtValue             = $dkim1Result.TxtValue
     dkim1TxtValues            = @($dkim1Result.TxtValues)
@@ -1287,6 +1317,8 @@ function Get-DnsDkimStatus {
     dkim1AcsConfigured        = $dkim1Result.AcsConfigured
     dkim1FallbackSelectors    = $dkim1FallbackRows
     dkim2                     = $dkim2Display
+    dkim2Selector             = $dkim2Selector
+    dkim2Custom               = $dkim2Custom
     dkim2CnameTarget          = $dkim2Result.CnameTarget
     dkim2TxtValue             = $dkim2Result.TxtValue
     dkim2TxtValues            = @($dkim2Result.TxtValues)
