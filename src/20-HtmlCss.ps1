@@ -507,8 +507,9 @@ html[dir="rtl"] .check-progress-popover {
   .check-progress-popover {
     animation: none;
   }
+  /* Slowed, not stopped: a frozen loading spinner looks like a hang. */
   .check-progress-popover .check-progress-icon.pending::after {
-    animation: none;
+    animation-duration: 1600ms;
   }
 }
 
