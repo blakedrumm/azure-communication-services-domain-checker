@@ -109,13 +109,17 @@ $htmlPage = @'
   --border: #e0e3ee;
   --status: #555555;
   --input-border: #c3c7d6;
-  --button-bg: #2f80ed;
+  /* #2563eb keeps white button text at 5.2:1 (WCAG 1.4.3 AA); #2f80ed was 3.9:1. */
+  --button-bg: #2563eb;
   --button-fg: #ffffff;
   --button-bg-secondary: #ffffff;
   --button-fg-secondary: #111827;
   --button-border-secondary: #c3c7d6;
   --code-bg: #0b1220;
   --code-fg: #c3d5ff;
+  /* Text color for links and link-like controls. Kept separate from --button-bg
+     (a fill color) so link text meets 4.5:1 on the page, card, and chip backgrounds. */
+  --link: #1a64c8;
 }
 
 .dark {
@@ -132,7 +136,16 @@ $htmlPage = @'
   --button-border-secondary: #4b5563;
   --code-bg: #020617;
   --code-fg: #e5e7eb;
+  --link: #60a5fa;
 }
+
+/* Pass/fail status TEXT colors (SPF lookup-limit summary, SPF expansion errors).
+   Dark-on-light by default; bright-on-dark in the dark theme and inside .code
+   blocks, which use a dark background in both themes. All pairs are >= 4.5:1. */
+:root { --pass-fg: #15803d; --fail-fg: #b91c1c; }
+.dark, .code:not(.code-lite) { --pass-fg: #4ade80; --fail-fg: #f87171; }
+/* Link-colored text inside the always-dark .code blocks needs the bright link tone in the light theme too. */
+.code:not(.code-lite) { --link: #60a5fa; }
 
 /* Hide marked buttons while screenshot is taken */
 .screenshot-mode .hide-on-screenshot {
@@ -151,6 +164,13 @@ html {
      (widely supported across modern Chromium, WebKit, and Firefox) avoids
      having to retune the many px-based font-size / spacing rules below. */
   zoom: 1.1;
+}
+/* Narrow screens: no extra zoom. Space is tight on phones, and the 1.1 zoom skews
+   accessibility checkers' geometry for horizontally scrolled tables (axe adds the
+   unzoomed scrollWidth to zoomed rects), producing false FastPass "Needs review"
+   contrast items for every off-screen cell. */
+@media (max-width: 699px) {
+  html { zoom: 1; }
 }
 
 body {
@@ -1179,7 +1199,9 @@ button.primary:disabled {
   margin-right: 4px;
 }
 .spf-expansion-table .spf-parent-repeat {
-  opacity: 0.45;
+  /* 0.6 keeps the "repeated parent" de-emphasis while staying >= 5:1 on the
+     code background in both themes (0.45 was 3.5-3.8:1, below WCAG 1.4.3). */
+  opacity: 0.6;
 }
 .spf-expansion-table .spf-lookups-heavy {
   background: rgba(217, 119, 6, 0.18);
@@ -1657,6 +1679,12 @@ input.dns-records-search-input {
   margin-top: 10px;
 }
 
+/* The propagation panel renders inside the dark .code block even in the light
+   theme, where the default --status (#555) is only 2.5:1 on #0b1220. Lighten the
+   muted text there, but restore the dark muted tone on the white metric chips. */
+html:not(.dark) .code .prop-shell { --status: #9ca3af; }
+html:not(.dark) .code .prop-shell .prop-stat { --status: #555555; }
+
 /* Compact metric chips (queried / responding / agreeing / ...). */
 .prop-stat-grid {
   display: flex;
@@ -1694,6 +1722,13 @@ input.dns-records-search-input {
 .prop-stat.warn .prop-stat-value { color: var(--prop-warn); }
 .prop-stat.bad .prop-stat-value { color: var(--prop-bad); }
 .prop-stat.idle .prop-stat-value { color: var(--prop-idle); }
+/* Light theme: the shared status hues are too pale as TEXT on the white chip
+   background (e.g. #10b981 = 2.5:1). Use darker shades of the same hues so the
+   counts meet WCAG 1.4.3 (4.5:1). Dark theme keeps the brighter hues (>= 5.3:1). */
+html:not(.dark) .prop-stat.ok .prop-stat-value { color: #047857; }
+html:not(.dark) .prop-stat.warn .prop-stat-value { color: #b45309; }
+html:not(.dark) .prop-stat.bad .prop-stat-value { color: #b91c1c; }
+html:not(.dark) .prop-stat.idle .prop-stat-value { color: #475569; }
 
 /* Coverage bar: share of responding resolvers that agree with the consensus. */
 .prop-coverage {
@@ -2275,6 +2310,10 @@ html.check-options-open {
 .prop-consensus-item {
   white-space: normal;
   overflow-wrap: anywhere;
+  /* Same color as the .prop-consensus box. Painting it on each item lets contrast
+     checkers resolve the background of rows scrolled inside the list (otherwise
+     reported as "background could not be determined"). No visual change. */
+  background: var(--code-bg);
 }
 
 /* The card body is rich HTML, so the plain-text summary needs its own
@@ -2335,7 +2374,8 @@ html.check-options-open {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(47, 128, 237, 0.09), rgba(47, 128, 237, 0.03));
+  /* Solid tint instead of a gradient so text contrast is machine-verifiable. */
+  background: rgba(47, 128, 237, 0.06);
 }
 
 .rdap-summary-count {
@@ -2468,7 +2508,9 @@ html.check-options-open {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: linear-gradient(180deg, rgba(47, 128, 237, 0.07), rgba(47, 128, 237, 0.02));
+  /* Solid tint (was a 0.07 -> 0.02 gradient) so contrast of the text on top can be
+     computed automatically instead of being flagged for manual review. */
+  background: rgba(47, 128, 237, 0.05);
 }
 
 .dkim-selector-name {
@@ -2492,7 +2534,7 @@ html.check-options-open {
   font-weight: 700;
   font-size: 11px;
   letter-spacing: 0.04em;
-  color: #2f80ed;
+  color: var(--link);
   text-transform: uppercase;
   padding-top: 1px;
 }
@@ -2631,7 +2673,7 @@ html.dark .dns-records-filter-select option {
 }
 
 .dns-records-filter-chip-value {
-  color: var(--button-bg);
+  color: var(--link);
   white-space: nowrap;
 }
 
@@ -2688,7 +2730,7 @@ html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
 }
 
 .dns-records-table .dns-record-chain-marker {
-  color: #2f80ed;
+  color: var(--link);
   font-weight: 600;
   margin-right: 2px;
   user-select: none;
@@ -3008,9 +3050,40 @@ ul.guidance li {
 .history-item {
   cursor: pointer;
   text-decoration: underline;
-  color: var(--button-bg);
+  color: var(--link);
+  /* Rendered as a <button> for keyboard access; strip native button chrome so it
+     still looks like the original inline link-style text. */
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
 }
 .history-item:hover { color: var(--fg); }
+
+/* Card collapse/expand chevron. A real <button> (keyboard operable) styled to
+   look exactly like the former decorative glyph; min 24x24 target (WCAG 2.5.8). */
+.card-header .card-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0 2px 0 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.card-header .card-toggle:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 1px;
+}
 
 .history-remove {
   border: none;
@@ -3024,7 +3097,7 @@ ul.guidance li {
 .history-remove:hover { color: var(--fg); }
 
 .card a {
-  color: var(--button-bg);
+  color: var(--link);
 }
 .card a:hover {
   color: var(--fg);
@@ -3060,7 +3133,11 @@ ul.guidance li {
   .input-row { flex-direction: column; }
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
-  .mx-table, .dns-records-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  /* overflow: auto (not overflow-x: auto, which computes to "auto hidden" with the
+     base .mx-table overflow:hidden) - same horizontal scrolling, but accessibility
+     checkers then measure the scrolled cells against the table background instead
+     of flagging every off-screen cell for manual contrast review. */
+  .mx-table, .dns-records-table { display: block; max-width: 100%; overflow: auto; white-space: nowrap; }
   /* On mobile the DNS records table is horizontally scrollable. Without an
    * explicit min-width on the Data cell, the long fully-qualified Name labels
    * (e.g., DKIM selectors like `selector1-...-_domainkey.<tenant>.onmicrosoft.com`)
@@ -3325,6 +3402,9 @@ ul.guidance li {
   text-decoration: none;
   line-height: 1.25;
   border-left: 2px solid transparent;
+  /* Same color as the rail. Painting it on each link lets contrast checkers
+     resolve links clipped by the rail's scroll area (otherwise "Needs review"). */
+  background: var(--card-bg);
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .section-rail-link:hover {
@@ -3730,7 +3810,7 @@ ul.guidance li {
 }
 
 .cookie-consent-banner a {
-  color: var(--button-bg);
+  color: var(--link);
   text-decoration: underline;
 }
 
@@ -3889,7 +3969,7 @@ ul.guidance li {
 }
 
 .cookie-settings-link:hover {
-  color: var(--button-bg);
+  color: var(--link);
 }
 
 @media (prefers-reduced-motion: reduce) {

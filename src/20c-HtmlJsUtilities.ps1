@@ -419,7 +419,7 @@ function getLanguageButtonHtml(code) {
   // page init) ensures the SVGs are already in the HTTP cache by the time
   // the user opens the menu, eliminating the open-time flicker.
   const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="eager" decoding="async" />` : '';
-  return `${flagHtml}<span>${safeName}</span><span class="caret">&#x25BE;</span>`;
+  return `${flagHtml}<span>${safeName}</span><span class="caret acs-glyph" data-glyph="&#x25BE;" aria-hidden="true"></span>`;
 }
 
 // Warm the browser cache for every language flag on page load. We construct
@@ -477,10 +477,12 @@ function populateLanguageSelect() {
 
   button.innerHTML = getLanguageButtonHtml(currentLanguage);
   button.setAttribute('aria-label', `${t('languageLabel')}: ${getLanguageDisplayName(currentLanguage)}`);
+  // role="listbox" requires an accessible name (axe aria-input-field-name).
+  menu.setAttribute('aria-label', t('languageLabel'));
 
   menu.innerHTML = LANGUAGE_OPTIONS.map(code => {
     const selected = code === currentLanguage ? ' active' : '';
-    return `<button type="button" class="language-option${selected}" role="option" aria-selected="${code === currentLanguage ? 'true' : 'false'}" onclick="changeLanguage('${code}')">${getLanguageButtonHtml(code).replace('<span class="caret">&#x25BE;</span>', '')}</button>`;
+    return `<button type="button" class="language-option${selected}" role="option" aria-selected="${code === currentLanguage ? 'true' : 'false'}" onclick="changeLanguage('${code}')">${getLanguageButtonHtml(code).replace('<span class="caret acs-glyph" data-glyph="&#x25BE;" aria-hidden="true"></span>', '')}</button>`;
   }).join('');
 }
 
@@ -494,7 +496,20 @@ function applyLanguageToStaticUi() {
   if (heading) heading.innerHTML = t('appHeading');
 
   const input = document.getElementById('domainInput');
-  if (input) input.placeholder = t('placeholderDomain');
+  if (input) {
+    input.placeholder = t('placeholderDomain');
+    // The placeholder is only a hint, so give the field a real accessible name (WCAG 1.3.1 / 4.1.2).
+    input.setAttribute('aria-label', t('domainInputLabel'));
+  }
+
+  // Accessibility chrome: skip link text and the icon-only clear (x) button name.
+  const skipLink = document.getElementById('skipToMainLink');
+  if (skipLink) skipLink.textContent = t('skipToMain');
+  const clearInputBtn = document.getElementById('clearBtn');
+  if (clearInputBtn) {
+    clearInputBtn.setAttribute('aria-label', t('clearInputLabel'));
+    clearInputBtn.title = t('clearInputLabel');
+  }
 
   const lookupBtn = document.getElementById('lookupBtn');
   if (lookupBtn) {
@@ -828,9 +843,12 @@ function renderHistory(items) {
     const key = escapeHtml(text.toLowerCase());
     const arg = JSON.stringify(text);
     const removeLabel = escapeHtml(t('removeLabel'));
+    // A real <button> (not a clickable <span>) so recent domains are reachable
+    // with Tab and activated with Enter/Space (WCAG 2.1.1 Keyboard). The remove
+    // button's accessible name includes the domain so each "x" is distinguishable.
     return `<span class="history-chip" data-domain="${key}">
-      <span class="history-item" onclick='runHistory(${arg})'>${safe}</span>
-      <button type="button" class="history-remove" title="${removeLabel}" aria-label="${removeLabel}" onclick='event.stopPropagation(); removeHistory(${arg})'>&#x2715;</button>
+      <button type="button" class="history-item" onclick='runHistory(${arg})'>${safe}</button>
+      <button type="button" class="history-remove" title="${removeLabel}" aria-label="${removeLabel} ${safe}" onclick='event.stopPropagation(); removeHistory(${arg})'><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button>
     </span>`;
   }).join(" ");
   container.innerHTML = escapeHtml(t('recent')) + ": " + chips;
@@ -874,6 +892,8 @@ function toggleCard(header) {
   if (content) {
     content.classList.toggle("collapsed");
   }
+  // Keep the chevron button's aria-expanded in sync for screen readers (20g-HtmlAccessibility.ps1).
+  if (typeof window.acsSyncCardToggles === 'function') window.acsSyncCardToggles(header.parentElement || header);
 
   // If the MX card is being collapsed, also hide the additional details and reset the button label.
   const isNowCollapsed = header.classList.contains("collapsed-header") || (content && content.classList.contains("collapsed"));

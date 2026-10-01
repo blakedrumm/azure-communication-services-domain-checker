@@ -131,7 +131,7 @@ $htmlPage += @'
 .smtp-meaning { display: block; margin-bottom: 6px; }
 .smtp-basic-meaning, .smtp-source, .smtp-muted { display: block; color: var(--status); font-size: 12px; }
 .smtp-source { margin-top: 6px; }
-.smtp-dialog a { color: var(--button-bg); text-underline-offset: 2px; }
+.smtp-dialog a { color: var(--link); text-underline-offset: 2px; }
 .dark .smtp-dialog a { color: #93c5fd; }
 .smtp-advice { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--border); }
 .smtp-reference-notice { color: var(--status); font-size: 12px; line-height: 1.5; margin: 12px 0 0; }

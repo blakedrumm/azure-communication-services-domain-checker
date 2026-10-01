@@ -225,6 +225,26 @@ Open **SMTP Responses > Look up a response** immediately above the footer, below
 - Controls, meanings, likely causes, fixes, retry advice, reference searches, and copied tables follow the selected UI language in all 10 supported languages. Protocol codes and provider attribution remain unchanged. English is the fallback for future entries without a translation.
 - Input is bounded to 16,000 characters and 50 distinct replies. The dialog stays open with its pasted text intact while the language changes or domain results refresh. Pasted diagnostic text is never translated or uploaded.
 
+### ♿ Accessibility
+
+The web UI targets **WCAG 2.2 AA** and is validated against the same axe-core engine (4.11) used by **Accessibility Insights for Web FastPass**.
+
+- **Keyboard:** every control is reachable with **Tab** and has a visible 2px focus ring. A **Skip to main content** link is the first Tab stop. Card headers collapse/expand from their chevron button (`aria-expanded` reflects the state), recent-domain chips are real buttons, and DNS-record rows toggle highlighting with **Enter**/**Space**.
+- **Structure:** the page uses `header` / `main` / `footer` landmarks (plus `nav` on `/terms` and `/privacy`); form fields, icon-only buttons, cookie toggles, and the language list all have accessible names, localized into all 10 languages.
+- **Contrast:** text meets 4.5:1 in both light and dark themes (links use a dedicated `--link` color; status text on light backgrounds uses darker shades). Decorative glyphs (chevrons, carets, ✕, arrows) are painted by CSS so screen readers skip them.
+- **Screen readers:** asynchronous updates are announced through polite/assertive live regions (`window.acsAnnounce`), and Windows High Contrast (forced-colors) mode keeps a visible focus indicator.
+
+**Automated regression scan.** `tools/accessibility/Test-Accessibility.mjs` (Playwright + axe-core 4.11) approximates the three FastPass steps across every major UI state (cookie banner, history, language menu, SMTP dialog, lookup results, Options dialog, RTL, `/terms`, `/privacy`) in light and dark themes, including a full Tab-stop walk. It exits non-zero on any violation or keyboard problem:
+
+```powershell
+pwsh ./acs-domain-checker.ps1 -Port 18080          # in one terminal
+cd tools/accessibility
+npm install; npx playwright install chromium
+node Test-Accessibility.mjs                        # env: BASE, DOMAIN, VW (viewport width), STRICT_REVIEW=1
+```
+
+The scan does not replace the manual FastPass sign-off in Accessibility Insights. "Needs review" items that appear only while the language menu or a modal dialog is open are expected: axe cannot measure text covered by an overlay. Verify them visually and mark them **Pass**.
+
 ## 🌍 Localization / Multi-Language Support
 
 The web UI is fully translated into **10 languages**. Users can switch languages at any time using the dropdown in the top bar. The selected language is persisted in `localStorage` and can also be set via the `?lang=` query parameter for shareable links.
@@ -903,7 +923,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.16.3`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.16.4`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -926,8 +946,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.16.3
-git push origin v2.16.3
+git tag v2.16.4
+git push origin v2.16.4
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -938,7 +958,7 @@ git push origin v2.16.3
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.16.3`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.16.4`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -955,11 +975,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.16.3
+docker pull limitlessworlds/acs-domain-checker:2.16.4
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.16.3
-docker pull limitlessworlds/acs-domain-checker:windows-2.16.3
+docker pull limitlessworlds/acs-domain-checker:linux-2.16.4
+docker pull limitlessworlds/acs-domain-checker:windows-2.16.4
 ```
 
 ### 🛠️ Manual Build Script
@@ -974,7 +994,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.16.3
+./acs-domain-checker-dockerhub.ps1 -Version 2.16.4
 ```
 
 **📋 Requirements for manual script:**

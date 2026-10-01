@@ -1,0 +1,14 @@
+{
+  "name": "acs-domain-checker-accessibility-tests",
+  "private": true,
+  "description": "Playwright + axe-core accessibility regression scan (same engine as Accessibility Insights for Web FastPass).",
+  "type": "module",
+  "scripts": {
+    "test": "node Test-Accessibility.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.0",
+    "axe-core": "~4.11.4",
+    "playwright": "^1.63.0"
+  }
+}

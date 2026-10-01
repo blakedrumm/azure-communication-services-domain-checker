@@ -17,7 +17,7 @@ $script:TosPageHtml = @'
 <meta property="og:title" content="Terms of Service - ACS Email Domain Checker" />
 <meta property="og:url" content="__ACS_SITE_URL__/terms" />
 <style nonce="__CSP_NONCE__">
-  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
+  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #1a64c8; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
   }
@@ -29,7 +29,9 @@ $script:TosPageHtml = @'
 </style>
 </head>
 <body>
-<a id="backLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<!-- Landmarks: the back link is the page's navigation and all content lives in <main> so every element sits inside a landmark (WCAG 1.3.1). -->
+<nav aria-label="Site"><a id="backLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a></nav>
+<main>
 <h1 id="tosTitle">Terms of Service</h1>
 <p><strong id="updatedLabel">Last updated:</strong> <span id="updatedValue">March 2026</span></p>
 
@@ -65,6 +67,7 @@ $script:TosPageHtml = @'
 
 <h2 id="tosSection9Title">9. Contact</h2>
 <p id="tosSection9Body">For questions about these terms, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+</main>
 <script nonce="__CSP_NONCE__">
 (() => {
   const TRANSLATIONS = {
@@ -302,7 +305,7 @@ $script:PrivacyPageHtml = @'
 <meta property="og:title" content="Privacy Statement - ACS Email Domain Checker" />
 <meta property="og:url" content="__ACS_SITE_URL__/privacy" />
 <style nonce="__CSP_NONCE__">
-  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
+  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #1a64c8; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
   }
@@ -314,7 +317,9 @@ $script:PrivacyPageHtml = @'
 </style>
 </head>
 <body>
-<a id="privacyBackLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<!-- Landmarks: the back link is the page's navigation and all content lives in <main> so every element sits inside a landmark (WCAG 1.3.1). -->
+<nav aria-label="Site"><a id="privacyBackLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a></nav>
+<main>
 <h1 id="privacyTitle">Privacy Statement</h1>
 <p><strong id="privacyUpdatedLabel">Last updated:</strong> <span id="privacyUpdatedValue">March 2026</span></p>
 
@@ -363,6 +368,7 @@ $script:PrivacyPageHtml = @'
 
 <h2 id="privacySection10Title">10. Contact</h2>
 <p id="privacySection10Body">For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+</main>
 <script nonce="__CSP_NONCE__">
 (() => {
   const TRANSLATIONS = {

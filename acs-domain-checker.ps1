@@ -1708,7 +1708,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.16.3'
+$script:AppVersion = '2.16.4'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   # Validate at the boundary: this value is interpolated into generated JSON
   # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
@@ -15475,13 +15475,17 @@ $htmlPage = @'
   --border: #e0e3ee;
   --status: #555555;
   --input-border: #c3c7d6;
-  --button-bg: #2f80ed;
+  /* #2563eb keeps white button text at 5.2:1 (WCAG 1.4.3 AA); #2f80ed was 3.9:1. */
+  --button-bg: #2563eb;
   --button-fg: #ffffff;
   --button-bg-secondary: #ffffff;
   --button-fg-secondary: #111827;
   --button-border-secondary: #c3c7d6;
   --code-bg: #0b1220;
   --code-fg: #c3d5ff;
+  /* Text color for links and link-like controls. Kept separate from --button-bg
+     (a fill color) so link text meets 4.5:1 on the page, card, and chip backgrounds. */
+  --link: #1a64c8;
 }
 
 .dark {
@@ -15498,7 +15502,16 @@ $htmlPage = @'
   --button-border-secondary: #4b5563;
   --code-bg: #020617;
   --code-fg: #e5e7eb;
+  --link: #60a5fa;
 }
+
+/* Pass/fail status TEXT colors (SPF lookup-limit summary, SPF expansion errors).
+   Dark-on-light by default; bright-on-dark in the dark theme and inside .code
+   blocks, which use a dark background in both themes. All pairs are >= 4.5:1. */
+:root { --pass-fg: #15803d; --fail-fg: #b91c1c; }
+.dark, .code:not(.code-lite) { --pass-fg: #4ade80; --fail-fg: #f87171; }
+/* Link-colored text inside the always-dark .code blocks needs the bright link tone in the light theme too. */
+.code:not(.code-lite) { --link: #60a5fa; }
 
 /* Hide marked buttons while screenshot is taken */
 .screenshot-mode .hide-on-screenshot {
@@ -15517,6 +15530,13 @@ html {
      (widely supported across modern Chromium, WebKit, and Firefox) avoids
      having to retune the many px-based font-size / spacing rules below. */
   zoom: 1.1;
+}
+/* Narrow screens: no extra zoom. Space is tight on phones, and the 1.1 zoom skews
+   accessibility checkers' geometry for horizontally scrolled tables (axe adds the
+   unzoomed scrollWidth to zoomed rects), producing false FastPass "Needs review"
+   contrast items for every off-screen cell. */
+@media (max-width: 699px) {
+  html { zoom: 1; }
 }
 
 body {
@@ -16545,7 +16565,9 @@ button.primary:disabled {
   margin-right: 4px;
 }
 .spf-expansion-table .spf-parent-repeat {
-  opacity: 0.45;
+  /* 0.6 keeps the "repeated parent" de-emphasis while staying >= 5:1 on the
+     code background in both themes (0.45 was 3.5-3.8:1, below WCAG 1.4.3). */
+  opacity: 0.6;
 }
 .spf-expansion-table .spf-lookups-heavy {
   background: rgba(217, 119, 6, 0.18);
@@ -17023,6 +17045,12 @@ input.dns-records-search-input {
   margin-top: 10px;
 }
 
+/* The propagation panel renders inside the dark .code block even in the light
+   theme, where the default --status (#555) is only 2.5:1 on #0b1220. Lighten the
+   muted text there, but restore the dark muted tone on the white metric chips. */
+html:not(.dark) .code .prop-shell { --status: #9ca3af; }
+html:not(.dark) .code .prop-shell .prop-stat { --status: #555555; }
+
 /* Compact metric chips (queried / responding / agreeing / ...). */
 .prop-stat-grid {
   display: flex;
@@ -17060,6 +17088,13 @@ input.dns-records-search-input {
 .prop-stat.warn .prop-stat-value { color: var(--prop-warn); }
 .prop-stat.bad .prop-stat-value { color: var(--prop-bad); }
 .prop-stat.idle .prop-stat-value { color: var(--prop-idle); }
+/* Light theme: the shared status hues are too pale as TEXT on the white chip
+   background (e.g. #10b981 = 2.5:1). Use darker shades of the same hues so the
+   counts meet WCAG 1.4.3 (4.5:1). Dark theme keeps the brighter hues (>= 5.3:1). */
+html:not(.dark) .prop-stat.ok .prop-stat-value { color: #047857; }
+html:not(.dark) .prop-stat.warn .prop-stat-value { color: #b45309; }
+html:not(.dark) .prop-stat.bad .prop-stat-value { color: #b91c1c; }
+html:not(.dark) .prop-stat.idle .prop-stat-value { color: #475569; }
 
 /* Coverage bar: share of responding resolvers that agree with the consensus. */
 .prop-coverage {
@@ -17641,6 +17676,10 @@ html.check-options-open {
 .prop-consensus-item {
   white-space: normal;
   overflow-wrap: anywhere;
+  /* Same color as the .prop-consensus box. Painting it on each item lets contrast
+     checkers resolve the background of rows scrolled inside the list (otherwise
+     reported as "background could not be determined"). No visual change. */
+  background: var(--code-bg);
 }
 
 /* The card body is rich HTML, so the plain-text summary needs its own
@@ -17701,7 +17740,8 @@ html.check-options-open {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(47, 128, 237, 0.09), rgba(47, 128, 237, 0.03));
+  /* Solid tint instead of a gradient so text contrast is machine-verifiable. */
+  background: rgba(47, 128, 237, 0.06);
 }
 
 .rdap-summary-count {
@@ -17834,7 +17874,9 @@ html.check-options-open {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: linear-gradient(180deg, rgba(47, 128, 237, 0.07), rgba(47, 128, 237, 0.02));
+  /* Solid tint (was a 0.07 -> 0.02 gradient) so contrast of the text on top can be
+     computed automatically instead of being flagged for manual review. */
+  background: rgba(47, 128, 237, 0.05);
 }
 
 .dkim-selector-name {
@@ -17858,7 +17900,7 @@ html.check-options-open {
   font-weight: 700;
   font-size: 11px;
   letter-spacing: 0.04em;
-  color: #2f80ed;
+  color: var(--link);
   text-transform: uppercase;
   padding-top: 1px;
 }
@@ -17997,7 +18039,7 @@ html.dark .dns-records-filter-select option {
 }
 
 .dns-records-filter-chip-value {
-  color: var(--button-bg);
+  color: var(--link);
   white-space: nowrap;
 }
 
@@ -18054,7 +18096,7 @@ html.dark .dns-records-table .dns-record-row.dns-record-row-selected td {
 }
 
 .dns-records-table .dns-record-chain-marker {
-  color: #2f80ed;
+  color: var(--link);
   font-weight: 600;
   margin-right: 2px;
   user-select: none;
@@ -18374,9 +18416,40 @@ ul.guidance li {
 .history-item {
   cursor: pointer;
   text-decoration: underline;
-  color: var(--button-bg);
+  color: var(--link);
+  /* Rendered as a <button> for keyboard access; strip native button chrome so it
+     still looks like the original inline link-style text. */
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
 }
 .history-item:hover { color: var(--fg); }
+
+/* Card collapse/expand chevron. A real <button> (keyboard operable) styled to
+   look exactly like the former decorative glyph; min 24x24 target (WCAG 2.5.8). */
+.card-header .card-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0 2px 0 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.card-header .card-toggle:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 1px;
+}
 
 .history-remove {
   border: none;
@@ -18390,7 +18463,7 @@ ul.guidance li {
 .history-remove:hover { color: var(--fg); }
 
 .card a {
-  color: var(--button-bg);
+  color: var(--link);
 }
 .card a:hover {
   color: var(--fg);
@@ -18426,7 +18499,11 @@ ul.guidance li {
   .input-row { flex-direction: column; }
   .input-wrapper { width: 100%; }
   .input-row button:not(.search-box #clearBtn) { width: 100%; }
-  .mx-table, .dns-records-table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; }
+  /* overflow: auto (not overflow-x: auto, which computes to "auto hidden" with the
+     base .mx-table overflow:hidden) - same horizontal scrolling, but accessibility
+     checkers then measure the scrolled cells against the table background instead
+     of flagging every off-screen cell for manual contrast review. */
+  .mx-table, .dns-records-table { display: block; max-width: 100%; overflow: auto; white-space: nowrap; }
   /* On mobile the DNS records table is horizontally scrollable. Without an
    * explicit min-width on the Data cell, the long fully-qualified Name labels
    * (e.g., DKIM selectors like `selector1-...-_domainkey.<tenant>.onmicrosoft.com`)
@@ -18691,6 +18768,9 @@ ul.guidance li {
   text-decoration: none;
   line-height: 1.25;
   border-left: 2px solid transparent;
+  /* Same color as the rail. Painting it on each link lets contrast checkers
+     resolve links clipped by the rail's scroll area (otherwise "Needs review"). */
+  background: var(--card-bg);
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .section-rail-link:hover {
@@ -19096,7 +19176,7 @@ ul.guidance li {
 }
 
 .cookie-consent-banner a {
-  color: var(--button-bg);
+  color: var(--link);
   text-decoration: underline;
 }
 
@@ -19255,7 +19335,7 @@ ul.guidance li {
 }
 
 .cookie-settings-link:hover {
-  color: var(--button-bg);
+  color: var(--link);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -19408,6 +19488,9 @@ async function ensureMsalLoaded() {
 
 <body class="section-fade-enabled">
 
+<!-- Skip link (WCAG 2.4.1 Bypass Blocks): first Tab stop, jumps past the toolbar to <main>. Styled in 20g-HtmlAccessibility.ps1; text localized in applyLanguageToStaticUi(). -->
+<a id="skipToMainLink" class="skip-link" href="#mainContent">Skip to main content</a>
+
 <!-- Static fallback content. The results UI is client-rendered, so without this
      a crawler (or an AI agent that does not execute JavaScript) sees only the
      toolbar button labels and describes the page from those. -->
@@ -19435,10 +19518,11 @@ async function ensureMsalLoaded() {
 
 <div class="container">
 
-<div class="top-bar">
+<!-- Landmarks (WCAG 1.3.1): toolbar = <header> (banner), page body = <main>, credits = <footer> (contentinfo). -->
+<header class="top-bar">
   <div id="languageDropdown" class="language-dropdown hide-on-screenshot engage-top-item">
     <button id="languageSelectBtn" type="button" class="language-trigger" onclick="toggleLanguageMenu()" aria-haspopup="listbox" aria-expanded="false"></button>
-    <div id="languageSelectMenu" class="language-menu" role="listbox"></div>
+    <div id="languageSelectMenu" class="language-menu" role="listbox" aria-label="Language"></div>
   </div>
   <button id="themeToggleBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="toggleTheme()">Dark mode</button>
   <button id="copyLinkBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="copyShareLink()">Copy link</button>
@@ -19448,7 +19532,9 @@ async function ensureMsalLoaded() {
   <button id="msSignInBtn" type="button" class="hide-on-screenshot ms-sign-in-btn engage-top-item" onclick="msSignIn()">Sign in with Microsoft</button>
   <span id="msAuthStatus" class="ms-auth-status hide-on-screenshot engage-top-item" style="display:none;"></span>
   <button id="msSignOutBtn" type="button" class="hide-on-screenshot engage-top-item" onclick="msSignOut()" style="display:none;">Sign out</button>
-</div>
+</header>
+
+<main id="mainContent" tabindex="-1">
 
 <div class="search-box engage-section">
   <img src="data:image/png;base64,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" alt="ACS Logo" style="height: 64px; display: block; margin: 0 auto 12px auto;">
@@ -19470,8 +19556,8 @@ async function ensureMsalLoaded() {
         and don't want to steal focus from the in-flight workflow).
       -->
       <span id="domainChips" class="domain-chips"></span>
-      <input id="domainInput" type="text" placeholder="example.com" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="toggleClearBtn()" />
-      <button id="clearBtn" class="clear-btn" type="button" onclick="clearInput()">&#x2715;</button>
+      <input id="domainInput" type="text" aria-label="Domain to check" placeholder="example.com" autofocus autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" oninput="toggleClearBtn()" />
+      <button id="clearBtn" class="clear-btn" type="button" aria-label="Clear domain input" title="Clear domain input" onclick="clearInput()"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button>
     </div>
     <button id="lookupBtn" class="primary hide-on-screenshot" type="button" onclick="runLookupFromInput()">Lookup</button>
     <!--
@@ -19545,13 +19631,13 @@ async function ensureMsalLoaded() {
 -->
 <div id="intakeFormCard" class="card intake-form-card" style="margin-bottom: 12px; display: none;">
   <div class="card-header collapsed-header" onclick="toggleCard(this)">
-    <span class="chevron">&#x25BC;</span>
+    <button type="button" class="chevron card-toggle" aria-expanded="false" aria-controls="intakeFormContent"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
     <span class="tag tag-info">Form</span>
     <strong id="intakeFormTitle">Customer Intake Information (optional)</strong>
     <button type="button" id="intakeInsertTemplateBtn" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); prefillIntakeForm();">Insert template</button>
     <button type="button" id="intakeClearBtn" class="copy-btn hide-on-screenshot" style="margin-left:6px;" onclick="event.stopPropagation(); clearIntakeForm();">Clear</button>
   </div>
-  <div class="card-content collapsed">
+  <div id="intakeFormContent" class="card-content collapsed">
     <p id="intakeFormHint" class="intake-form-hint" style="margin:0 0 10px 0; font-size:12px; opacity:0.8;">
       Paste in here the customer intake form responses. Formatting (bold, italics, lists, tables, links, pasted images) is preserved. Contents are saved locally in your browser (functional cookies must be allowed) and are appended to the <strong>Copy Email Quota</strong> output.
     </p>
@@ -19625,7 +19711,7 @@ async function ensureMsalLoaded() {
 
 <section id="smtpResponseTool" class="smtp-tool-band hide-on-screenshot" aria-labelledby="smtpResponseToolTitle">
   <h2 id="smtpResponseToolTitle" data-smtp-i18n="smtpToolTitle">SMTP Responses</h2>
-  <button type="button" id="smtpResponseOpen" class="smtp-tool-button" aria-haspopup="dialog" aria-controls="smtpResponseDialog">
+  <button type="button" id="smtpResponseOpen" class="smtp-tool-button" aria-haspopup="dialog">
     <img data-smtp-icon="search" class="smtp-tool-icon" alt="" aria-hidden="true" width="16" height="16" />
     <span data-smtp-i18n="smtpOpenLookup">Look up a response</span>
   </button>
@@ -19638,9 +19724,11 @@ async function ensureMsalLoaded() {
 -->
 <dialog id="checkOptionsDialog" class="check-options-dialog hide-on-screenshot" aria-labelledby="checkOptionsTitle" aria-describedby="checkOptionsIntro"></dialog>
 
-<div class="footer" id="footerText">
+</main>
+
+<footer class="footer" id="footerText">
   ACS Email Domain Checker v__APP_VERSION__ &bull; Written by: <a href="https://blakedrumm.com/" style="color:inherit;">Blake Drumm</a> &bull; Generated by PowerShell &bull; <a href="#" onclick="window.scrollTo(0,0); return false;" style="color:inherit;">Back to Top</a>
-</div>
+</footer>
 
 </div>
 
@@ -19656,7 +19744,7 @@ async function ensureMsalLoaded() {
           <span class="cookie-category-desc" id="cookieCatEssentialDesc">Required for the tool to function. Cannot be disabled.</span>
         </div>
         <label class="cookie-toggle">
-          <input type="checkbox" checked disabled />
+          <input type="checkbox" id="cookieToggleEssential" checked disabled aria-labelledby="cookieCatEssentialName" aria-describedby="cookieCatEssentialDesc" />
           <span class="cookie-toggle-slider"></span>
         </label>
       </div>
@@ -19666,7 +19754,7 @@ async function ensureMsalLoaded() {
           <span class="cookie-category-desc" id="cookieCatFunctionalDesc">Theme, language, and domain lookup history.</span>
         </div>
         <label class="cookie-toggle">
-          <input type="checkbox" id="cookieToggleFunctional" checked />
+          <input type="checkbox" id="cookieToggleFunctional" checked aria-labelledby="cookieCatFunctionalName" aria-describedby="cookieCatFunctionalDesc" />
           <span class="cookie-toggle-slider"></span>
         </label>
       </div>
@@ -19676,7 +19764,7 @@ async function ensureMsalLoaded() {
           <span class="cookie-category-desc" id="cookieCatAnalyticsDesc">Anonymous usage metrics to improve the tool.</span>
         </div>
         <label class="cookie-toggle">
-          <input type="checkbox" id="cookieToggleAnalytics" checked />
+          <input type="checkbox" id="cookieToggleAnalytics" checked aria-labelledby="cookieCatAnalyticsName" aria-describedby="cookieCatAnalyticsDesc" />
           <span class="cookie-toggle-slider"></span>
         </label>
       </div>
@@ -21901,6 +21989,11 @@ Object.keys(REMAINING_TRANSLATION_OVERRIDES).forEach(code => {
 const UI_TRANSLATION_OVERRIDES = {
   en: {
     removeLabel: 'Remove',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Skip to main content',
+    domainInputLabel: 'Domain to check',
+    clearInputLabel: 'Clear domain input',
+    toggleSection: 'Show or hide section',
     reportIssueTitle: 'Report an issue (includes the domain name)',
     noRecordOnDomain: 'No record on {domain}',
     parentDomainAcsTxtInfo: 'Parent domain {lookupDomain} ACS TXT (informational only):',
@@ -21917,6 +22010,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   es: {
     removeLabel: 'Quitar',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Saltar al contenido principal',
+    domainInputLabel: 'Dominio que se va a comprobar',
+    clearInputLabel: 'Borrar el dominio',
+    toggleSection: 'Mostrar u ocultar secci\u00F3n',
     reportIssueTitle: 'Reportar un problema (incluye el nombre de dominio)',
     noRecordOnDomain: 'No hay registro en {domain}',
     parentDomainAcsTxtInfo: 'TXT ACS del dominio primario {lookupDomain} (solo informativo):',
@@ -21951,6 +22049,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   fr: {
     removeLabel: 'Supprimer',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Aller au contenu principal',
+    domainInputLabel: 'Domaine \u00E0 v\u00E9rifier',
+    clearInputLabel: 'Effacer le domaine',
+    toggleSection: 'Afficher ou masquer la section',
     reportIssueTitle: 'Signaler un probl\u00E8me (inclut le nom de domaine)',
     noRecordOnDomain: 'Aucun enregistrement sur {domain}',
     parentDomainAcsTxtInfo: 'TXT ACS du domaine parent {lookupDomain} (informatif uniquement) :',
@@ -21967,6 +22070,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   de: {
     removeLabel: 'Entfernen',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Zum Hauptinhalt springen',
+    domainInputLabel: 'Zu pr\u00FCfende Domain',
+    clearInputLabel: 'Domaineingabe l\u00F6schen',
+    toggleSection: 'Abschnitt ein- oder ausblenden',
     reportIssueTitle: 'Problem melden (einschlie\u00DFlich Domainname)',
     noRecordOnDomain: 'Kein Eintrag auf {domain}',
     parentDomainAcsTxtInfo: 'ACS-TXT der \u00FCbergeordneten Domain {lookupDomain} (nur informativ):',
@@ -21983,6 +22091,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'pt-BR': {
     removeLabel: 'Remover',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Pular para o conte\u00FAdo principal',
+    domainInputLabel: 'Dom\u00EDnio a verificar',
+    clearInputLabel: 'Limpar dom\u00EDnio',
+    toggleSection: 'Mostrar ou ocultar se\u00E7\u00E3o',
     reportIssueTitle: 'Relatar um problema (inclui o nome do dom\u00EDnio)',
     noRecordOnDomain: 'Nenhum registro em {domain}',
     parentDomainAcsTxtInfo: 'TXT ACS do dom\u00EDnio pai {lookupDomain} (somente informativo):',
@@ -21999,6 +22112,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   ar: {
     removeLabel: '\u0625\u0632\u0627\u0644\u0629',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u0627\u0646\u062A\u0642\u0644 \u0625\u0644\u0649 \u0627\u0644\u0645\u062D\u062A\u0648\u0649 \u0627\u0644\u0631\u0626\u064A\u0633\u064A',
+    domainInputLabel: '\u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u0645\u0631\u0627\u062F \u0641\u062D\u0635\u0647',
+    clearInputLabel: '\u0645\u0633\u062D \u0627\u0644\u0646\u0637\u0627\u0642',
+    toggleSection: '\u0625\u0638\u0647\u0627\u0631 \u0627\u0644\u0642\u0633\u0645 \u0623\u0648 \u0625\u062E\u0641\u0627\u0624\u0647',
     reportIssueTitle: '\u0627\u0644\u0625\u0628\u0644\u0627\u063A \u0639\u0646 \u0645\u0634\u0643\u0644\u0629 (\u064A\u062A\u0636\u0645\u0646 \u0627\u0633\u0645 \u0627\u0644\u0646\u0637\u0627\u0642)',
     noRecordOnDomain: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0633\u062C\u0644 \u0639\u0644\u0649 {domain}',
     parentDomainAcsTxtInfo: 'TXT \u0627\u0644\u062E\u0627\u0635 \u0628\u0640 ACS \u0645\u0646 \u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u0623\u0635\u0644 {lookupDomain} (\u0644\u0644\u0645\u0639\u0644\u0648\u0645\u0629 \u0641\u0642\u0637):',
@@ -22031,6 +22149,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'zh-CN': {
     removeLabel: '\u79FB\u9664',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u8DF3\u5230\u4E3B\u8981\u5185\u5BB9',
+    domainInputLabel: '\u8981\u68C0\u67E5\u7684\u57DF',
+    clearInputLabel: '\u6E05\u9664\u57DF\u8F93\u5165',
+    toggleSection: '\u663E\u793A\u6216\u9690\u85CF\u90E8\u5206',
     reportIssueTitle: '\u62A5\u544A\u95EE\u9898\uFF08\u5305\u542B\u57DF\u540D\uFF09',
     noRecordOnDomain: '{domain} \u4E0A\u6CA1\u6709\u8BB0\u5F55',
     parentDomainAcsTxtInfo: '\u7236\u57DF {lookupDomain} \u7684 ACS TXT\uFF08\u4EC5\u4F9B\u53C2\u8003\uFF09\uFF1A',
@@ -22043,6 +22166,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'hi-IN': {
     removeLabel: '\u0939\u091F\u093E\u090F\u0901',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u092E\u0941\u0916\u094D\u092F \u0938\u093E\u092E\u0917\u094D\u0930\u0940 \u092A\u0930 \u091C\u093E\u090F\u0901',
+    domainInputLabel: '\u091C\u093E\u0901\u091A\u0928\u0947 \u0915\u0947 \u0932\u093F\u090F \u0921\u094B\u092E\u0947\u0928',
+    clearInputLabel: '\u0921\u094B\u092E\u0947\u0928 \u0907\u0928\u092A\u0941\u091F \u0938\u093E\u092B\u093C \u0915\u0930\u0947\u0902',
+    toggleSection: '\u0905\u0928\u0941\u092D\u093E\u0917 \u0926\u093F\u0916\u093E\u090F\u0901 \u092F\u093E \u091B\u093F\u092A\u093E\u090F\u0901',
     reportIssueTitle: '\u0938\u092E\u0938\u094D\u092F\u093E \u0930\u093F\u092A\u094B\u0930\u094D\u091F \u0915\u0930\u0947\u0902 (\u0921\u094B\u092E\u0947\u0928 \u0928\u093E\u092E \u0936\u093E\u092E\u093F\u0932 \u0939\u0948)',
     noRecordOnDomain: '{domain} \u092A\u0930 \u0915\u094B\u0908 \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0928\u0939\u0940\u0902 \u0939\u0948',
     parentDomainAcsTxtInfo: '\u092E\u0942\u0932 \u0921\u094B\u092E\u0947\u0928 {lookupDomain} \u0915\u093E ACS TXT (\u0915\u0947\u0935\u0932 \u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u0915\u0947 \u0932\u093F\u090F):',
@@ -22055,6 +22183,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'ja-JP': {
     removeLabel: '\u524A\u9664',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u30E1\u30A4\u30F3 \u30B3\u30F3\u30C6\u30F3\u30C4\u306B\u30B9\u30AD\u30C3\u30D7',
+    domainInputLabel: '\u30C1\u30A7\u30C3\u30AF\u3059\u308B\u30C9\u30E1\u30A4\u30F3',
+    clearInputLabel: '\u30C9\u30E1\u30A4\u30F3\u306E\u5165\u529B\u3092\u30AF\u30EA\u30A2',
+    toggleSection: '\u30BB\u30AF\u30B7\u30E7\u30F3\u306E\u8868\u793A/\u975E\u8868\u793A',
     reportIssueTitle: '\u554F\u984C\u3092\u5831\u544A\uFF08\u30C9\u30E1\u30A4\u30F3\u540D\u3092\u542B\u307F\u307E\u3059\uFF09',
     noRecordOnDomain: '{domain} \u306B\u30EC\u30B3\u30FC\u30C9\u306F\u3042\u308A\u307E\u305B\u3093',
     parentDomainAcsTxtInfo: '\u89AA\u30C9\u30E1\u30A4\u30F3 {lookupDomain} \u306E ACS TXT\uFF08\u53C2\u8003\u60C5\u5831\u306E\u307F\uFF09:',
@@ -22067,6 +22200,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'ru-RU': {
     removeLabel: '\u0423\u0434\u0430\u043B\u0438\u0442\u044C',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u043A \u043E\u0441\u043D\u043E\u0432\u043D\u043E\u043C\u0443 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u043C\u0443',
+    domainInputLabel: '\u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u043C\u044B\u0439 \u0434\u043E\u043C\u0435\u043D',
+    clearInputLabel: '\u041E\u0447\u0438\u0441\u0442\u0438\u0442\u044C \u043F\u043E\u043B\u0435 \u0434\u043E\u043C\u0435\u043D\u0430',
+    toggleSection: '\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0438\u043B\u0438 \u0441\u043A\u0440\u044B\u0442\u044C \u0440\u0430\u0437\u0434\u0435\u043B',
     reportIssueTitle: '\u0421\u043E\u043E\u0431\u0449\u0438\u0442\u044C \u043E \u043F\u0440\u043E\u0431\u043B\u0435\u043C\u0435 (\u0432\u043A\u043B\u044E\u0447\u0430\u044F \u0438\u043C\u044F \u0434\u043E\u043C\u0435\u043D\u0430)',
     noRecordOnDomain: '\u041D\u0430 {domain} \u0437\u0430\u043F\u0438\u0441\u044C \u043E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442',
     parentDomainAcsTxtInfo: 'ACS TXT \u0440\u043E\u0434\u0438\u0442\u0435\u043B\u044C\u0441\u043A\u043E\u0433\u043E \u0434\u043E\u043C\u0435\u043D\u0430 {lookupDomain} (\u0442\u043E\u043B\u044C\u043A\u043E \u0434\u043B\u044F \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u0438):',
@@ -28241,7 +28379,7 @@ function getLanguageButtonHtml(code) {
   // page init) ensures the SVGs are already in the HTTP cache by the time
   // the user opens the menu, eliminating the open-time flicker.
   const flagHtml = flagUrl ? `<img class="language-flag" src="${escapeHtml(flagUrl)}" alt="" loading="eager" decoding="async" />` : '';
-  return `${flagHtml}<span>${safeName}</span><span class="caret">&#x25BE;</span>`;
+  return `${flagHtml}<span>${safeName}</span><span class="caret acs-glyph" data-glyph="&#x25BE;" aria-hidden="true"></span>`;
 }
 
 // Warm the browser cache for every language flag on page load. We construct
@@ -28299,10 +28437,12 @@ function populateLanguageSelect() {
 
   button.innerHTML = getLanguageButtonHtml(currentLanguage);
   button.setAttribute('aria-label', `${t('languageLabel')}: ${getLanguageDisplayName(currentLanguage)}`);
+  // role="listbox" requires an accessible name (axe aria-input-field-name).
+  menu.setAttribute('aria-label', t('languageLabel'));
 
   menu.innerHTML = LANGUAGE_OPTIONS.map(code => {
     const selected = code === currentLanguage ? ' active' : '';
-    return `<button type="button" class="language-option${selected}" role="option" aria-selected="${code === currentLanguage ? 'true' : 'false'}" onclick="changeLanguage('${code}')">${getLanguageButtonHtml(code).replace('<span class="caret">&#x25BE;</span>', '')}</button>`;
+    return `<button type="button" class="language-option${selected}" role="option" aria-selected="${code === currentLanguage ? 'true' : 'false'}" onclick="changeLanguage('${code}')">${getLanguageButtonHtml(code).replace('<span class="caret acs-glyph" data-glyph="&#x25BE;" aria-hidden="true"></span>', '')}</button>`;
   }).join('');
 }
 
@@ -28316,7 +28456,20 @@ function applyLanguageToStaticUi() {
   if (heading) heading.innerHTML = t('appHeading');
 
   const input = document.getElementById('domainInput');
-  if (input) input.placeholder = t('placeholderDomain');
+  if (input) {
+    input.placeholder = t('placeholderDomain');
+    // The placeholder is only a hint, so give the field a real accessible name (WCAG 1.3.1 / 4.1.2).
+    input.setAttribute('aria-label', t('domainInputLabel'));
+  }
+
+  // Accessibility chrome: skip link text and the icon-only clear (x) button name.
+  const skipLink = document.getElementById('skipToMainLink');
+  if (skipLink) skipLink.textContent = t('skipToMain');
+  const clearInputBtn = document.getElementById('clearBtn');
+  if (clearInputBtn) {
+    clearInputBtn.setAttribute('aria-label', t('clearInputLabel'));
+    clearInputBtn.title = t('clearInputLabel');
+  }
 
   const lookupBtn = document.getElementById('lookupBtn');
   if (lookupBtn) {
@@ -28650,9 +28803,12 @@ function renderHistory(items) {
     const key = escapeHtml(text.toLowerCase());
     const arg = JSON.stringify(text);
     const removeLabel = escapeHtml(t('removeLabel'));
+    // A real <button> (not a clickable <span>) so recent domains are reachable
+    // with Tab and activated with Enter/Space (WCAG 2.1.1 Keyboard). The remove
+    // button's accessible name includes the domain so each "x" is distinguishable.
     return `<span class="history-chip" data-domain="${key}">
-      <span class="history-item" onclick='runHistory(${arg})'>${safe}</span>
-      <button type="button" class="history-remove" title="${removeLabel}" aria-label="${removeLabel}" onclick='event.stopPropagation(); removeHistory(${arg})'>&#x2715;</button>
+      <button type="button" class="history-item" onclick='runHistory(${arg})'>${safe}</button>
+      <button type="button" class="history-remove" title="${removeLabel}" aria-label="${removeLabel} ${safe}" onclick='event.stopPropagation(); removeHistory(${arg})'><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button>
     </span>`;
   }).join(" ");
   container.innerHTML = escapeHtml(t('recent')) + ": " + chips;
@@ -28696,6 +28852,8 @@ function toggleCard(header) {
   if (content) {
     content.classList.toggle("collapsed");
   }
+  // Keep the chevron button's aria-expanded in sync for screen readers (20g-HtmlAccessibility.ps1).
+  if (typeof window.acsSyncCardToggles === 'function') window.acsSyncCardToggles(header.parentElement || header);
 
   // If the MX card is being collapsed, also hide the additional details and reset the button label.
   const isNowCollapsed = header.classList.contains("collapsed-header") || (content && content.classList.contains("collapsed"));
@@ -30697,7 +30855,7 @@ function renderDomainChips() {
       + '<span class="domain-chip-label">' + escapeHtml(d) + '</span>'
       + '<button type="button" class="domain-chip-remove" aria-label="'
         + escapeHtml(t('removeDomainLabel', { domain: d }))
-        + '" onclick="removeDomainChip(' + i + ')">&#x2715;</button>'
+        + '" onclick="removeDomainChip(' + i + ')"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button>'
     + '</span>'
   ).join('');
 }
@@ -31394,7 +31552,7 @@ function buildSectionNavHtml(markup) {
   return `
   <div class="card section-nav-card hide-on-screenshot" id="card-section-nav">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('jumpToTag'))}</span>
       <strong>${escapeHtml(t('jumpToSection'))}</strong>
     </div>
@@ -31454,14 +31612,14 @@ function buildSectionRail(markup) {
       <span class="section-rail-title">${escapeHtml(t('jumpToSection'))}</span>
       <button type="button" class="section-rail-toggle" onclick="toggleSectionRailCollapsed()"
         aria-label="${escapeHtml(t('jumpToSectionCollapse'))}" title="${escapeHtml(t('jumpToSectionCollapse'))}">
-        <span class="section-rail-toggle-icon" aria-hidden="true">&#x276E;</span>
+        <span class="section-rail-toggle-icon acs-glyph" data-glyph="&#x276E;" aria-hidden="true"></span>
       </button>
     </div>
     <ul class="section-rail-list">${items}</ul>
     <button type="button" class="section-rail-expand" onclick="toggleSectionRailCollapsed()"
       aria-label="${escapeHtml(t('jumpToSectionExpand'))}" title="${escapeHtml(t('jumpToSectionExpand'))}">
       <span class="section-rail-expand-label">${escapeHtml(t('jumpToSection'))}</span>
-      <span class="section-rail-expand-icon" aria-hidden="true">&#x276F;</span>
+      <span class="section-rail-expand-icon acs-glyph" data-glyph="&#x276F;" aria-hidden="true"></span>
     </button>`;
   rail.classList.add('section-rail-visible');
 
@@ -31865,7 +32023,7 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
   return `
   <div class="card"${cardId ? ` id="${cardId}"` : ''}>
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       ${label ? `<span class="tag ${cls}">${translatedLabel}</span>` : ""}
       <strong>${safeTitle}</strong>${titleSuffixHtml ? ' ' + titleSuffixHtml : ''}
       ${showCopy ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, '${key}')">${escapeHtml(t('copy'))}</button>` : ""}
@@ -32017,7 +32175,7 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
     // Parent/Target manually.
     const indentDepth = Math.max(0, Number(row.depth) - 1);
     const indentHtml = indentDepth > 0
-      ? `<span class="spf-chain-arrow" aria-hidden="true">${'&nbsp;&nbsp;'.repeat(indentDepth - 1)}&#x21B3;</span>`
+      ? `<span class="spf-chain-arrow" aria-hidden="true">${'&nbsp;&nbsp;'.repeat(indentDepth - 1)}<span class="acs-glyph" data-glyph="&#x21B3;"></span></span>`
       : '';
 
     // Dim the Parent cell when it equals the target of the previous row, i.e.
@@ -33088,7 +33246,7 @@ function buildCheckOverrideBadgeHtml(isCustom) {
 
 // `scope` is a fixed literal ('spf' | 'dkim1' | 'dkim2'), never user input.
 function buildCheckOptionsButtonHtml(scope) {
-  return `<button type="button" class="copy-btn hide-on-screenshot check-options-btn" aria-haspopup="dialog" aria-controls="checkOptionsDialog" title="${escapeHtml(t('checkOptionsButtonTitle'))}" onclick="event.stopPropagation(); openCheckOptions('${scope}')">${escapeHtml(t('checkOptionsButton'))}</button>`;
+  return `<button type="button" class="copy-btn hide-on-screenshot check-options-btn" aria-haspopup="dialog" title="${escapeHtml(t('checkOptionsButtonTitle'))}" onclick="event.stopPropagation(); openCheckOptions('${scope}')">${escapeHtml(t('checkOptionsButton'))}</button>`;
 }
 
 function renderCheckOptionsDialog() {
@@ -33113,7 +33271,7 @@ function renderCheckOptionsDialog() {
     <form class="check-options-form" novalidate onsubmit="event.preventDefault(); applyCheckOptions();">
       <div class="check-options-header">
         <h2 id="checkOptionsTitle">${escapeHtml(t('checkOptionsTitle'))}</h2>
-        <button type="button" class="check-options-close" aria-label="${escapeHtml(t('checkOptionsClose'))}" title="${escapeHtml(t('checkOptionsClose'))}" onclick="closeCheckOptions()">&#x2715;</button>
+        <button type="button" class="check-options-close" aria-label="${escapeHtml(t('checkOptionsClose'))}" title="${escapeHtml(t('checkOptionsClose'))}" onclick="closeCheckOptions()"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button>
       </div>
       <div class="check-options-body">
         <p id="checkOptionsIntro" class="check-options-intro">${escapeHtml(t('checkOptionsIntro'))}</p>
@@ -33861,7 +34019,7 @@ function updateDnsRecordsFilterChips() {
   }
 
   container.innerHTML = filters.map((filter, index) => {
-    return `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})">&#x2715;</button></span>`;
+    return `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button></span>`;
   }).join('');
   container.style.display = 'flex';
 }
@@ -34201,6 +34359,9 @@ function clearDnsRecordsFilters() {
   filterDnsRecordsTable();
 }
 
+// Rows are keyboard-selectable (tabindex=0, Enter/Space) for yellow highlighting.
+// The state is exposed with aria-selected, which ARIA permits on table rows;
+// aria-pressed is only valid on buttons and is flagged by axe (aria-allowed-attr).
 function toggleDnsRecordRowSelection(row) {
   if (!row) return;
   const key = String(row.getAttribute('data-row-key') || '');
@@ -34209,11 +34370,11 @@ function toggleDnsRecordRowSelection(row) {
   if (selectedDnsRecordKeys.has(key)) {
     selectedDnsRecordKeys.delete(key);
     row.classList.remove('dns-record-row-selected');
-    row.setAttribute('aria-pressed', 'false');
+    row.setAttribute('aria-selected', 'false');
   } else {
     selectedDnsRecordKeys.add(key);
     row.classList.add('dns-record-row-selected');
-    row.setAttribute('aria-pressed', 'true');
+    row.setAttribute('aria-selected', 'true');
   }
 }
 
@@ -34239,7 +34400,7 @@ function renderDnsRecordsTable(records) {
     // via a span so it can be styled separately and is hidden from the
     // search/filter haystack (which uses the original `record.name`).
     const name = isChainedChild
-      ? `<span class="dns-record-chain-marker" aria-hidden="true">&#x21B3;&nbsp;</span>${escapedName}`
+      ? `<span class="dns-record-chain-marker acs-glyph" data-glyph="&#x21B3;&#xA0;" aria-hidden="true"></span>${escapedName}`
       : escapedName;
     const dnsClass = escapeHtml(record.class || 'IN');
     const type = escapeHtml(record.type || '');
@@ -34254,7 +34415,7 @@ function renderDnsRecordsTable(records) {
     const rowClasses = ['dns-record-row'];
     if (isSelected) rowClasses.push('dns-record-row-selected');
     if (isChainedChild) rowClasses.push('dns-record-row-chained');
-    return `<tr class="${rowClasses.join(' ')}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+    return `<tr class="${rowClasses.join(' ')}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-selected="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
   }).join('');
 
   return `
@@ -34277,7 +34438,7 @@ function renderDnsRecordsTable(records) {
         </select>
         <button type="button" class="copy-btn dns-records-clear-btn" onclick="clearDnsRecordsFilters()">${escapeHtml(t('dnsRecordsClearFilters'))}</button>
         <span id="dnsRecordsFilterSummary" class="dns-records-filter-summary">${escapeHtml(t('dnsRecordsFilterSummary', { visible: String(rows.length), total: String(rows.length) }))}</span>
-        <div id="dnsRecordsFilterChips" class="dns-records-filter-chip-row" style="display:${dnsRecordsFilterState.filters.length ? 'flex' : 'none'};">${(dnsRecordsFilterState.filters || []).map((filter, index) => `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})">&#x2715;</button></span>`).join('')}</div>
+        <div id="dnsRecordsFilterChips" class="dns-records-filter-chip-row" style="display:${dnsRecordsFilterState.filters.length ? 'flex' : 'none'};">${(dnsRecordsFilterState.filters || []).map((filter, index) => `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button></span>`).join('')}</div>
       </div>
       <div class="dns-records-table-wrap">
       <table id="dnsRecordsTable" class="mx-table dns-records-table">
@@ -34585,7 +34746,7 @@ function render(r) {
   quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('mxRecordsLabel'))}:</strong> ${escapeHtml(mxStatusText || t('unknown'))}</div>` + (mxCopyDetail ? `<div style="margin-left:12px;">${escapeHtml(mxCopyDetail)}</div>` : ''));
 
   const multiRblLink = `https://multirbl.valli.org/dnsbl-lookup/${encodeURIComponent(r.domain || "")}.html`;
-  const multiRblHtml = `<a href="${multiRblLink}" target="_blank" rel="noopener" style="font-size:11px; color:#2f80ed; text-decoration:none;">(MultiRBL &#x2197;)</a>`;
+  const multiRblHtml = `<a href="${multiRblLink}" target="_blank" rel="noopener" style="font-size:11px; color:var(--link); text-decoration:none;">(MultiRBL &#x2197;)</a>`;
 
   // 2) Reputation
   const reputationInfo = t('reputationInfo');
@@ -35040,7 +35201,7 @@ function render(r) {
   cards.push(`
   <div class="card" id="card-email-quota">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('checklist'))}</span>
       <strong>${escapeHtml(t('emailQuota'))}</strong>
       <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(buildQuotaCopyPayload(), this)">${escapeHtml(t('copyEmailQuota'))}</button>
@@ -35089,7 +35250,7 @@ function render(r) {
   cards.push(`
   <div class="card" id="card-verification">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('verificationTag'))}</span>
       <strong>${escapeHtml(t('domainVerification'))}</strong>
     </div>
@@ -35265,7 +35426,7 @@ function render(r) {
     cards.push(`
   <div class="card" id="card-whois">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag ${whoisTagClass}">${escapeHtml(translateBadge(whoisLabel))}</span>
       <strong>${escapeHtml(t('domainRegistration'))}</strong>
       <button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, 'whois')">${escapeHtml(t('copy'))}</button>
@@ -35314,7 +35475,7 @@ function render(r) {
     cards.push(`
       <div class="card" id="card-domain">
         <div class="card-header" onclick="toggleCard(this)">
-          <span class="chevron">&#x25BC;</span>
+          <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
           <span class="tag ${domainClass}">${escapeHtml(translateBadge(domainLabel))}</span>
           <strong>${escapeHtml(t('domain'))}</strong>
         </div>
@@ -35353,7 +35514,7 @@ function render(r) {
     cards.push(`
       <div class="card" id="card-records">
         <div class="card-header" onclick="toggleCard(this)">
-          <span class="chevron">&#x25BC;</span>
+          <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
           <span class="tag tag-info">${escapeHtml(t('info'))}</span>
           <strong>${escapeHtml(t('dnsRecords'))}</strong>
           <button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, 'records')">${escapeHtml(t('copy'))}</button>
@@ -35471,7 +35632,7 @@ function render(r) {
     cards.push(`
   <div class="card" id="card-mx">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('info'))}</span>
       <strong>${escapeHtml(t('mxRecords'))}</strong>
       <button type="button"
@@ -35618,7 +35779,7 @@ function render(r) {
     cards.push(`
   <div class="card" id="card-spfExpansion">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag ${spfCardExceedsLookupLimit ? 'tag-warn' : 'tag-info'}">${escapeHtml(translateBadge(spfCardExceedsLookupLimit ? 'WARN' : 'INFO'))}</span>
       <strong>${escapeHtml(t('spfExpansionRecordsTitle'))}</strong>
     </div>
@@ -36417,7 +36578,7 @@ function render(r) {
   cards.push(`
     <div class="card" id="card-guidance">
       <div class="card-header" onclick="toggleCard(this)">
-        <span class="chevron">&#x25BC;</span>
+        <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
         <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
         <strong>${renderLabelWithIcon('guidance')}</strong>
         <div class="card-icons" style="margin-left: auto; font-size: 0.8em; display: flex; align-items: center; gap: 6px;">
@@ -36436,7 +36597,7 @@ function render(r) {
   cards.push(`
     <div class="card" id="card-helpfulLinks">
       <div class="card-header" onclick="toggleCard(this)">
-        <span class="chevron">&#x25BC;</span>
+        <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
         <span class="tag tag-info">${escapeHtml(t('docs'))}</span>
         <strong>${escapeHtml(t('helpfulLinks'))}</strong>
       </div>
@@ -36466,7 +36627,7 @@ function render(r) {
   cards.push(`
     <div class="card" id="card-tools">
       <div class="card-header" onclick="toggleCard(this)">
-        <span class="chevron">&#x25BC;</span>
+        <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
         <span class="tag tag-info">${escapeHtml(t('tools'))}</span>
         <strong>${escapeHtml(t('externalTools'))}</strong>
       </div>
@@ -38997,6 +39158,42 @@ $htmlPage += @'
   left: 0;
 }
 
+/* <main id="mainContent" tabindex="-1"> is the skip-link target. It receives
+   programmatic focus only, so suppress the focus ring on the container itself. */
+#mainContent:focus {
+  outline: none;
+}
+
+/* Decorative icon glyphs (chevrons, carets, x, arrows). The character lives in
+   data-glyph and is painted by CSS, so it is never read by screen readers and is
+   not evaluated as text by contrast checkers (axe "Needs review": "content
+   contains only non-text characters"). Controls using it carry their own
+   aria-label. Usage: <span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span> */
+.acs-glyph::before {
+  content: attr(data-glyph);
+}
+
+/* Visible keyboard focus everywhere (WCAG 2.4.7 Focus Visible / 2.4.11). Several
+   components replace the outline with a subtle border-color change, which is easy
+   to miss; this restores a consistent 2px ring for keyboard focus only. --link is
+   >= 5.6:1 against every page/card/code background in both themes (>= 3:1 needed). */
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+input:not(#domainInput):focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible,
+[contenteditable="true"]:focus-visible {
+  outline: 2px solid var(--link) !important;
+  outline-offset: 2px;
+}
+/* The domain field draws its border on .input-wrapper (so chips can sit inside it),
+   so ring the wrapper rather than the borderless inner input. */
+.input-wrapper:focus-within {
+  box-shadow: 0 0 0 2px var(--link);
+}
+
 /* Windows High Contrast / forced-colors mode: guarantee a visible keyboard
    focus indicator even when the app's custom colors are replaced by the OS.
    Scoped to :focus-visible so it only shows during keyboard navigation. */
@@ -39063,6 +39260,53 @@ $htmlPage += @'
 
   // Single global entry point consumed by the render/lookup code.
   window.acsAnnounce = announce;
+
+  // ---------------------------------------------------------------------------
+  // Card collapse/expand toggles (WCAG 2.1.1 Keyboard, 4.1.2 Name/Role/Value).
+  //
+  // Every card header renders its chevron as <button class="chevron card-toggle">.
+  // The button's click bubbles to the header's onclick="toggleCard(this)", so no
+  // extra handler is needed; this helper only keeps the ARIA state truthful:
+  //   aria-expanded  -> mirrors the header's .collapsed-header class
+  //   aria-controls  -> the collapsible .card-content element (when it has an id)
+  //   aria-label     -> the card title, so the control reads e.g. "SPF, expanded"
+  // It runs from toggleCard() and, because cards are rendered via innerHTML in
+  // many places, from a rAF-debounced MutationObserver after any DOM insertion.
+  // ---------------------------------------------------------------------------
+  function syncCardToggles(root) {
+    var scope = (root && root.querySelectorAll) ? root : document;
+    var toggles = scope.querySelectorAll('.card-header > .card-toggle');
+    for (var i = 0; i < toggles.length; i++) {
+      var btn = toggles[i];
+      var header = btn.parentElement;
+      var content = header.nextElementSibling;
+      var collapsed = header.classList.contains('collapsed-header') ||
+        !!(content && content.classList.contains('collapsed'));
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (content && content.id) btn.setAttribute('aria-controls', content.id);
+      var titleEl = header.querySelector('strong');
+      var title = titleEl ? (titleEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
+      if (!title && typeof window.t === 'function') title = window.t('toggleSection');
+      if (title && btn.getAttribute('aria-label') !== title) btn.setAttribute('aria-label', title);
+    }
+  }
+  window.acsSyncCardToggles = syncCardToggles;
+
+  // Observe childList only (not attributes) so our own setAttribute calls can
+  // never retrigger the observer.
+  var syncScheduled = false;
+  function scheduleSync() {
+    if (syncScheduled) { return; }
+    syncScheduled = true;
+    window.requestAnimationFrame(function () {
+      syncScheduled = false;
+      syncCardToggles(document);
+    });
+  }
+  if (window.MutationObserver && document.body) {
+    new MutationObserver(scheduleSync).observe(document.body, { childList: true, subtree: true });
+  }
+  scheduleSync();
 })();
 </script>
 '@
@@ -39199,7 +39443,7 @@ $htmlPage += @'
 .smtp-meaning { display: block; margin-bottom: 6px; }
 .smtp-basic-meaning, .smtp-source, .smtp-muted { display: block; color: var(--status); font-size: 12px; }
 .smtp-source { margin-top: 6px; }
-.smtp-dialog a { color: var(--button-bg); text-underline-offset: 2px; }
+.smtp-dialog a { color: var(--link); text-underline-offset: 2px; }
 .dark .smtp-dialog a { color: #93c5fd; }
 .smtp-advice { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--border); }
 .smtp-reference-notice { color: var(--status); font-size: 12px; line-height: 1.5; margin: 12px 0 0; }
@@ -39665,7 +39909,7 @@ $script:TosPageHtml = @'
 <meta property="og:title" content="Terms of Service - ACS Email Domain Checker" />
 <meta property="og:url" content="__ACS_SITE_URL__/terms" />
 <style nonce="__CSP_NONCE__">
-  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
+  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #1a64c8; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
   }
@@ -39677,7 +39921,9 @@ $script:TosPageHtml = @'
 </style>
 </head>
 <body>
-<a id="backLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<!-- Landmarks: the back link is the page's navigation and all content lives in <main> so every element sits inside a landmark (WCAG 1.3.1). -->
+<nav aria-label="Site"><a id="backLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a></nav>
+<main>
 <h1 id="tosTitle">Terms of Service</h1>
 <p><strong id="updatedLabel">Last updated:</strong> <span id="updatedValue">March 2026</span></p>
 
@@ -39713,6 +39959,7 @@ $script:TosPageHtml = @'
 
 <h2 id="tosSection9Title">9. Contact</h2>
 <p id="tosSection9Body">For questions about these terms, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+</main>
 <script nonce="__CSP_NONCE__">
 (() => {
   const TRANSLATIONS = {
@@ -39950,7 +40197,7 @@ $script:PrivacyPageHtml = @'
 <meta property="og:title" content="Privacy Statement - ACS Email Domain Checker" />
 <meta property="og:url" content="__ACS_SITE_URL__/privacy" />
 <style nonce="__CSP_NONCE__">
-  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #2f80ed; }
+  :root { --bg: #f4f6fb; --fg: #111827; --card-bg: #ffffff; --border: #e0e3ee; --link: #1a64c8; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #1e1e1e; --fg: #d4d4d4; --card-bg: #2d2d2d; --border: #444; --link: #5ba8f5; }
   }
@@ -39962,7 +40209,9 @@ $script:PrivacyPageHtml = @'
 </style>
 </head>
 <body>
-<a id="privacyBackLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a>
+<!-- Landmarks: the back link is the page's navigation and all content lives in <main> so every element sits inside a landmark (WCAG 1.3.1). -->
+<nav aria-label="Site"><a id="privacyBackLink" class="back" href="/">&larr; Back to ACS Email Domain Checker</a></nav>
+<main>
 <h1 id="privacyTitle">Privacy Statement</h1>
 <p><strong id="privacyUpdatedLabel">Last updated:</strong> <span id="privacyUpdatedValue">March 2026</span></p>
 
@@ -40011,6 +40260,7 @@ $script:PrivacyPageHtml = @'
 
 <h2 id="privacySection10Title">10. Contact</h2>
 <p id="privacySection10Body">For privacy-related questions, visit <a href="https://blakedrumm.com/" target="_blank" rel="noopener">blakedrumm.com</a>.</p>
+</main>
 <script nonce="__CSP_NONCE__">
 (() => {
   const TRANSLATIONS = {

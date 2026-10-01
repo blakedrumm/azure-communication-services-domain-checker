@@ -64,6 +64,42 @@ $htmlPage += @'
   left: 0;
 }
 
+/* <main id="mainContent" tabindex="-1"> is the skip-link target. It receives
+   programmatic focus only, so suppress the focus ring on the container itself. */
+#mainContent:focus {
+  outline: none;
+}
+
+/* Decorative icon glyphs (chevrons, carets, x, arrows). The character lives in
+   data-glyph and is painted by CSS, so it is never read by screen readers and is
+   not evaluated as text by contrast checkers (axe "Needs review": "content
+   contains only non-text characters"). Controls using it carry their own
+   aria-label. Usage: <span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span> */
+.acs-glyph::before {
+  content: attr(data-glyph);
+}
+
+/* Visible keyboard focus everywhere (WCAG 2.4.7 Focus Visible / 2.4.11). Several
+   components replace the outline with a subtle border-color change, which is easy
+   to miss; this restores a consistent 2px ring for keyboard focus only. --link is
+   >= 5.6:1 against every page/card/code background in both themes (>= 3:1 needed). */
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+input:not(#domainInput):focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible,
+[contenteditable="true"]:focus-visible {
+  outline: 2px solid var(--link) !important;
+  outline-offset: 2px;
+}
+/* The domain field draws its border on .input-wrapper (so chips can sit inside it),
+   so ring the wrapper rather than the borderless inner input. */
+.input-wrapper:focus-within {
+  box-shadow: 0 0 0 2px var(--link);
+}
+
 /* Windows High Contrast / forced-colors mode: guarantee a visible keyboard
    focus indicator even when the app's custom colors are replaced by the OS.
    Scoped to :focus-visible so it only shows during keyboard navigation. */
@@ -130,6 +166,53 @@ $htmlPage += @'
 
   // Single global entry point consumed by the render/lookup code.
   window.acsAnnounce = announce;
+
+  // ---------------------------------------------------------------------------
+  // Card collapse/expand toggles (WCAG 2.1.1 Keyboard, 4.1.2 Name/Role/Value).
+  //
+  // Every card header renders its chevron as <button class="chevron card-toggle">.
+  // The button's click bubbles to the header's onclick="toggleCard(this)", so no
+  // extra handler is needed; this helper only keeps the ARIA state truthful:
+  //   aria-expanded  -> mirrors the header's .collapsed-header class
+  //   aria-controls  -> the collapsible .card-content element (when it has an id)
+  //   aria-label     -> the card title, so the control reads e.g. "SPF, expanded"
+  // It runs from toggleCard() and, because cards are rendered via innerHTML in
+  // many places, from a rAF-debounced MutationObserver after any DOM insertion.
+  // ---------------------------------------------------------------------------
+  function syncCardToggles(root) {
+    var scope = (root && root.querySelectorAll) ? root : document;
+    var toggles = scope.querySelectorAll('.card-header > .card-toggle');
+    for (var i = 0; i < toggles.length; i++) {
+      var btn = toggles[i];
+      var header = btn.parentElement;
+      var content = header.nextElementSibling;
+      var collapsed = header.classList.contains('collapsed-header') ||
+        !!(content && content.classList.contains('collapsed'));
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      if (content && content.id) btn.setAttribute('aria-controls', content.id);
+      var titleEl = header.querySelector('strong');
+      var title = titleEl ? (titleEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
+      if (!title && typeof window.t === 'function') title = window.t('toggleSection');
+      if (title && btn.getAttribute('aria-label') !== title) btn.setAttribute('aria-label', title);
+    }
+  }
+  window.acsSyncCardToggles = syncCardToggles;
+
+  // Observe childList only (not attributes) so our own setAttribute calls can
+  // never retrigger the observer.
+  var syncScheduled = false;
+  function scheduleSync() {
+    if (syncScheduled) { return; }
+    syncScheduled = true;
+    window.requestAnimationFrame(function () {
+      syncScheduled = false;
+      syncCardToggles(document);
+    });
+  }
+  if (window.MutationObserver && document.body) {
+    new MutationObserver(scheduleSync).observe(document.body, { childList: true, subtree: true });
+  }
+  scheduleSync();
 })();
 </script>
 '@

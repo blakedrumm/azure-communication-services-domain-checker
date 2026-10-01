@@ -2204,6 +2204,11 @@ Object.keys(REMAINING_TRANSLATION_OVERRIDES).forEach(code => {
 const UI_TRANSLATION_OVERRIDES = {
   en: {
     removeLabel: 'Remove',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Skip to main content',
+    domainInputLabel: 'Domain to check',
+    clearInputLabel: 'Clear domain input',
+    toggleSection: 'Show or hide section',
     reportIssueTitle: 'Report an issue (includes the domain name)',
     noRecordOnDomain: 'No record on {domain}',
     parentDomainAcsTxtInfo: 'Parent domain {lookupDomain} ACS TXT (informational only):',
@@ -2220,6 +2225,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   es: {
     removeLabel: 'Quitar',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Saltar al contenido principal',
+    domainInputLabel: 'Dominio que se va a comprobar',
+    clearInputLabel: 'Borrar el dominio',
+    toggleSection: 'Mostrar u ocultar secci\u00F3n',
     reportIssueTitle: 'Reportar un problema (incluye el nombre de dominio)',
     noRecordOnDomain: 'No hay registro en {domain}',
     parentDomainAcsTxtInfo: 'TXT ACS del dominio primario {lookupDomain} (solo informativo):',
@@ -2254,6 +2264,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   fr: {
     removeLabel: 'Supprimer',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Aller au contenu principal',
+    domainInputLabel: 'Domaine \u00E0 v\u00E9rifier',
+    clearInputLabel: 'Effacer le domaine',
+    toggleSection: 'Afficher ou masquer la section',
     reportIssueTitle: 'Signaler un probl\u00E8me (inclut le nom de domaine)',
     noRecordOnDomain: 'Aucun enregistrement sur {domain}',
     parentDomainAcsTxtInfo: 'TXT ACS du domaine parent {lookupDomain} (informatif uniquement) :',
@@ -2270,6 +2285,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   de: {
     removeLabel: 'Entfernen',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Zum Hauptinhalt springen',
+    domainInputLabel: 'Zu pr\u00FCfende Domain',
+    clearInputLabel: 'Domaineingabe l\u00F6schen',
+    toggleSection: 'Abschnitt ein- oder ausblenden',
     reportIssueTitle: 'Problem melden (einschlie\u00DFlich Domainname)',
     noRecordOnDomain: 'Kein Eintrag auf {domain}',
     parentDomainAcsTxtInfo: 'ACS-TXT der \u00FCbergeordneten Domain {lookupDomain} (nur informativ):',
@@ -2286,6 +2306,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'pt-BR': {
     removeLabel: 'Remover',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: 'Pular para o conte\u00FAdo principal',
+    domainInputLabel: 'Dom\u00EDnio a verificar',
+    clearInputLabel: 'Limpar dom\u00EDnio',
+    toggleSection: 'Mostrar ou ocultar se\u00E7\u00E3o',
     reportIssueTitle: 'Relatar um problema (inclui o nome do dom\u00EDnio)',
     noRecordOnDomain: 'Nenhum registro em {domain}',
     parentDomainAcsTxtInfo: 'TXT ACS do dom\u00EDnio pai {lookupDomain} (somente informativo):',
@@ -2302,6 +2327,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   ar: {
     removeLabel: '\u0625\u0632\u0627\u0644\u0629',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u0627\u0646\u062A\u0642\u0644 \u0625\u0644\u0649 \u0627\u0644\u0645\u062D\u062A\u0648\u0649 \u0627\u0644\u0631\u0626\u064A\u0633\u064A',
+    domainInputLabel: '\u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u0645\u0631\u0627\u062F \u0641\u062D\u0635\u0647',
+    clearInputLabel: '\u0645\u0633\u062D \u0627\u0644\u0646\u0637\u0627\u0642',
+    toggleSection: '\u0625\u0638\u0647\u0627\u0631 \u0627\u0644\u0642\u0633\u0645 \u0623\u0648 \u0625\u062E\u0641\u0627\u0624\u0647',
     reportIssueTitle: '\u0627\u0644\u0625\u0628\u0644\u0627\u063A \u0639\u0646 \u0645\u0634\u0643\u0644\u0629 (\u064A\u062A\u0636\u0645\u0646 \u0627\u0633\u0645 \u0627\u0644\u0646\u0637\u0627\u0642)',
     noRecordOnDomain: '\u0644\u0627 \u064A\u0648\u062C\u062F \u0633\u062C\u0644 \u0639\u0644\u0649 {domain}',
     parentDomainAcsTxtInfo: 'TXT \u0627\u0644\u062E\u0627\u0635 \u0628\u0640 ACS \u0645\u0646 \u0627\u0644\u0646\u0637\u0627\u0642 \u0627\u0644\u0623\u0635\u0644 {lookupDomain} (\u0644\u0644\u0645\u0639\u0644\u0648\u0645\u0629 \u0641\u0642\u0637):',
@@ -2334,6 +2364,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'zh-CN': {
     removeLabel: '\u79FB\u9664',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u8DF3\u5230\u4E3B\u8981\u5185\u5BB9',
+    domainInputLabel: '\u8981\u68C0\u67E5\u7684\u57DF',
+    clearInputLabel: '\u6E05\u9664\u57DF\u8F93\u5165',
+    toggleSection: '\u663E\u793A\u6216\u9690\u85CF\u90E8\u5206',
     reportIssueTitle: '\u62A5\u544A\u95EE\u9898\uFF08\u5305\u542B\u57DF\u540D\uFF09',
     noRecordOnDomain: '{domain} \u4E0A\u6CA1\u6709\u8BB0\u5F55',
     parentDomainAcsTxtInfo: '\u7236\u57DF {lookupDomain} \u7684 ACS TXT\uFF08\u4EC5\u4F9B\u53C2\u8003\uFF09\uFF1A',
@@ -2346,6 +2381,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'hi-IN': {
     removeLabel: '\u0939\u091F\u093E\u090F\u0901',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u092E\u0941\u0916\u094D\u092F \u0938\u093E\u092E\u0917\u094D\u0930\u0940 \u092A\u0930 \u091C\u093E\u090F\u0901',
+    domainInputLabel: '\u091C\u093E\u0901\u091A\u0928\u0947 \u0915\u0947 \u0932\u093F\u090F \u0921\u094B\u092E\u0947\u0928',
+    clearInputLabel: '\u0921\u094B\u092E\u0947\u0928 \u0907\u0928\u092A\u0941\u091F \u0938\u093E\u092B\u093C \u0915\u0930\u0947\u0902',
+    toggleSection: '\u0905\u0928\u0941\u092D\u093E\u0917 \u0926\u093F\u0916\u093E\u090F\u0901 \u092F\u093E \u091B\u093F\u092A\u093E\u090F\u0901',
     reportIssueTitle: '\u0938\u092E\u0938\u094D\u092F\u093E \u0930\u093F\u092A\u094B\u0930\u094D\u091F \u0915\u0930\u0947\u0902 (\u0921\u094B\u092E\u0947\u0928 \u0928\u093E\u092E \u0936\u093E\u092E\u093F\u0932 \u0939\u0948)',
     noRecordOnDomain: '{domain} \u092A\u0930 \u0915\u094B\u0908 \u0930\u093F\u0915\u0949\u0930\u094D\u0921 \u0928\u0939\u0940\u0902 \u0939\u0948',
     parentDomainAcsTxtInfo: '\u092E\u0942\u0932 \u0921\u094B\u092E\u0947\u0928 {lookupDomain} \u0915\u093E ACS TXT (\u0915\u0947\u0935\u0932 \u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u0915\u0947 \u0932\u093F\u090F):',
@@ -2358,6 +2398,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'ja-JP': {
     removeLabel: '\u524A\u9664',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u30E1\u30A4\u30F3 \u30B3\u30F3\u30C6\u30F3\u30C4\u306B\u30B9\u30AD\u30C3\u30D7',
+    domainInputLabel: '\u30C1\u30A7\u30C3\u30AF\u3059\u308B\u30C9\u30E1\u30A4\u30F3',
+    clearInputLabel: '\u30C9\u30E1\u30A4\u30F3\u306E\u5165\u529B\u3092\u30AF\u30EA\u30A2',
+    toggleSection: '\u30BB\u30AF\u30B7\u30E7\u30F3\u306E\u8868\u793A/\u975E\u8868\u793A',
     reportIssueTitle: '\u554F\u984C\u3092\u5831\u544A\uFF08\u30C9\u30E1\u30A4\u30F3\u540D\u3092\u542B\u307F\u307E\u3059\uFF09',
     noRecordOnDomain: '{domain} \u306B\u30EC\u30B3\u30FC\u30C9\u306F\u3042\u308A\u307E\u305B\u3093',
     parentDomainAcsTxtInfo: '\u89AA\u30C9\u30E1\u30A4\u30F3 {lookupDomain} \u306E ACS TXT\uFF08\u53C2\u8003\u60C5\u5831\u306E\u307F\uFF09:',
@@ -2370,6 +2415,11 @@ const UI_TRANSLATION_OVERRIDES = {
   },
   'ru-RU': {
     removeLabel: '\u0423\u0434\u0430\u043B\u0438\u0442\u044C',
+    // Accessibility labels: skip link, domain input name, clear (x) button, card collapse toggle.
+    skipToMain: '\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u043A \u043E\u0441\u043D\u043E\u0432\u043D\u043E\u043C\u0443 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u043C\u0443',
+    domainInputLabel: '\u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u043C\u044B\u0439 \u0434\u043E\u043C\u0435\u043D',
+    clearInputLabel: '\u041E\u0447\u0438\u0441\u0442\u0438\u0442\u044C \u043F\u043E\u043B\u0435 \u0434\u043E\u043C\u0435\u043D\u0430',
+    toggleSection: '\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0438\u043B\u0438 \u0441\u043A\u0440\u044B\u0442\u044C \u0440\u0430\u0437\u0434\u0435\u043B',
     reportIssueTitle: '\u0421\u043E\u043E\u0431\u0449\u0438\u0442\u044C \u043E \u043F\u0440\u043E\u0431\u043B\u0435\u043C\u0435 (\u0432\u043A\u043B\u044E\u0447\u0430\u044F \u0438\u043C\u044F \u0434\u043E\u043C\u0435\u043D\u0430)',
     noRecordOnDomain: '\u041D\u0430 {domain} \u0437\u0430\u043F\u0438\u0441\u044C \u043E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442',
     parentDomainAcsTxtInfo: 'ACS TXT \u0440\u043E\u0434\u0438\u0442\u0435\u043B\u044C\u0441\u043A\u043E\u0433\u043E \u0434\u043E\u043C\u0435\u043D\u0430 {lookupDomain} (\u0442\u043E\u043B\u044C\u043A\u043E \u0434\u043B\u044F \u0438\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0438\u0438):',

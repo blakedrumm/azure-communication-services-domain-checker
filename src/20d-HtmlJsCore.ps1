@@ -117,7 +117,7 @@ function renderDomainChips() {
       + '<span class="domain-chip-label">' + escapeHtml(d) + '</span>'
       + '<button type="button" class="domain-chip-remove" aria-label="'
         + escapeHtml(t('removeDomainLabel', { domain: d }))
-        + '" onclick="removeDomainChip(' + i + ')">&#x2715;</button>'
+        + '" onclick="removeDomainChip(' + i + ')"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button>'
     + '</span>'
   ).join('');
 }
@@ -814,7 +814,7 @@ function buildSectionNavHtml(markup) {
   return `
   <div class="card section-nav-card hide-on-screenshot" id="card-section-nav">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('jumpToTag'))}</span>
       <strong>${escapeHtml(t('jumpToSection'))}</strong>
     </div>
@@ -874,14 +874,14 @@ function buildSectionRail(markup) {
       <span class="section-rail-title">${escapeHtml(t('jumpToSection'))}</span>
       <button type="button" class="section-rail-toggle" onclick="toggleSectionRailCollapsed()"
         aria-label="${escapeHtml(t('jumpToSectionCollapse'))}" title="${escapeHtml(t('jumpToSectionCollapse'))}">
-        <span class="section-rail-toggle-icon" aria-hidden="true">&#x276E;</span>
+        <span class="section-rail-toggle-icon acs-glyph" data-glyph="&#x276E;" aria-hidden="true"></span>
       </button>
     </div>
     <ul class="section-rail-list">${items}</ul>
     <button type="button" class="section-rail-expand" onclick="toggleSectionRailCollapsed()"
       aria-label="${escapeHtml(t('jumpToSectionExpand'))}" title="${escapeHtml(t('jumpToSectionExpand'))}">
       <span class="section-rail-expand-label">${escapeHtml(t('jumpToSection'))}</span>
-      <span class="section-rail-expand-icon" aria-hidden="true">&#x276F;</span>
+      <span class="section-rail-expand-icon acs-glyph" data-glyph="&#x276F;" aria-hidden="true"></span>
     </button>`;
   rail.classList.add('section-rail-visible');
 
@@ -1285,7 +1285,7 @@ function card(title, value, label, cls, key, showCopy = true, titleSuffixHtml = 
   return `
   <div class="card"${cardId ? ` id="${cardId}"` : ''}>
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       ${label ? `<span class="tag ${cls}">${translatedLabel}</span>` : ""}
       <strong>${safeTitle}</strong>${titleSuffixHtml ? ' ' + titleSuffixHtml : ''}
       ${showCopy ? `<button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, '${key}')">${escapeHtml(t('copy'))}</button>` : ""}
@@ -1437,7 +1437,7 @@ function buildSpfExpansionCardHtml(analysis, queriedDomain) {
     // Parent/Target manually.
     const indentDepth = Math.max(0, Number(row.depth) - 1);
     const indentHtml = indentDepth > 0
-      ? `<span class="spf-chain-arrow" aria-hidden="true">${'&nbsp;&nbsp;'.repeat(indentDepth - 1)}&#x21B3;</span>`
+      ? `<span class="spf-chain-arrow" aria-hidden="true">${'&nbsp;&nbsp;'.repeat(indentDepth - 1)}<span class="acs-glyph" data-glyph="&#x21B3;"></span></span>`
       : '';
 
     // Dim the Parent cell when it equals the target of the previous row, i.e.
@@ -2508,7 +2508,7 @@ function buildCheckOverrideBadgeHtml(isCustom) {
 
 // `scope` is a fixed literal ('spf' | 'dkim1' | 'dkim2'), never user input.
 function buildCheckOptionsButtonHtml(scope) {
-  return `<button type="button" class="copy-btn hide-on-screenshot check-options-btn" aria-haspopup="dialog" aria-controls="checkOptionsDialog" title="${escapeHtml(t('checkOptionsButtonTitle'))}" onclick="event.stopPropagation(); openCheckOptions('${scope}')">${escapeHtml(t('checkOptionsButton'))}</button>`;
+  return `<button type="button" class="copy-btn hide-on-screenshot check-options-btn" aria-haspopup="dialog" title="${escapeHtml(t('checkOptionsButtonTitle'))}" onclick="event.stopPropagation(); openCheckOptions('${scope}')">${escapeHtml(t('checkOptionsButton'))}</button>`;
 }
 
 function renderCheckOptionsDialog() {
@@ -2533,7 +2533,7 @@ function renderCheckOptionsDialog() {
     <form class="check-options-form" novalidate onsubmit="event.preventDefault(); applyCheckOptions();">
       <div class="check-options-header">
         <h2 id="checkOptionsTitle">${escapeHtml(t('checkOptionsTitle'))}</h2>
-        <button type="button" class="check-options-close" aria-label="${escapeHtml(t('checkOptionsClose'))}" title="${escapeHtml(t('checkOptionsClose'))}" onclick="closeCheckOptions()">&#x2715;</button>
+        <button type="button" class="check-options-close" aria-label="${escapeHtml(t('checkOptionsClose'))}" title="${escapeHtml(t('checkOptionsClose'))}" onclick="closeCheckOptions()"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button>
       </div>
       <div class="check-options-body">
         <p id="checkOptionsIntro" class="check-options-intro">${escapeHtml(t('checkOptionsIntro'))}</p>
@@ -3281,7 +3281,7 @@ function updateDnsRecordsFilterChips() {
   }
 
   container.innerHTML = filters.map((filter, index) => {
-    return `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})">&#x2715;</button></span>`;
+    return `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button></span>`;
   }).join('');
   container.style.display = 'flex';
 }
@@ -3621,6 +3621,9 @@ function clearDnsRecordsFilters() {
   filterDnsRecordsTable();
 }
 
+// Rows are keyboard-selectable (tabindex=0, Enter/Space) for yellow highlighting.
+// The state is exposed with aria-selected, which ARIA permits on table rows;
+// aria-pressed is only valid on buttons and is flagged by axe (aria-allowed-attr).
 function toggleDnsRecordRowSelection(row) {
   if (!row) return;
   const key = String(row.getAttribute('data-row-key') || '');
@@ -3629,11 +3632,11 @@ function toggleDnsRecordRowSelection(row) {
   if (selectedDnsRecordKeys.has(key)) {
     selectedDnsRecordKeys.delete(key);
     row.classList.remove('dns-record-row-selected');
-    row.setAttribute('aria-pressed', 'false');
+    row.setAttribute('aria-selected', 'false');
   } else {
     selectedDnsRecordKeys.add(key);
     row.classList.add('dns-record-row-selected');
-    row.setAttribute('aria-pressed', 'true');
+    row.setAttribute('aria-selected', 'true');
   }
 }
 
@@ -3659,7 +3662,7 @@ function renderDnsRecordsTable(records) {
     // via a span so it can be styled separately and is hidden from the
     // search/filter haystack (which uses the original `record.name`).
     const name = isChainedChild
-      ? `<span class="dns-record-chain-marker" aria-hidden="true">&#x21B3;&nbsp;</span>${escapedName}`
+      ? `<span class="dns-record-chain-marker acs-glyph" data-glyph="&#x21B3;&#xA0;" aria-hidden="true"></span>${escapedName}`
       : escapedName;
     const dnsClass = escapeHtml(record.class || 'IN');
     const type = escapeHtml(record.type || '');
@@ -3674,7 +3677,7 @@ function renderDnsRecordsTable(records) {
     const rowClasses = ['dns-record-row'];
     if (isSelected) rowClasses.push('dns-record-row-selected');
     if (isChainedChild) rowClasses.push('dns-record-row-chained');
-    return `<tr class="${rowClasses.join(' ')}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-pressed="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
+    return `<tr class="${rowClasses.join(' ')}" data-row-key="${escapeHtml(rowKey)}" data-search="${escapeHtml(searchText)}" data-col-name="${escapeHtml(String(record.name || '').toLowerCase())}" data-col-class="${escapeHtml(String(record.class || 'IN').toLowerCase())}" data-col-display-class="${dnsClass}" data-col-type="${escapeHtml(String(record.type || '').toLowerCase())}" data-col-display-type="${type}" data-col-data="${escapeHtml(String((record.data || '') + ' ' + details.map(item => `${t(item.labelKey || '')} ${item.value || ''}`.trim()).join(' ')).toLowerCase())}" data-col-ttl="${escapeHtml(String(ttl).toLowerCase())}" aria-selected="${isSelected ? 'true' : 'false'}" tabindex="0" onclick="toggleDnsRecordRowSelection(this)" onkeydown="handleDnsRecordRowKeydown(event, this)"><td>${name}</td><td>${dnsClass}</td><td>${type}</td><td class="dns-record-data">${data}</td><td class="dns-record-ttl">${ttl}</td></tr>`;
   }).join('');
 
   return `
@@ -3697,7 +3700,7 @@ function renderDnsRecordsTable(records) {
         </select>
         <button type="button" class="copy-btn dns-records-clear-btn" onclick="clearDnsRecordsFilters()">${escapeHtml(t('dnsRecordsClearFilters'))}</button>
         <span id="dnsRecordsFilterSummary" class="dns-records-filter-summary">${escapeHtml(t('dnsRecordsFilterSummary', { visible: String(rows.length), total: String(rows.length) }))}</span>
-        <div id="dnsRecordsFilterChips" class="dns-records-filter-chip-row" style="display:${dnsRecordsFilterState.filters.length ? 'flex' : 'none'};">${(dnsRecordsFilterState.filters || []).map((filter, index) => `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})">&#x2715;</button></span>`).join('')}</div>
+        <div id="dnsRecordsFilterChips" class="dns-records-filter-chip-row" style="display:${dnsRecordsFilterState.filters.length ? 'flex' : 'none'};">${(dnsRecordsFilterState.filters || []).map((filter, index) => `<span class="history-chip dns-records-filter-chip" data-filter-index="${index}"><span class="dns-records-filter-chip-column">${escapeHtml(getDnsRecordFilterColumnLabel(filter.column))}:</span><span class="dns-records-filter-chip-value">${escapeHtml(filter.displayValue || filter.query || '')}</span><button type="button" class="history-remove dns-records-filter-remove" aria-label="${escapeHtml(t('removeLabel'))}" title="${escapeHtml(t('removeLabel'))}" onclick="event.stopPropagation(); removeDnsRecordsFilterByIndex(${index})"><span class="acs-glyph" data-glyph="&#x2715;" aria-hidden="true"></span></button></span>`).join('')}</div>
       </div>
       <div class="dns-records-table-wrap">
       <table id="dnsRecordsTable" class="mx-table dns-records-table">
@@ -4005,7 +4008,7 @@ function render(r) {
   quotaCopyHtmlLines.push(`<div><strong>${escapeHtml(t('mxRecordsLabel'))}:</strong> ${escapeHtml(mxStatusText || t('unknown'))}</div>` + (mxCopyDetail ? `<div style="margin-left:12px;">${escapeHtml(mxCopyDetail)}</div>` : ''));
 
   const multiRblLink = `https://multirbl.valli.org/dnsbl-lookup/${encodeURIComponent(r.domain || "")}.html`;
-  const multiRblHtml = `<a href="${multiRblLink}" target="_blank" rel="noopener" style="font-size:11px; color:#2f80ed; text-decoration:none;">(MultiRBL &#x2197;)</a>`;
+  const multiRblHtml = `<a href="${multiRblLink}" target="_blank" rel="noopener" style="font-size:11px; color:var(--link); text-decoration:none;">(MultiRBL &#x2197;)</a>`;
 
   // 2) Reputation
   const reputationInfo = t('reputationInfo');
@@ -4460,7 +4463,7 @@ function render(r) {
   cards.push(`
   <div class="card" id="card-email-quota">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('checklist'))}</span>
       <strong>${escapeHtml(t('emailQuota'))}</strong>
       <button type="button" class="copy-btn hide-on-screenshot" style="margin-left:auto;" onclick="event.stopPropagation(); copyText(buildQuotaCopyPayload(), this)">${escapeHtml(t('copyEmailQuota'))}</button>
@@ -4509,7 +4512,7 @@ function render(r) {
   cards.push(`
   <div class="card" id="card-verification">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('verificationTag'))}</span>
       <strong>${escapeHtml(t('domainVerification'))}</strong>
     </div>
@@ -4685,7 +4688,7 @@ function render(r) {
     cards.push(`
   <div class="card" id="card-whois">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag ${whoisTagClass}">${escapeHtml(translateBadge(whoisLabel))}</span>
       <strong>${escapeHtml(t('domainRegistration'))}</strong>
       <button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, 'whois')">${escapeHtml(t('copy'))}</button>
@@ -4734,7 +4737,7 @@ function render(r) {
     cards.push(`
       <div class="card" id="card-domain">
         <div class="card-header" onclick="toggleCard(this)">
-          <span class="chevron">&#x25BC;</span>
+          <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
           <span class="tag ${domainClass}">${escapeHtml(translateBadge(domainLabel))}</span>
           <strong>${escapeHtml(t('domain'))}</strong>
         </div>
@@ -4773,7 +4776,7 @@ function render(r) {
     cards.push(`
       <div class="card" id="card-records">
         <div class="card-header" onclick="toggleCard(this)">
-          <span class="chevron">&#x25BC;</span>
+          <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
           <span class="tag tag-info">${escapeHtml(t('info'))}</span>
           <strong>${escapeHtml(t('dnsRecords'))}</strong>
           <button type="button" class="copy-btn hide-on-screenshot" style="margin-left: auto;" onclick="event.stopPropagation(); copyField(this, 'records')">${escapeHtml(t('copy'))}</button>
@@ -4891,7 +4894,7 @@ function render(r) {
     cards.push(`
   <div class="card" id="card-mx">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag tag-info">${escapeHtml(t('info'))}</span>
       <strong>${escapeHtml(t('mxRecords'))}</strong>
       <button type="button"
@@ -5038,7 +5041,7 @@ function render(r) {
     cards.push(`
   <div class="card" id="card-spfExpansion">
     <div class="card-header" onclick="toggleCard(this)">
-      <span class="chevron">&#x25BC;</span>
+      <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
       <span class="tag ${spfCardExceedsLookupLimit ? 'tag-warn' : 'tag-info'}">${escapeHtml(translateBadge(spfCardExceedsLookupLimit ? 'WARN' : 'INFO'))}</span>
       <strong>${escapeHtml(t('spfExpansionRecordsTitle'))}</strong>
     </div>
@@ -5837,7 +5840,7 @@ function render(r) {
   cards.push(`
     <div class="card" id="card-guidance">
       <div class="card-header" onclick="toggleCard(this)">
-        <span class="chevron">&#x25BC;</span>
+        <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
         <span class="tag tag-info">${escapeHtml(t('readinessTips'))}</span>
         <strong>${renderLabelWithIcon('guidance')}</strong>
         <div class="card-icons" style="margin-left: auto; font-size: 0.8em; display: flex; align-items: center; gap: 6px;">
@@ -5856,7 +5859,7 @@ function render(r) {
   cards.push(`
     <div class="card" id="card-helpfulLinks">
       <div class="card-header" onclick="toggleCard(this)">
-        <span class="chevron">&#x25BC;</span>
+        <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
         <span class="tag tag-info">${escapeHtml(t('docs'))}</span>
         <strong>${escapeHtml(t('helpfulLinks'))}</strong>
       </div>
@@ -5886,7 +5889,7 @@ function render(r) {
   cards.push(`
     <div class="card" id="card-tools">
       <div class="card-header" onclick="toggleCard(this)">
-        <span class="chevron">&#x25BC;</span>
+        <button type="button" class="chevron card-toggle" aria-expanded="true"><span class="acs-glyph" data-glyph="&#x25BC;" aria-hidden="true"></span></button>
         <span class="tag tag-info">${escapeHtml(t('tools'))}</span>
         <strong>${escapeHtml(t('externalTools'))}</strong>
       </div>
