@@ -41908,12 +41908,14 @@ if ($metricsEnabled) {
     }
     $requireDmarcEnforcement = ($requireDmarcRaw -in @('1', 'true'))
 
-    # Link back to the UI for this domain, like the "Page Link" row in the copied report.
-    $quotaPageLink = $null
-    try {
-      $quotaBase = Get-AcsPublicBaseUrl -Context $ctx
-      if (-not [string]::IsNullOrWhiteSpace($quotaBase)) { $quotaPageLink = '{0}/?domain={1}' -f $quotaBase, [uri]::EscapeDataString($domain) }
-    } catch { $quotaPageLink = $null }
+    # Link back to the UI for this domain, like the "Report link" row in the copied
+    # report. Uses ACS_PUBLIC_BASE_URL when the operator set it, otherwise the
+    # public site. It is never derived from the request: behind a proxy or on a
+    # local run that gives an unshareable address such as http://localhost:8080.
+    $quotaBase = ''
+    try { $quotaBase = Get-AcsPublicBaseUrl -Context $null } catch { $quotaBase = '' }
+    if ([string]::IsNullOrWhiteSpace($quotaBase)) { $quotaBase = 'https://acs-domain-checker.microsoft.com' }
+    $quotaPageLink = '{0}/?domain={1}' -f $quotaBase, [uri]::EscapeDataString($domain)
 
     $sem = Get-DomainSemaphore -domain $domain -scope $path
     $null = $sem.Wait()
