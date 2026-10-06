@@ -120,6 +120,9 @@ if ($apiListMatch.Success) {
     $servedEndpoints = @([regex]::Matches($apiListMatch.Groups[1].Value, '"(/api/[^"]+)"') | ForEach-Object { $_.Groups[1].Value })
 }
 $servedEndpoints += '/dns'
+# Standalone routes that are not in the shared /api/* list above.
+$servedEndpoints += @([regex]::Matches($handlerRaw, "\`$path -eq '(/api/email-quota)'") | ForEach-Object { $_.Groups[1].Value })
+Assert-Condition '/api/email-quota route was found' ($servedEndpoints -contains '/api/email-quota') 'regex did not match the /api/email-quota route in 23-RequestHandler.ps1'
 
 $llms = Get-AcsLlmsTxt -BaseUrl 'https://example.test' -Version '0.0.0'
 $openApi = Get-AcsOpenApiJson -BaseUrl 'https://example.test' -Version '0.0.0'

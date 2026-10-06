@@ -39,7 +39,8 @@ $functionNames = @(
   'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-FirstNonEmptyPropertyValue','Get-DomainRegistrationStatus',
   'Get-DmarcSecurityGuidance',
   'Invoke-SysinternalsWhoisLookup','Invoke-LinuxWhoisLookup','Invoke-TcpWhoisLookup','Test-WhoisDomainNameSafe','Initialize-WhoisFieldRegexes','Get-WhoisParsedRegistrationData','ConvertTo-SafeWhoisRawText','Get-FallbackWhoisServersForDomain','Invoke-WhoisProcess','Get-WhoisCooldownDictionary','Test-WhoisServerOnCooldown','Add-WhoisServerCooldown','Get-DomainAgeParts','Format-DomainAge','Get-TimeUntilParts','Format-ExpiryRemaining',
-  'Get-AcsDnsStatus'
+  'Get-AcsDnsStatus',
+  'Get-AcsEmailQuotaStatus','ConvertTo-AcsEmailQuotaReport'
 )
 
 # Create an InitialSessionState that will be shared by all runspace workers.

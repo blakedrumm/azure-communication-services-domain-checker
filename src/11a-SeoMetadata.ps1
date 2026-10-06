@@ -293,6 +293,7 @@ Version: __ACS_VERSION__
 ## Endpoints
 
 - [Full aggregated report](__ACS_ROOT__/dns?domain=example.com): every check below in one JSON document.
+- [Email Quota](__ACS_ROOT__/api/email-quota?domain=example.com): the Email Quota checklist from the web UI - an overall `pass`/`warn`/`fail` verdict, per-check rows (MX, reputation, registration, SPF, DMARC), and the Copy Email Quota report table. Add `format=markdown` for just the table, or `requireDmarcEnforcement=true` to treat DMARC `p=none` as a warning.
 - [Base records](__ACS_ROOT__/api/base?domain=example.com): SPF, ACS verification TXT, A/AAAA addresses.
 - [MX records](__ACS_ROOT__/api/mx?domain=example.com): mail exchangers and detected mail provider.
 - [All DNS records](__ACS_ROOT__/api/records?domain=example.com): full record table including TTLs.
@@ -321,11 +322,11 @@ The SPF and DKIM checks default to the Azure public cloud values
 (`include:spf.protection.outlook.com` and the `selector1-azurecomm-prod-net` /
 `selector2-azurecomm-prod-net` CNAMEs). For a domain set up in another environment,
 such as a sovereign or government cloud, pass the values the Azure portal shows:
-`spfInclude` on `__ACS_ROOT__/api/base` and `__ACS_ROOT__/dns` (an include host, an
+`spfInclude` on `__ACS_ROOT__/api/base`, `__ACS_ROOT__/api/email-quota` and `__ACS_ROOT__/dns` (an include host, an
 `include:` term, or a whole SPF record; the first include is used), and
 `dkim1Target` / `dkim2Target` (the expected CNAME target) with optional
 `dkim1Selector` / `dkim2Selector` (derived from the target when omitted) on
-`__ACS_ROOT__/api/dkim`, `__ACS_ROOT__/api/records` and `__ACS_ROOT__/dns`. Responses
+`__ACS_ROOT__/api/dkim`, `__ACS_ROOT__/api/records`, `__ACS_ROOT__/api/email-quota` and `__ACS_ROOT__/dns`. Responses
 echo the values checked (`spfRequiredInclude`, `dkim1Selector`, `dkim1ExpectedCname`,
 ...). Invalid values return HTTP 400 instead of falling back to the defaults.
 
@@ -392,7 +393,8 @@ function Get-AcsOpenApiJson {
   # path -> summary. /dns is listed first because it is the preferred entry point.
   $endpoints = [ordered]@{
     '/dns'              = 'Aggregated report containing every check below.'
-    '/api/base'         = 'SPF record, ACS domain-verification TXT record, and A/AAAA addresses.'
+    '/api/email-quota'  = 'Email Quota checklist: overall pass/warn/fail verdict, per-check rows, and the Copy Email Quota report table.'
+    '/api/base'           = 'SPF record, ACS domain-verification TXT record, and A/AAAA addresses.'
     '/api/mx'           = 'MX records and the detected mail provider.'
     '/api/records'      = 'Full DNS record table including TTLs.'
     '/api/dmarc'        = 'DMARC policy and derived security guidance.'
@@ -427,10 +429,14 @@ function Get-AcsOpenApiJson {
       $extraParams.Add('        { "name": "validate", "in": "query", "description": "Set to 0 to skip resolver health pre-selection.", "schema": { "type": "string", "enum": ["0","1"], "default": "1" } }')
     }
     # Optional custom SPF / DKIM requirements for domains set up outside the Azure public cloud.
-    if ($endpoint -in @('/dns', '/api/base')) {
+    if ($endpoint -eq '/api/email-quota') {
+      $extraParams.Add('        { "name": "requireDmarcEnforcement", "in": "query", "description": "Treat a monitor-only DMARC policy (p=none) as a warning. The web UI does this when the Customer Intake form shows an expected tier above Earth.", "schema": { "type": "string", "enum": ["true","false","1","0"], "default": "false" } }')
+      $extraParams.Add('        { "name": "format", "in": "query", "description": "json returns the verdict, checklist rows and report table. markdown returns only the Copy Email Quota table as text/markdown.", "schema": { "type": "string", "enum": ["json","markdown"], "default": "json" } }')
+    }
+    if ($endpoint -in @('/dns', '/api/email-quota', '/api/base')) {
       $extraParams.Add('        { "name": "spfInclude", "in": "query", "description": "Check the SPF requirement against this include instead of spf.protection.outlook.com (for example a sovereign or government cloud include). Accepts a host name, an include: term, or a whole SPF record; the first include is used. Invalid values return 400.", "schema": { "type": "string", "maxLength": 512 } }')
     }
-    if ($endpoint -in @('/dns', '/api/dkim', '/api/records')) {
+    if ($endpoint -in @('/dns', '/api/email-quota', '/api/dkim', '/api/records')) {
       foreach ($slot in 1, 2) {
         $extraParams.Add('        { "name": "dkim' + $slot + 'Target", "in": "query", "description": "Expected CNAME target for DKIM selector ' + $slot + ' instead of the Azure public cloud default (the Value column in the Azure portal). Invalid values return 400.", "schema": { "type": "string", "maxLength": 253 } }')
         $extraParams.Add('        { "name": "dkim' + $slot + 'Selector", "in": "query", "description": "Selector host name for DKIM selector ' + $slot + ', for example selector' + $slot + '-example._domainkey (the Name column in the Azure portal). Optional: derived from dkim' + $slot + 'Target when omitted.", "schema": { "type": "string", "maxLength": 253 } }')

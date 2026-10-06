@@ -537,6 +537,93 @@ if ($metricsEnabled) {
     return
   }
 
+  # 2c) Email Quota report (/api/email-quota): the server-side equivalent of the
+  # SPA's Email Quota card and "Copy Email Quota" table. Runs every check that
+  # feeds the card (see Get-AcsEmailQuotaStatus in 18a-EmailQuota.ps1). It is
+  # handled separately from the /api/* block above because it takes its own
+  # parameters (requireDmarcEnforcement, format) on top of the /dns overrides.
+  if ($path -eq '/api/email-quota') {
+    if (-not (Test-ApiKey -Context $ctx)) {
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'email-quota-auth' -EventId 'REQ-AUTH-FAILED' -Message 'Request rejected by API key validation.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-401' -Fields @{ statusCode = 401 }
+      Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
+      return
+    }
+
+    $rate = Test-RateLimit -Context $ctx
+    if (-not $rate.allowed) {
+      try {
+        if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
+          $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
+        }
+      } catch { }
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'email-quota-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
+      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      return
+    }
+
+    $quotaQuery = $null
+    try { $quotaQuery = $ctx.Request.QueryString } catch { $quotaQuery = $null }
+    $domainRaw = $null
+    try { if ($quotaQuery) { $domainRaw = $quotaQuery['domain'] } } catch { $domainRaw = $null }
+    $domain = ConvertTo-NormalizedDomain $domainRaw
+
+    Write-RequestLog -Context $ctx -Action "API $path" -Domain $domain
+
+    if ([string]::IsNullOrWhiteSpace($domain)) {
+      Write-Json -Context $ctx -Object @{ error = 'Missing domain parameter.' } -StatusCode 400
+      return
+    }
+    if (-not (Test-DomainName -Domain $domain)) {
+      Write-Json -Context $ctx -Object @{ error = 'Invalid domain parameter.' } -StatusCode 400
+      return
+    }
+
+    # Same optional SPF / DKIM requirement overrides as /dns.
+    $checkOverrides = Get-CheckOverridesFromQuery -QueryString $quotaQuery -Domain $domain
+    if ($checkOverrides.error) {
+      Write-Json -Context $ctx -Object @{ error = $checkOverrides.error } -StatusCode 400
+      return
+    }
+
+    # Allowlisted flags. Unknown values are rejected so a typo never silently
+    # produces a verdict the caller did not ask for.
+    $requireDmarcRaw = ''
+    $formatRaw = ''
+    try { $requireDmarcRaw = ([string]$quotaQuery['requireDmarcEnforcement']).Trim().ToLowerInvariant() } catch { $requireDmarcRaw = '' }
+    try { $formatRaw = ([string]$quotaQuery['format']).Trim().ToLowerInvariant() } catch { $formatRaw = '' }
+    if ($requireDmarcRaw -notin @('', '0', '1', 'true', 'false')) {
+      Write-Json -Context $ctx -Object @{ error = 'Invalid requireDmarcEnforcement parameter. Use true or false.' } -StatusCode 400
+      return
+    }
+    if ($formatRaw -notin @('', 'json', 'markdown')) {
+      Write-Json -Context $ctx -Object @{ error = 'Invalid format parameter. Use json or markdown.' } -StatusCode 400
+      return
+    }
+    $requireDmarcEnforcement = ($requireDmarcRaw -in @('1', 'true'))
+
+    # Link back to the UI for this domain, like the "Page Link" row in the copied report.
+    $quotaPageLink = $null
+    try {
+      $quotaBase = Get-AcsPublicBaseUrl -Context $ctx
+      if (-not [string]::IsNullOrWhiteSpace($quotaBase)) { $quotaPageLink = '{0}/?domain={1}' -f $quotaBase, [uri]::EscapeDataString($domain) }
+    } catch { $quotaPageLink = $null }
+
+    $sem = Get-DomainSemaphore -domain $domain -scope $path
+    $null = $sem.Wait()
+    try {
+      $quotaResult = Get-AcsEmailQuotaStatus -Domain $domain -SpfRequiredInclude $checkOverrides.spfInclude -Dkim1Override $checkOverrides.dkim1 -Dkim2Override $checkOverrides.dkim2 -RequireDmarcEnforcement $requireDmarcEnforcement -PageLink $quotaPageLink
+      if ($formatRaw -eq 'markdown') {
+        Write-TextResponse -Context $ctx -Body ([string]$quotaResult.reportMarkdown + "`n") -ContentType 'text/markdown; charset=utf-8' -CacheSeconds 0
+      } else {
+        Write-Json -Context $ctx -Object $quotaResult
+      }
+    }
+    finally {
+      try { $null = $sem.Release() } catch {}
+    }
+    return
+  }
+
   # 3) Serve the aggregated endpoint used by the UI (/dns)
   if ($path -eq "/dns") {
     if (-not (Test-ApiKey -Context $ctx)) {
