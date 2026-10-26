@@ -32,7 +32,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.16.5'
+$script:AppVersion = '2.16.6'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   # Validate at the boundary: this value is interpolated into generated JSON
   # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
@@ -123,4 +123,3 @@ function Invoke-MetricsRequest {
 if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
   $env:ACS_DNS_DOH_ENDPOINT = $DohEndpoint
 }
-

@@ -1,5 +1,27 @@
 # ===== Web Server Startup =====
 # ------------------- SERVER STARTUP HELPERS -------------------
+function Get-ConfiguredApiKeys {
+  $keys = @()
+  $legacyKey = [string]$env:ACS_API_KEY
+  if (-not [string]::IsNullOrWhiteSpace($legacyKey)) { $keys += $legacyKey }
+
+  $rawKeys = [string]$env:ACS_API_KEYS
+  if (-not [string]::IsNullOrWhiteSpace($rawKeys)) {
+    $additionalKeys = @(
+      foreach ($entry in ($rawKeys -split '[,;\r\n]')) {
+        $key = $entry.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($key)) { $key }
+      }
+    )
+    if ($additionalKeys.Count -eq 0) {
+      throw 'ACS_API_KEYS must contain at least one non-empty API key.'
+    }
+    $keys += $additionalKeys
+  }
+
+  return $keys
+}
+
 # Probe a local URL to check if something is already listening (used during startup
 # to give a more helpful error message if the port is occupied).
 function Test-LocalHttpEndpoint {
@@ -129,6 +151,14 @@ $displayUrl = "http://localhost:$Port"
 
 if ([string]::IsNullOrWhiteSpace($TestDomain)) {
   try {
+    $configuredApiKeys = @(Get-ConfiguredApiKeys)
+  }
+  catch {
+    Write-AcsLogException -Level 'Error' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-CONFIG-INVALID' -ErrorCode 'ACS-API-AUTH-CONFIG' -Exception $_
+    throw
+  }
+
+  try {
     $listener = [System.Net.HttpListener]::new()
 
     # Choose the listener prefix based on the requested binding mode.
@@ -230,7 +260,7 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'metrics-config' -EventId 'METRICS-DISABLED' -Message 'Anonymous metrics disabled.'
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($env:ACS_API_KEY)) {
+    if ($configuredApiKeys.Count -gt 0) {
       Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-ENABLED' -Message 'API key authentication enabled.'
     } else {
       Write-AcsLogEvent -Level 'Warning' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-DISABLED' -Message 'API key authentication disabled.'

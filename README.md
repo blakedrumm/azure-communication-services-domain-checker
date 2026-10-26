@@ -651,9 +651,9 @@ Every page ships complete, crawler-ready metadata so search results and link pre
 
 Protect your API endpoints with API key authentication:
 
-If `ACS_API_KEY` environment variable is set, API endpoints require authentication via:
+If `ACS_API_KEY` or `ACS_API_KEYS` is set, API endpoints require one configured key per request via:
 
-- **✅ Recommended - Header:** `X-Api-Key: <your-key>`
+- **✅ Recommended - Header:** `X-Api-Key: <your-key>` (also supports `X-ACS-API-Key` or `Authorization: ApiKey <your-key>`)
 - **⚠️ Less Secure - Query Parameter:** `?apiKey=<your-key>` (avoid in production)
 
 ### 🔑 Setting Up Authentication
@@ -669,6 +669,56 @@ export ACS_API_KEY="your-secret-key-here"
 ./acs-domain-checker.ps1
 ```
 
+### Multiple API Keys and Rotation
+
+Set `ACS_API_KEYS` to a comma-, semicolon-, or newline-separated list:
+
+```powershell
+$env:ACS_API_KEYS = "client-a-key,client-b-key,rotation-key"
+.\acs-domain-checker.ps1
+```
+
+```bash
+export ACS_API_KEYS="client-a-key,client-b-key,rotation-key"
+./acs-domain-checker.ps1
+```
+
+Each client sends only its own key, for example:
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8080/api/base?domain=example.com" `
+  -Headers @{ "X-Api-Key" = "client-b-key" }
+```
+
+- Keys are case-sensitive. Surrounding whitespace and empty entries in a usable list are ignored.
+- `ACS_API_KEY` remains a single literal key (including any commas or semicolons) and is accepted alongside every key in `ACS_API_KEYS`.
+- Unset or whitespace-only variables preserve open access. A non-empty `ACS_API_KEYS` containing only separators is rejected at startup.
+- All keys grant the same access and have no automatic expiration. To rotate, temporarily keep both old and new keys; remove the old key from both variables and restart the app to revoke it.
+- As in single-key mode, the built-in web UI embeds one key: `ACS_API_KEY` when set, otherwise the first key in `ACS_API_KEYS`. Additional keys are not embedded. This is not per-user authorization for web UI visitors.
+
+Generate independent 256-bit keys with PowerShell (compatible with Windows PowerShell 5.1 and PowerShell 7):
+
+```powershell
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+  $keys = 1..3 | ForEach-Object {
+    $bytes = New-Object byte[] 32
+    $rng.GetBytes($bytes)
+    [Convert]::ToBase64String($bytes)
+  }
+  $env:ACS_API_KEYS = $keys -join ','
+}
+finally {
+  $rng.Dispose()
+}
+```
+
+Store the individual values in `$keys` securely and distribute one to each client.
+
+The generated keys are Base64 strings, not GUIDs; dashes are not required. Send them in the `X-Api-Key` header. If you use the less-secure `apiKey` query parameter, encode the individual key with `[uri]::EscapeDataString($keys[0])` first: an unencoded `+` is decoded as a space and authentication fails.
+
+For Azure-hosted instances, `$env:ACS_API_KEYS` only changes your local PowerShell session and its child processes; it does not update the deployed app. Configure the joined value in the Azure hosting resource's environment variables/app settings and deploy the updated application. Multiple keys require version `2.16.6` or later; version `2.16.5` only reads the single `ACS_API_KEY` variable.
+
 ⚠️ **Security Best Practice:** Always use header-based authentication in production environments to prevent API keys from appearing in logs.
 
 ## ⚙️ Configuration (Environment Variables)
@@ -678,7 +728,8 @@ Customize the application behavior using these environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | Port for the web listener |
-| `ACS_API_KEY` | _(none)_ | API key for securing `/api/*` and `/dns` endpoints |
+| `ACS_API_KEY` | _(none)_ | Single literal API key for securing `/api/*` and `/dns`; accepted alongside `ACS_API_KEYS` |
+| `ACS_API_KEYS` | _(none)_ | Comma/semicolon/newline-separated API keys; each request must match one key |
 | `ACS_RATE_LIMIT_PER_MIN` | `240` | Maximum requests per minute per client IP (set to `0` to disable). Sized for multi-domain sweeps (up to 10 domains × ~10 endpoints ≈ 100 requests) |
 | `ACS_APP_VERSION` | _(from script)_ | Override the displayed application version string |
 
@@ -932,7 +983,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.16.5`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.16.6`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -955,8 +1006,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.16.5
-git push origin v2.16.5
+git tag v2.16.6
+git push origin v2.16.6
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -967,7 +1018,7 @@ git push origin v2.16.5
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.16.5`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.16.6`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -984,11 +1035,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.16.5
+docker pull limitlessworlds/acs-domain-checker:2.16.6
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.16.5
-docker pull limitlessworlds/acs-domain-checker:windows-2.16.5
+docker pull limitlessworlds/acs-domain-checker:linux-2.16.6
+docker pull limitlessworlds/acs-domain-checker:windows-2.16.6
 ```
 
 ### 🛠️ Manual Build Script
@@ -1003,7 +1054,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.16.5
+./acs-domain-checker-dockerhub.ps1 -Version 2.16.6
 ```
 
 **📋 Requirements for manual script:**
@@ -1084,7 +1135,7 @@ Security is a top priority for the ACS Domain Checker:
 ### 🛡️ Security Recommendations
 
 For production deployments:
-1. ✅ Always enable `ACS_API_KEY` for authentication
+1. ✅ Always enable `ACS_API_KEY` or `ACS_API_KEYS` for authentication
 2. ✅ Configure `ACS_RATE_LIMIT_PER_MIN` to prevent abuse
 3. ✅ Use HTTPS with a valid SSL/TLS certificate
 4. ✅ Keep the MSAL library updated via automated updates
@@ -1115,9 +1166,9 @@ $env:ACS_DNS_RESOLVER = "DoH"
 #### 🔐 Authentication Issues
 **Problem:** API key authentication not working
 **Solution:**
-- Ensure `ACS_API_KEY` is set correctly
+- Ensure `ACS_API_KEY` or `ACS_API_KEYS` is set correctly, then restart the app
 - Use header-based authentication: `X-Api-Key: your-key`
-- Verify the API key is not expired or contains special characters
+- Send one complete key with matching case, not the entire configured list
 
 #### 🐳 Docker Container Issues
 **Problem:** Container fails to start or crashes
@@ -1195,6 +1246,9 @@ Keep `Download-UiAssets.ps1` in sync with the asset names referenced by
 ### ✅ Quick validation after a build
 
 ```powershell
+# Offline API-key compatibility, parsing, and UI-template checks
+pwsh -NoProfile -File .\tools\Test-ApiKeys.ps1
+
 # CLI smoke test — runs DNS checks once and prints JSON
 pwsh -NoProfile -File ./acs-domain-checker.ps1 -TestDomain example.com
 ```

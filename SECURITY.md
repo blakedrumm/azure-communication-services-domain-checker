@@ -71,7 +71,7 @@ ship a fix before disclosing details publicly.
   WHOIS/RDAP registries, DNSBL providers) rather than in this code.
 - Findings that require a misconfiguration the documentation explicitly warns
   against (for example, exposing the plaintext HTTP listener directly to the
-  internet without a reverse proxy or `ACS_API_KEY`).
+  internet without a reverse proxy or `ACS_API_KEY` / `ACS_API_KEYS`).
 - Denial of service from unrealistic request volumes against a local tool.
 
 ## Deploying Securely
@@ -81,7 +81,8 @@ deploying beyond `localhost`:
 
 - Put it **behind a reverse proxy that terminates HTTPS**; the built-in listener
   serves plain HTTP.
-- Set **`ACS_API_KEY`** to require an API key on `/api/*` and `/dns`.
+- Set **`ACS_API_KEY`** or the comma/semicolon/newline-separated **`ACS_API_KEYS`**
+  to require one configured API key on `/api/*` and `/dns`.
 - Keep **rate limiting** enabled (`ACS_RATE_LIMIT_PER_MIN`, default `240`).
 - Only set **`ACS_TRUSTED_PROXIES`** for proxies you actually control, so
   forwarded client-IP headers cannot be spoofed.

@@ -59,6 +59,7 @@
   - ACS_ENTRA_TENANT_ID          : Optional tenant ID or domain (e.g., contoso.onmicrosoft.com) for Entra ID authority.
   - ACS_API_KEY                  : Optional API key required for /api/* and /dns endpoints (send via X-Api-Key header).
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
+  - ACS_API_KEYS                 : Optional comma/semicolon/newline-delimited API keys accepted alongside ACS_API_KEY.
   - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 240; set to 0 to disable).
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
@@ -244,4 +245,3 @@ if ($MaxRequestBodyBytes -gt 0) {
 }
 if ($bodyCap -le 0) { $bodyCap = 65536 }
 $env:ACS_MAX_REQUEST_BODY_BYTES = $bodyCap.ToString()
-

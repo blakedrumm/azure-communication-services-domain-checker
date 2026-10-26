@@ -59,6 +59,7 @@
   - ACS_ENTRA_TENANT_ID          : Optional tenant ID or domain (e.g., contoso.onmicrosoft.com) for Entra ID authority.
   - ACS_API_KEY                  : Optional API key required for /api/* and /dns endpoints (send via X-Api-Key header).
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
+  - ACS_API_KEYS                 : Optional comma/semicolon/newline-delimited API keys accepted alongside ACS_API_KEY.
   - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 240; set to 0 to disable).
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
@@ -244,7 +245,6 @@ if ($MaxRequestBodyBytes -gt 0) {
 }
 if ($bodyCap -le 0) { $bodyCap = 65536 }
 $env:ACS_MAX_REQUEST_BODY_BYTES = $bodyCap.ToString()
-
 # ===== Domain Parsing Utilities =====
 # ------------------- DOMAIN PARSING UTILITIES -------------------
 # Deriving a registrable ("pay-level") domain from an arbitrary subdomain requires
@@ -1708,7 +1708,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.16.5'
+$script:AppVersion = '2.16.6'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   # Validate at the boundary: this value is interpolated into generated JSON
   # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
@@ -1799,7 +1799,6 @@ function Invoke-MetricsRequest {
 if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
   $env:ACS_DNS_DOH_ENDPOINT = $DohEndpoint
 }
-
 # ===== Secure Structured Logging =====
 # Privacy-first diagnostics for security review readiness.
 #
@@ -3397,6 +3396,28 @@ if (-not [string]::IsNullOrWhiteSpace($DohEndpoint)) {
 # ------------------- WEB SERVER STARTUP -------------------
 # ===== Web Server Startup =====
 # ------------------- SERVER STARTUP HELPERS -------------------
+function Get-ConfiguredApiKeys {
+  $keys = @()
+  $legacyKey = [string]$env:ACS_API_KEY
+  if (-not [string]::IsNullOrWhiteSpace($legacyKey)) { $keys += $legacyKey }
+
+  $rawKeys = [string]$env:ACS_API_KEYS
+  if (-not [string]::IsNullOrWhiteSpace($rawKeys)) {
+    $additionalKeys = @(
+      foreach ($entry in ($rawKeys -split '[,;\r\n]')) {
+        $key = $entry.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($key)) { $key }
+      }
+    )
+    if ($additionalKeys.Count -eq 0) {
+      throw 'ACS_API_KEYS must contain at least one non-empty API key.'
+    }
+    $keys += $additionalKeys
+  }
+
+  return $keys
+}
+
 # Probe a local URL to check if something is already listening (used during startup
 # to give a more helpful error message if the port is occupied).
 function Test-LocalHttpEndpoint {
@@ -3526,6 +3547,14 @@ $displayUrl = "http://localhost:$Port"
 
 if ([string]::IsNullOrWhiteSpace($TestDomain)) {
   try {
+    $configuredApiKeys = @(Get-ConfiguredApiKeys)
+  }
+  catch {
+    Write-AcsLogException -Level 'Error' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-CONFIG-INVALID' -ErrorCode 'ACS-API-AUTH-CONFIG' -Exception $_
+    throw
+  }
+
+  try {
     $listener = [System.Net.HttpListener]::new()
 
     # Choose the listener prefix based on the requested binding mode.
@@ -3627,7 +3656,7 @@ if ([string]::IsNullOrWhiteSpace($TestDomain)) {
       Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'metrics-config' -EventId 'METRICS-DISABLED' -Message 'Anonymous metrics disabled.'
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($env:ACS_API_KEY)) {
+    if ($configuredApiKeys.Count -gt 0) {
       Write-AcsLogEvent -Level 'Information' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-ENABLED' -Message 'API key authentication enabled.'
     } else {
       Write-AcsLogEvent -Level 'Warning' -Component 'ServerStartup' -Operation 'api-auth-config' -EventId 'API-AUTH-DISABLED' -Message 'API key authentication disabled.'
@@ -5285,7 +5314,7 @@ Version: __ACS_VERSION__
 - All endpoints are `GET` and take a `domain` query parameter, e.g. `__ACS_ROOT__/api/base?domain=example.com`.
 - Responses are JSON. No request body is ever needed.
 - Requests are rate limited per client IP (default 240/min). Honor `Retry-After` on HTTP 429.
-- Some deployments require an API key sent as the `X-Api-Key` header. A 401 response means a key is required.
+- Deployments with `ACS_API_KEY` or `ACS_API_KEYS` require one configured key sent as the `X-Api-Key` header. A 401 response means the key is missing or invalid.
 - `__ACS_ROOT__/dns` returns every check in a single aggregated response. Prefer it when you want the whole picture; prefer the individual endpoints when you need one specific answer quickly.
 
 ## Endpoints
@@ -5383,7 +5412,7 @@ function Get-AcsOpenApiJson {
   [void]$sb.AppendLine(('  "servers": [ {{ "url": "{0}" }} ],' -f $root))
   [void]$sb.AppendLine('  "components": {')
   [void]$sb.AppendLine('    "securitySchemes": {')
-  [void]$sb.AppendLine('      "apiKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key", "description": "Only required when the deployment sets ACS_API_KEY." }')
+  [void]$sb.AppendLine('      "apiKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key", "description": "Required when the deployment sets ACS_API_KEY or ACS_API_KEYS. Send one configured key per request." }')
   [void]$sb.AppendLine('    }')
   [void]$sb.AppendLine('  },')
   [void]$sb.AppendLine('  "paths": {')
@@ -9049,20 +9078,24 @@ function Test-StringEqualsConstantTime {
   return ($diff -eq 0)
 }
 
-# Validate the API key from the request against ACS_API_KEY env var.
+# Validate the request against ACS_API_KEY and the ACS_API_KEYS list.
 # Returns $true if no API key is configured (open access) or if the provided key matches.
 function Test-ApiKey {
   param($Context)
 
-  $expected = [string]$env:ACS_API_KEY
-  if ([string]::IsNullOrWhiteSpace($expected)) { return $true }
+  $expectedKeys = @(Get-ConfiguredApiKeys)
+  if ($expectedKeys.Count -eq 0) { return $true }
 
   $provided = Get-ApiKeyFromRequest -Context $Context
   if ([string]::IsNullOrWhiteSpace($provided)) { return $false }
 
-  # Constant-time compare so a remote caller cannot infer the API key one byte
-  # at a time by measuring response timing. See Test-StringEqualsConstantTime.
-  return Test-StringEqualsConstantTime -A $provided -B $expected
+  # Compare every key without short-circuiting on the matching key's position.
+  $matched = $false
+  foreach ($expected in $expectedKeys) {
+    $isMatch = Test-StringEqualsConstantTime -A $provided -B $expected
+    $matched = $matched -or $isMatch
+  }
+  return $matched
 }
 
 # Enforce per-client-IP rate limiting using a sliding 60-second window.
@@ -39599,8 +39632,8 @@ $entraAutoSignIn = $env:ACS_ENTRA_AUTO_SIGN_IN
 if ([string]::IsNullOrWhiteSpace($entraAutoSignIn)) { $entraAutoSignIn = '1' }
 $htmlPage = $htmlPage.Replace('__ENTRA_AUTO_SIGN_IN__', (ConvertTo-JsStringLiteralBody $entraAutoSignIn))
 
-$apiKey = $env:ACS_API_KEY
-if ([string]::IsNullOrWhiteSpace($apiKey)) { $apiKey = '' }
+$configuredApiKeys = @(Get-ConfiguredApiKeys)
+$apiKey = if ($configuredApiKeys.Count -gt 0) { $configuredApiKeys[0] } else { '' }
 $htmlPage = $htmlPage.Replace('__ACS_API_KEY__', (ConvertTo-JsStringLiteralBody $apiKey))
 
 $issueUrl = $env:ACS_ISSUE_URL
@@ -39658,7 +39691,6 @@ if ([string]::IsNullOrWhiteSpace($ogImage)) {
 }
 $ogImageAttr = $ogImage.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
 $htmlPage = $htmlPage.Replace('__ACS_OG_IMAGE__', $ogImageAttr)
-
 # ===== HTML Accessibility Layer (CSS + JS) =====
 #
 # PURPOSE
@@ -41135,7 +41167,7 @@ $functionNames = @(
   'Get-RegistrableDomain','ConvertTo-AsciiDomainName','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
   'ConvertFrom-DnsTxtPresentationData','Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','ConvertTo-SpfIncludeOverride','ConvertTo-DkimSelectorOverride','Get-CheckOverridesFromQuery','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Select-SpfRecordFromSet','Merge-SpfRecordSet','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
-  'Get-ClientIp','Test-IsTrustedProxy','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
+  'Get-ClientIp','Test-IsTrustedProxy','Get-ConfiguredApiKeys','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Get-DomainReputationProviderCatalog','Get-DomainReputationCacheKey','Get-DomainReputationCacheEntry','Set-DomainReputationCacheEntry','Remove-DomainReputationCacheEntry','Get-DomainReputationHealthEntry','Set-DomainReputationHealthEntry','Test-DomainReputationQueryBudget','Test-DomainReputationProviderBudget','Get-DomainReputationAuthorityHosts','New-DomainReputationDnsQueryPacket','Read-DomainReputationDnsResponse','Invoke-DomainReputationDnsFanout','Test-DomainReputationPositiveControl','Test-DomainReputationProviderControl','ConvertFrom-DomainReputationProviderOutcome','Get-DomainReputationProviderEndpoints','Get-DomainReputationStatus','Get-CombinedReputationState',
@@ -41304,7 +41336,6 @@ function Invoke-InflightCleanup {
     Complete-InflightInvocation -InvocationId $invocationId
   }
 }
-
 # ===== Per-Request Handler Script =====
 # ------------------- PER-REQUEST HANDLER SCRIPT -------------------
 # This here-string is the script block that runs inside each RunspacePool worker

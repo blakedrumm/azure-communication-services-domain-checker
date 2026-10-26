@@ -287,7 +287,7 @@ Version: __ACS_VERSION__
 - All endpoints are `GET` and take a `domain` query parameter, e.g. `__ACS_ROOT__/api/base?domain=example.com`.
 - Responses are JSON. No request body is ever needed.
 - Requests are rate limited per client IP (default 240/min). Honor `Retry-After` on HTTP 429.
-- Some deployments require an API key sent as the `X-Api-Key` header. A 401 response means a key is required.
+- Deployments with `ACS_API_KEY` or `ACS_API_KEYS` require one configured key sent as the `X-Api-Key` header. A 401 response means the key is missing or invalid.
 - `__ACS_ROOT__/dns` returns every check in a single aggregated response. Prefer it when you want the whole picture; prefer the individual endpoints when you need one specific answer quickly.
 
 ## Endpoints
@@ -385,7 +385,7 @@ function Get-AcsOpenApiJson {
   [void]$sb.AppendLine(('  "servers": [ {{ "url": "{0}" }} ],' -f $root))
   [void]$sb.AppendLine('  "components": {')
   [void]$sb.AppendLine('    "securitySchemes": {')
-  [void]$sb.AppendLine('      "apiKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key", "description": "Only required when the deployment sets ACS_API_KEY." }')
+  [void]$sb.AppendLine('      "apiKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key", "description": "Required when the deployment sets ACS_API_KEY or ACS_API_KEYS. Send one configured key per request." }')
   [void]$sb.AppendLine('    }')
   [void]$sb.AppendLine('  },')
   [void]$sb.AppendLine('  "paths": {')

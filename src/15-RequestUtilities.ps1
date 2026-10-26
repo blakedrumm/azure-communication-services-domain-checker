@@ -298,20 +298,24 @@ function Test-StringEqualsConstantTime {
   return ($diff -eq 0)
 }
 
-# Validate the API key from the request against ACS_API_KEY env var.
+# Validate the request against ACS_API_KEY and the ACS_API_KEYS list.
 # Returns $true if no API key is configured (open access) or if the provided key matches.
 function Test-ApiKey {
   param($Context)
 
-  $expected = [string]$env:ACS_API_KEY
-  if ([string]::IsNullOrWhiteSpace($expected)) { return $true }
+  $expectedKeys = @(Get-ConfiguredApiKeys)
+  if ($expectedKeys.Count -eq 0) { return $true }
 
   $provided = Get-ApiKeyFromRequest -Context $Context
   if ([string]::IsNullOrWhiteSpace($provided)) { return $false }
 
-  # Constant-time compare so a remote caller cannot infer the API key one byte
-  # at a time by measuring response timing. See Test-StringEqualsConstantTime.
-  return Test-StringEqualsConstantTime -A $provided -B $expected
+  # Compare every key without short-circuiting on the matching key's position.
+  $matched = $false
+  foreach ($expected in $expectedKeys) {
+    $isMatch = Test-StringEqualsConstantTime -A $provided -B $expected
+    $matched = $matched -or $isMatch
+  }
+  return $matched
 }
 
 # Enforce per-client-IP rate limiting using a sliding 60-second window.
