@@ -102,7 +102,69 @@ function setCheckProgressActive(active) {
 // a removable chip. When more than one domain is checked, per-domain results
 // are cached and shown one at a time through the #domainTabs tab bar (a single
 // #results container is reused because result-card element IDs are global).
-const MAX_LOOKUP_DOMAINS = 10;
+const DEFAULT_LOOKUP_DOMAIN_LIMIT = 100;
+const SIGNED_IN_LOOKUP_DOMAIN_LIMIT = 1000;
+const lookupActionIds = new WeakMap();
+
+function getLookupDomainLimit() {
+  return msAuthAccount && lastAuthData ? SIGNED_IN_LOOKUP_DOMAIN_LIMIT : DEFAULT_LOOKUP_DOMAIN_LIMIT;
+}
+
+function buildLookupRequestHeaders(actionId) {
+  const headers = buildConsentRequestHeaders({});
+  const apiKey = (acsApiKey || '').trim();
+  if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
+  if (actionId) headers['X-ACS-Lookup-Action'] = actionId;
+  headers['Cache-Control'] = 'no-cache';
+  headers['Pragma'] = 'no-cache';
+  return headers;
+}
+
+async function prepareLookupAction(domains, statusElement) {
+  if (lookupActionController) lookupActionController.abort();
+  const controller = new AbortController();
+  lookupActionController = controller;
+  const showError = message => {
+    setStatus(escapeHtml(message));
+    if (statusElement) statusElement.textContent = message;
+  };
+  try {
+    // A shared link can load before MSAL restores the signed-in session.
+    if (domains.length > DEFAULT_LOOKUP_DOMAIN_LIMIT) await msAuthInitialization;
+    if (controller.signal.aborted) return null;
+    const limit = getLookupDomainLimit();
+    if (domains.length > limit) {
+      let message = t('domainBatchLimitExceeded', { count: String(domains.length), limit: String(limit) });
+      if (limit === DEFAULT_LOOKUP_DOMAIN_LIMIT) message += ' ' + t('domainBatchSignInHint');
+      showError(message);
+      return null;
+    }
+
+    const headers = buildLookupRequestHeaders();
+    if (domains.length > DEFAULT_LOOKUP_DOMAIN_LIMIT) {
+      const result = await msalInstance.acquireTokenSilent({ scopes: GRAPH_SCOPES, account: msAuthAccount });
+      if (controller.signal.aborted) return null;
+      if (!result || !result.accessToken) throw new Error(t('lookupActionFailed'));
+      headers.Authorization = 'Bearer ' + result.accessToken;
+    }
+    const response = await fetch('/api/lookup-action?count=' + domains.length, {
+      headers, signal: controller.signal, cache: 'no-store'
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    if (!/^[a-f0-9]{32}$/.test(data.actionId) || data.websiteCount !== domains.length) {
+      throw new Error(t('lookupActionFailed'));
+    }
+    return controller.signal.aborted ? null : data.actionId;
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      showError(t('lookupActionFailed') + ' ' + (error && error.message ? error.message : String(error)));
+    }
+    return null;
+  } finally {
+    if (lookupActionController === controller) lookupActionController = null;
+  }
+}
 
 function isMultiDomainActive() {
   return !!(multiDomainState && Array.isArray(multiDomainState.domains) && multiDomainState.domains.length > 1);
@@ -144,7 +206,8 @@ function removeDomainChip(index) {
 }
 
 // All entered domains = committed chips + any valid trailing input text.
-// Normalized, validated, deduped, order-preserving, and capped.
+// Normalized, validated, deduped, and order-preserving. Admission rejects an
+// oversized action explicitly instead of silently discarding entered websites.
 function getEnteredDomains() {
   const input = document.getElementById('domainInput');
   const raw = (domainChipTokens || []).slice();
@@ -157,7 +220,7 @@ function getEnteredDomains() {
     seen[d] = true;
     out.push(d);
   }
-  return out.slice(0, MAX_LOOKUP_DOMAINS);
+  return out;
 }
 
 // Reflect a domain list in the address box: one domain => plain input text (no
@@ -206,7 +269,8 @@ function handleDomainInputPaste(e) {
   const input = e.target;
   const parts = ((input.value || '') + ' ' + text).split(/[\s,;]+/).filter(Boolean);
   input.value = '';
-  for (const p of parts) addDomainChip(p);
+  domainChipTokens = Array.from(new Set(domainChipTokens.concat(parseDomainListParam(parts.join(' ')))));
+  renderDomainChips();
   toggleClearBtn();
 }
 
@@ -220,16 +284,17 @@ function handleDomainInputBlur(e) {
 function runLookupFromInput() {
   const domains = getEnteredDomains();
   if (domains.length === 0) {
-    lookup(); // reuse the single-domain empty/invalid prompts
-    return;
+    return lookup(); // reuse the single-domain empty/invalid prompts
   }
-  runMultiDomainLookup(domains, { animateTopIntro: false });
+  return runMultiDomainLookup(domains, { animateTopIntro: false });
 }
 
 // Reset multi-domain bookkeeping back to a single (or empty) domain and hide
 // the tabs. Called by single-domain lookups so a prior sweep leaves no stale
 // tabs/chips behind.
 function resetMultiDomainState(domain) {
+  multiRunToken++;
+  if (!domain && lookupActionController) lookupActionController.abort();
   multiDomainState.domains = domain ? [domain] : [];
   multiDomainState.results = {};
   multiDomainState.active = domain || null;
@@ -362,18 +427,20 @@ function showDomainTab(domain) {
 
 // Run a sweep over multiple domains. Domains are checked SEQUENTIALLY (one fully
 // completes before the next starts) so the shared #results container and the
-// per-run request cancellation never collide, and the server's per-IP rate
-// limiter is not hit with N*10 concurrent requests. A single domain takes the
+// per-run request cancellation never collide. All checks share one admitted
+// processing action and count websites rather than API calls. A single domain takes the
 // classic path (no chips, no tabs).
 async function runMultiDomainLookup(domains, options = {}) {
-  domains = (domains || []).slice(0, MAX_LOOKUP_DOMAINS);
+  domains = (domains || []).slice();
   if (domains.length === 0) { lookup(); return; }
+  const lookupActionId = await prepareLookupAction(domains, options.statusElement);
+  if (!lookupActionId) return false;
 
   if (domains.length === 1) {
     applyDomainsToInputBox(domains);
     // lookup() resets multi-domain state itself via resetMultiDomainState().
-    await lookup({ domainOverride: domains[0], animateTopIntro: !!options.animateTopIntro });
-    return;
+    await lookup({ domainOverride: domains[0], animateTopIntro: !!options.animateTopIntro, lookupActionId });
+    return true;
   }
 
   applyDomainsToInputBox(domains);
@@ -411,7 +478,7 @@ async function runMultiDomainLookup(domains, options = {}) {
     // (it stays at opacity 0 under body.section-fade-enabled), leaving a blank
     // top. Subsequent (background) domains never animate the intro.
     const introForThis = (i === 0) && !!options.animateTopIntro;
-    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: introForThis });
+    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: introForThis, lookupActionId });
     if (token !== multiRunToken) return;
     // Store the returned object, guarded so a domain's slot only ever holds the
     // result whose .domain matches its key (prevents any cross-domain aliasing).
@@ -427,9 +494,10 @@ async function runMultiDomainLookup(domains, options = {}) {
   // lastResult on the final domain while the user is viewing another tab).
   const activeRes = multiDomainState.results[multiDomainState.active];
   if (activeRes) { lastResult = activeRes; render(activeRes); }
+  return true;
 }
 
-function lookup(options = {}) {
+async function lookup(options = {}) {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
   const screenshotBtn = document.getElementById("screenshotBtn");
@@ -459,6 +527,9 @@ function lookup(options = {}) {
     setStatus(t('promptEnterValidDomain'));
     return;
   }
+
+  const lookupActionId = options.lookupActionId || await prepareLookupAction([domain]);
+  if (!lookupActionId) return;
 
   // Multi-domain bookkeeping: a normal single-domain lookup clears any prior
   // multi-domain sweep (hiding tabs/chips). During a sweep, lookup() is called
@@ -521,12 +592,7 @@ function lookup(options = {}) {
     const controller = new AbortController();
     activeLookup.controllers.push(controller);
     try {
-      let headers = {};
-      const apiKey = (acsApiKey || '').trim();
-      if (apiKey && !apiKey.startsWith('__')) {
-        headers['X-Api-Key'] = apiKey;
-      }
-      headers = buildConsentRequestHeaders(headers);
+      const headers = buildLookupRequestHeaders(lookupActionId);
       // Add cache-busting query param and explicit no-store cache mode so the browser
       // never serves stale DNS/WHOIS data from its HTTP cache or BFCache.
       headers['Cache-Control'] = 'no-cache';
@@ -591,6 +657,7 @@ function hideTopBarItem(element) {
   // between domains. The multi-domain sweep stores this exact object, which
   // guarantees multiDomainState.results[d].domain === d.
   const resultObj = lastResult;
+  lookupActionIds.set(resultObj, lookupActionId);
   recomputeDerived(resultObj);
   render(resultObj);
 
@@ -2450,12 +2517,7 @@ async function rerunPropagationCheck() {
   if (!target._errors) target._errors = {};
 
   try {
-    let headers = {};
-    const apiKey = (acsApiKey || '').trim();
-    if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
-    headers = buildConsentRequestHeaders(headers);
-    headers['Cache-Control'] = 'no-cache';
-    headers['Pragma'] = 'no-cache';
+    const headers = buildLookupRequestHeaders(lookupActionIds.get(target));
 
     const url = '/api/propagation?domain=' + encodeURIComponent(target.domain)
       + '&_=' + Date.now() + '&' + buildPropagationQuery();
@@ -2720,12 +2782,7 @@ async function rerunCheckOverrideEndpoints(keys) {
       const controller = new AbortController();
       activeLookup.controllers.push(controller);
       try {
-        let headers = {};
-        const apiKey = (acsApiKey || '').trim();
-        if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
-        headers = buildConsentRequestHeaders(headers);
-        headers['Cache-Control'] = 'no-cache';
-        headers['Pragma'] = 'no-cache';
+        const headers = buildLookupRequestHeaders(lookupActionIds.get(target));
         const extra = endpoints[key].query();
         const url = endpoints[key].path + '?domain=' + encodeURIComponent(domain) + '&_=' + Date.now() + (extra ? '&' + extra : '');
         const resp = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
@@ -7253,7 +7310,7 @@ function getFirstIntakeSendingDomain(rawSendingDomain) {
 // Extract ALL valid sending domains from the intake answer (customers often
 // list several custom domains: "mail1.example.com, mail2.example.net and
 // example.org"). Returns a normalized, validated, deduped, order-preserving,
-// capped list. Empty when nothing valid is found.
+// list. Empty when nothing valid is found; oversized actions are rejected at admission.
 function getAllIntakeSendingDomains(rawSendingDomain) {
   const raw = (rawSendingDomain === null || rawSendingDomain === undefined)
     ? '' : String(rawSendingDomain);
@@ -7272,7 +7329,7 @@ function getAllIntakeSendingDomains(rawSendingDomain) {
     const whole = normalizeDomain(raw);
     if (whole && isValidDomain(whole)) out.push(whole);
   }
-  return out.slice(0, MAX_LOOKUP_DOMAINS);
+  return out;
 }
 
 // Order-insensitive set comparison for two domain lists.
@@ -7287,8 +7344,7 @@ function sameDomainSet(a, b) {
 // Compare the intake "Current sending domain" against the domain currently
 // loaded in the checker. When they differ (and the sending domain is valid),
 // load it into the search box and trigger a fresh lookup. When the intake
-// answer lists multiple domains we only ever run the checker on the FIRST
-// valid one (see getFirstIntakeSendingDomain).
+// answer lists multiple domains, the same per-action limit as the address bar applies.
 function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
   // Check EVERY valid domain the customer listed (multi-domain aware).
   const sendingDomains = getAllIntakeSendingDomains(rawSendingDomain);
@@ -7310,7 +7366,7 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
     status.textContent = runningText;
   }
   // runMultiDomainLookup handles the single-domain case (no tabs/chips) too.
-  const pending = runMultiDomainLookup(sendingDomains, { animateTopIntro: true });
+  const pending = runMultiDomainLookup(sendingDomains, { animateTopIntro: true, statusElement: status });
   // Clear the transient status once the sweep settles. We only touch the status
   // if it still shows OUR running text, so a newer message (from another
   // edit/run) is never clobbered.
@@ -7324,6 +7380,7 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
   } else {
     restore();
   }
+  return pending;
 }
 
 function renderExtractedIntakeTable(values) {
@@ -7724,7 +7781,7 @@ function initializePage() {
 
   // Initialize Microsoft Entra ID authentication
   if (typeof initMsAuth === 'function') {
-    initMsAuth();
+    msAuthInitialization = initMsAuth();
   }
 
   // Show cookie consent banner if no consent has been given yet (EU GDPR / ePrivacy)
@@ -7752,7 +7809,7 @@ const INITIAL_LOOKUP_MAX_RETRIES = 20;
 const INITIAL_LOOKUP_RETRY_DELAY_MS = 50;
 
 // Parse a ?domain= query value that may contain several space/comma/semicolon-
-// separated domains into a normalized, validated, deduped, capped list.
+// separated domains into a normalized, validated, deduped list.
 function parseDomainListParam(raw) {
   const s = (raw === null || raw === undefined) ? '' : String(raw);
   if (!s.trim()) return [];
@@ -7763,7 +7820,7 @@ function parseDomainListParam(raw) {
     const d = normalizeDomain(tok);
     if (d && isValidDomain(d) && !seen[d]) { seen[d] = true; out.push(d); }
   }
-  return out.slice(0, MAX_LOOKUP_DOMAINS);
+  return out;
 }
 
 function startPageInitialization() {
@@ -7821,11 +7878,7 @@ function scheduleInitialLookup(domain) {
     if (initialLookupHasStarted) return;
     initialLookupIsScheduled = false;
     initialLookupHasStarted = true;
-    if (bootstrapDomains.length > 1) {
-      runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
-    } else {
-      lookup({ animateTopIntro: true, domainOverride: primary });
-    }
+    runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
   };
 
   window.requestAnimationFrame(() => {
@@ -7862,6 +7915,8 @@ let msalInstance = null;
 let msAuthAccount = null;
 let isMsEmployee = false;
 let msalInitError = null;
+let msAuthInitialization = Promise.resolve();
+let lookupActionController = null;
 const GRAPH_SCOPES = ['User.Read'];
 
 '@

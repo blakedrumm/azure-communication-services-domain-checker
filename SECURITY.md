@@ -83,7 +83,11 @@ deploying beyond `localhost`:
   serves plain HTTP.
 - Set **`ACS_API_KEY`** or the comma/semicolon/newline-separated **`ACS_API_KEYS`**
   to require one configured API key on `/api/*` and `/dns`.
-- Keep **rate limiting** enabled (`ACS_RATE_LIMIT_PER_MIN`, default `240`).
+- Keep the **unbatched API abuse guard** enabled (`ACS_RATE_LIMIT_PER_MIN`, default `24000`).
+  UI processing actions independently allow 100 websites, or 1,000 after server-side
+  Microsoft Graph token validation. Action IDs are client-IP-bound, kept in memory,
+  and expire after one idle hour. Bearer tokens and Graph profiles are never retained
+  or logged. Use session affinity when load-balancing multiple application instances.
 - Only set **`ACS_TRUSTED_PROXIES`** for proxies you actually control, so
   forwarded client-IP headers cannot be spoofed.
 - Restrict **`ACS_ALLOWED_ORIGINS`** to the origins that should call the API.

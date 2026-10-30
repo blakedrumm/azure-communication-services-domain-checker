@@ -199,7 +199,7 @@ The embedded single-page application includes a rich set of interactive features
 
 | Feature | Description |
 |---------|-------------|
-| 🧩 **Multi-domain lookups** | Enter several domains at once (space/comma-separated). Each becomes a removable chip in the address box, and results appear under a tab per domain. The tab bar sticks to the top of the page while scrolling so the domain you're viewing is always labeled (a single tab is still shown for one domain). Shareable via a space-separated `?domain=` URL. |
+| 🧩 **Multi-domain lookups** | Enter up to **100 websites per action**, or **1,000 when signed in with Microsoft**, using the address bar or Customer Intake form. Each becomes a removable chip in the address box, and results appear under a tab per domain. The tab bar sticks to the top of the page while scrolling so the domain you're viewing is always labeled (a single tab is still shown for one domain). Shareable via a space-separated `?domain=` URL. |
 | 🌙 **Dark / Light theme** | Toggle between dark and light mode; preference is saved in `localStorage` |
 | 🕑 **Search history** | Recent domain lookups appear as dismissible chips below the search box |
 | 🔗 **Copy shareable link** | Copies a permalink to the current domain lookup so you can share it with teammates |
@@ -288,6 +288,18 @@ The **Customer Intake Information** form (shown to signed-in users) is language-
 - When the intake form contains one or more current sending domains that differ from the active lookup, the checker automatically runs against **every** listed domain (multi-domain lookup with a tab per domain) and clears the temporary "Running checker..." status once the sweep completes.
 
 > Machine-translated questionnaire strings (especially for `ar`, `zh-CN`, `hi-IN`, `ja-JP`, `ru-RU`) are best-effort and benefit from native-speaker review. The form does **not** translate the customer's answers between languages; it structures and labels them.
+
+### Website processing limits
+
+The address bar, Customer Intake **Process Data**, and shared multi-domain links use the same per-action limits: **100 distinct websites**, or **1,000 for any account signed in through the app's Microsoft sign-in flow** (not only Microsoft employees). Normalized duplicates count once. Oversized actions show an explicit error before checking any website; input is never silently truncated.
+
+The UI first obtains an action ID from `GET /api/lookup-action?count=N`, then sends it in the `X-ACS-Lookup-Action` header on each lookup and card re-check. All 11 checks for a website share one slot. Each new processing action gets a fresh budget, so repeated submissions and background metrics cannot exhaust a valid action's website allowance.
+
+Admission above 100 websites requires a Microsoft Graph bearer token, obtained through the existing MSAL `User.Read` flow and validated once against the fixed Graph `/me` endpoint. The token and profile are not retained, logged, or sent to individual lookup endpoints. The normal API key, when configured, is still required. Actions are held only in memory, are client-IP-bound, and expire after one idle hour (`410`); a different client receives `403`. When load-balancing multiple application instances, enable session affinity so admission and its lookups reach the same instance.
+
+Requests without an action ID retain a separate per-IP abuse guard: `ACS_RATE_LIMIT_PER_MIN` defaults to **24,000**, up from 240. This setting does not reduce or disable the per-action website limits.
+
+Offline regression checks (PowerShell and Node.js): `pwsh -NoProfile -File .\tools\Test-LookupLimits.ps1`.
 
 ## 🔍 DNS Checks & Guidance
 
@@ -568,6 +580,7 @@ The application exposes the following RESTful API endpoints:
 | Endpoint | Description | 📝 Purpose |
 |----------|-------------|------------|
 | `/` | Web UI | Interactive single-page application for domain checking |
+| `/api/lookup-action?count=N` | Website action admission | Returns `actionId`, `websiteCount`, and `maxDomains`. Allows 1-100 websites normally, or up to 1,000 with a valid Microsoft Graph `Authorization: Bearer ...` token. Send the action ID in `X-ACS-Lookup-Action` on subsequent domain lookups. The configured API key is required here too |
 | `/dns` | Aggregated readiness JSON | Complete DNS readiness report for a domain. Accepts the optional `spfInclude`, `dkim1Selector`, `dkim1Target`, `dkim2Selector` and `dkim2Target` parameters (see [Custom SPF and DKIM requirements](#custom-spf-and-dkim-requirements)) |
 | `/api/email-quota` | Email Quota checklist | Returns the same result as the web UI's **Email Quota** card: an overall `pass` / `warn` / `fail` verdict, the Domain Verification verdict, one row per check (MX, Reputation, Domain Registration, SPF, DMARC), and the **Copy Email Quota** report table as both structured rows and Markdown. Runs every check the card uses (the `/dns` checks plus reputation and website), so it takes as long as a full UI lookup. Accepts the same SPF/DKIM parameters as `/dns`, plus `requireDmarcEnforcement=true` (treat DMARC `p=none` as a warning, as the UI does when the Customer Intake form shows an expected tier above Earth) and `format=markdown` (return only the report table as `text/markdown`). The report's `Report link` row points at `ACS_PUBLIC_BASE_URL` when set, otherwise at `https://acs-domain-checker.microsoft.com`. Text is English only, and the Customer Intake block is not included |
 | `/api/base` | Root TXT/SPF/ACS TXT | Validates SPF and ACS verification TXT records. Accepts an optional `spfInclude` parameter |
@@ -582,7 +595,7 @@ The application exposes the following RESTful API endpoints:
 | `/api/nameservers` | Per-nameserver TXT consistency | Queries each authoritative nameserver directly (raw UDP/TCP DNS) for the domain's TXT records and compares them, so you can see whether every nameserver serves the same SPF / verification records or whether divergence is making them resolve only intermittently |
 | `/api/propagation` | Global DNS propagation | Queries a geographically spread set of public DNS resolvers in parallel and compares their answers, so you can see whether a recent DNS change is visible everywhere yet. Accepts optional `type`, `regions`, `max`, `timeout`, `expected`, `custom` and `validate` query parameters (all allowlisted, length-capped and clamped server-side) |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
-| `/api/auth/event` | Anonymous Microsoft Entra ID sign-in ping | Header-only, consent-gated. SPA POSTs an opaque SHA-256 account hash and a Microsoft-employee boolean after client-side MSAL/Graph verification; the server never sees access tokens, UPN, oid, or tenant id. |
+| `/api/auth/event` | Anonymous Microsoft Entra ID sign-in ping | Header-only, consent-gated. SPA POSTs an opaque SHA-256 account hash and a Microsoft-employee boolean after client-side MSAL/Graph verification; this analytics endpoint never receives access tokens, UPN, oid, or tenant id. |
 | `/terms` | Terms of Service | Embedded, localized Terms of Service page |
 | `/privacy` | Privacy Statement | Embedded, localized Privacy Statement page |
 | `/robots.txt` | Crawler policy | Allows search engines on the pages, blocks `/api/` and `/dns` for general crawlers, and explicitly grants AI assistants access (including the JSON API). Points at the sitemap. |
@@ -730,7 +743,7 @@ Customize the application behavior using these environment variables:
 | `PORT` | `8080` | Port for the web listener |
 | `ACS_API_KEY` | _(none)_ | Single literal API key for securing `/api/*` and `/dns`; accepted alongside `ACS_API_KEYS` |
 | `ACS_API_KEYS` | _(none)_ | Comma/semicolon/newline-separated API keys; each request must match one key |
-| `ACS_RATE_LIMIT_PER_MIN` | `240` | Maximum requests per minute per client IP (set to `0` to disable). Sized for multi-domain sweeps (up to 10 domains × ~10 endpoints ≈ 100 requests) |
+| `ACS_RATE_LIMIT_PER_MIN` | `24000` | Maximum unbatched requests per minute per client IP (`0` disables this abuse guard). Admitted UI actions instead count distinct websites: 100 normally, or 1,000 with Microsoft sign-in |
 | `ACS_APP_VERSION` | _(from script)_ | Override the displayed application version string |
 
 ### 🔍 DNS Resolution
@@ -853,7 +866,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SmtpRespons
 # Windows PowerShell - comprehensive example
 $env:PORT = "9000"
 $env:ACS_API_KEY = "my-secret-key"
-$env:ACS_RATE_LIMIT_PER_MIN = "300"
+$env:ACS_RATE_LIMIT_PER_MIN = "24000"
 $env:ACS_ENABLE_ANON_METRICS = "1"
 $env:ACS_DNS_RESOLVER = "DoH"
 $env:ACS_WHOISXML_API_KEY = "your-whoisxml-key"
@@ -865,7 +878,7 @@ $env:ACS_ISSUE_URL = "https://github.com/blakedrumm/azure-communication-services
 # Linux/macOS - comprehensive example
 export PORT=9000
 export ACS_API_KEY=my-secret-key
-export ACS_RATE_LIMIT_PER_MIN=300
+export ACS_RATE_LIMIT_PER_MIN=24000
 export ACS_ENABLE_ANON_METRICS=1
 export ACS_DNS_RESOLVER=DoH
 export ACS_WHOISXML_API_KEY=your-whoisxml-key
@@ -983,7 +996,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.16.6`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.16.7`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -1006,8 +1019,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.16.6
-git push origin v2.16.6
+git tag v2.16.7
+git push origin v2.16.7
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -1018,7 +1031,7 @@ git push origin v2.16.6
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.16.6`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.16.7`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -1035,11 +1048,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.16.6
+docker pull limitlessworlds/acs-domain-checker:2.16.7
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.16.6
-docker pull limitlessworlds/acs-domain-checker:windows-2.16.6
+docker pull limitlessworlds/acs-domain-checker:linux-2.16.7
+docker pull limitlessworlds/acs-domain-checker:windows-2.16.7
 ```
 
 ### 🛠️ Manual Build Script
@@ -1054,7 +1067,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.16.6
+./acs-domain-checker-dockerhub.ps1 -Version 2.16.7
 ```
 
 **📋 Requirements for manual script:**

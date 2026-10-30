@@ -47,6 +47,8 @@ $AcsRateLimitStore = [System.Collections.Concurrent.ConcurrentDictionary[string,
 $AcsRateLimitLock = [object]::new()
 $global:AcsRateLimitStore = $AcsRateLimitStore
 $global:AcsRateLimitLock = $AcsRateLimitLock
+$AcsLookupActionStore = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::Ordinal)
+$global:AcsLookupActionStore = $AcsLookupActionStore
 
 function Get-AnonymousMetricsPersistPath {
   $p = $env:ACS_ANON_METRICS_FILE

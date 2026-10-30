@@ -3827,6 +3827,9 @@ const MULTI_DOMAIN_TRANSLATION_OVERRIDES = {
   en: {
     removeDomainLabel: 'Remove {domain}',
     domainCheckQueued: 'Preparing to check this domain\u2026',
+    domainBatchLimitExceeded: 'This action contains {count} websites; the maximum is {limit}. No websites from this action were checked.',
+    domainBatchSignInHint: 'Sign in with Microsoft to check up to 1,000 websites per action.',
+    lookupActionFailed: 'Website checks could not start. Please try again.',
     checkingMultipleDomains: 'Checking {count} domains\u2026'
   },
   es: {

@@ -60,7 +60,8 @@
   - ACS_API_KEY                  : Optional API key required for /api/* and /dns endpoints (send via X-Api-Key header).
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
   - ACS_API_KEYS                 : Optional comma/semicolon/newline-delimited API keys accepted alongside ACS_API_KEY.
-  - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 240; set to 0 to disable).
+  - ACS_RATE_LIMIT_PER_MIN       : Max unbatched requests per minute per client IP (default 24000; 0 disables).
+                                   UI processing actions instead allow 100 websites, or 1000 with Microsoft sign-in.
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
                                    Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
@@ -167,17 +168,10 @@ $script:DnsResolverMode = $DnsResolver
 # Use env vars for settings that must be visible inside request handler runspaces.
 $env:ACS_DNS_RESOLVER = $DnsResolver
 
-# Configure per-client rate limiting. A value of 0 disables rate limiting.
-#
-# Default is 240 requests/minute per client IP. This is sized for the SPA's
-# multi-domain lookup feature: a single sweep checks up to MAX_LOOKUP_DOMAINS
-# (10) domains and fans out to ~10 backend endpoints per domain (base, mx,
-# records, whois, dmarc, dkim, cname, reputation, website, nameservers) =
-# ~100 requests. The shared per-IP bucket counts every endpoint call, so the
-# previous cap of 60 throttled a legitimate 10-domain sweep partway through.
-# 240 leaves headroom for metrics/auth calls plus a follow-up sweep while still
-# bounding abusive volumes of expensive WHOIS/DNSBL lookups.
-$rateLimitPerMinute = 240
+# UI actions count distinct websites, not their individual backend checks.
+# Keep a separate, generous abuse guard for requests without an action ID.
+# 24000 accommodates two 1000-website sweeps of 11 checks plus other traffic.
+$rateLimitPerMinute = 24000
 if ($env:ACS_RATE_LIMIT_PER_MIN -and $env:ACS_RATE_LIMIT_PER_MIN -match '^\d+$') {
   $rateLimitPerMinute = [int]$env:ACS_RATE_LIMIT_PER_MIN
 }

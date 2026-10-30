@@ -284,9 +284,10 @@ Version: __ACS_VERSION__
 
 ## How to use this API
 
-- All endpoints are `GET` and take a `domain` query parameter, e.g. `__ACS_ROOT__/api/base?domain=example.com`.
+- Lookup endpoints are `GET` and take a `domain` query parameter, e.g. `__ACS_ROOT__/api/base?domain=example.com`.
 - Responses are JSON. No request body is ever needed.
-- Requests are rate limited per client IP (default 240/min). Honor `Retry-After` on HTTP 429.
+- Unbatched requests are rate limited per client IP (default 24000/min). Honor `Retry-After` on HTTP 429.
+- For a multi-website action, first request `/api/lookup-action?count=N`, then send its `actionId` in `X-ACS-Lookup-Action` on every lookup. Each distinct website counts once, regardless of how many checks it needs. Actions allow up to 100 websites, or 1000 when admission includes a valid Microsoft Graph bearer token. No lookup starts when admission fails.
 - Deployments with `ACS_API_KEY` or `ACS_API_KEYS` require one configured key sent as the `X-Api-Key` header. A 401 response means the key is missing or invalid.
 - `__ACS_ROOT__/dns` returns every check in a single aggregated response. Prefer it when you want the whole picture; prefer the individual endpoints when you need one specific answer quickly.
 
@@ -419,6 +420,7 @@ function Get-AcsOpenApiJson {
     [void]$sb.Append($domainParam)
 
     $extraParams = [System.Collections.Generic.List[string]]::new()
+    $extraParams.Add('        { "name": "X-ACS-Lookup-Action", "in": "header", "description": "Optional actionId from /api/lookup-action?count=N. Counts distinct websites per action rather than individual API requests. The action is bound to the originating client and expires after one idle hour.", "schema": { "type": "string", "pattern": "^[a-f0-9]{32}$" } }')
     if ($endpoint -eq '/api/propagation') {
       $extraParams.Add('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } }')
       $extraParams.Add('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } }')
@@ -455,7 +457,9 @@ function Get-AcsOpenApiJson {
     [void]$sb.AppendLine('          "200": { "description": "Check result.", "content": { "application/json": { "schema": { "type": "object" } } } },')
     [void]$sb.AppendLine('          "400": { "description": "Missing or invalid domain parameter." },')
     [void]$sb.AppendLine('          "401": { "description": "An API key is required by this deployment." },')
-    [void]$sb.AppendLine('          "429": { "description": "Rate limit exceeded. Honor the Retry-After header." }')
+    [void]$sb.AppendLine('          "403": { "description": "Processing action belongs to a different client." },')
+    [void]$sb.AppendLine('          "410": { "description": "Processing action is invalid or expired. Start a new action." },')
+    [void]$sb.AppendLine('          "429": { "description": "Website budget or unbatched request rate limit exceeded. Honor Retry-After when present." }')
     [void]$sb.AppendLine('        }')
     [void]$sb.AppendLine('      }')
     [void]$sb.AppendLine(('    }}{0}' -f $(if ($isLast) { '' } else { ',' })))

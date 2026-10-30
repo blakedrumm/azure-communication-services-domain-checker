@@ -310,6 +310,22 @@ if ($metricsEnabled) {
     return
   }
 
+  # Admit a processing action before its per-website checks fan out.
+  if ($path -eq '/api/lookup-action') {
+    if (-not (Test-ApiKey -Context $ctx)) {
+      Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
+      return
+    }
+    $domainCount = 0
+    if (-not [int]::TryParse([string]$ctx.Request.QueryString['count'], [ref]$domainCount)) {
+      Write-Json -Context $ctx -Object @{ error = 'A positive website count is required.' } -StatusCode 400
+      return
+    }
+    $action = New-AcsLookupAction -Context $ctx -DomainCount $domainCount
+    Write-Json -Context $ctx -Object $action.body -StatusCode $action.statusCode
+    return
+  }
+
   # 2) Serve individual API endpoints (/api/*)
   if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers","/api/propagation")) {
     if (-not (Test-ApiKey -Context $ctx)) {
@@ -318,15 +334,16 @@ if ($metricsEnabled) {
       return
     }
 
-    $rate = Test-RateLimit -Context $ctx
+    $rate = Test-RateLimit -Context $ctx -DomainLookup
     if (-not $rate.allowed) {
+      $rateStatus = if ($rate.statusCode) { [int]$rate.statusCode } else { 429 }
       try {
         if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
-      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
-      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by request limiting.' -CorrelationId $correlationId -ErrorCode ('ACS-REQ-{0}' -f $rateStatus) -Fields @{ statusCode = $rateStatus; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
+      Write-Json -Context $ctx -Object @{ error = $(if ($rate.error) { $rate.error } else { 'Rate limit exceeded.' }); retryAfterSeconds = $rate.retryAfterSec } -StatusCode $rateStatus
       return
     }
 
@@ -445,13 +462,11 @@ if ($metricsEnabled) {
     return
   }
 
-  # 2b) Microsoft Entra ID auth: handled entirely client-side in the SPA.
+  # 2b) Microsoft Entra ID sign-in and anonymous auth metrics.
   # The browser uses MSAL to acquire a Microsoft Graph token and calls
   # Graph /me directly (see verifyMsAccount in 20e-HtmlAzureIntegration.ps1).
-  # The previous /api/auth/verify route forwarded user bearer tokens to
-  # Microsoft Graph from the server, which expanded the trust boundary
-  # without adding security. It was removed so the server never handles
-  # raw Entra access tokens.
+  # Only admission of actions above 100 websites additionally validates a
+  # Graph token server-side; analytics never receives or retains that token.
   #
   # The /api/auth/event route below is the consent-gated, header-only
   # successor: after the SPA finishes its own Graph verification it POSTs
@@ -549,15 +564,16 @@ if ($metricsEnabled) {
       return
     }
 
-    $rate = Test-RateLimit -Context $ctx
+    $rate = Test-RateLimit -Context $ctx -DomainLookup
     if (-not $rate.allowed) {
+      $rateStatus = if ($rate.statusCode) { [int]$rate.statusCode } else { 429 }
       try {
         if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
-      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'email-quota-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
-      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'email-quota-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by request limiting.' -CorrelationId $correlationId -ErrorCode ('ACS-REQ-{0}' -f $rateStatus) -Fields @{ statusCode = $rateStatus; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
+      Write-Json -Context $ctx -Object @{ error = $(if ($rate.error) { $rate.error } else { 'Rate limit exceeded.' }); retryAfterSeconds = $rate.retryAfterSec } -StatusCode $rateStatus
       return
     }
 
@@ -634,15 +650,16 @@ if ($metricsEnabled) {
       return
     }
 
-    $rate = Test-RateLimit -Context $ctx
+    $rate = Test-RateLimit -Context $ctx -DomainLookup
     if (-not $rate.allowed) {
+      $rateStatus = if ($rate.statusCode) { [int]$rate.statusCode } else { 429 }
       try {
         if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
-      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
-      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec; acsReady = $false } -StatusCode 429
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by request limiting.' -CorrelationId $correlationId -ErrorCode ('ACS-REQ-{0}' -f $rateStatus) -Fields @{ statusCode = $rateStatus; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
+      Write-Json -Context $ctx -Object @{ error = $(if ($rate.error) { $rate.error } else { 'Rate limit exceeded.' }); retryAfterSeconds = $rate.retryAfterSec; acsReady = $false } -StatusCode $rateStatus
       return
     }
 

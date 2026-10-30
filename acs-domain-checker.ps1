@@ -60,7 +60,8 @@
   - ACS_API_KEY                  : Optional API key required for /api/* and /dns endpoints (send via X-Api-Key header).
                                    Example query usage (less secure): http://localhost:8080/api/base?domain=example.com&apiKey=YOUR_KEY
   - ACS_API_KEYS                 : Optional comma/semicolon/newline-delimited API keys accepted alongside ACS_API_KEY.
-  - ACS_RATE_LIMIT_PER_MIN       : Max requests per minute per client IP (default 240; set to 0 to disable).
+  - ACS_RATE_LIMIT_PER_MIN       : Max unbatched requests per minute per client IP (default 24000; 0 disables).
+                                   UI processing actions instead allow 100 websites, or 1000 with Microsoft sign-in.
   - ACS_ISSUE_URL                : Optional issue URL for the "Report issue" button (domain name appended as query).
   - ACS_RBL_ZONES                : Optional comma/semicolon/newline-delimited DNSBL zones. If empty, safe built-in defaults are used.
                                    Example optional add-on: `zen.spamhaus.org` (user-supplied only; not enabled by default).
@@ -167,17 +168,10 @@ $script:DnsResolverMode = $DnsResolver
 # Use env vars for settings that must be visible inside request handler runspaces.
 $env:ACS_DNS_RESOLVER = $DnsResolver
 
-# Configure per-client rate limiting. A value of 0 disables rate limiting.
-#
-# Default is 240 requests/minute per client IP. This is sized for the SPA's
-# multi-domain lookup feature: a single sweep checks up to MAX_LOOKUP_DOMAINS
-# (10) domains and fans out to ~10 backend endpoints per domain (base, mx,
-# records, whois, dmarc, dkim, cname, reputation, website, nameservers) =
-# ~100 requests. The shared per-IP bucket counts every endpoint call, so the
-# previous cap of 60 throttled a legitimate 10-domain sweep partway through.
-# 240 leaves headroom for metrics/auth calls plus a follow-up sweep while still
-# bounding abusive volumes of expensive WHOIS/DNSBL lookups.
-$rateLimitPerMinute = 240
+# UI actions count distinct websites, not their individual backend checks.
+# Keep a separate, generous abuse guard for requests without an action ID.
+# 24000 accommodates two 1000-website sweeps of 11 checks plus other traffic.
+$rateLimitPerMinute = 24000
 if ($env:ACS_RATE_LIMIT_PER_MIN -and $env:ACS_RATE_LIMIT_PER_MIN -match '^\d+$') {
   $rateLimitPerMinute = [int]$env:ACS_RATE_LIMIT_PER_MIN
 }
@@ -1708,7 +1702,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.16.6'
+$script:AppVersion = '2.16.7'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   # Validate at the boundary: this value is interpolated into generated JSON
   # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
@@ -3725,6 +3719,8 @@ $AcsRateLimitStore = [System.Collections.Concurrent.ConcurrentDictionary[string,
 $AcsRateLimitLock = [object]::new()
 $global:AcsRateLimitStore = $AcsRateLimitStore
 $global:AcsRateLimitLock = $AcsRateLimitLock
+$AcsLookupActionStore = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new([System.StringComparer]::Ordinal)
+$global:AcsLookupActionStore = $AcsLookupActionStore
 
 function Get-AnonymousMetricsPersistPath {
   $p = $env:ACS_ANON_METRICS_FILE
@@ -5311,9 +5307,10 @@ Version: __ACS_VERSION__
 
 ## How to use this API
 
-- All endpoints are `GET` and take a `domain` query parameter, e.g. `__ACS_ROOT__/api/base?domain=example.com`.
+- Lookup endpoints are `GET` and take a `domain` query parameter, e.g. `__ACS_ROOT__/api/base?domain=example.com`.
 - Responses are JSON. No request body is ever needed.
-- Requests are rate limited per client IP (default 240/min). Honor `Retry-After` on HTTP 429.
+- Unbatched requests are rate limited per client IP (default 24000/min). Honor `Retry-After` on HTTP 429.
+- For a multi-website action, first request `/api/lookup-action?count=N`, then send its `actionId` in `X-ACS-Lookup-Action` on every lookup. Each distinct website counts once, regardless of how many checks it needs. Actions allow up to 100 websites, or 1000 when admission includes a valid Microsoft Graph bearer token. No lookup starts when admission fails.
 - Deployments with `ACS_API_KEY` or `ACS_API_KEYS` require one configured key sent as the `X-Api-Key` header. A 401 response means the key is missing or invalid.
 - `__ACS_ROOT__/dns` returns every check in a single aggregated response. Prefer it when you want the whole picture; prefer the individual endpoints when you need one specific answer quickly.
 
@@ -5446,6 +5443,7 @@ function Get-AcsOpenApiJson {
     [void]$sb.Append($domainParam)
 
     $extraParams = [System.Collections.Generic.List[string]]::new()
+    $extraParams.Add('        { "name": "X-ACS-Lookup-Action", "in": "header", "description": "Optional actionId from /api/lookup-action?count=N. Counts distinct websites per action rather than individual API requests. The action is bound to the originating client and expires after one idle hour.", "schema": { "type": "string", "pattern": "^[a-f0-9]{32}$" } }')
     if ($endpoint -eq '/api/propagation') {
       $extraParams.Add('        { "name": "type", "in": "query", "description": "DNS record type to test.", "schema": { "type": "string", "enum": ["A","AAAA","CNAME","MX","NS","TXT","SOA","CAA"], "default": "TXT" } }')
       $extraParams.Add('        { "name": "regions", "in": "query", "description": "Comma-separated resolver regions.", "schema": { "type": "string", "examples": ["europe,asia"] } }')
@@ -5482,7 +5480,9 @@ function Get-AcsOpenApiJson {
     [void]$sb.AppendLine('          "200": { "description": "Check result.", "content": { "application/json": { "schema": { "type": "object" } } } },')
     [void]$sb.AppendLine('          "400": { "description": "Missing or invalid domain parameter." },')
     [void]$sb.AppendLine('          "401": { "description": "An API key is required by this deployment." },')
-    [void]$sb.AppendLine('          "429": { "description": "Rate limit exceeded. Honor the Retry-After header." }')
+    [void]$sb.AppendLine('          "403": { "description": "Processing action belongs to a different client." },')
+    [void]$sb.AppendLine('          "410": { "description": "Processing action is invalid or expired. Start a new action." },')
+    [void]$sb.AppendLine('          "429": { "description": "Website budget or unbatched request rate limit exceeded. Honor Retry-After when present." }')
     [void]$sb.AppendLine('        }')
     [void]$sb.AppendLine('      }')
     [void]$sb.AppendLine(('    }}{0}' -f $(if ($isLast) { '' } else { ',' })))
@@ -9098,7 +9098,119 @@ function Test-ApiKey {
   return $matched
 }
 
-# Enforce per-client-IP rate limiting using a sliding 60-second window.
+function New-AcsLookupAction {
+  param($Context, [int]$DomainCount)
+
+  if ($DomainCount -lt 1) {
+    return @{ statusCode = 400; body = @{ error = 'A positive website count is required.' } }
+  }
+
+  $maxDomains = 100
+  if ($DomainCount -gt $maxDomains) {
+    $authorization = Get-RequestHeaderValue -Context $Context -Name 'Authorization'
+    if ($authorization -notmatch '^Bearer\s+(\S+)$') {
+      return @{ statusCode = 429; body = @{ error = 'Check at most 100 websites per action, or sign in with Microsoft for up to 1000.'; maxDomains = 100 } }
+    }
+    if ($DomainCount -gt 1000) {
+      return @{ statusCode = 429; body = @{ error = 'Check at most 1000 websites per processing action.'; maxDomains = 1000 } }
+    }
+
+    # Only elevated actions need a token. Graph validates it; neither the token
+    # nor the returned profile is retained in the action store or analytics.
+    try {
+      $null = Invoke-OutboundHttp -Uri 'https://graph.microsoft.com/v1.0/me?$select=id' -Headers @{ Authorization = $authorization } -TimeoutSec 15 -ReturnRaw
+    } catch {
+      $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+      if ($statusCode -in @(401, 403)) {
+        return @{ statusCode = 401; body = @{ error = 'Microsoft sign-in is invalid or expired. Sign in again to check more than 100 websites.' } }
+      }
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestUtilities' -Operation 'lookup-action-auth' -EventId 'LOOKUP-AUTH-UNAVAILABLE' -Message 'Microsoft sign-in validation is temporarily unavailable.' -Fields @{ dependency = 'MicrosoftGraph'; statusCode = 502 }
+      return @{ statusCode = 502; body = @{ error = 'Microsoft sign-in could not be validated. Please try again.' } }
+    }
+    $maxDomains = 1000
+  }
+
+  $clientIp = Get-ClientIp -Context $Context
+  if ([string]::IsNullOrWhiteSpace($clientIp)) { $clientIp = 'unknown' }
+  $now = [DateTimeOffset]::UtcNow
+  [System.Threading.Monitor]::Enter($AcsRateLimitLock)
+  try {
+    if ($AcsLookupActionStore.Count -ge 1000) {
+      foreach ($entry in @($AcsLookupActionStore.GetEnumerator())) {
+        if ($entry.Value.lastSeenUtc -lt $now.AddHours(-1)) {
+          $removed = $null
+          $null = $AcsLookupActionStore.TryRemove($entry.Key, [ref]$removed)
+        }
+      }
+    }
+    if ($AcsLookupActionStore.Count -ge 10000) {
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestUtilities' -Operation 'lookup-action-create' -EventId 'LOOKUP-ACTION-CAPACITY' -Message 'Processing action capacity is temporarily exhausted.' -Fields @{ statusCode = 503 }
+      return @{ statusCode = 503; body = @{ error = 'Website processing is busy. Please try again later.' } }
+    }
+
+    $action = [pscustomobject]@{
+      clientIp = $clientIp
+      lastSeenUtc = $now
+      domainLimit = $DomainCount
+      domains = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+    do { $actionId = New-AnonSessionId } while (-not $AcsLookupActionStore.TryAdd($actionId, $action))
+    return @{ statusCode = 200; body = @{ actionId = $actionId; maxDomains = $maxDomains; websiteCount = $DomainCount } }
+  } finally {
+    [System.Threading.Monitor]::Exit($AcsRateLimitLock)
+  }
+}
+
+function Test-AcsLookupAction {
+  param($Context, [string]$ActionId)
+
+  $rejected = [pscustomobject]@{
+    allowed = $false; remaining = 0; retryAfterSec = $null; limit = 0
+    statusCode = 410
+    error = 'Invalid or expired processing action. Run the website check again.'
+  }
+  if ($ActionId -cnotmatch '^[a-f0-9]{32}$') { return $rejected }
+
+  $clientIp = Get-ClientIp -Context $Context
+  if ([string]::IsNullOrWhiteSpace($clientIp)) { $clientIp = 'unknown' }
+  $domain = ConvertTo-NormalizedDomain -Raw ([string]$Context.Request.QueryString['domain'])
+  $now = [DateTimeOffset]::UtcNow
+  [System.Threading.Monitor]::Enter($AcsRateLimitLock)
+  try {
+    $action = $null
+    if (-not $AcsLookupActionStore.TryGetValue($ActionId, [ref]$action)) { return $rejected }
+    if ($action.lastSeenUtc -lt $now.AddHours(-1)) {
+      $removed = $null
+      $null = $AcsLookupActionStore.TryRemove($ActionId, [ref]$removed)
+      return $rejected
+    }
+    if ($action.clientIp -ne $clientIp) {
+      $rejected.statusCode = 403
+      return $rejected
+    }
+
+    # Invalid domains still get the route's normal 400 response, but do not
+    # consume a website slot. All checks for an admitted website share one slot.
+    if (Test-DomainName -Domain $domain) {
+      if (-not $action.domains.Contains($domain) -and $action.domains.Count -ge $action.domainLimit) {
+        return [pscustomobject]@{
+          allowed = $false; remaining = 0; retryAfterSec = $null; limit = $action.domainLimit
+          error = "Website limit exceeded for this action (maximum $($action.domainLimit)). Start a new processing action."
+        }
+      }
+      $null = $action.domains.Add($domain)
+    }
+    $action.lastSeenUtc = $now
+    return [pscustomobject]@{
+      allowed = $true; remaining = $action.domainLimit - $action.domains.Count
+      retryAfterSec = $null; limit = $action.domainLimit
+    }
+  } finally {
+    [System.Threading.Monitor]::Exit($AcsRateLimitLock)
+  }
+}
+
+# Enforce per-client-IP rate limiting for requests outside a processing action.
 # Returns an object with allowed (bool), remaining count, and retry-after seconds.
 #
 # -Multiplier raises the per-window limit for cheap, high-frequency endpoints
@@ -9109,8 +9221,16 @@ function Test-ApiKey {
 function Test-RateLimit {
   param(
     $Context,
-    [int]$Multiplier = 1
+    [int]$Multiplier = 1,
+    [switch]$DomainLookup
   )
+
+  if ($DomainLookup) {
+    $actionId = Get-RequestHeaderValue -Context $Context -Name 'X-ACS-Lookup-Action'
+    if (-not [string]::IsNullOrWhiteSpace($actionId)) {
+      return Test-AcsLookupAction -Context $Context -ActionId $actionId
+    }
+  }
 
   $limit = 0
   if ($env:ACS_RATE_LIMIT_PER_MIN -and $env:ACS_RATE_LIMIT_PER_MIN -match '^\d+$') {
@@ -24212,6 +24332,9 @@ const MULTI_DOMAIN_TRANSLATION_OVERRIDES = {
   en: {
     removeDomainLabel: 'Remove {domain}',
     domainCheckQueued: 'Preparing to check this domain\u2026',
+    domainBatchLimitExceeded: 'This action contains {count} websites; the maximum is {limit}. No websites from this action were checked.',
+    domainBatchSignInHint: 'Sign in with Microsoft to check up to 1,000 websites per action.',
+    lookupActionFailed: 'Website checks could not start. Please try again.',
     checkingMultipleDomains: 'Checking {count} domains\u2026'
   },
   es: {
@@ -31440,7 +31563,69 @@ function setCheckProgressActive(active) {
 // a removable chip. When more than one domain is checked, per-domain results
 // are cached and shown one at a time through the #domainTabs tab bar (a single
 // #results container is reused because result-card element IDs are global).
-const MAX_LOOKUP_DOMAINS = 10;
+const DEFAULT_LOOKUP_DOMAIN_LIMIT = 100;
+const SIGNED_IN_LOOKUP_DOMAIN_LIMIT = 1000;
+const lookupActionIds = new WeakMap();
+
+function getLookupDomainLimit() {
+  return msAuthAccount && lastAuthData ? SIGNED_IN_LOOKUP_DOMAIN_LIMIT : DEFAULT_LOOKUP_DOMAIN_LIMIT;
+}
+
+function buildLookupRequestHeaders(actionId) {
+  const headers = buildConsentRequestHeaders({});
+  const apiKey = (acsApiKey || '').trim();
+  if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
+  if (actionId) headers['X-ACS-Lookup-Action'] = actionId;
+  headers['Cache-Control'] = 'no-cache';
+  headers['Pragma'] = 'no-cache';
+  return headers;
+}
+
+async function prepareLookupAction(domains, statusElement) {
+  if (lookupActionController) lookupActionController.abort();
+  const controller = new AbortController();
+  lookupActionController = controller;
+  const showError = message => {
+    setStatus(escapeHtml(message));
+    if (statusElement) statusElement.textContent = message;
+  };
+  try {
+    // A shared link can load before MSAL restores the signed-in session.
+    if (domains.length > DEFAULT_LOOKUP_DOMAIN_LIMIT) await msAuthInitialization;
+    if (controller.signal.aborted) return null;
+    const limit = getLookupDomainLimit();
+    if (domains.length > limit) {
+      let message = t('domainBatchLimitExceeded', { count: String(domains.length), limit: String(limit) });
+      if (limit === DEFAULT_LOOKUP_DOMAIN_LIMIT) message += ' ' + t('domainBatchSignInHint');
+      showError(message);
+      return null;
+    }
+
+    const headers = buildLookupRequestHeaders();
+    if (domains.length > DEFAULT_LOOKUP_DOMAIN_LIMIT) {
+      const result = await msalInstance.acquireTokenSilent({ scopes: GRAPH_SCOPES, account: msAuthAccount });
+      if (controller.signal.aborted) return null;
+      if (!result || !result.accessToken) throw new Error(t('lookupActionFailed'));
+      headers.Authorization = 'Bearer ' + result.accessToken;
+    }
+    const response = await fetch('/api/lookup-action?count=' + domains.length, {
+      headers, signal: controller.signal, cache: 'no-store'
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    if (!/^[a-f0-9]{32}$/.test(data.actionId) || data.websiteCount !== domains.length) {
+      throw new Error(t('lookupActionFailed'));
+    }
+    return controller.signal.aborted ? null : data.actionId;
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      showError(t('lookupActionFailed') + ' ' + (error && error.message ? error.message : String(error)));
+    }
+    return null;
+  } finally {
+    if (lookupActionController === controller) lookupActionController = null;
+  }
+}
 
 function isMultiDomainActive() {
   return !!(multiDomainState && Array.isArray(multiDomainState.domains) && multiDomainState.domains.length > 1);
@@ -31482,7 +31667,8 @@ function removeDomainChip(index) {
 }
 
 // All entered domains = committed chips + any valid trailing input text.
-// Normalized, validated, deduped, order-preserving, and capped.
+// Normalized, validated, deduped, and order-preserving. Admission rejects an
+// oversized action explicitly instead of silently discarding entered websites.
 function getEnteredDomains() {
   const input = document.getElementById('domainInput');
   const raw = (domainChipTokens || []).slice();
@@ -31495,7 +31681,7 @@ function getEnteredDomains() {
     seen[d] = true;
     out.push(d);
   }
-  return out.slice(0, MAX_LOOKUP_DOMAINS);
+  return out;
 }
 
 // Reflect a domain list in the address box: one domain => plain input text (no
@@ -31544,7 +31730,8 @@ function handleDomainInputPaste(e) {
   const input = e.target;
   const parts = ((input.value || '') + ' ' + text).split(/[\s,;]+/).filter(Boolean);
   input.value = '';
-  for (const p of parts) addDomainChip(p);
+  domainChipTokens = Array.from(new Set(domainChipTokens.concat(parseDomainListParam(parts.join(' ')))));
+  renderDomainChips();
   toggleClearBtn();
 }
 
@@ -31558,16 +31745,17 @@ function handleDomainInputBlur(e) {
 function runLookupFromInput() {
   const domains = getEnteredDomains();
   if (domains.length === 0) {
-    lookup(); // reuse the single-domain empty/invalid prompts
-    return;
+    return lookup(); // reuse the single-domain empty/invalid prompts
   }
-  runMultiDomainLookup(domains, { animateTopIntro: false });
+  return runMultiDomainLookup(domains, { animateTopIntro: false });
 }
 
 // Reset multi-domain bookkeeping back to a single (or empty) domain and hide
 // the tabs. Called by single-domain lookups so a prior sweep leaves no stale
 // tabs/chips behind.
 function resetMultiDomainState(domain) {
+  multiRunToken++;
+  if (!domain && lookupActionController) lookupActionController.abort();
   multiDomainState.domains = domain ? [domain] : [];
   multiDomainState.results = {};
   multiDomainState.active = domain || null;
@@ -31700,18 +31888,20 @@ function showDomainTab(domain) {
 
 // Run a sweep over multiple domains. Domains are checked SEQUENTIALLY (one fully
 // completes before the next starts) so the shared #results container and the
-// per-run request cancellation never collide, and the server's per-IP rate
-// limiter is not hit with N*10 concurrent requests. A single domain takes the
+// per-run request cancellation never collide. All checks share one admitted
+// processing action and count websites rather than API calls. A single domain takes the
 // classic path (no chips, no tabs).
 async function runMultiDomainLookup(domains, options = {}) {
-  domains = (domains || []).slice(0, MAX_LOOKUP_DOMAINS);
+  domains = (domains || []).slice();
   if (domains.length === 0) { lookup(); return; }
+  const lookupActionId = await prepareLookupAction(domains, options.statusElement);
+  if (!lookupActionId) return false;
 
   if (domains.length === 1) {
     applyDomainsToInputBox(domains);
     // lookup() resets multi-domain state itself via resetMultiDomainState().
-    await lookup({ domainOverride: domains[0], animateTopIntro: !!options.animateTopIntro });
-    return;
+    await lookup({ domainOverride: domains[0], animateTopIntro: !!options.animateTopIntro, lookupActionId });
+    return true;
   }
 
   applyDomainsToInputBox(domains);
@@ -31749,7 +31939,7 @@ async function runMultiDomainLookup(domains, options = {}) {
     // (it stays at opacity 0 under body.section-fade-enabled), leaving a blank
     // top. Subsequent (background) domains never animate the intro.
     const introForThis = (i === 0) && !!options.animateTopIntro;
-    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: introForThis });
+    const res = await lookup({ domainOverride: d, fromMulti: true, skipUrlUpdate: true, animateTopIntro: introForThis, lookupActionId });
     if (token !== multiRunToken) return;
     // Store the returned object, guarded so a domain's slot only ever holds the
     // result whose .domain matches its key (prevents any cross-domain aliasing).
@@ -31765,9 +31955,10 @@ async function runMultiDomainLookup(domains, options = {}) {
   // lastResult on the final domain while the user is viewing another tab).
   const activeRes = multiDomainState.results[multiDomainState.active];
   if (activeRes) { lastResult = activeRes; render(activeRes); }
+  return true;
 }
 
-function lookup(options = {}) {
+async function lookup(options = {}) {
   const input = document.getElementById("domainInput");
   const btn   = document.getElementById("lookupBtn");
   const screenshotBtn = document.getElementById("screenshotBtn");
@@ -31797,6 +31988,9 @@ function lookup(options = {}) {
     setStatus(t('promptEnterValidDomain'));
     return;
   }
+
+  const lookupActionId = options.lookupActionId || await prepareLookupAction([domain]);
+  if (!lookupActionId) return;
 
   // Multi-domain bookkeeping: a normal single-domain lookup clears any prior
   // multi-domain sweep (hiding tabs/chips). During a sweep, lookup() is called
@@ -31859,12 +32053,7 @@ function lookup(options = {}) {
     const controller = new AbortController();
     activeLookup.controllers.push(controller);
     try {
-      let headers = {};
-      const apiKey = (acsApiKey || '').trim();
-      if (apiKey && !apiKey.startsWith('__')) {
-        headers['X-Api-Key'] = apiKey;
-      }
-      headers = buildConsentRequestHeaders(headers);
+      const headers = buildLookupRequestHeaders(lookupActionId);
       // Add cache-busting query param and explicit no-store cache mode so the browser
       // never serves stale DNS/WHOIS data from its HTTP cache or BFCache.
       headers['Cache-Control'] = 'no-cache';
@@ -31929,6 +32118,7 @@ function hideTopBarItem(element) {
   // between domains. The multi-domain sweep stores this exact object, which
   // guarantees multiDomainState.results[d].domain === d.
   const resultObj = lastResult;
+  lookupActionIds.set(resultObj, lookupActionId);
   recomputeDerived(resultObj);
   render(resultObj);
 
@@ -33788,12 +33978,7 @@ async function rerunPropagationCheck() {
   if (!target._errors) target._errors = {};
 
   try {
-    let headers = {};
-    const apiKey = (acsApiKey || '').trim();
-    if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
-    headers = buildConsentRequestHeaders(headers);
-    headers['Cache-Control'] = 'no-cache';
-    headers['Pragma'] = 'no-cache';
+    const headers = buildLookupRequestHeaders(lookupActionIds.get(target));
 
     const url = '/api/propagation?domain=' + encodeURIComponent(target.domain)
       + '&_=' + Date.now() + '&' + buildPropagationQuery();
@@ -34058,12 +34243,7 @@ async function rerunCheckOverrideEndpoints(keys) {
       const controller = new AbortController();
       activeLookup.controllers.push(controller);
       try {
-        let headers = {};
-        const apiKey = (acsApiKey || '').trim();
-        if (apiKey && !apiKey.startsWith('__')) headers['X-Api-Key'] = apiKey;
-        headers = buildConsentRequestHeaders(headers);
-        headers['Cache-Control'] = 'no-cache';
-        headers['Pragma'] = 'no-cache';
+        const headers = buildLookupRequestHeaders(lookupActionIds.get(target));
         const extra = endpoints[key].query();
         const url = endpoints[key].path + '?domain=' + encodeURIComponent(domain) + '&_=' + Date.now() + (extra ? '&' + extra : '');
         const resp = await fetch(url, { signal: controller.signal, headers: headers, cache: 'no-store' });
@@ -38591,7 +38771,7 @@ function getFirstIntakeSendingDomain(rawSendingDomain) {
 // Extract ALL valid sending domains from the intake answer (customers often
 // list several custom domains: "mail1.example.com, mail2.example.net and
 // example.org"). Returns a normalized, validated, deduped, order-preserving,
-// capped list. Empty when nothing valid is found.
+// list. Empty when nothing valid is found; oversized actions are rejected at admission.
 function getAllIntakeSendingDomains(rawSendingDomain) {
   const raw = (rawSendingDomain === null || rawSendingDomain === undefined)
     ? '' : String(rawSendingDomain);
@@ -38610,7 +38790,7 @@ function getAllIntakeSendingDomains(rawSendingDomain) {
     const whole = normalizeDomain(raw);
     if (whole && isValidDomain(whole)) out.push(whole);
   }
-  return out.slice(0, MAX_LOOKUP_DOMAINS);
+  return out;
 }
 
 // Order-insensitive set comparison for two domain lists.
@@ -38625,8 +38805,7 @@ function sameDomainSet(a, b) {
 // Compare the intake "Current sending domain" against the domain currently
 // loaded in the checker. When they differ (and the sending domain is valid),
 // load it into the search box and trigger a fresh lookup. When the intake
-// answer lists multiple domains we only ever run the checker on the FIRST
-// valid one (see getFirstIntakeSendingDomain).
+// answer lists multiple domains, the same per-action limit as the address bar applies.
 function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
   // Check EVERY valid domain the customer listed (multi-domain aware).
   const sendingDomains = getAllIntakeSendingDomains(rawSendingDomain);
@@ -38648,7 +38827,7 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
     status.textContent = runningText;
   }
   // runMultiDomainLookup handles the single-domain case (no tabs/chips) too.
-  const pending = runMultiDomainLookup(sendingDomains, { animateTopIntro: true });
+  const pending = runMultiDomainLookup(sendingDomains, { animateTopIntro: true, statusElement: status });
   // Clear the transient status once the sweep settles. We only touch the status
   // if it still shows OUR running text, so a newer message (from another
   // edit/run) is never clobbered.
@@ -38662,6 +38841,7 @@ function maybeRunCheckerForIntakeDomain(rawSendingDomain, status) {
   } else {
     restore();
   }
+  return pending;
 }
 
 function renderExtractedIntakeTable(values) {
@@ -39062,7 +39242,7 @@ function initializePage() {
 
   // Initialize Microsoft Entra ID authentication
   if (typeof initMsAuth === 'function') {
-    initMsAuth();
+    msAuthInitialization = initMsAuth();
   }
 
   // Show cookie consent banner if no consent has been given yet (EU GDPR / ePrivacy)
@@ -39090,7 +39270,7 @@ const INITIAL_LOOKUP_MAX_RETRIES = 20;
 const INITIAL_LOOKUP_RETRY_DELAY_MS = 50;
 
 // Parse a ?domain= query value that may contain several space/comma/semicolon-
-// separated domains into a normalized, validated, deduped, capped list.
+// separated domains into a normalized, validated, deduped list.
 function parseDomainListParam(raw) {
   const s = (raw === null || raw === undefined) ? '' : String(raw);
   if (!s.trim()) return [];
@@ -39101,7 +39281,7 @@ function parseDomainListParam(raw) {
     const d = normalizeDomain(tok);
     if (d && isValidDomain(d) && !seen[d]) { seen[d] = true; out.push(d); }
   }
-  return out.slice(0, MAX_LOOKUP_DOMAINS);
+  return out;
 }
 
 function startPageInitialization() {
@@ -39159,11 +39339,7 @@ function scheduleInitialLookup(domain) {
     if (initialLookupHasStarted) return;
     initialLookupIsScheduled = false;
     initialLookupHasStarted = true;
-    if (bootstrapDomains.length > 1) {
-      runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
-    } else {
-      lookup({ animateTopIntro: true, domainOverride: primary });
-    }
+    runMultiDomainLookup(bootstrapDomains, { animateTopIntro: true });
   };
 
   window.requestAnimationFrame(() => {
@@ -39200,6 +39376,8 @@ let msalInstance = null;
 let msAuthAccount = null;
 let isMsEmployee = false;
 let msalInitError = null;
+let msAuthInitialization = Promise.resolve();
+let lookupActionController = null;
 const GRAPH_SCOPES = ['User.Read'];
 
 '@
@@ -41167,7 +41345,7 @@ $functionNames = @(
   'Get-RegistrableDomain','ConvertTo-AsciiDomainName','Get-ParentDomains','Test-WhoisRawTextHasUsableData','Test-WhoisResponseIsRegistryBlock','Get-RegistryWebFormUrl','Get-KnownRegistryWebFormUrl','Get-WhoisCreationDateLabelRegex','Get-WhoisExpiryDateLabelRegex',
   'ConvertFrom-DnsTxtPresentationData','Resolve-DohName','ResolveSafely','Get-DnsIpString','Get-MxRecordObjects','Get-DnsRecordTypeCode','Get-DnsRecordTypeName','New-DnsRecordDetail','Format-DnsRecordDetailTtl','Convert-DnssecTimestampToDisplay','Get-DnsEscapedByteDisplay','Convert-DnsEscapedLabelToDisplay','Convert-DnsNameToDisplay','Convert-DnsBinaryDataToDisplay','Get-DnssecAlgorithmDisplay','Get-DnsRecordTypeDisplay','Get-DnsRecordDetails','Get-ReverseLookupSupplementTargets','Get-DnsRecordDataString','ConvertTo-ReverseLookupName','Resolve-DohRecordsDetailed','Resolve-DnsRecordsDetailed','Get-DnsRecordsStatus','ConvertTo-NormalizedDomain','Test-DomainName','ConvertTo-SpfIncludeOverride','ConvertTo-DkimSelectorOverride','Get-CheckOverridesFromQuery','Write-RequestLog','Get-DohDnssecAnomaly','Get-DohResolutionStatus',
   'Get-SpfTokens','Test-SpfMacroText','Get-SpfDomainSpecTarget','Get-SpfMechanismType','Select-SpfRecordFromSet','Merge-SpfRecordSet','Test-SpfOutlookIncludeToken','Find-SpfOutlookRequirementMatch','ConvertTo-Ipv4CidrRange','ConvertTo-Ipv6CidrRange','ConvertTo-SpfIpRange','Test-IpRangeContains','Get-OutlookSpfCanonicalRanges','Get-SpfChainAuthorizedRanges','Test-SpfChainCoversOutlookRanges','Get-SpfMacroDelegationProvider','Find-SpfMacroDelegatedTarget','Get-SpfOutlookRequirementStatus','Get-SpfNestedAnalysis','Format-SpfNestedAnalysisText','Get-SpfGuidance',
-  'Get-ClientIp','Test-IsTrustedProxy','Get-ConfiguredApiKeys','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
+  'Get-ClientIp','Test-IsTrustedProxy','Get-ConfiguredApiKeys','Get-ApiKeyFromRequest','Test-StringEqualsConstantTime','Test-ApiKey','New-AcsLookupAction','Test-AcsLookupAction','Test-RateLimit','Get-RequestCorrelationId','Set-RequestCorrelationHeader','Test-AcsClientDisconnect',
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Get-DomainReputationProviderCatalog','Get-DomainReputationCacheKey','Get-DomainReputationCacheEntry','Set-DomainReputationCacheEntry','Remove-DomainReputationCacheEntry','Get-DomainReputationHealthEntry','Set-DomainReputationHealthEntry','Test-DomainReputationQueryBudget','Test-DomainReputationProviderBudget','Get-DomainReputationAuthorityHosts','New-DomainReputationDnsQueryPacket','Read-DomainReputationDnsResponse','Invoke-DomainReputationDnsFanout','Test-DomainReputationPositiveControl','Test-DomainReputationProviderControl','ConvertFrom-DomainReputationProviderOutcome','Get-DomainReputationProviderEndpoints','Get-DomainReputationStatus','Get-CombinedReputationState',
@@ -41204,6 +41382,7 @@ $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableE
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsUptime', $global:AcsUptime, 'Shared uptime stopwatch'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsRateLimitStore', $global:AcsRateLimitStore, 'Shared rate limit store'))
 $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsRateLimitLock', $global:AcsRateLimitLock, 'Shared rate limit lock'))
+$iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('AcsLookupActionStore', $global:AcsLookupActionStore, 'Shared website processing actions'))
 
 # Share the WHOIS-server negative-cache dictionary across all handler runspaces.
 # Without this each runspace would observe its own empty $global:AcsWhoisServerCooldown
@@ -41648,6 +41827,22 @@ if ($metricsEnabled) {
     return
   }
 
+  # Admit a processing action before its per-website checks fan out.
+  if ($path -eq '/api/lookup-action') {
+    if (-not (Test-ApiKey -Context $ctx)) {
+      Write-Json -Context $ctx -Object @{ error = 'Missing or invalid API key.' } -StatusCode 401
+      return
+    }
+    $domainCount = 0
+    if (-not [int]::TryParse([string]$ctx.Request.QueryString['count'], [ref]$domainCount)) {
+      Write-Json -Context $ctx -Object @{ error = 'A positive website count is required.' } -StatusCode 400
+      return
+    }
+    $action = New-AcsLookupAction -Context $ctx -DomainCount $domainCount
+    Write-Json -Context $ctx -Object $action.body -StatusCode $action.statusCode
+    return
+  }
+
   # 2) Serve individual API endpoints (/api/*)
   if ($path -in @("/api/base","/api/mx","/api/records","/api/whois","/api/dmarc","/api/dkim","/api/cname","/api/reputation","/api/website","/api/nameservers","/api/propagation")) {
     if (-not (Test-ApiKey -Context $ctx)) {
@@ -41656,15 +41851,16 @@ if ($metricsEnabled) {
       return
     }
 
-    $rate = Test-RateLimit -Context $ctx
+    $rate = Test-RateLimit -Context $ctx -DomainLookup
     if (-not $rate.allowed) {
+      $rateStatus = if ($rate.statusCode) { [int]$rate.statusCode } else { 429 }
       try {
         if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
-      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
-      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'api-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by request limiting.' -CorrelationId $correlationId -ErrorCode ('ACS-REQ-{0}' -f $rateStatus) -Fields @{ statusCode = $rateStatus; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
+      Write-Json -Context $ctx -Object @{ error = $(if ($rate.error) { $rate.error } else { 'Rate limit exceeded.' }); retryAfterSeconds = $rate.retryAfterSec } -StatusCode $rateStatus
       return
     }
 
@@ -41783,13 +41979,11 @@ if ($metricsEnabled) {
     return
   }
 
-  # 2b) Microsoft Entra ID auth: handled entirely client-side in the SPA.
+  # 2b) Microsoft Entra ID sign-in and anonymous auth metrics.
   # The browser uses MSAL to acquire a Microsoft Graph token and calls
   # Graph /me directly (see verifyMsAccount in 20e-HtmlAzureIntegration.ps1).
-  # The previous /api/auth/verify route forwarded user bearer tokens to
-  # Microsoft Graph from the server, which expanded the trust boundary
-  # without adding security. It was removed so the server never handles
-  # raw Entra access tokens.
+  # Only admission of actions above 100 websites additionally validates a
+  # Graph token server-side; analytics never receives or retains that token.
   #
   # The /api/auth/event route below is the consent-gated, header-only
   # successor: after the SPA finishes its own Graph verification it POSTs
@@ -41887,15 +42081,16 @@ if ($metricsEnabled) {
       return
     }
 
-    $rate = Test-RateLimit -Context $ctx
+    $rate = Test-RateLimit -Context $ctx -DomainLookup
     if (-not $rate.allowed) {
+      $rateStatus = if ($rate.statusCode) { [int]$rate.statusCode } else { 429 }
       try {
         if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
-      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'email-quota-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
-      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec } -StatusCode 429
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'email-quota-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by request limiting.' -CorrelationId $correlationId -ErrorCode ('ACS-REQ-{0}' -f $rateStatus) -Fields @{ statusCode = $rateStatus; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
+      Write-Json -Context $ctx -Object @{ error = $(if ($rate.error) { $rate.error } else { 'Rate limit exceeded.' }); retryAfterSeconds = $rate.retryAfterSec } -StatusCode $rateStatus
       return
     }
 
@@ -41972,15 +42167,16 @@ if ($metricsEnabled) {
       return
     }
 
-    $rate = Test-RateLimit -Context $ctx
+    $rate = Test-RateLimit -Context $ctx -DomainLookup
     if (-not $rate.allowed) {
+      $rateStatus = if ($rate.statusCode) { [int]$rate.statusCode } else { 429 }
       try {
         if ($ctx.Response -is [System.Net.HttpListenerResponse] -and $rate.retryAfterSec) {
           $ctx.Response.Headers['Retry-After'] = [string]$rate.retryAfterSec
         }
       } catch { }
-      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by rate limiting.' -CorrelationId $correlationId -ErrorCode 'ACS-REQ-429' -Fields @{ statusCode = 429; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
-      Write-Json -Context $ctx -Object @{ error = 'Rate limit exceeded.'; retryAfterSeconds = $rate.retryAfterSec; acsReady = $false } -StatusCode 429
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestHandler' -Operation 'dns-rate-limit' -EventId 'REQ-RATE-LIMITED' -Message 'Request rejected by request limiting.' -CorrelationId $correlationId -ErrorCode ('ACS-REQ-{0}' -f $rateStatus) -Fields @{ statusCode = $rateStatus; retryAfterSec = $rate.retryAfterSec; limit = $rate.limit; remaining = 0 }
+      Write-Json -Context $ctx -Object @{ error = $(if ($rate.error) { $rate.error } else { 'Rate limit exceeded.' }); retryAfterSeconds = $rate.retryAfterSec; acsReady = $false } -StatusCode $rateStatus
       return
     }
 

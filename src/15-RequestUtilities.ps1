@@ -318,7 +318,119 @@ function Test-ApiKey {
   return $matched
 }
 
-# Enforce per-client-IP rate limiting using a sliding 60-second window.
+function New-AcsLookupAction {
+  param($Context, [int]$DomainCount)
+
+  if ($DomainCount -lt 1) {
+    return @{ statusCode = 400; body = @{ error = 'A positive website count is required.' } }
+  }
+
+  $maxDomains = 100
+  if ($DomainCount -gt $maxDomains) {
+    $authorization = Get-RequestHeaderValue -Context $Context -Name 'Authorization'
+    if ($authorization -notmatch '^Bearer\s+(\S+)$') {
+      return @{ statusCode = 429; body = @{ error = 'Check at most 100 websites per action, or sign in with Microsoft for up to 1000.'; maxDomains = 100 } }
+    }
+    if ($DomainCount -gt 1000) {
+      return @{ statusCode = 429; body = @{ error = 'Check at most 1000 websites per processing action.'; maxDomains = 1000 } }
+    }
+
+    # Only elevated actions need a token. Graph validates it; neither the token
+    # nor the returned profile is retained in the action store or analytics.
+    try {
+      $null = Invoke-OutboundHttp -Uri 'https://graph.microsoft.com/v1.0/me?$select=id' -Headers @{ Authorization = $authorization } -TimeoutSec 15 -ReturnRaw
+    } catch {
+      $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+      if ($statusCode -in @(401, 403)) {
+        return @{ statusCode = 401; body = @{ error = 'Microsoft sign-in is invalid or expired. Sign in again to check more than 100 websites.' } }
+      }
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestUtilities' -Operation 'lookup-action-auth' -EventId 'LOOKUP-AUTH-UNAVAILABLE' -Message 'Microsoft sign-in validation is temporarily unavailable.' -Fields @{ dependency = 'MicrosoftGraph'; statusCode = 502 }
+      return @{ statusCode = 502; body = @{ error = 'Microsoft sign-in could not be validated. Please try again.' } }
+    }
+    $maxDomains = 1000
+  }
+
+  $clientIp = Get-ClientIp -Context $Context
+  if ([string]::IsNullOrWhiteSpace($clientIp)) { $clientIp = 'unknown' }
+  $now = [DateTimeOffset]::UtcNow
+  [System.Threading.Monitor]::Enter($AcsRateLimitLock)
+  try {
+    if ($AcsLookupActionStore.Count -ge 1000) {
+      foreach ($entry in @($AcsLookupActionStore.GetEnumerator())) {
+        if ($entry.Value.lastSeenUtc -lt $now.AddHours(-1)) {
+          $removed = $null
+          $null = $AcsLookupActionStore.TryRemove($entry.Key, [ref]$removed)
+        }
+      }
+    }
+    if ($AcsLookupActionStore.Count -ge 10000) {
+      Write-AcsLogEvent -Level 'Warning' -Component 'RequestUtilities' -Operation 'lookup-action-create' -EventId 'LOOKUP-ACTION-CAPACITY' -Message 'Processing action capacity is temporarily exhausted.' -Fields @{ statusCode = 503 }
+      return @{ statusCode = 503; body = @{ error = 'Website processing is busy. Please try again later.' } }
+    }
+
+    $action = [pscustomobject]@{
+      clientIp = $clientIp
+      lastSeenUtc = $now
+      domainLimit = $DomainCount
+      domains = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+    do { $actionId = New-AnonSessionId } while (-not $AcsLookupActionStore.TryAdd($actionId, $action))
+    return @{ statusCode = 200; body = @{ actionId = $actionId; maxDomains = $maxDomains; websiteCount = $DomainCount } }
+  } finally {
+    [System.Threading.Monitor]::Exit($AcsRateLimitLock)
+  }
+}
+
+function Test-AcsLookupAction {
+  param($Context, [string]$ActionId)
+
+  $rejected = [pscustomobject]@{
+    allowed = $false; remaining = 0; retryAfterSec = $null; limit = 0
+    statusCode = 410
+    error = 'Invalid or expired processing action. Run the website check again.'
+  }
+  if ($ActionId -cnotmatch '^[a-f0-9]{32}$') { return $rejected }
+
+  $clientIp = Get-ClientIp -Context $Context
+  if ([string]::IsNullOrWhiteSpace($clientIp)) { $clientIp = 'unknown' }
+  $domain = ConvertTo-NormalizedDomain -Raw ([string]$Context.Request.QueryString['domain'])
+  $now = [DateTimeOffset]::UtcNow
+  [System.Threading.Monitor]::Enter($AcsRateLimitLock)
+  try {
+    $action = $null
+    if (-not $AcsLookupActionStore.TryGetValue($ActionId, [ref]$action)) { return $rejected }
+    if ($action.lastSeenUtc -lt $now.AddHours(-1)) {
+      $removed = $null
+      $null = $AcsLookupActionStore.TryRemove($ActionId, [ref]$removed)
+      return $rejected
+    }
+    if ($action.clientIp -ne $clientIp) {
+      $rejected.statusCode = 403
+      return $rejected
+    }
+
+    # Invalid domains still get the route's normal 400 response, but do not
+    # consume a website slot. All checks for an admitted website share one slot.
+    if (Test-DomainName -Domain $domain) {
+      if (-not $action.domains.Contains($domain) -and $action.domains.Count -ge $action.domainLimit) {
+        return [pscustomobject]@{
+          allowed = $false; remaining = 0; retryAfterSec = $null; limit = $action.domainLimit
+          error = "Website limit exceeded for this action (maximum $($action.domainLimit)). Start a new processing action."
+        }
+      }
+      $null = $action.domains.Add($domain)
+    }
+    $action.lastSeenUtc = $now
+    return [pscustomobject]@{
+      allowed = $true; remaining = $action.domainLimit - $action.domains.Count
+      retryAfterSec = $null; limit = $action.domainLimit
+    }
+  } finally {
+    [System.Threading.Monitor]::Exit($AcsRateLimitLock)
+  }
+}
+
+# Enforce per-client-IP rate limiting for requests outside a processing action.
 # Returns an object with allowed (bool), remaining count, and retry-after seconds.
 #
 # -Multiplier raises the per-window limit for cheap, high-frequency endpoints
@@ -329,8 +441,16 @@ function Test-ApiKey {
 function Test-RateLimit {
   param(
     $Context,
-    [int]$Multiplier = 1
+    [int]$Multiplier = 1,
+    [switch]$DomainLookup
   )
+
+  if ($DomainLookup) {
+    $actionId = Get-RequestHeaderValue -Context $Context -Name 'X-ACS-Lookup-Action'
+    if (-not [string]::IsNullOrWhiteSpace($actionId)) {
+      return Test-AcsLookupAction -Context $Context -ActionId $actionId
+    }
+  }
 
   $limit = 0
   if ($env:ACS_RATE_LIMIT_PER_MIN -and $env:ACS_RATE_LIMIT_PER_MIN -match '^\d+$') {
