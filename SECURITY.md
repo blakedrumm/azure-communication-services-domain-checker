@@ -8,7 +8,7 @@ the most reliable way to stay protected is to run the newest version.
 
 | Version | Supported |
 |---------|-----------|
-| Latest release (currently `2.10.x`) | :white_check_mark: |
+| Latest release (currently `2.16.x`) | :white_check_mark: |
 | Any older version | :x: |
 
 Because the tool is often downloaded and run standalone, older copies do **not**
@@ -91,5 +91,11 @@ deploying beyond `localhost`:
 - Only set **`ACS_TRUSTED_PROXIES`** for proxies you actually control, so
   forwarded client-IP headers cannot be spoofed.
 - Restrict **`ACS_ALLOWED_ORIGINS`** to the origins that should call the API.
+- Website probes require direct, restricted HTTP(S) egress. They do not use ambient
+  proxies and pin connections to validated public IPs while retaining TLS hostname
+  validation. Do not give an internet-facing probe corporate/VPN/private-network
+  access; deny privately routed public ranges and host-platform services at the
+  network boundary. Use **`ACS_DISABLE_WEBSITE_PROBE=1`** if isolated egress cannot
+  be provided; the other DNS checks remain available.
 
 See [`README.md`](README.md) for the full list of configuration options.

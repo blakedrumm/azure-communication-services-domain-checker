@@ -17,18 +17,95 @@
 #     unique-local/CGNAT/etc. the request is refused.
 #   * Redirects are NOT followed automatically; each hop's Location is re-validated
 #     (scheme/port/public-IP) before we connect to it, with a small hop cap.
+#   * Connections use ONLY the validated IPs, without a second hostname lookup.
+#     The original hostname is retained for Host, TLS SNI, and certificate checks.
+#     Ambient proxies are disabled so proxy-side DNS cannot bypass these guards.
 #   * The response body is read with a hard byte cap and the whole operation runs
 #     under a short cancellation timeout so a slow/huge target cannot pin a worker.
-# A residual TOCTOU window exists between our pre-resolution guard and the socket
-# connect (DNS rebinding). The public-IP-only guard + per-hop revalidation + no
-# auto-redirect keep that risk low for a read-only GET; it is documented here so a
-# future maintainer understands the tradeoff.
 
-# Ensure System.Net.Http is available on Windows PowerShell 5.1 (it is loaded by
-# default on PowerShell 7+, but the explicit load is a no-op cost there and makes
-# the dependency obvious). Wrapped so a restricted host doesn't fail to define the
-# rest of the functions in this file.
-try { Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue } catch { }
+try { Add-Type -AssemblyName System.Net.Http -ErrorAction Stop } catch {
+  Write-AcsLogException -Component 'WebsiteProbe' -Operation 'http-initialization' -EventId 'WEB-HTTP-INIT-FAILED' -Exception $_.Exception -ErrorCode 'ACS-WEB-HTTP-INIT' -Message 'Website HTTP dependency initialization failed.'
+}
+
+# ConnectCallback runs on .NET threads without a PowerShell runspace. Keep it in
+# C#, and retain the native HTTP stack's multi-address connection fallback.
+$websiteSocketsHandlerType = 'System.Net.Http.SocketsHttpHandler' -as [type]
+if ($websiteSocketsHandlerType -and $websiteSocketsHandlerType.GetProperty('ConnectCallback') -and -not ('AcsWebsitePinnedHttp' -as [type])) {
+  try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class AcsWebsitePinnedHttp : DelegatingHandler
+{
+    private readonly ConcurrentDictionary<string, IPAddress[]> targets =
+        new ConcurrentDictionary<string, IPAddress[]>(StringComparer.OrdinalIgnoreCase);
+
+    public AcsWebsitePinnedHttp(Uri target, string[] addresses, CookieContainer cookies)
+    {
+        var handler = new SocketsHttpHandler();
+        handler.AllowAutoRedirect = false;
+        handler.UseProxy = false;
+        handler.CookieContainer = cookies;
+        handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+        handler.ConnectCallback = (context, token) =>
+            new ValueTask<Stream>(Connect(context.DnsEndPoint, token));
+        InnerHandler = handler;
+        SetTarget(target, addresses);
+    }
+
+    public static HttpMessageHandler CreateHandler(Uri target, string[] addresses, CookieContainer cookies)
+    {
+        return new AcsWebsitePinnedHttp(target, addresses, cookies);
+    }
+
+    public void SetTarget(Uri target, string[] addresses)
+    {
+        var pinned = new IPAddress[addresses.Length];
+        for (int i = 0; i < addresses.Length; i++) pinned[i] = IPAddress.Parse(addresses[i]);
+        targets[Key(target.IdnHost, target.Port)] = pinned;
+    }
+
+    private static string Key(string host, int port)
+    {
+        return host.Trim('[', ']') + ":" + port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private async Task<Stream> Connect(DnsEndPoint endpoint, CancellationToken token)
+    {
+        IPAddress[] addresses;
+        if (!targets.TryGetValue(Key(endpoint.Host, endpoint.Port), out addresses))
+            throw new InvalidOperationException("Unexpected website connection destination.");
+
+        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        socket.NoDelay = true;
+        using (token.Register(() => socket.Dispose()))
+        {
+            try
+            {
+                await SocketTaskExtensions.ConnectAsync(socket, addresses, endpoint.Port).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                return new NetworkStream(socket, true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+  } catch {
+    Write-AcsLogException -Component 'WebsiteProbe' -Operation 'pinned-transport-initialization' -EventId 'WEB-PINNED-INIT-FAILED' -Exception $_.Exception -ErrorCode 'ACS-WEB-PINNED-INIT' -Message 'Native website connection pinning unavailable; using literal-IP request pinning.' -Fields @{ fallback = 'literal-ip' }
+  }
+}
 
 # Return $true only when the supplied IP literal is a public, routable address.
 # Handles both IPv4 and IPv6 (including IPv4-mapped IPv6 like ::ffff:10.0.0.1,
@@ -48,6 +125,7 @@ function Test-IsPublicIpAddress {
 	if ($b[0] -ge 224) { return $false }                       # 224.0.0.0/4 multicast + 240/4 reserved
 	if ($b[0] -eq 100 -and $b[1] -ge 64 -and $b[1] -le 127) { return $false }  # 100.64/10 CGNAT
 	if ($b[0] -eq 169 -and $b[1] -eq 254) { return $false }                    # 169.254/16 link-local
+	if ($b[0] -eq 168 -and $b[1] -eq 63 -and $b[2] -eq 129 -and $b[3] -eq 16) { return $false } # Azure host service
 	if ($b[0] -eq 172 -and $b[1] -ge 16  -and $b[1] -le 31)  { return $false } # 172.16/12 private
 	if ($b[0] -eq 192 -and $b[1] -eq 0   -and $b[2] -eq 0)   { return $false } # 192.0.0/24 IETF
 	if ($b[0] -eq 192 -and $b[1] -eq 0   -and $b[2] -eq 2)   { return $false } # 192.0.2/24 TEST-NET-1
@@ -62,6 +140,7 @@ function Test-IsPublicIpAddress {
 
   if ($ipObj.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
 	# ---- IPv6 ----
+	if ($ipObj.ScopeId -ne 0) { return $false }
 	if ($ipObj.IsIPv4MappedToIPv6) {
 	  # ::ffff:a.b.c.d - re-validate the embedded IPv4 so a mapped private
 	  # address cannot slip past the IPv6 checks below.
@@ -75,7 +154,14 @@ function Test-IsPublicIpAddress {
 	$allZero = $true
 	foreach ($octet in $b6) { if ($octet -ne 0) { $allZero = $false; break } }
 	if ($allZero) { return $false }                                            # :: unspecified
-	if (($b6[0] -band 0xFE) -eq 0xFC) { return $false }                        # fc00::/7 unique local
+	# Only allocated global unicast space is eligible. This also excludes
+	# IPv4-compatible, NAT64, discard-only, and unique-local addresses.
+	if (($b6[0] -band 0xE0) -ne 0x20) { return $false }                       # outside 2000::/3
+	if ($b6[0] -eq 0x20 -and $b6[1] -eq 0x01 -and ($b6[2] -band 0xFE) -eq 0) { return $false } # 2001::/23 special-use
+	if ($b6[0] -eq 0x20 -and $b6[1] -eq 0x01 -and $b6[2] -eq 0x0D -and $b6[3] -eq 0xB8) { return $false } # documentation
+	if ($b6[0] -eq 0x20 -and $b6[1] -eq 0x02) { return $false }               # 2002::/16 6to4
+	if ($b6[0] -eq 0x3F -and $b6[1] -eq 0xFE) { return $false }               # retired 6bone
+	if ($b6[0] -eq 0x3F -and $b6[1] -eq 0xFF -and ($b6[2] -band 0xF0) -eq 0) { return $false } # 3fff::/20 documentation
 	return $true
   }
 
@@ -137,6 +223,32 @@ function Test-WebsiteHostIsPublic {
   return [pscustomobject]@{ isPublic = $true; addresses = $addresses; reason = $null }
 }
 
+function New-WebsiteHttpHandler {
+  param(
+	[Parameter(Mandatory = $true)][uri]$TargetUri,
+	[Parameter(Mandatory = $true)][string[]]$Addresses,
+	[Parameter(Mandatory = $true)][System.Net.CookieContainer]$Cookies
+  )
+
+  foreach ($address in $Addresses) {
+	if (-not (Test-IsPublicIpAddress -IpAddress $address)) { throw 'Refused a non-public website connection address.' }
+  }
+
+  if ('AcsWebsitePinnedHttp' -as [type]) {
+	return [AcsWebsitePinnedHttp]::CreateHandler($TargetUri, $Addresses, $Cookies)
+  }
+
+  # .NET Framework has no ConnectCallback. Its requests are instead addressed
+  # to a validated IP literal, retaining Host for TLS SNI/certificate validation.
+  # Cookies are managed against the original URL, not that transport-only IP.
+  $handler = [System.Net.Http.HttpClientHandler]::new()
+  $handler.AllowAutoRedirect = $false
+  $handler.UseProxy = $false
+  $handler.UseCookies = $false
+  $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+  return $handler
+}
+
 # Perform the manual, SSRF-guarded redirect walk for a single starting URL and
 # return a neutral snapshot of what was found. This is the workhorse: it creates a
 # short-lived HttpClient with auto-redirect DISABLED, validates each hop, reads the
@@ -182,29 +294,19 @@ function Get-WebsiteSnapshot {
   $handler = $null
   $client  = $null
   $cts     = $null
+  $resp    = $null
+  $cookies = [System.Net.CookieContainer]::new()
+  $lastAuthority = $null
   try {
 	# Prefer TLS 1.2+ for the handshake (older defaults bite Windows PowerShell 5.1).
 	try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 } catch { }
-
-	$handler = [System.Net.Http.HttpClientHandler]::new()
-	$handler.AllowAutoRedirect = $false   # we follow + re-validate redirects manually
-	try { $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate } catch { }
-
-	$client = [System.Net.Http.HttpClient]::new($handler)
-	$client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
-	try {
-	  # A descriptive, honest User-Agent. Some parking pages vary content by UA;
-	  # a generic browser-ish UA gets us the page a human would see.
-	  $null = $client.DefaultRequestHeaders.UserAgent.ParseAdd('Mozilla/5.0 (compatible; ACS-Domain-Checker/1.0; +https://github.com/mcaps-microsoft/azure-communication-services-domain-checker)')
-	  $null = $client.DefaultRequestHeaders.Accept.ParseAdd('text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
-	} catch { }
 
 	# Whole-operation cancellation budget (covers headers + body streaming, which
 	# HttpClient.Timeout alone does not when using ResponseHeadersRead).
 	$cts = [System.Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSec))
 
 	$current = $startUri
-	$chain = New-Object System.Collections.Generic.List[object]
+	$chain = [System.Collections.Generic.List[object]]::new()
 
 	for ($hop = 0; $hop -le $MaxRedirects; $hop++) {
 	  # Only http/https and only standard web ports are ever contacted.
@@ -216,9 +318,13 @@ function Get-WebsiteSnapshot {
 		$result.error = 'Refused redirect to a non-standard port.'
 		break
 	  }
+	  if (-not [string]::IsNullOrEmpty($current.UserInfo)) {
+		$result.error = 'Refused URL containing user information.'
+		break
+	  }
 
 	  # SSRF guard: confirm this hop's host resolves only to public IPs.
-	  $hostCheck = Test-WebsiteHostIsPublic -HostName $current.Host
+	  $hostCheck = Test-WebsiteHostIsPublic -HostName $current.IdnHost
 	  if (-not $hostCheck.isPublic) {
 		$result.error = $hostCheck.reason
 		break
@@ -226,8 +332,71 @@ function Get-WebsiteSnapshot {
 
 	  $resp = $null
 	  try {
-		$req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $current)
-		$resp = $client.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token).GetAwaiter().GetResult()
+		$authority = $current.GetLeftPart([System.UriPartial]::Authority)
+		if ($client -and $handler -is [System.Net.Http.HttpClientHandler] -and $lastAuthority -ne $authority) {
+		  # Do not reuse an IP-keyed TLS connection for a different hostname.
+		  $client.Dispose()
+		  $client = $null
+		}
+		if (-not $client) {
+		  $handler = New-WebsiteHttpHandler -TargetUri $current -Addresses $hostCheck.addresses -Cookies $cookies
+		  $client = [System.Net.Http.HttpClient]::new($handler)
+		  $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+		  $null = $client.DefaultRequestHeaders.UserAgent.ParseAdd('Mozilla/5.0 (compatible; ACS-Domain-Checker/1.0; +https://github.com/mcaps-microsoft/azure-communication-services-domain-checker)')
+		  $null = $client.DefaultRequestHeaders.Accept.ParseAdd('text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+		  $lastAuthority = $authority
+		} elseif ($handler.GetType().FullName -eq 'AcsWebsitePinnedHttp') {
+		  $handler.SetTarget($current, [string[]]$hostCheck.addresses)
+		}
+
+		$literalPinning = $handler -is [System.Net.Http.HttpClientHandler]
+		$connectionAddresses = @('')
+		if ($literalPinning) { $connectionAddresses = @($hostCheck.addresses) }
+		foreach ($address in $connectionAddresses) {
+		  $req = $null
+		  try {
+			$requestUri = $current
+			if ($literalPinning) {
+			  $transportUri = [System.UriBuilder]::new($current)
+			  $transportUri.Host = $address
+			  $requestUri = $transportUri.Uri
+			}
+			$req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $requestUri)
+			if ($literalPinning) {
+			  $originalAuthority = [System.UriBuilder]::new($current)
+			  $originalAuthority.Host = $current.IdnHost
+			  $req.Headers.Host = $originalAuthority.Uri.Authority
+			  # Match the native pinned socket's TCP_NODELAY without changing
+			  # process-wide networking defaults for other lookup providers.
+			  $servicePoint = [System.Net.ServicePointManager]::FindServicePoint($requestUri, [System.Net.IWebProxy]$null)
+			  $servicePoint.UseNagleAlgorithm = $false
+			  $cookieHeader = $cookies.GetCookieHeader($current)
+			  if ($cookieHeader) { $null = $req.Headers.TryAddWithoutValidation('Cookie', $cookieHeader) }
+			}
+			$resp = $client.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token).GetAwaiter().GetResult()
+			break
+		  } catch {
+			# Match the native stack: try another validated address only for a
+			# socket connection failure, not for TLS or HTTP-level failures.
+			$connectionError = $_.Exception
+			$socketFailure = $false
+			while ($connectionError) {
+			  if ($connectionError -is [System.Net.Sockets.SocketException]) { $socketFailure = $true; break }
+			  $connectionError = $connectionError.InnerException
+			}
+			if (-not $literalPinning -or -not $socketFailure -or $cts.IsCancellationRequested -or $address -eq $connectionAddresses[-1]) { throw }
+		  } finally {
+			if ($req) { $req.Dispose() }
+		  }
+		}
+
+		if ($literalPinning -and $resp.Headers.Contains('Set-Cookie')) {
+		  foreach ($setCookie in $resp.Headers.GetValues('Set-Cookie')) {
+			try { $cookies.SetCookies($current, $setCookie) } catch [System.Net.CookieException] {
+			  Write-AcsLogEvent -Level 'Warning' -Component 'WebsiteProbe' -Operation 'response-cookie' -EventId 'WEB-COOKIE-REJECTED' -Message 'Website response contained an invalid cookie.' -ErrorCode 'ACS-WEB-COOKIE'
+			}
+		  }
+		}
 	  } catch {
 		# Classify TLS/handshake failures distinctly - an expired/self-signed cert
 		# is itself a useful, neutral signal about the site.
@@ -242,7 +411,7 @@ function Get-WebsiteSnapshot {
 		if ($isTls) {
 		  $result.tlsError = $true
 		  $result.error = 'TLS/SSL handshake failed (certificate or protocol error).'
-		} elseif ($msg -match '(?i)cancel|timed out|timeout') {
+		} elseif ($cts.IsCancellationRequested -or $msg -match '(?i)cancel|timed out|timeout') {
 		  $result.error = 'Connection timed out.'
 		} else {
 		  $result.error = 'Connection failed.'
@@ -294,23 +463,32 @@ function Get-WebsiteSnapshot {
 
 	  if ($looksHtml) {
 		$bytes = $null
+		$stream = $null
+		$ms = $null
+		$bodyReadFailed = $false
 		try {
 		  $stream = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-		  $ms = New-Object System.IO.MemoryStream
-		  $buffer = New-Object byte[] 8192
+		  $ms = [System.IO.MemoryStream]::new()
+		  $buffer = [byte[]]::new(8192)
 		  $total = 0
 		  while ($true) {
-			$read = $stream.ReadAsync($buffer, 0, $buffer.Length, $cts.Token).GetAwaiter().GetResult()
+			$readCount = $buffer.Length
+			if (($MaxBytes - $total) -lt $readCount) { $readCount = $MaxBytes - $total }
+			$read = $stream.ReadAsync($buffer, 0, $readCount, $cts.Token).GetAwaiter().GetResult()
 			if ($read -le 0) { break }
 			$take = [Math]::Min($read, ($MaxBytes - $total))
 			if ($take -gt 0) { $ms.Write($buffer, 0, $take); $total += $take }
 			if ($total -ge $MaxBytes) { break }
 		  }
 		  $bytes = $ms.ToArray()
-		  try { $ms.Dispose() } catch { }
-		  try { $stream.Dispose() } catch { }
 		} catch {
-		  $bytes = $null
+		  $bodyReadFailed = $true
+		  if ($ms) { $bytes = $ms.ToArray() }
+		  $result.error = if ($cts.IsCancellationRequested) { 'Response body read timed out.' } else { 'Response body read failed.' }
+		  Write-AcsLogEvent -Level 'Warning' -Component 'WebsiteProbe' -Operation 'response-body' -EventId 'WEB-BODY-READ-FAILED' -Message 'Website response body could not be read completely.' -ErrorCode 'ACS-WEB-BODY'
+		} finally {
+		  if ($ms) { $ms.Dispose() }
+		  if ($stream) { $stream.Dispose() }
 		}
 
 		if ($bytes -and $bytes.Length -gt 0) {
@@ -368,7 +546,7 @@ function Get-WebsiteSnapshot {
 			'account suspended'    = 'suspended'
 			'site not configured'  = 'notConfigured'
 		  }
-		  $signals = New-Object System.Collections.Generic.List[string]
+		  $signals = [System.Collections.Generic.List[string]]::new()
 		  foreach ($marker in $markers.GetEnumerator()) {
 			if ($haystack.Contains($marker.Key)) {
 			  if (-not $signals.Contains($marker.Value)) { $signals.Add($marker.Value) }
@@ -376,7 +554,7 @@ function Get-WebsiteSnapshot {
 		  }
 		  $result.placeholderSignals = $signals.ToArray()
 		  $result.placeholderDetected = ($signals.Count -gt 0)
-		} else {
+		} elseif (-not $bodyReadFailed) {
 		  # Reachable but empty body is itself a (neutral) signal.
 		  $result.visibleTextLength = 0
 		  $result.nearEmpty = $true
@@ -397,6 +575,7 @@ function Get-WebsiteSnapshot {
 	if ([string]::IsNullOrWhiteSpace([string]$result.error)) { $result.error = 'Website probe failed.' }
   }
   finally {
+	if ($resp)    { $resp.Dispose() }
 	if ($cts)     { try { $cts.Dispose() } catch { } }
 	if ($client)  { try { $client.Dispose() } catch { } }
 	if ($handler) { try { $handler.Dispose() } catch { } }
@@ -538,6 +717,7 @@ function Get-WebsiteProbeStatus {
 	$status.placeholderDetected = [bool]$picked.placeholderDetected
 	$status.placeholderSignals  = @($picked.placeholderSignals)
 	$status.tlsError            = [bool]$picked.tlsError
+	$status.error               = $picked.error
 
 	# Neutral summary classification:
 	#   * PlaceholderContent - parked/under-construction/default/near-empty page.

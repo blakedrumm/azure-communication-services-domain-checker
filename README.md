@@ -426,8 +426,14 @@ Because the full-page screenshot button captures every rendered card, this snaps
 
 - Only `http`/`https` schemes and only ports 80/443 are ever contacted
 - The target host must resolve **entirely** to public, routable IPs (IPv4 + IPv6, including IPv4-mapped IPv6) — private/loopback/link-local/CGNAT/unique-local targets are refused
+- Every connection is pinned to those validated IPs, eliminating a second DNS lookup and the DNS-rebinding window. The original hostname is retained for HTTP `Host`, TLS SNI, and certificate validation on both PowerShell 7 and Windows PowerShell 5.1.
+- IPv6 translation/tunneling, documentation/reserved addresses, and the Azure host-service address are refused. URLs containing user information are also refused.
 - Redirects are **not** auto-followed; each hop is re-validated before connecting, with a small hop cap
-- The response body is read under a hard byte cap and the whole operation runs under a short timeout
+- Already validated public connections are reused across redirects where safe, without additional DNS lookups or TLS handshakes at connection time.
+- Ambient/system/environment HTTP proxies are **not used** for website probes; direct outbound TCP 80/443 access is required.
+- The response body is read under a hard byte cap and the whole operation runs under a short timeout. Read failures are reported explicitly, retaining metadata received before the failure instead of misreporting the site as empty.
+
+Public-IP validation cannot determine whether an otherwise public address is routed to an internal-only service on the hosting network. Run internet-facing website probes with restricted egress and without corporate/VPN/private-network access; explicitly deny any privately routed public ranges at the network boundary. If direct, isolated egress is unavailable, use the existing `ACS_DISABLE_WEBSITE_PROBE=1` opt-out. These restrictions intentionally affect unsafe/internal destinations, not the output shape or the other DNS checks.
 
 ### Configuration
 
@@ -843,6 +849,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
 |------|--------|
 | `tools/Audit-RunspaceFunctions.ps1` | Every function reachable from the HTTP request handler is registered in the runspace pool. An unregistered function surfaces to users as an HTTP 500 on one specific check. |
 | `tools/Test-SecureLogging.ps1` | Captured logs contain no PII, secrets, headers, query strings, bodies, or raw exception data. |
+| `tools/Test-WebsiteProbe.ps1` | Offline SSRF/address/redirect/cap checks plus owned-loopback HTTP/TLS, cookies, gzip/deflate, chunking, and concurrent-runspace tests. Optional `-BaselineFile <previous-16b-WebsiteProbe.ps1>` compares every website output value and interleaved latency samples with the previous implementation. Run under both PowerShell 5.1 and 7; no public or internal service is contacted. |
 | `tools/Test-SmtpResponses.ps1` | Runs the actual browser parser, catalog, reference filters, table renderer, and copy formatter using Node.js. Covers code boundaries, status conflicts, provider attribution, generic fallbacks, input limits, escaped output, and localized controls. Run under both PowerShell 5.1 and 7. |
 | `tools/Test-SeoMetadata.ps1` | Language lists stay in sync across the SPA, sitemap and `hreflang` links; every `__TOKEN__` has a replacement site; `-f` format strings are valid; every lookup endpoint is documented in `/llms.txt` and `/openapi.json`; required `<head>` tags and the JSON-LD CSP nonce are present; both listener modes preserve bodyless `HEAD` semantics; share-link bootstrap has an idempotent hidden-tab fallback. |
 | `tools/Test-EmailQuota.ps1` | `/api/email-quota` gives the same pass/warn/fail verdict and checklist rows as the web UI's Email Quota card, using offline fixtures. Covers missing MX, SPF include/duplicate/lookup-limit/macro/SERVFAIL cases, nameserver TXT recovery, young/expired/web-form-only registrations, reputation states and errors, the DMARC enforcement opt-in, and the Markdown table. Run under both PowerShell 5.1 and 7. |
@@ -850,6 +857,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Audit-RunspaceFunctions.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-WebsiteProbe.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-WebsiteProbe.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SeoMetadata.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-EmailQuota.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SmtpResponses.ps1
@@ -996,7 +1005,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.16.7`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.16.8`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -1019,8 +1028,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.16.7
-git push origin v2.16.7
+git tag v2.16.8
+git push origin v2.16.8
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -1031,7 +1040,7 @@ git push origin v2.16.7
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.16.7`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.16.8`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -1048,11 +1057,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.16.7
+docker pull limitlessworlds/acs-domain-checker:2.16.8
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.16.7
-docker pull limitlessworlds/acs-domain-checker:windows-2.16.7
+docker pull limitlessworlds/acs-domain-checker:linux-2.16.8
+docker pull limitlessworlds/acs-domain-checker:windows-2.16.8
 ```
 
 ### 🛠️ Manual Build Script
@@ -1067,7 +1076,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.16.7
+./acs-domain-checker-dockerhub.ps1 -Version 2.16.8
 ```
 
 **📋 Requirements for manual script:**
