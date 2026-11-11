@@ -27,7 +27,7 @@ function ConvertTo-ComparableJson {
 }
 
 $savedEnvironment = @{}
-foreach ($name in @('ACS_DISABLE_WEBSITE_PROBE','ACS_WEBSITE_PROBE_TIMEOUT_SEC','ACS_WEBSITE_PROBE_MAX_BYTES','ACS_WEBSITE_PROBE_MAX_REDIRECTS','ACS_LOG_LEVEL','ACS_LOG_FILE')) {
+foreach ($name in @('ACS_DISABLE_WEBSITE_PROBE','ACS_WEBSITE_PROBE_ALLOWED_ORIGINS','ACS_WEBSITE_PROBE_TIMEOUT_SEC','ACS_WEBSITE_PROBE_MAX_BYTES','ACS_WEBSITE_PROBE_MAX_REDIRECTS','ACS_LOG_LEVEL','ACS_LOG_FILE')) {
   $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
   [Environment]::SetEnvironmentVariable($name, $null, 'Process')
 }
@@ -38,7 +38,10 @@ try {
   . (Join-Path $repoRoot 'src\16b-WebsiteProbe.ps1')
   $realHandlerFactory = (Get-Command New-WebsiteHttpHandler).ScriptBlock
   $realIpTest = (Get-Command Test-IsPublicIpAddress).ScriptBlock
+  $realOriginConverter = (Get-Command ConvertTo-WebsiteProbeOrigin).ScriptBlock
+  Set-Item -Path Function:\ConvertTo-TestWebsiteOrigin -Value $realOriginConverter
   $snapshotSource = (Get-Command Get-WebsiteSnapshot).ScriptBlock.ToString()
+  $fixtureOrigins = 'https://example.com,http://example.com,https://www.example.com,http://www.example.com,https://mixed.example.com,https://empty.example.com'
 
   Write-Output '=== Website SSRF and Output Regression Checks ==='
   foreach ($ip in @(
@@ -68,6 +71,7 @@ try {
   foreach ($ip in @('127.0.0.1','::ffff:127.0.0.1','168.63.129.16','64:ff9b::a00:1')) {
     Assert-Equal "literal host guard $ip" $false (Test-WebsiteHostIsPublic -HostName $ip).isPublic
   }
+  $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = $fixtureOrigins
   Assert-Throws 'handler independently refuses a private address' {
     New-WebsiteHttpHandler -TargetUri 'https://example.com/' -Addresses @('8.8.8.8','127.0.0.1') -Cookies ([System.Net.CookieContainer]::new())
   }
@@ -272,6 +276,62 @@ public static class WebsiteProbeTlsPolicy
   $snapshotFields = @('requestedUrl','finalUrl','reachable','statusCode','scheme','contentType','redirected','redirectChain','title','metaDescription','bodyExcerpt','visibleTextLength','nearEmpty','placeholderDetected','placeholderSignals','tlsError','error')
   $statusFields = @('domain','generatedAtUtc','checked','disabledReason','reachable','finalUrl','statusCode','scheme','contentType','redirected','redirectChain','title','metaDescription','bodyExcerpt','visibleTextLength','nearEmpty','placeholderDetected','placeholderSignals','tlsError','attempts','summary','error')
   $body = '<html><head><title>Example &amp; Co</title><meta content="We &amp; you" name="description"></head><body><script>secret script text</script><style>hidden style</style><p>A working public website with products, contact information, and useful customer guidance.</p></body></html>'
+
+  foreach ($configuration in @(
+    $null, '1', 'true', '*', 'https://*.example.com', 'https://example.com/path',
+    'https://user:fixture@example.com', 'https://example.com?destination=other.example',
+    'https://example.com#fragment', 'https://8.8.8.8', 'https://[2606:4700:4700::1111]',
+    'https://example.com:8080', 'https://example.com;not-an-origin',
+    ('x' * 16385), ((1..257 | ForEach-Object { "https://site$_.example" }) -join ',')
+  )) {
+    $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = $configuration
+    Reset-WebsiteFixture @()
+    $disabled = Get-WebsiteProbeStatus -Domain 'protected-network.example'
+    Assert-Equal 'default/invalid policy keeps the complete API shape' ($statusFields -join ',') ($disabled.PSObject.Properties.Name -join ',')
+    Assert-Equal 'default/invalid policy returns a neutral disabled result' 'Disabled' $disabled.summary
+    Assert-Equal 'default/invalid policy does not claim a check occurred' $false $disabled.checked
+    Assert-Equal 'default/invalid policy exposes an explicit reason' $false ([string]::IsNullOrWhiteSpace($disabled.disabledReason))
+    $snapshot = Get-WebsiteSnapshot -Url 'https://protected-network.example/'
+    Assert-Equal 'direct snapshots also fail closed with the complete shape' ($snapshotFields -join ',') ($snapshot.PSObject.Properties.Name -join ',')
+    Assert-Equal 'direct snapshots expose the policy failure' $true ($snapshot.error -like 'Website probe disabled:*')
+    Assert-Throws 'direct handler creation cannot bypass default/invalid policy' {
+      & $realHandlerFactory -TargetUri 'https://protected-network.example/' -Addresses @('8.8.8.8') -Cookies ([System.Net.CookieContainer]::new())
+    }
+    Assert-Equal 'default/invalid policy performs no website DNS' 0 $script:dnsCalls.Count
+    Assert-Equal 'default/invalid policy constructs no transport' 0 $script:factoryCalls
+  }
+  $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = 'HTTPS://EXAMPLE.COM:443/; https://example.com.'
+  foreach ($target in @(
+    'https://example.com/path?q=1', 'https://EXAMPLE.COM/', 'https://example.com./',
+    'http://example.com/', 'https://www.example.com/', 'https://example.com.attacker.example/',
+    'https://protected-network.example/', 'https://8.8.8.8/', 'https://user@example.com/'
+  )) {
+    $permitted = $target -in @('https://example.com/path?q=1','https://EXAMPLE.COM/','https://example.com./')
+    Assert-Equal "exact origin authorization for $target" $permitted (Test-WebsiteProbeTarget -TargetUri $target)
+  }
+  Reset-WebsiteFixture @((New-ResponseSpec -Status 302 -Location 'https://protected-network.example/'))
+  $blockedRedirect = Get-WebsiteSnapshot -Url 'https://example.com/'
+  Assert-Equal 'public-addressed protected redirect is refused' $false $blockedRedirect.reachable
+  Assert-Equal 'unapproved public redirect is refused before DNS' 'example.com' ($script:dnsCalls -join ',')
+  Assert-Equal 'unapproved public redirect never sends a second request' 1 ([WebsiteProbeFixtures]::Uris.Count)
+  Assert-Equal 'unapproved public redirect has an explicit error' 'Website destination is not authorized by server policy.' $blockedRedirect.error
+  Assert-Throws 'handler independently refuses an unapproved public origin' {
+    & $realHandlerFactory -TargetUri 'https://protected-network.example/' -Addresses @('8.8.8.8') -Cookies ([System.Net.CookieContainer]::new())
+  }
+  Reset-WebsiteFixture @(New-ResponseSpec -Failure socket)
+  $fallback = Get-WebsiteProbeStatus -Domain 'example.com'
+  Assert-Equal 'www and HTTP fallback cannot broaden authorization' 1 ([WebsiteProbeFixtures]::Uris.Count)
+  Assert-Equal 'unapproved fallback candidates perform no DNS' 1 $script:dnsCalls.Count
+  Assert-Equal 'authorized connection failure remains explicit' 'Connection failed.' $fallback.error
+  $env:ACS_DISABLE_WEBSITE_PROBE = '1'
+  Reset-WebsiteFixture @()
+  Assert-Equal 'opt-out also blocks direct snapshots' 'Website probe disabled by server configuration.' (Get-WebsiteSnapshot -Url 'https://example.com/').error
+  Assert-Throws 'opt-out also blocks direct handler creation' {
+    & $realHandlerFactory -TargetUri 'https://example.com/' -Addresses @('8.8.8.8') -Cookies ([System.Net.CookieContainer]::new())
+  }
+  Assert-Equal 'opt-out performs no direct-helper DNS work' 0 $script:dnsCalls.Count
+  $env:ACS_DISABLE_WEBSITE_PROBE = $null
+  $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = $fixtureOrigins
 
   foreach ($mode in @('memory','literal-memory')) {
     $script:fixtureMode = $mode
@@ -583,6 +643,20 @@ public sealed class WebsiteProbeLoopbackServer : IDisposable
     $script:fixtureMode = 'loopback'
     $script:dnsFixtures = @{}
     foreach ($hostName in @('127.0.0.1','localhost','public-website.test','does-not-resolve.invalid','wrong-website.test')) { $script:dnsFixtures[$hostName] = @('127.0.0.1') }
+    # Adapt only owned ephemeral loopback origins to their explicitly approved
+    # standard-port test identities; production policy remains unchanged.
+    function ConvertTo-WebsiteProbeOrigin {
+      param([uri]$TargetUri)
+      if ($script:ownedLoopback -and $TargetUri.Port -in $script:fixturePorts -and
+          $TargetUri.IdnHost -in @('127.0.0.1','localhost','public-website.test','does-not-resolve.invalid','wrong-website.test')) {
+        $identity = [System.UriBuilder]::new($TargetUri)
+        if ($identity.Host -eq '127.0.0.1') { $identity.Host = 'fixture-loopback.test' }
+        $identity.Port = if ($identity.Scheme -eq 'https') { 443 } else { 80 }
+        return ConvertTo-TestWebsiteOrigin -TargetUri $identity.Uri
+      }
+      return ConvertTo-TestWebsiteOrigin -TargetUri $TargetUri
+    }
+    $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = 'http://fixture-loopback.test,https://fixture-loopback.test,http://localhost,http://does-not-resolve.invalid,https://public-website.test,https://wrong-website.test'
     # Permit only the explicitly owned ephemeral ports in an in-memory clone.
     # The production function's standard-port checks were tested above unchanged.
     $testSource = $snapshotSource.Replace('$current.Port -ne 80 -and $current.Port -ne 443', '$current.Port -notin $script:fixturePorts')
@@ -629,12 +703,13 @@ public sealed class WebsiteProbeLoopbackServer : IDisposable
     Assert-Equal 'a mismatched TLS certificate is not reachable' $false $result.reachable
 
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    foreach ($name in @('Get-WebsiteSnapshot','Format-WebsiteText','New-WebsiteHttpHandler')) {
+    foreach ($name in @('Get-WebsiteProbeStatus','Get-WebsiteSnapshot','Format-WebsiteText','New-WebsiteHttpHandler','ConvertTo-WebsiteProbeOrigin','ConvertTo-TestWebsiteOrigin','Get-WebsiteProbePolicy','Test-WebsiteProbeTarget')) {
       $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, (Get-Command $name).Definition))
     }
-    $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new('Test-WebsiteHostIsPublic', 'param($HostName) [pscustomobject]@{ isPublic = $true; addresses = @("127.0.0.1"); reason = $null }'))
+    $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new('Test-WebsiteHostIsPublic', 'param($HostName) $script:workerDnsCalls++; [pscustomobject]@{ isPublic = $true; addresses = @("127.0.0.1"); reason = $null }'))
     foreach ($entry in @{
       fixtureMode = 'loopback'; ownedLoopback = $true; fixturePorts = $script:fixturePorts
+      workerDnsCalls = 0; factoryCalls = 0
     }.GetEnumerator()) {
       $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new($entry.Key, $entry.Value, 'Owned loopback fixture state'))
     }
@@ -656,6 +731,29 @@ public sealed class WebsiteProbeLoopbackServer : IDisposable
         Assert-Equal 'concurrent runspace retains every snapshot field/value' (ConvertTo-ComparableJson $expected) (ConvertTo-ComparableJson $output[0])
         Assert-Equal 'concurrent runspace has no missing-function/delegate errors' 0 $item.worker.Streams.Error.Count
       }
+      $allowedOrigins = $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS
+      try {
+        foreach ($configuration in @($null,'true','https://public-website.test')) {
+          $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = $configuration
+          $worker = [System.Management.Automation.PowerShell]::Create()
+          try {
+            $worker.RunspacePool = $pool
+            $null = $worker.AddScript({
+              $dnsBefore = $script:workerDnsCalls
+              $factoryBefore = $script:factoryCalls
+              $status = Get-WebsiteProbeStatus -Domain 'protected-network.example'
+              $snapshot = Get-WebsiteSnapshot -Url 'https://protected-network.example/'
+              [pscustomobject]@{ status = $status; snapshot = $snapshot; dnsCalls = $script:workerDnsCalls - $dnsBefore; factoryCalls = $script:factoryCalls - $factoryBefore }
+            })
+            $denied = $worker.Invoke()
+            Assert-Equal 'worker policy denies an unapproved public destination' 'Disabled' $denied[0].status.summary
+            Assert-Equal 'worker direct snapshot is not reachable' $false $denied[0].snapshot.reachable
+            Assert-Equal 'worker policy denial performs zero DNS' 0 $denied[0].dnsCalls
+            Assert-Equal 'worker policy denial creates zero transports' 0 $denied[0].factoryCalls
+            Assert-Equal 'worker policy cache follows configuration changes' 0 $worker.Streams.Error.Count
+          } finally { $worker.Dispose() }
+        }
+      } finally { $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = $allowedOrigins }
     } finally {
       foreach ($item in $pending) { $item.worker.Dispose() }
       $pool.Dispose()

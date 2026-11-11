@@ -1702,7 +1702,7 @@ if ([string]::IsNullOrWhiteSpace($script:MetricsHashKey)) {
 $MetricsHashKey = $script:MetricsHashKey
 
 # Application version (for metrics/reporting)
-$script:AppVersion = '2.16.8'
+$script:AppVersion = '2.17.0'
 if (-not [string]::IsNullOrWhiteSpace($env:ACS_APP_VERSION)) {
   # Validate at the boundary: this value is interpolated into generated JSON
   # (/openapi.json) and Markdown (/llms.txt), so an unconstrained override could
@@ -5326,7 +5326,7 @@ Version: __ACS_VERSION__
 - [CNAME](__ACS_ROOT__/api/cname?domain=example.com): CNAME chain resolution.
 - [WHOIS / RDAP](__ACS_ROOT__/api/whois?domain=example.com): registrar, creation and expiry dates, domain age.
 - [Blocklist reputation](__ACS_ROOT__/api/reputation?domain=example.com): separate mail-target IPv4 DNSBL and control-validated literal-domain reputation results. URIBL Multi, NordSpam DBL, and Spam Eating Monkey URI are enabled by default; control failures never become clean results.
-- [Website probe](__ACS_ROOT__/api/website?domain=example.com): HTTP reachability and page title/description.
+- [Website probe](__ACS_ROOT__/api/website?domain=example.com): HTTP reachability and page title/description for server-approved exact origins only. Denied by default; unapproved destinations return a complete neutral disabled result without website network activity.
 - [Nameserver consistency](__ACS_ROOT__/api/nameservers?domain=example.com): queries each authoritative nameserver directly and reports whether they serve identical TXT records.
 - [Global DNS propagation](__ACS_ROOT__/api/propagation?domain=example.com&type=TXT&max=25): queries public recursive resolvers worldwide and reports what percentage see the record.
 
@@ -5426,7 +5426,7 @@ function Get-AcsOpenApiJson {
     '/api/cname'        = 'CNAME chain resolution.'
     '/api/whois'        = 'Registrar, creation/expiry dates and domain age via RDAP or WHOIS.'
     '/api/reputation'   = 'Separate mail-target IPv4 DNSBL and control-validated literal-domain reputation results.'
-    '/api/website'      = 'HTTP reachability probe with page title and description.'
+    '/api/website'      = 'HTTP reachability probe for server-approved exact origins, with page title and description. Denied by default; unapproved destinations return checked=false, summary=Disabled and disabledReason without website network activity.'
     '/api/nameservers'  = 'Queries each authoritative nameserver directly and compares their TXT records.'
     '/api/propagation'  = 'Queries public recursive resolvers worldwide and reports propagation coverage.'
   }
@@ -10737,6 +10737,9 @@ function Get-DnsCnameStatus {
 #
 # SECURITY: probing an arbitrary, attacker-influenced hostname is a classic SSRF
 # vector. The following defenses are layered here:
+#   * No destination is authorized by default. Only exact origins explicitly
+#     approved by the operator may be probed, including every redirect/fallback.
+#     Public addressing alone does not authorize use of the server's network.
 #   * Only http/https schemes and only ports 80/443 are allowed.
 #   * The target host is resolved up-front and EVERY resolved address must be a
 #     public, routable IP (v4 + v6). If any address is private/loopback/link-local/
@@ -10949,6 +10952,72 @@ function Test-WebsiteHostIsPublic {
   return [pscustomobject]@{ isPublic = $true; addresses = $addresses; reason = $null }
 }
 
+function ConvertTo-WebsiteProbeOrigin {
+  param([Parameter(Mandatory = $true)][uri]$TargetUri)
+
+  if (-not $TargetUri.IsAbsoluteUri -or $TargetUri.Scheme -notin @('http','https') -or
+	  $TargetUri.Port -notin @(80,443) -or $TargetUri.HostNameType -ne [System.UriHostNameType]::Dns -or
+	  -not [string]::IsNullOrEmpty($TargetUri.UserInfo)) { return $null }
+
+  try {
+	return '{0}://{1}:{2}' -f $TargetUri.Scheme, $TargetUri.IdnHost.TrimEnd('.').ToLowerInvariant(), $TargetUri.Port
+  } catch [System.UriFormatException] { return $null }
+}
+
+function Get-WebsiteProbePolicy {
+  if (([string]$env:ACS_DISABLE_WEBSITE_PROBE).Trim() -eq '1') {
+	return [pscustomobject]@{ enabled = $false; reason = 'Website probe disabled by server configuration.'; origins = $null }
+  }
+
+  $raw = [string]$env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS
+  $cached = $ExecutionContext.SessionState.PSVariable.GetValue('script:WebsiteProbePolicyCache')
+  if ($cached -and $cached.raw -ceq $raw) { return $cached.policy }
+
+  $origins = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $policy = [pscustomobject]@{
+	enabled = $false
+	reason = 'Website probe disabled: no server-approved origins are configured.'
+	origins = $origins
+  }
+  if (-not [string]::IsNullOrWhiteSpace($raw)) {
+	$valid = $raw.Length -le 16384
+	if ($valid) {
+	  foreach ($entry in ($raw -split '[,;\r\n]')) {
+		$value = $entry.Trim()
+		if (-not $value) { continue }
+		$uri = $null
+		if (-not [uri]::TryCreate($value, [System.UriKind]::Absolute, [ref]$uri) -or
+			$uri.AbsolutePath -ne '/' -or $uri.Query -or $uri.Fragment) { $valid = $false; break }
+		$origin = ConvertTo-WebsiteProbeOrigin -TargetUri $uri
+		if (-not $origin) { $valid = $false; break }
+		$null = $origins.Add($origin)
+		if ($origins.Count -gt 256) { $valid = $false; break }
+	  }
+	}
+	if (-not $valid) {
+	  $origins.Clear()
+	  $policy.reason = 'Website probe disabled: server-approved origins configuration is invalid.'
+	} elseif ($origins.Count -gt 0) {
+	  $policy.enabled = $true
+	  $policy.reason = $null
+	}
+  }
+  # Cache only trusted process configuration, never request-selected origins.
+  $script:WebsiteProbePolicyCache = [pscustomobject]@{ raw = $raw; policy = $policy }
+  return $policy
+}
+
+function Test-WebsiteProbeTarget {
+  param(
+	[Parameter(Mandatory = $true)][uri]$TargetUri,
+	[object]$Policy = (Get-WebsiteProbePolicy)
+  )
+
+  if (-not $Policy.enabled) { return $false }
+  $origin = ConvertTo-WebsiteProbeOrigin -TargetUri $TargetUri
+  return ($null -ne $origin -and $Policy.origins.Contains($origin))
+}
+
 function New-WebsiteHttpHandler {
   param(
 	[Parameter(Mandatory = $true)][uri]$TargetUri,
@@ -10956,6 +11025,10 @@ function New-WebsiteHttpHandler {
 	[Parameter(Mandatory = $true)][System.Net.CookieContainer]$Cookies
   )
 
+  $policy = Get-WebsiteProbePolicy
+  if (-not (Test-WebsiteProbeTarget -TargetUri $TargetUri -Policy $policy)) {
+	throw 'Website destination is not authorized by server policy.'
+  }
   foreach ($address in $Addresses) {
 	if (-not (Test-IsPublicIpAddress -IpAddress $address)) { throw 'Refused a non-public website connection address.' }
   }
@@ -11016,6 +11089,8 @@ function Get-WebsiteSnapshot {
   $startUri = $null
   try { $startUri = [uri]$Url } catch { $result.error = 'Malformed URL.'; return $result }
   if (-not $startUri.IsAbsoluteUri) { $result.error = 'URL must be absolute.'; return $result }
+  $policy = Get-WebsiteProbePolicy
+  if (-not $policy.enabled) { $result.error = $policy.reason; return $result }
 
   $handler = $null
   $client  = $null
@@ -11049,7 +11124,11 @@ function Get-WebsiteSnapshot {
 		break
 	  }
 
-	  # SSRF guard: confirm this hop's host resolves only to public IPs.
+	  # Authorize before DNS, even for public IPs or an existing connection.
+	  if (-not (Test-WebsiteProbeTarget -TargetUri $current -Policy $policy)) {
+		$result.error = 'Website destination is not authorized by server policy.'
+		break
+	  }
 	  $hostCheck = Test-WebsiteHostIsPublic -HostName $current.IdnHost
 	  if (-not $hostCheck.isPublic) {
 		$result.error = $hostCheck.reason
@@ -11368,11 +11447,11 @@ function Get-WebsiteProbeStatus {
 	return $status
   }
 
-  # Operator opt-out (e.g. on networks where outbound web traffic is undesirable).
-  if (([string]$env:ACS_DISABLE_WEBSITE_PROBE).Trim() -eq '1') {
+  $policy = Get-WebsiteProbePolicy
+  if (-not $policy.enabled) {
 	$status.checked = $false
 	$status.summary = 'Disabled'
-	$status.disabledReason = 'Website probe disabled by server configuration.'
+	$status.disabledReason = $policy.reason
 	return $status
   }
 
@@ -11397,13 +11476,26 @@ function Get-WebsiteProbeStatus {
   # variant is skipped when the queried name already starts with www. so we don't
   # probe www.www.example.com.
   $hasWww = $d.ToLowerInvariant().StartsWith('www.')
-  $candidates = New-Object System.Collections.Generic.List[string]
+  $candidates = [System.Collections.Generic.List[string]]::new()
   $candidates.Add("https://$d/")
   if (-not $hasWww) { $candidates.Add("https://www.$d/") }
   $candidates.Add("http://$d/")
   if (-not $hasWww) { $candidates.Add("http://www.$d/") }
 
-  $attempts = New-Object System.Collections.Generic.List[object]
+  $approvedCandidate = $false
+  foreach ($candidate in $candidates) {
+	$candidateUri = $null
+	if ([uri]::TryCreate($candidate, [System.UriKind]::Absolute, [ref]$candidateUri) -and
+		(Test-WebsiteProbeTarget -TargetUri $candidateUri -Policy $policy)) { $approvedCandidate = $true; break }
+  }
+  if (-not $approvedCandidate) {
+	$status.checked = $false
+	$status.summary = 'Disabled'
+	$status.disabledReason = 'Website destination is not authorized by server policy.'
+	return $status
+  }
+
+  $attempts = [System.Collections.Generic.List[object]]::new()
   $picked = $null
 
   foreach ($candidate in $candidates) {
@@ -41529,7 +41621,7 @@ $functionNames = @(
   'Get-DnsBaseStatus','Get-DnsMxStatus','Get-DnsDmarcStatus','Get-DnsDkimStatus','Get-CnameTargetFromRecords','Get-DnsCnameStatus','Invoke-RblLookup','ConvertTo-ReversedIpv4','Get-DnsReputationStatus',
   'Get-RblCacheEntry','Set-RblCacheEntry','Clear-ExpiredRblCacheEntries',
   'Get-DomainReputationProviderCatalog','Get-DomainReputationCacheKey','Get-DomainReputationCacheEntry','Set-DomainReputationCacheEntry','Remove-DomainReputationCacheEntry','Get-DomainReputationHealthEntry','Set-DomainReputationHealthEntry','Test-DomainReputationQueryBudget','Test-DomainReputationProviderBudget','Get-DomainReputationAuthorityHosts','New-DomainReputationDnsQueryPacket','Read-DomainReputationDnsResponse','Invoke-DomainReputationDnsFanout','Test-DomainReputationPositiveControl','Test-DomainReputationProviderControl','ConvertFrom-DomainReputationProviderOutcome','Get-DomainReputationProviderEndpoints','Get-DomainReputationStatus','Get-CombinedReputationState',
-  'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','New-WebsiteHttpHandler','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
+  'Test-IsPublicIpAddress','Test-WebsiteHostIsPublic','ConvertTo-WebsiteProbeOrigin','Get-WebsiteProbePolicy','Test-WebsiteProbeTarget','New-WebsiteHttpHandler','Get-WebsiteSnapshot','Format-WebsiteText','Get-WebsiteProbeStatus',
   'Invoke-RawDnsTxtQuery','Get-AuthoritativeNameserverHosts','Resolve-NameserverPublicIps','Get-NameserverTxtStatus',
   'Get-DnsPropagationTypeCode','Get-DnsPropagationResolverCatalog','Get-DnsPropagationHealthTtlMinutes','Get-DnsPropagationHealthState','Set-DnsPropagationHealthState','ConvertFrom-DnsPropagationResolverInput','Select-DnsPropagationResolvers','Read-DnsNameFromBuffer','ConvertFrom-DnsPropagationRdata','New-DnsPropagationQueryPacket','Read-DnsPropagationResponse','Invoke-DnsPropagationTcpFanout','Invoke-DnsPropagationFanout','Get-DnsPropagationStatus',
   'Get-RdapBootstrapData','Get-RdapBuiltInTldMap','Get-RdapBaseUrlForDomain','Invoke-RdapLookup','Invoke-WhoisXmlLookup','Invoke-GoDaddyWhoisLookup','ConvertTo-NullableUtcIso8601','Get-DomainAgeDays','Get-FirstNonEmptyPropertyValue','Get-DomainRegistrationStatus',

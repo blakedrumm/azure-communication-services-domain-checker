@@ -11,6 +11,9 @@
 #
 # SECURITY: probing an arbitrary, attacker-influenced hostname is a classic SSRF
 # vector. The following defenses are layered here:
+#   * No destination is authorized by default. Only exact origins explicitly
+#     approved by the operator may be probed, including every redirect/fallback.
+#     Public addressing alone does not authorize use of the server's network.
 #   * Only http/https schemes and only ports 80/443 are allowed.
 #   * The target host is resolved up-front and EVERY resolved address must be a
 #     public, routable IP (v4 + v6). If any address is private/loopback/link-local/
@@ -223,6 +226,72 @@ function Test-WebsiteHostIsPublic {
   return [pscustomobject]@{ isPublic = $true; addresses = $addresses; reason = $null }
 }
 
+function ConvertTo-WebsiteProbeOrigin {
+  param([Parameter(Mandatory = $true)][uri]$TargetUri)
+
+  if (-not $TargetUri.IsAbsoluteUri -or $TargetUri.Scheme -notin @('http','https') -or
+	  $TargetUri.Port -notin @(80,443) -or $TargetUri.HostNameType -ne [System.UriHostNameType]::Dns -or
+	  -not [string]::IsNullOrEmpty($TargetUri.UserInfo)) { return $null }
+
+  try {
+	return '{0}://{1}:{2}' -f $TargetUri.Scheme, $TargetUri.IdnHost.TrimEnd('.').ToLowerInvariant(), $TargetUri.Port
+  } catch [System.UriFormatException] { return $null }
+}
+
+function Get-WebsiteProbePolicy {
+  if (([string]$env:ACS_DISABLE_WEBSITE_PROBE).Trim() -eq '1') {
+	return [pscustomobject]@{ enabled = $false; reason = 'Website probe disabled by server configuration.'; origins = $null }
+  }
+
+  $raw = [string]$env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS
+  $cached = $ExecutionContext.SessionState.PSVariable.GetValue('script:WebsiteProbePolicyCache')
+  if ($cached -and $cached.raw -ceq $raw) { return $cached.policy }
+
+  $origins = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $policy = [pscustomobject]@{
+	enabled = $false
+	reason = 'Website probe disabled: no server-approved origins are configured.'
+	origins = $origins
+  }
+  if (-not [string]::IsNullOrWhiteSpace($raw)) {
+	$valid = $raw.Length -le 16384
+	if ($valid) {
+	  foreach ($entry in ($raw -split '[,;\r\n]')) {
+		$value = $entry.Trim()
+		if (-not $value) { continue }
+		$uri = $null
+		if (-not [uri]::TryCreate($value, [System.UriKind]::Absolute, [ref]$uri) -or
+			$uri.AbsolutePath -ne '/' -or $uri.Query -or $uri.Fragment) { $valid = $false; break }
+		$origin = ConvertTo-WebsiteProbeOrigin -TargetUri $uri
+		if (-not $origin) { $valid = $false; break }
+		$null = $origins.Add($origin)
+		if ($origins.Count -gt 256) { $valid = $false; break }
+	  }
+	}
+	if (-not $valid) {
+	  $origins.Clear()
+	  $policy.reason = 'Website probe disabled: server-approved origins configuration is invalid.'
+	} elseif ($origins.Count -gt 0) {
+	  $policy.enabled = $true
+	  $policy.reason = $null
+	}
+  }
+  # Cache only trusted process configuration, never request-selected origins.
+  $script:WebsiteProbePolicyCache = [pscustomobject]@{ raw = $raw; policy = $policy }
+  return $policy
+}
+
+function Test-WebsiteProbeTarget {
+  param(
+	[Parameter(Mandatory = $true)][uri]$TargetUri,
+	[object]$Policy = (Get-WebsiteProbePolicy)
+  )
+
+  if (-not $Policy.enabled) { return $false }
+  $origin = ConvertTo-WebsiteProbeOrigin -TargetUri $TargetUri
+  return ($null -ne $origin -and $Policy.origins.Contains($origin))
+}
+
 function New-WebsiteHttpHandler {
   param(
 	[Parameter(Mandatory = $true)][uri]$TargetUri,
@@ -230,6 +299,10 @@ function New-WebsiteHttpHandler {
 	[Parameter(Mandatory = $true)][System.Net.CookieContainer]$Cookies
   )
 
+  $policy = Get-WebsiteProbePolicy
+  if (-not (Test-WebsiteProbeTarget -TargetUri $TargetUri -Policy $policy)) {
+	throw 'Website destination is not authorized by server policy.'
+  }
   foreach ($address in $Addresses) {
 	if (-not (Test-IsPublicIpAddress -IpAddress $address)) { throw 'Refused a non-public website connection address.' }
   }
@@ -290,6 +363,8 @@ function Get-WebsiteSnapshot {
   $startUri = $null
   try { $startUri = [uri]$Url } catch { $result.error = 'Malformed URL.'; return $result }
   if (-not $startUri.IsAbsoluteUri) { $result.error = 'URL must be absolute.'; return $result }
+  $policy = Get-WebsiteProbePolicy
+  if (-not $policy.enabled) { $result.error = $policy.reason; return $result }
 
   $handler = $null
   $client  = $null
@@ -323,7 +398,11 @@ function Get-WebsiteSnapshot {
 		break
 	  }
 
-	  # SSRF guard: confirm this hop's host resolves only to public IPs.
+	  # Authorize before DNS, even for public IPs or an existing connection.
+	  if (-not (Test-WebsiteProbeTarget -TargetUri $current -Policy $policy)) {
+		$result.error = 'Website destination is not authorized by server policy.'
+		break
+	  }
 	  $hostCheck = Test-WebsiteHostIsPublic -HostName $current.IdnHost
 	  if (-not $hostCheck.isPublic) {
 		$result.error = $hostCheck.reason
@@ -642,11 +721,11 @@ function Get-WebsiteProbeStatus {
 	return $status
   }
 
-  # Operator opt-out (e.g. on networks where outbound web traffic is undesirable).
-  if (([string]$env:ACS_DISABLE_WEBSITE_PROBE).Trim() -eq '1') {
+  $policy = Get-WebsiteProbePolicy
+  if (-not $policy.enabled) {
 	$status.checked = $false
 	$status.summary = 'Disabled'
-	$status.disabledReason = 'Website probe disabled by server configuration.'
+	$status.disabledReason = $policy.reason
 	return $status
   }
 
@@ -671,13 +750,26 @@ function Get-WebsiteProbeStatus {
   # variant is skipped when the queried name already starts with www. so we don't
   # probe www.www.example.com.
   $hasWww = $d.ToLowerInvariant().StartsWith('www.')
-  $candidates = New-Object System.Collections.Generic.List[string]
+  $candidates = [System.Collections.Generic.List[string]]::new()
   $candidates.Add("https://$d/")
   if (-not $hasWww) { $candidates.Add("https://www.$d/") }
   $candidates.Add("http://$d/")
   if (-not $hasWww) { $candidates.Add("http://www.$d/") }
 
-  $attempts = New-Object System.Collections.Generic.List[object]
+  $approvedCandidate = $false
+  foreach ($candidate in $candidates) {
+	$candidateUri = $null
+	if ([uri]::TryCreate($candidate, [System.UriKind]::Absolute, [ref]$candidateUri) -and
+		(Test-WebsiteProbeTarget -TargetUri $candidateUri -Policy $policy)) { $approvedCandidate = $true; break }
+  }
+  if (-not $approvedCandidate) {
+	$status.checked = $false
+	$status.summary = 'Disabled'
+	$status.disabledReason = 'Website destination is not authorized by server policy.'
+	return $status
+  }
+
+  $attempts = [System.Collections.Generic.List[object]]::new()
   $picked = $null
 
   foreach ($candidate in $candidates) {

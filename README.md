@@ -409,7 +409,7 @@ The percentage applies only to mail-IP DNSBL queries. Domain providers are not t
 
 ## 🌐 Website Reachability Snapshot
 
-The `/api/website` endpoint performs a **security-guarded** HTTP(S) request to the queried domain so you can see, at a glance, whether it serves a real website or appears blank, parked, or "under construction". It tries `https://` first (apex, then `www.`) and falls back to `http://`, returning the first reachable terminal page.
+The `/api/website` endpoint performs an HTTP(S) request only to **explicitly server-approved origins** so you can see whether an approved domain serves a real website or appears blank, parked, or "under construction". As of **2.17.0, website fetching is denied by default**. An unapproved domain returns the complete existing response schema with `checked: false`, `summary: "Disabled"`, and an explanatory `disabledReason`; all other DNS checks remain available. Approved candidates retain the HTTPS-first apex/`www.`/HTTP ordering, but each origin must be approved independently.
 
 The output is intentionally **neutral and factual** — it reports only what was technically observed and makes no judgement about the domain owner:
 
@@ -424,6 +424,7 @@ Because the full-page screenshot button captures every rendered card, this snaps
 
 ### Security guards (SSRF protection)
 
+- The operator-only `ACS_WEBSITE_PROBE_ALLOWED_ORIGINS` setting authorizes **exact scheme/hostname/port origins**, never wildcard domains, suffix matches, IP literals, or arbitrary-domain probing. Unset, empty, or invalid configuration denies website network activity. Browser parameters, headers, and API keys cannot grant destination authorization.
 - Only `http`/`https` schemes and only ports 80/443 are ever contacted
 - The target host must resolve **entirely** to public, routable IPs (IPv4 + IPv6, including IPv4-mapped IPv6) — private/loopback/link-local/CGNAT/unique-local targets are refused
 - Every connection is pinned to those validated IPs, eliminating a second DNS lookup and the DNS-rebinding window. The original hostname is retained for HTTP `Host`, TLS SNI, and certificate validation on both PowerShell 7 and Windows PowerShell 5.1.
@@ -433,13 +434,22 @@ Because the full-page screenshot button captures every rendered card, this snaps
 - Ambient/system/environment HTTP proxies are **not used** for website probes; direct outbound TCP 80/443 access is required.
 - The response body is read under a hard byte cap and the whole operation runs under a short timeout. Read failures are reported explicitly, retaining metadata received before the failure instead of misreporting the site as empty.
 
-Public-IP validation cannot determine whether an otherwise public address is routed to an internal-only service on the hosting network. Run internet-facing website probes with restricted egress and without corporate/VPN/private-network access; explicitly deny any privately routed public ranges at the network boundary. If direct, isolated egress is unavailable, use the existing `ACS_DISABLE_WEBSITE_PROBE=1` opt-out. These restrictions intentionally affect unsafe/internal destinations, not the output shape or the other DNS checks.
+Public-IP validation cannot distinguish an ordinary website from a publicly addressed service that trusts the server's corporate/VPN network. The default-deny policy prevents callers from selecting either kind of unapproved destination, before DNS or socket work, including redirects and `/api/email-quota`. Do not automatically approve user-entered domains or configure protected services. Approval is an explicit grant to use the server's network, **not proof of network isolation**. Retain restricted egress, including denial of corporate/private services using public IP ranges, for approved destinations too. Arbitrary-domain snapshots require a separately implemented, genuinely isolated fetch execution context; no configuration flag enables them on the application host.
+
+To authorize a small, operator-vetted set of ordinary public websites, configure exact origins on the **server**, for example:
+
+```powershell
+$env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = 'https://example.com;https://www.example.com'
+```
+
+This does not authorize HTTP fallback, other subdomains, or redirects to another origin. Origins accept an optional trailing `/` and are normalized for case, IDN, and default ports. Paths, queries, fragments, credentials, wildcard hosts, and IP literals invalidate the entire configuration. The list is limited to 256 distinct origins and 16,384 characters, separated by commas, semicolons, or newlines. Policy parsing is cached per worker without a network preflight. Existing output values for permitted snapshots, TLS checks, cookies, compression, and response limits are retained.
 
 ### Configuration
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ACS_DISABLE_WEBSITE_PROBE` | _(unset)_ | Set to `1` to disable the probe entirely (the card renders a neutral "disabled" note) |
+| `ACS_WEBSITE_PROBE_ALLOWED_ORIGINS` | _(empty: deny all)_ | Operator-vetted exact HTTP(S) origins permitted for website snapshots, including each redirect and fallback. Invalid configuration denies all; no wildcards or IP literals. |
 | `ACS_WEBSITE_PROBE_TIMEOUT_SEC` | `8` | Per-request timeout in seconds (max 30) |
 | `ACS_WEBSITE_PROBE_MAX_BYTES` | `262144` | Hard cap on bytes read from the response body (max 2 MB) |
 | `ACS_WEBSITE_PROBE_MAX_REDIRECTS` | `5` | Maximum redirect hops to follow (max 10) |
@@ -597,7 +607,7 @@ The application exposes the following RESTful API endpoints:
 | `/api/dkim` | DKIM selectors | Checks DomainKeys Identified Mail signatures. Accepts the optional `dkim1Selector`, `dkim1Target`, `dkim2Selector` and `dkim2Target` parameters |
 | `/api/cname` | CNAME records | Validates canonical name records |
 | `/api/reputation` | DNSBL reputation | Checks domain reputation against DNS blocklists |
-| `/api/website` | Website reachability snapshot | Performs a security-guarded HTTP(S) probe (apex + www, HTTPS first) and returns a neutral, factual snapshot: reachability, HTTP status, redirect chain, page title/description, a short text excerpt, and recognized placeholder/parked-page markers |
+| `/api/website` | Website reachability snapshot | Denied by default. For server-approved exact origins only, returns reachability, HTTP status, redirect chain, title/description, excerpt, and placeholder indicators. Unapproved destinations retain the complete schema with `checked: false`, `summary: "Disabled"`, and `disabledReason`, without website network activity |
 | `/api/nameservers` | Per-nameserver TXT consistency | Queries each authoritative nameserver directly (raw UDP/TCP DNS) for the domain's TXT records and compares them, so you can see whether every nameserver serves the same SPF / verification records or whether divergence is making them resolve only intermittently |
 | `/api/propagation` | Global DNS propagation | Queries a geographically spread set of public DNS resolvers in parallel and compares their answers, so you can see whether a recent DNS change is visible everywhere yet. Accepts optional `type`, `regions`, `max`, `timeout`, `expected`, `custom` and `validate` query parameters (all allowlisted, length-capped and clamped server-side) |
 | `/api/metrics` | Anonymous metrics | Returns aggregated usage metrics (if enabled) |
@@ -849,7 +859,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/Test-SecureLogging.ps1
 |------|--------|
 | `tools/Audit-RunspaceFunctions.ps1` | Every function reachable from the HTTP request handler is registered in the runspace pool. An unregistered function surfaces to users as an HTTP 500 on one specific check. |
 | `tools/Test-SecureLogging.ps1` | Captured logs contain no PII, secrets, headers, query strings, bodies, or raw exception data. |
-| `tools/Test-WebsiteProbe.ps1` | Offline SSRF/address/redirect/cap checks plus owned-loopback HTTP/TLS, cookies, gzip/deflate, chunking, and concurrent-runspace tests. Optional `-BaselineFile <previous-16b-WebsiteProbe.ps1>` compares every website output value and interleaved latency samples with the previous implementation. Run under both PowerShell 5.1 and 7; no public or internal service is contacted. |
+| `tools/Test-WebsiteProbe.ps1` | Default-deny/invalid-policy/approved-origin/redirect/direct-helper/no-network regressions plus owned-loopback HTTP/TLS, cookies, gzip/deflate, chunking, and concurrent-runspace tests. Optional `-BaselineFile <previous-16b-WebsiteProbe.ps1>` compares every permitted website output value and interleaved latency samples with the previous implementation. Run under both PowerShell 5.1 and 7; no public or internal service is contacted. `tools/Test-LookupLimits.ps1` also verifies that both website API entry points enforce the policy regardless of request parameters or API keys. |
 | `tools/Test-SmtpResponses.ps1` | Runs the actual browser parser, catalog, reference filters, table renderer, and copy formatter using Node.js. Covers code boundaries, status conflicts, provider attribution, generic fallbacks, input limits, escaped output, and localized controls. Run under both PowerShell 5.1 and 7. |
 | `tools/Test-SeoMetadata.ps1` | Language lists stay in sync across the SPA, sitemap and `hreflang` links; every `__TOKEN__` has a replacement site; `-f` format strings are valid; every lookup endpoint is documented in `/llms.txt` and `/openapi.json`; required `<head>` tags and the JSON-LD CSP nonce are present; both listener modes preserve bodyless `HEAD` semantics; share-link bootstrap has an idempotent hidden-tab fallback. |
 | `tools/Test-EmailQuota.ps1` | `/api/email-quota` gives the same pass/warn/fail verdict and checklist rows as the web UI's Email Quota card, using offline fixtures. Covers missing MX, SPF include/duplicate/lookup-limit/macro/SERVFAIL cases, nameserver TXT recovery, young/expired/web-form-only registrations, reputation states and errors, the DMARC enforcement opt-in, and the Markdown table. Run under both PowerShell 5.1 and 7. |
@@ -1005,7 +1015,7 @@ This repository includes automated workflows to build and publish Docker images 
 A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatically builds multi-platform Docker images and publishes them to Docker Hub.
 
 **🚀 Deployment Triggers:**
-- ✅ Automatically when a version tag is pushed (e.g., `v2.16.8`)
+- ✅ Automatically when a version tag is pushed (e.g., `v2.17.0`)
 - ✅ Manually via GitHub Actions workflow dispatch
 
 **📦 What Gets Published:**
@@ -1028,8 +1038,8 @@ To enable automatic deployment to Docker Hub, configure the following secrets in
 **Method 1: Git Tag (Recommended)**
 ```bash
 # Tag the release
-git tag v2.16.8
-git push origin v2.16.8
+git tag v2.17.0
+git push origin v2.17.0
 
 # The workflow will automatically:
 # 1. Build Linux image on Ubuntu
@@ -1040,7 +1050,7 @@ git push origin v2.16.8
 **Method 2: Manual Workflow Dispatch**
 1. 🌐 Navigate to **Actions** → **Publish Docker Images to Docker Hub**
 2. ▶️ Click **Run workflow**
-3. 📝 Enter the version (e.g., `2.16.8`) or leave empty to extract from `acs-domain-checker.ps1`
+3. 📝 Enter the version (e.g., `2.17.0`) or leave empty to extract from `acs-domain-checker.ps1`
 4. 🚀 Click **Run workflow**
 
 ### 🔍 Using Published Images
@@ -1057,11 +1067,11 @@ docker run --rm -p 8080:8080 limitlessworlds/acs-domain-checker:latest
 Pull a specific version:
 ```bash
 # Pull specific version
-docker pull limitlessworlds/acs-domain-checker:2.16.8
+docker pull limitlessworlds/acs-domain-checker:2.17.0
 
 # Pull platform-specific image
-docker pull limitlessworlds/acs-domain-checker:linux-2.16.8
-docker pull limitlessworlds/acs-domain-checker:windows-2.16.8
+docker pull limitlessworlds/acs-domain-checker:linux-2.17.0
+docker pull limitlessworlds/acs-domain-checker:windows-2.17.0
 ```
 
 ### 🛠️ Manual Build Script
@@ -1076,7 +1086,7 @@ For local multi-platform builds and testing, use the included PowerShell script:
 ./acs-domain-checker-dockerhub.ps1 -DryRun
 
 # Specify custom version
-./acs-domain-checker-dockerhub.ps1 -Version 2.16.8
+./acs-domain-checker-dockerhub.ps1 -Version 2.17.0
 ```
 
 **📋 Requirements for manual script:**

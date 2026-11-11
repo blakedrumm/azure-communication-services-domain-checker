@@ -8,7 +8,7 @@ the most reliable way to stay protected is to run the newest version.
 
 | Version | Supported |
 |---------|-----------|
-| Latest release (currently `2.16.x`) | :white_check_mark: |
+| Latest release (currently `2.17.x`) | :white_check_mark: |
 | Any older version | :x: |
 
 Because the tool is often downloaded and run standalone, older copies do **not**
@@ -91,11 +91,22 @@ deploying beyond `localhost`:
 - Only set **`ACS_TRUSTED_PROXIES`** for proxies you actually control, so
   forwarded client-IP headers cannot be spoofed.
 - Restrict **`ACS_ALLOWED_ORIGINS`** to the origins that should call the API.
-- Website probes require direct, restricted HTTP(S) egress. They do not use ambient
+- As of **2.17.0, website fetching is denied by default**. Only the exact origins
+  explicitly configured in **`ACS_WEBSITE_PROBE_ALLOWED_ORIGINS`** may be probed.
+  Invalid configuration, unapproved destinations, redirects, and fallbacks are
+  denied before website DNS/socket work. This applies to `/api/website`,
+  `/api/email-quota`, and direct probe helpers. API keys and browser input do not
+  authorize destinations; a frontend-embedded API key is not a secret boundary.
+  Do not auto-approve queried domains, use wildcard policies, or approve
+  network-protected services. Permitted snapshots require direct, restricted
+  HTTP(S) egress. They do not use ambient
   proxies and pin connections to validated public IPs while retaining TLS hostname
   validation. Do not give an internet-facing probe corporate/VPN/private-network
   access; deny privately routed public ranges and host-platform services at the
-  network boundary. Use **`ACS_DISABLE_WEBSITE_PROBE=1`** if isolated egress cannot
-  be provided; the other DNS checks remain available.
+  network boundary. Exact-origin approval is not proof of isolation. Arbitrary
+  domain fetching requires a separate, genuinely isolated fetch execution context,
+  not an environment-variable assertion that the current host is safe.
+  **`ACS_DISABLE_WEBSITE_PROBE=1`** remains an unconditional opt-out; the other DNS
+  checks remain available when website fetching is denied.
 
 See [`README.md`](README.md) for the full list of configuration options.

@@ -223,6 +223,19 @@ $badLines = @(($r.reportMarkdown -split "`n") | Where-Object { ([regex]::Matches
 Assert-Equal 'markdown rows keep exactly two columns (pipes in values escaped)' 0 $badLines.Count
 Assert-Equal 'markdown reputation row escapes separators' $true ($r.reportMarkdown -like '*\| Zones queried*')
 
+$disabledWebsite = [pscustomobject]@{
+  checked = $false
+  reachable = $false
+  summary = 'Disabled'
+  disabledReason = 'Website destination is not authorized by server policy.'
+}
+$disabledReport = ConvertTo-AcsEmailQuotaReport -Status (New-HealthyStatus) -Reputation (New-CleanReputation) -Website $disabledWebsite
+Assert-Equal 'website policy denial does not change the quota verdict' $r.emailQuota.status $disabledReport.emailQuota.status
+Assert-Equal 'website policy denial preserves every checklist result' ($r.checklist | ConvertTo-Json -Depth 8 -Compress) ($disabledReport.checklist | ConvertTo-Json -Depth 8 -Compress)
+Assert-Equal 'website policy denial preserves all other report data' ($r.report | Where-Object field -ne 'Website' | ConvertTo-Json -Depth 8 -Compress) ($disabledReport.report | Where-Object field -ne 'Website' | ConvertTo-Json -Depth 8 -Compress)
+Assert-Equal 'website policy denial remains explicit in the report' $disabledWebsite.disabledReason (Get-Field $disabledReport 'Website')
+Assert-Equal 'website policy denial remains explicit in Markdown' $true $disabledReport.reportMarkdown.Contains($disabledWebsite.disabledReason)
+
 Write-Host ''
 if ($failures.Count -eq 0) {
   Write-Host ("PASS: all {0} checks passed." -f $checks) -ForegroundColor Green

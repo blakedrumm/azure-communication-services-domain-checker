@@ -62,7 +62,7 @@ function Invoke-OutboundHttp {
 }
 
 $savedEnvironment = @{}
-foreach ($name in @('ACS_RATE_LIMIT_PER_MIN', 'ACS_API_KEY', 'ACS_API_KEYS', 'ACS_TRUSTED_PROXIES', 'ACS_ENABLE_ANON_METRICS', 'ACS_LOG_LEVEL', 'ACS_LOG_FILE')) {
+foreach ($name in @('ACS_RATE_LIMIT_PER_MIN', 'ACS_API_KEY', 'ACS_API_KEYS', 'ACS_TRUSTED_PROXIES', 'ACS_ENABLE_ANON_METRICS', 'ACS_LOG_LEVEL', 'ACS_LOG_FILE', 'ACS_DISABLE_WEBSITE_PROBE', 'ACS_WEBSITE_PROBE_ALLOWED_ORIGINS')) {
   $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 
@@ -74,6 +74,8 @@ try {
   $env:ACS_ENABLE_ANON_METRICS = '0'
   $env:ACS_LOG_LEVEL = 'Critical'
   $env:ACS_LOG_FILE = $null
+  $env:ACS_DISABLE_WEBSITE_PROBE = $null
+  $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = $null
   $AcsAnonMetricsEnabled = $false
   $script:AppVersion = 'test'
   . (Join-Path $repoRoot 'src\01-DomainParsing.ps1')
@@ -185,6 +187,41 @@ try {
   for ($index = 0; $index -lt 10000; $index++) { $AcsLookupActionStore[[string]$index] = $active }
   Assert-Equal 'action storage is bounded and capacity failure is explicit' 503 (New-AcsLookupAction -Context $plain -DomainCount 1).statusCode
   $AcsLookupActionStore.Clear()
+
+  # Exercise the real probe through both request entry points; all unrelated
+  # providers remain stubbed, and a denied probe must never reach these seams.
+  . (Join-Path $repoRoot 'src\16b-WebsiteProbe.ps1')
+  . (Join-Path $repoRoot 'src\18a-EmailQuota.ps1')
+  $script:websiteNetworkCalls = 0
+  function Test-WebsiteHostIsPublic {
+    param($HostName)
+    $script:websiteNetworkCalls++
+    throw 'A policy-denied website must not resolve DNS.'
+  }
+  function New-WebsiteHttpHandler {
+    param($TargetUri, $Addresses, $Cookies)
+    $script:websiteNetworkCalls++
+    throw 'A policy-denied website must not create a transport.'
+  }
+  function ConvertTo-AcsEmailQuotaReport {
+    param($Status, $Reputation, $ReputationError, $Website, $WebsiteError, $Nameservers, $RequireDmarcEnforcement, $PageLink)
+    return @{ domain = $Status.domain; website = $Website }
+  }
+  foreach ($configuration in @($null,'true','https://approved.example')) {
+    $env:ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = $configuration
+    foreach ($domain in @('protected-network.example','8.8.8.8')) {
+      foreach ($path in @('/api/website','/api/email-quota')) {
+        $context = New-TestContext -Path $path -Query @{ domain = $domain; allowedOrigins = "https://$domain"; ACS_WEBSITE_PROBE_ALLOWED_ORIGINS = "https://$domain" } -Headers @{ 'X-Api-Key' = 'synthetic-api-key'; 'ACS_WEBSITE_PROBE_ALLOWED_ORIGINS' = "https://$domain" }
+        $response = Invoke-TestHandler $context
+        $website = if ($path -eq '/api/website') { $response.Json } else { $response.Json.website }
+        Assert-Equal "$path keeps its successful response envelope for policy denial" 200 $response.StatusCode
+        Assert-Equal "$path cannot authorize destinations using request data or an API key" 'Disabled' $website.summary
+        Assert-Equal "$path does not claim a website check occurred" $false $website.checked
+        Assert-Equal "$path supplies an explicit policy-denial reason" $false ([string]::IsNullOrWhiteSpace($website.disabledReason))
+      }
+    }
+  }
+  Assert-Equal 'both website entry points deny before all website network work' 0 $script:websiteNetworkCalls
 
   & node (Join-Path $PSScriptRoot 'Test-LookupLimits.mjs') $repoRoot
   if ($LASTEXITCODE -ne 0) { throw 'Browser-source lookup limit validation failed.' }
